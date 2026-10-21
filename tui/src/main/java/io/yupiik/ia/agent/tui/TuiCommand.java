@@ -2085,7 +2085,7 @@ public class TuiCommand implements Runnable {
      * avoid accidental clipboard overwrites.
      */
     private void copySelection(final TuiRunner runner, final UiState state) {
-        final var text = state.selection.copy(state.screenGrid);
+        final var text = state.selection.copy(state.screenGrid, state.copyBoxes);
         if (text == null || text.length() <= 1 || text.isBlank()) {
             return;
         }
@@ -3976,6 +3976,7 @@ public class TuiCommand implements Runnable {
         }
         state.toolFooterLinks = links;
         var chunkTop = 0;
+        final var copyBoxes = new ArrayList<SelectionState.CopyBox>();
         for (final var chunk : chunks) {
             final var top = chunkTop - viewOffset;
             chunkTop += chunk.height();
@@ -3987,7 +3988,15 @@ public class TuiCommand implements Runnable {
             }
             final var sub = new Rect(content.x(), inner.y() + visibleTop, content.width(), visibleH);
             frame.renderWidget(chunk.widget(skip), sub);
+            if (chunk.boxed()) {
+                // the box rect is resolved from the chunk's unclipped absolute frame
+                // (not the clipped sub rect) so a box scrolled partly off-screen never
+                // mislabels a visible content row as a top/bottom border
+                copyBoxes.add(
+                        copyBox(new Rect(content.x(), inner.y() + top, content.width(), chunk.height()), chunk.box()));
+            }
         }
+        state.copyBoxes = List.copyOf(copyBoxes);
         // search match highlighting: reversed strips over matched rows, same buffer
         // trick as the scrollbar indicator (no span surgery needed)
         if (state.search.active() && !state.search.matches().isEmpty()) {
@@ -4024,10 +4033,51 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private record RenderedChunk(int height, IntFunction<dev.tamboui.widget.Widget> supplier) {
+    private record RenderedChunk(int height, IntFunction<dev.tamboui.widget.Widget> supplier, BoxChrome box) {
         dev.tamboui.widget.Widget widget(final int skip) {
             return supplier.apply(skip);
         }
+
+        boolean boxed() {
+            return box != null;
+        }
+    }
+
+    /**
+     * The block chrome of a boxed chunk: the columns/rows the surrounding block
+     * (borders plus padding) contributes on each side, so the transcript render
+     * can publish the exact content region for selection copy. {@code null} for
+     * unbordered chunks (prose paragraphs, thoughts, the collapsed tool line).
+     * Every boxed chunk here uses symmetric chrome, so half the block's total
+     * chrome falls on each side.
+     */
+    private record BoxChrome(int left, int right, int top, int bottom) {
+        static BoxChrome symmetric(final Block block) {
+            final var h = block.horizontalChrome();
+            final var v = block.verticalChrome();
+            return new BoxChrome(h / 2, h / 2, v / 2, v / 2);
+        }
+    }
+
+    /**
+     * The copyable interior of one boxed chunk as drawn on screen: the content
+     * columns (walls and padding already excluded) and the exact rule rows that
+     * are the box's top and bottom borders. Built from the chunk's unclipped
+     * absolute rect so a partially scrolled box never mislabels a visible
+     * content row as a border; selection copy only visits on-screen rows anyway.
+     */
+    private static SelectionState.CopyBox copyBox(final Rect outer, final BoxChrome chrome) {
+        final var left = outer.x() + chrome.left();
+        final var right = outer.right() - chrome.right() - 1;
+        final var top = outer.y() + chrome.top();
+        final var bottom = outer.bottom() - chrome.bottom() - 1;
+        return new SelectionState.CopyBox(
+                left,
+                right,
+                top,
+                bottom,
+                chrome.top() > 0 ? outer.y() : -1,
+                chrome.bottom() > 0 ? outer.bottom() - 1 : -1);
     }
 
     /** Everything that, when unchanged, lets a frame reuse the previous chunk render. */
@@ -4555,7 +4605,8 @@ public class TuiCommand implements Runnable {
                                 .block(boxed)
                                 .overflow(Overflow.CLIP)
                                 .scroll(Math.clamp(innerH - 1, 0, skip))
-                                .build()));
+                                .build(),
+                        BoxChrome.symmetric(boxed)));
                 anySegment = true;
             }
         }
@@ -4573,7 +4624,8 @@ public class TuiCommand implements Runnable {
                         .text(text)
                         .overflow(Overflow.CLIP)
                         .scroll(Math.clamp(innerH - 1, 0, skip))
-                        .build()));
+                        .build(),
+                null));
     }
 
     /** Concatenated span contents of a line (used for transcript search). */
@@ -4596,13 +4648,16 @@ public class TuiCommand implements Runnable {
         for (final var line : lines) {
             rows.add(plainText(line));
         }
-        out.add(new RenderedChunk(innerH, skip -> {
-            final var paragraph = Paragraph.builder().text(text).overflow(Overflow.CLIP);
-            if (thoughtBg != null) {
-                paragraph.background(thoughtBg);
-            }
-            return paragraph.scroll(Math.clamp(innerH - 1, 0, skip)).build();
-        }));
+        out.add(new RenderedChunk(
+                innerH,
+                skip -> {
+                    final var paragraph = Paragraph.builder().text(text).overflow(Overflow.CLIP);
+                    if (thoughtBg != null) {
+                        paragraph.background(thoughtBg);
+                    }
+                    return paragraph.scroll(Math.clamp(innerH - 1, 0, skip)).build();
+                },
+                null));
     }
 
     /**
@@ -4688,14 +4743,16 @@ public class TuiCommand implements Runnable {
         }
         final var text = Text.from(lines.toArray(Line[]::new));
         final var innerH = Math.max(text.height(), 1);
+        final var box = runBlock(run);
         out.add(new RenderedChunk(
                 innerH + 2,
                 skip -> Paragraph.builder()
                         .text(text)
-                        .block(runBlock(run))
+                        .block(box)
                         .overflow(Overflow.CLIP)
                         .scroll(Math.clamp(innerH - 1, 0, skip))
-                        .build()));
+                        .build(),
+                BoxChrome.symmetric(box)));
     }
 
     /**
@@ -4840,7 +4897,8 @@ public class TuiCommand implements Runnable {
                     skip -> Paragraph.builder()
                             .text(Text.from(line))
                             .overflow(Overflow.CLIP)
-                            .build()));
+                            .build(),
+                    null));
             return;
         }
         final var top = out.stream().mapToInt(RenderedChunk::height).sum();
@@ -4922,7 +4980,8 @@ public class TuiCommand implements Runnable {
                         .block(block)
                         .overflow(Overflow.CLIP)
                         .scroll(Math.clamp(innerH - 1, 0, skip))
-                        .build()));
+                        .build(),
+                BoxChrome.symmetric(block)));
     }
 
     private String blockTitle(final ToolCard card) {
@@ -8148,6 +8207,13 @@ public class TuiCommand implements Runnable {
          * to resolve a mouse press, published by the render thread each frame.
          */
         private volatile List<Rect> paneZones = List.of();
+        /**
+         * The copyable interior regions of the boxed chunks drawn last frame, published by
+         * the render thread. {@link SelectionState#copy(String[][], List)} uses them to strip
+         * box walls and top/bottom rule rows from a selection without quoting frame glyphs,
+         * so every bordered widget (code blocks, tool cards, tool runs) copies clean.
+         */
+        private volatile List<SelectionState.CopyBox> copyBoxes = List.of();
 
         private final SpinnerState spinnerState = new SpinnerState();
         private volatile String lastTodosRender = "";

@@ -371,18 +371,18 @@ class SelectionStateTest {
     }
 
     @Test
-    void boxedCodeBlockCopyStripsTheRightBorderAndPadding() {
+    void boxedCodeBlockCopyStripsTheWallsAndPadding() {
         final var selection = new SelectionState();
-        // a boxed code block rendered in the body: the zone clip starts at column 2
-        // (past the excluded left border and one padding cell), like the real copyZone
+        // a boxed code block: col 0 is the left wall, cols 1-2 the left padding,
+        // the content, cols 8-10 the right padding and col 11 the right wall
         final var grid = SelectionState.grid(
                 List.of("\u2502  hello   \u2502", "\u2502  world   \u2502", "\u2502  again   \u2502"));
         final var zone = new Rect(2, 0, 10, 3);
         selection.press(2, 0, grid, List.of(zone));
         selection.drag(11, 2, grid);
-        // the leading padding, the trailing padding and the right vertical border are
-        // all stripped so a code block copies clean code, not its box frame
-        assertEquals("hello\nworld\nagain", selection.copy(grid));
+        // the box content region (walls and padding excluded) is columns 3..8
+        final var box = new SelectionState.CopyBox(3, 8, 0, 2, -1, -1);
+        assertEquals("hello\nworld\nagain", selection.copy(grid, List.of(box)));
     }
 
     @Test
@@ -394,7 +394,8 @@ class SelectionStateTest {
         selection.press(2, 0, grid, List.of(zone));
         selection.drag(11, 2, grid);
         // a blank line inside the block is content, not framing: it stays as an empty row
-        assertEquals("a\n\nb", selection.copy(grid));
+        final var box = new SelectionState.CopyBox(3, 8, 0, 2, -1, -1);
+        assertEquals("a\n\nb", selection.copy(grid, List.of(box)));
     }
 
     @Test
@@ -408,20 +409,67 @@ class SelectionStateTest {
         final var zone = new Rect(2, 0, 10, 4);
         selection.press(2, 0, grid, List.of(zone));
         selection.drag(11, 3, grid);
-        // the horizontal-rule rows (top and bottom walls) are not content and are removed
-        assertEquals("hello\nworld", selection.copy(grid));
+        // rows 0 and 3 are the box's top/bottom border rows and are dropped;
+        // the interior is columns 3..8
+        final var box = new SelectionState.CopyBox(3, 8, 1, 2, 0, 3);
+        assertEquals("hello\nworld", selection.copy(grid, List.of(box)));
+    }
+
+    @Test
+    void boxedCodeBlockDropUsesRowGeometryNotGlyphGuessing() {
+        final var selection = new SelectionState();
+        // a box whose top border row carries a title and plain corners that are not
+        // part of the old horizontal-rule glyph set: it is dropped via row geometry
+        final var grid = SelectionState.grid(List.of(
+                "\u250C\u2500\u2500 java \u2500\u2500\u2500\u2510",
+                "\u2502  public   \u2502",
+                "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518"));
+        final var zone = new Rect(2, 0, 10, 3);
+        selection.press(2, 0, grid, List.of(zone));
+        selection.drag(11, 2, grid);
+        final var box = new SelectionState.CopyBox(3, 8, 1, 1, 0, 2);
+        assertEquals("public", selection.copy(grid, List.of(box)));
+    }
+
+    @Test
+    void boxedInteriorKeepsLeadingIndentation() {
+        final var selection = new SelectionState();
+        // the box content region includes real code indentation (4 leading spaces)
+        // which must be preserved, unlike the box padding which is outside the region
+        final var grid = SelectionState.grid(List.of("\u2502  def f:      \u2502", "\u2502      return 1 \u2502"));
+        final var zone = new Rect(2, 0, 15, 2);
+        selection.press(2, 0, grid, List.of(zone));
+        selection.drag(16, 1, grid);
+        // content columns 3..14: col 3 starts right after the left padding so the first
+        // line is "def f:" (trailing padding stripped) and the second keeps its four-space
+        // indentation
+        final var box = new SelectionState.CopyBox(3, 14, 0, 1, -1, -1);
+        assertEquals("def f:\n    return 1", selection.copy(grid, List.of(box)));
     }
 
     @Test
     void proseLinesEndingInBoxGlyphsAreLeftUntouched() {
         final var selection = new SelectionState();
-        // a normal (non-boxed) prose line never ends with a box glyph, so this stays intact:
-        // only rows actually carrying the right vertical border are stripped
+        // normally prose never ends with a box glyph; even if it does, no box region is
+        // declared for it so it is copied verbatim
         final var grid = SelectionState.grid(List.of("print('x')", "done"));
         final var zone = new Rect(0, 0, 11, 2);
         selection.press(0, 0, grid, List.of(zone));
         selection.drag(10, 1, grid);
         assertEquals("print('x')\ndone", selection.copy(grid));
+    }
+
+    @Test
+    void boxedRowsOutsideTheSelectionSpanAreIgnored() {
+        final var selection = new SelectionState();
+        // the box spans rows 3..5 but the selection covers rows 0..1 only, so the box
+        // framing logic must not influence the copied prose
+        final var grid = SelectionState.grid(List.of("one", "two", "\u2502  x   \u2502"));
+        final var zone = new Rect(0, 0, 8, 3);
+        selection.press(0, 0, grid, List.of(zone));
+        selection.drag(7, 1, grid);
+        final var box = new SelectionState.CopyBox(1, 6, 2, 2, -1, -1);
+        assertEquals("one\ntwo", selection.copy(grid, List.of(box)));
     }
 
     @Test
