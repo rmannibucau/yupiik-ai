@@ -33,6 +33,12 @@ public record HttpClientConfiguration(
                         "Disable TLS certificate validation and hostname verification. Only intended for internal/testing endpoints, use with care.")
         boolean disableTlsCheck,
 
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Are cookies enabled client side. Some gateway will need it for routing purpose (and cache reuse).")
+        boolean enableCookies,
+
         @Property(defaultValue = "\"HTTP/1.1\"", documentation = "HTTP version to use: HTTP/1.1 or HTTP_2.")
         String version,
 

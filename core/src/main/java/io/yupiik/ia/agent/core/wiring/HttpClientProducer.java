@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.configuration.HttpClientCertificateConfiguration;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.Authenticator;
+import java.net.CookieManager;
 import java.net.InetSocketAddress;
 import java.net.PasswordAuthentication;
 import java.net.Proxy;
@@ -73,6 +74,9 @@ public class HttpClientProducer {
                 .version(version(cfg.version()))
                 .connectTimeout(Duration.ofSeconds(cfg.connectTimeoutSeconds() <= 0 ? 30 : cfg.connectTimeoutSeconds()))
                 .followRedirects(HttpClient.Redirect.NORMAL);
+        if (cfg.enableCookies()) {
+            builder.cookieHandler(new CookieManager());
+        }
         final var proxy = cfg.proxy();
         if (proxy != null && proxy.host() != null && !proxy.host().isBlank()) {
             final var noProxyHosts = proxy.noProxyHosts() == null ? List.<String>of() : proxy.noProxyHosts();
