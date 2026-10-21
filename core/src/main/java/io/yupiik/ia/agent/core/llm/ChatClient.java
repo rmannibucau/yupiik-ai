@@ -40,6 +40,7 @@ import io.yupiik.llm.client.LlmResponseParseException;
 import io.yupiik.llm.client.RoutingLlmClient;
 import io.yupiik.llm.client.anthropic.AnthropicDialect;
 import io.yupiik.llm.client.codex.CodexDialect;
+import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.openai.OpenAICompletionsDialect;
 import io.yupiik.llm.client.openai.OpenAIResponsesDialect;
@@ -432,6 +433,9 @@ public class ChatClient implements AutoCloseable {
                 final String rendered;
                 try {
                     rendered = t.render(Map.of());
+                } catch (final CodexNotAuthenticatedException notAuthed) {
+                    // rethrow as-is so TurnRunner can trigger the interactive login flow
+                    throw notAuthed;
                 } catch (final RuntimeException e) {
                     throw new IllegalArgumentException(
                             "Cannot render dynamic header '" + k + "': " + e.getMessage(), e);

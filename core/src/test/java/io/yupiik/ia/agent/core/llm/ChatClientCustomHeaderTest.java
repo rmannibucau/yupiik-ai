@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
@@ -27,10 +28,12 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.HashMap;
 import java.util.List;
@@ -41,6 +44,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Verifies that user-registered {@link CustomDynamicHeaderTemplateHelper} beans are injected after
@@ -57,6 +61,9 @@ class ChatClientCustomHeaderTest {
     private ExtendedHttpClient http;
     private HttpClient delegate;
     private final CopyOnWriteArrayList<Map<String, List<String>>> seenHeaders = new CopyOnWriteArrayList<>();
+
+    @TempDir
+    Path tempDir;
 
     @BeforeEach
     void start(final JsonMapper mapper) throws IOException {
@@ -112,8 +119,41 @@ class ChatClientCustomHeaderTest {
         assertEquals("Bearer custom-auth-arg", headers.get("authorization").get(0));
     }
 
+    /**
+     * A missing Codex session must surface as a {@link CodexNotAuthenticatedException} - not a wrapped
+     * {@link IllegalArgumentException} - so the caller (TurnRunner) can trigger the interactive login
+     * flow and open the browser. The {@code authorization} dynamic header here resolves through
+     * {@code {{codexAgentAssertion "codex"}}}, which throws when no auth file exists in the (empty)
+     * storage home.
+     */
+    @Test
+    void missingCodexSessionSurfacesAsCodexNotAuthenticated(final JsonMapper mapper) throws Exception {
+        final var codexClient =
+                chatClient(mapper, tempDir.toString(), "authorization: {{codexAgentAssertion \"codex\"}}");
+        try (codexClient) {
+            final var thrown = assertThrows(
+                    CodexNotAuthenticatedException.class,
+                    () -> codexClient.chat(new ChatCompletionRequest(
+                            "test-model",
+                            List.of(Message.user("hi")),
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null)));
+            assertEquals("codex", thrown.provider());
+        }
+    }
+
     private ChatClient chatClient(final JsonMapper mapper) {
-        final var config = configuration(mapper);
+        return chatClient(mapper, null, null);
+    }
+
+    private ChatClient chatClient(final JsonMapper mapper, final String storageHome, final String dynamicHeaders) {
+        final var config = configuration(mapper, storageHome, dynamicHeaders);
         return new ChatClient(
                 config,
                 mapper,
@@ -129,7 +169,15 @@ class ChatClientCustomHeaderTest {
     }
 
     private CodingAgentConfiguration configuration(final JsonMapper mapper) {
+        return configuration(mapper, null, null);
+    }
+
+    private CodingAgentConfiguration configuration(
+            final JsonMapper mapper, final String storageHome, final String dynamicHeaders) {
         final var entries = new HashMap<String, String>();
+        if (storageHome != null) {
+            entries.put("yca.storageHome", storageHome);
+        }
         entries.put("yca.provider.providers.length", "1");
         entries.put("yca.provider.providers.0.id", "default");
         entries.put(
@@ -142,7 +190,9 @@ class ChatClientCustomHeaderTest {
         entries.put("yca.provider.providers.0.timeoutSeconds", "5");
         entries.put(
                 "yca.provider.providers.0.dynamicHeaders",
-                "x-custom: {{myHeader \"arg\"}}\nauthorization: Bearer {{myAuth \"arg\"}}");
+                dynamicHeaders == null
+                        ? "x-custom: {{myHeader \"arg\"}}\nauthorization: Bearer {{myAuth \"arg\"}}"
+                        : dynamicHeaders);
         entries.put("yca.provider.providers.0.headers", "x-static: static-value");
         entries.put("yca.llm.retriesMaxAttempts", "1");
         entries.put("yca.llm.retriesBaseDelayMs", "1");

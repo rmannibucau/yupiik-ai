@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.ia.agent.core.configuration.ReasoningFormat;
+import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
@@ -348,6 +349,10 @@ final class LlmWire {
                 Thread.currentThread().interrupt();
                 throw ie;
             }
+            if (cause instanceof CodexNotAuthenticatedException codex) {
+                // rethrow as-is so TurnRunner can trigger the interactive login flow
+                throw codex;
+            }
             throw translate(cause);
         }
     }
@@ -462,6 +467,10 @@ final class LlmWire {
             if (cause instanceof InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw ie;
+            }
+            if (cause instanceof CodexNotAuthenticatedException codex) {
+                // rethrow as-is so TurnRunner can trigger the interactive login flow
+                throw codex;
             }
             throw translate(cause);
         }
