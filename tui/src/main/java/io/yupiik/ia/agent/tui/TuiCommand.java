@@ -3880,6 +3880,7 @@ public class TuiCommand implements Runnable {
                     switch (status.state()) {
                         case ENABLED -> Color.hex(palette.success());
                         case DISABLED -> Color.hex(palette.textMuted());
+                        case PENDING -> Color.hex(palette.warning());
                         case FAILED -> Color.hex(palette.error());
                     };
             text.add(Line.from(

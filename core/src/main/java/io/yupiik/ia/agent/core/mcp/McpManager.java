@@ -31,7 +31,10 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -49,8 +52,16 @@ public class McpManager {
     private final List<EmbeddedTool> localTools;
     private final ExtendedHttpClient httpClient;
     private final ProcessService processes;
+    private final ExecutorService executor;
+    private final boolean async;
     private final Map<String, McpClient> clients = new ConcurrentHashMap<>();
     private final Map<String, List<EmbeddedTool>> toolsByServer = new ConcurrentHashMap<>();
+    // In-flight remote MCP server initialize handshakes, keyed by server name. They are kicked off
+    // asynchronously from start() so the container startup (ToolRegistry#onStart on the main thread)
+    // never blocks on a network round-trip or subprocess spawn; they are joined lazily on first real
+    // use (tools()/call()/serverStatuses()) and awaited in close() so the process does not exit
+    // mid-handshake or leak a subprocess.
+    private final Map<String, CompletableFuture<Void>> pending = new ConcurrentHashMap<>();
 
     public McpManager(
             final CodingAgentConfiguration configuration,
@@ -58,11 +69,26 @@ public class McpManager {
             final List<EmbeddedTool> localTools,
             final ExtendedHttpClient httpClient,
             final ProcessService processes) {
+        this(configuration, mapper, localTools, httpClient, processes, null);
+    }
+
+    public McpManager(
+            final CodingAgentConfiguration configuration,
+            final JsonMapper mapper,
+            final List<EmbeddedTool> localTools,
+            final ExtendedHttpClient httpClient,
+            final ProcessService processes,
+            final ExecutorService executor) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.localTools = localTools;
         this.httpClient = httpClient;
         this.processes = processes;
+        this.executor = executor;
+        // A provided (app-managed, injected) executor is the shared application pool: register async
+        // handshakes so container startup is never blocked. Without one (tests/programmatic use) the
+        // handshakes run synchronously, preserving the historical blocking semantics.
+        this.async = executor != null;
     }
 
     protected McpManager() {
@@ -71,6 +97,8 @@ public class McpManager {
         this.localTools = null;
         this.httpClient = null;
         this.processes = null;
+        this.executor = null;
+        this.async = false;
     }
 
     /**
@@ -90,11 +118,15 @@ public class McpManager {
         // not set until every server (or its no-op disabled skip) has gone through startServer once,
         // so a partial failure is retried on a subsequent start rather than silently skipped
         if (configuration.tools().builtin().enabled()) {
-            startLocal();
+            startLocal(); // in-process only: no I/O, stays synchronous
         }
         for (final var server : configuration.mcp().servers()) {
             if (server.enabled()) {
-                startServer(server);
+                if (async) {
+                    startServerAsync(server);
+                } else {
+                    startServer(server);
+                }
             }
         }
         started = true;
@@ -104,6 +136,10 @@ public class McpManager {
      * Restart every enabled {@link McpClient} (built-in local tools included):
      * the previous client is closed and removed then a fresh one is created and
      * initialized, and its tools are re-imported.
+     *
+     * <p>Unlike the automatic {@link #start()} (async, non-blocking), an explicit reset runs the
+     * initializations synchronously: the caller drives it and expects the servers to be usable when it
+     * returns.</p>
      */
     public void reset() {
         started = false; // an explicit reset may re-run even after an automatic start (see start())
@@ -122,6 +158,8 @@ public class McpManager {
      * Restart a single server by name (either a configured one or the built-in
      * {@code yca} one). Existing tools keep working during the swap since they
      * delegate to {@link #call(String, String, Map)}.
+     *
+     * <p>Synchronous like {@link #reset()}: the caller expects the server usable when it returns.</p>
      *
      * @param name the server name.
      */
@@ -154,6 +192,17 @@ public class McpManager {
                 ? List.<EmbeddedTool>of()
                 : localTools.stream().filter(t -> builtin.keeps(t.name())).collect(toList());
         toolsByServer.put("yca", new ArrayList<>(filtered));
+    }
+
+    /**
+     * Kicks off the remote server handshake asynchronously so container startup is not blocked by a
+     * network round-trip or a subprocess spawn. The returned future is joined lazily on first use and
+     * awaited at shutdown.
+     */
+    private void startServerAsync(final McpServerConfiguration server) {
+        pending.remove(server.name());
+        final var future = CompletableFuture.runAsync(() -> startServer(server), executor);
+        pending.put(server.name(), future);
     }
 
     private void startServer(final McpServerConfiguration server) {
@@ -206,6 +255,7 @@ public class McpManager {
     }
 
     private void close(final String name) {
+        pending.remove(name);
         final var previous = clients.remove(name);
         if (previous != null) {
             try {
@@ -217,12 +267,14 @@ public class McpManager {
     }
 
     public List<EmbeddedTool> tools() {
+        awaitAllPending();
         final var out = new ArrayList<EmbeddedTool>();
         toolsByServer.values().forEach(out::addAll);
         return out;
     }
 
     public Map<String, List<EmbeddedTool>> toolsByServer() {
+        awaitAllPending();
         final var out = new LinkedHashMap<String, List<EmbeddedTool>>();
         toolsByServer.forEach((server, serverTools) -> out.put(server, List.copyOf(serverTools)));
         return out;
@@ -242,6 +294,9 @@ public class McpManager {
     public enum ServerState {
         ENABLED,
         DISABLED,
+        // the handshake is still in flight (start() fired it asynchronously); it will transition to
+        // ENABLED or FAILED as soon as it completes and is observed (a status read joins it).
+        PENDING,
         FAILED
     }
 
@@ -257,10 +312,12 @@ public class McpManager {
             for (final var server : mcp.servers()) {
                 if (!server.enabled()) {
                     out.add(new ServerStatus(server.name(), ServerState.DISABLED));
-                } else if (clients.containsKey(server.name())) {
-                    out.add(new ServerStatus(server.name(), ServerState.ENABLED));
                 } else {
-                    out.add(new ServerStatus(server.name(), ServerState.FAILED));
+                    out.add(new ServerStatus(
+                            server.name(),
+                            clients.containsKey(server.name())
+                                    ? ServerState.ENABLED
+                                    : pending.containsKey(server.name()) ? ServerState.PENDING : ServerState.FAILED));
                 }
             }
         }
@@ -268,6 +325,7 @@ public class McpManager {
     }
 
     public String call(final String serverName, final String toolName, final Map<String, Object> args) {
+        awaitPending(serverName);
         final var client = clients.get(serverName);
         if (client == null) {
             throw new IllegalStateException("MCP server " + serverName + " is not started");
@@ -283,6 +341,28 @@ public class McpManager {
     }
 
     /**
+     * Waits for every in-flight remote handshake. Used by the read paths ({@link #tools()} and
+     * {@link #toolsByServer()}) so the tool list observed is always the settled one; pending futures
+     * are always guaranteed to settle (the underlying task never leaks a blocked thread beyond a
+     * request/timeout), so a plain join has no unbounded hang.
+     */
+    private void awaitAllPending() {
+        pending.values().forEach(McpManager::join);
+    }
+
+    private void awaitPending(final String serverName) {
+        final var future = pending.get(serverName);
+        if (future != null) {
+            join(future);
+            pending.remove(serverName);
+        }
+    }
+
+    private static void join(final CompletableFuture<Void> future) {
+        future.join();
+    }
+
+    /**
      * Close every running {@link McpClient} (stdio subprocesses and stream-backed clients included)
      * and drop the cached tool metadata. Invoked as an application-scoped bean destroy so MCP
      * subprocesses are torn down on application shutdown, not only on restart/reset.
@@ -290,6 +370,22 @@ public class McpManager {
     @Destroy
     public void close() {
         final var start = System.nanoTime();
+        // await still-in-flight handshakes so we do not tear down clients while an initialize is in
+        // the middle of its setup (and so a subprocess-originated client is disposed and reaped). Give
+        // it a bounded grace: the handshake is bounded by the request timeout, but a remote that never
+        // answers would otherwise keep the JVM alive at exit thanks to an unsettled common-pool task.
+        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        for (final var future : pending.values()) {
+            try {
+                future.get(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (final java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
+                logger.warning("MCP handshake not fully settled at shutdown: " + e.getMessage());
+            }
+        }
+        pending.clear();
         clients.values().forEach(this::quietClose);
         clients.clear();
         toolsByServer.clear();

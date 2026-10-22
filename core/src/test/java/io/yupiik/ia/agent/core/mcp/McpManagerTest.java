@@ -41,6 +41,9 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -216,6 +219,76 @@ class McpManagerTest {
         assertEquals(1, initializations.get(), "a second start() must not re-initialize the server");
         assertEquals(1, manager.tools().size());
         assertEquals(firstTools, manager.tools());
+    }
+
+    @Test
+    void startIsNonBlockingButFirstUseJoins() throws Exception {
+        // The @ApplicationScoped (app path) McpManager runs remote handshakes asynchronously on the
+        // injected executor so container startup is never blocked. start() must return before the
+        // server has answered, while the first real use (tools()/call()) and close() join the
+        // in-flight handshake.
+        final var initializeGate = new CountDownLatch(1);
+        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/mcp", exchange -> {
+            final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            if (body.contains("\"method\":\"initialize\"")) {
+                try {
+                    if (!initializeGate.await(5, TimeUnit.SECONDS)) {
+                        respond(exchange, 500, "{}", "application/json");
+                        return;
+                    }
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    respond(exchange, 500, "{}", "application/json");
+                    return;
+                }
+                respond(
+                        exchange,
+                        200,
+                        "{\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}",
+                        "application/json");
+            } else if (body.contains("\"method\":\"tools/list\"")) {
+                respond(
+                        exchange,
+                        200,
+                        "{\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
+                        "application/json");
+            } else {
+                respond(exchange, 200, "{}", "application/json");
+            }
+        });
+        server.start();
+
+        final var url = "http://localhost:" + server.getAddress().getPort() + "/mcp";
+        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var manager = new McpManager(
+                    configuration(List.of(new McpServerConfiguration(
+                            "test", null, List.of(), List.of(), null, url, "key", List.of(), true, List.of()))),
+                    mapper,
+                    List.of(),
+                    httpClient,
+                    new ProcessService(),
+                    executor);
+
+            // start() must return while the initialize handshake is still blocked on the gate
+            manager.start();
+            assertTrue(true, "start() must not block on the MCP handshake (returned while handshake in flight)");
+
+            // first real use joins: tools() must wait for the handshake, so it only returns once the
+            // server answered (we already held start() non-blocking; now release the gate and observe tools())
+            assertTrue(
+                    manager.serverStatuses()
+                            .contains(new McpManager.ServerStatus("test", McpManager.ServerState.PENDING)),
+                    "a server whose handshake has not completed is reported as PENDING");
+            initializeGate.countDown();
+            assertEquals(1, manager.tools().size(), "tools() must join the pending handshake");
+            assertEquals("test_find_docs", manager.tools().get(0).name());
+            assertTrue(
+                    manager.serverStatuses()
+                            .contains(new McpManager.ServerStatus("test", McpManager.ServerState.ENABLED)),
+                    "once joined the server reports ENABLED");
+            manager.close();
+        }
     }
 
     @Test
