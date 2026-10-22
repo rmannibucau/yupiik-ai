@@ -643,8 +643,11 @@ public class TuiCommand implements Runnable {
             // after the TUI exits and the shell would print the SGR reports as garbage.
             // Restore ?1003l on both exit paths: after the runner's close below (clean exit)
             // and from the JVM shutdown hook (SIGTERM / Ctrl-C when the signal handler is not
-            // installed), mirroring CliCommand's shutdown-cleanup pattern.
-            final var mouseRestoreHook = new Thread(
+            // installed), mirroring CliCommand's shutdown-cleanup pattern. The same hook also
+            // surfaces the open persisted sessions on the abrupt path: the clean-exit final
+            // block (and its logOpenedSessions call) never runs when the JVM is killed, so
+            // without this the user would not see where their session went.
+            final var shutdownHook = new Thread(
                     () -> {
                         try {
                             tui.backend().writeRaw(TuiRunnerFactory.MOUSE_MOTION_DISABLE);
@@ -652,9 +655,10 @@ public class TuiCommand implements Runnable {
                         } catch (final IOException e) {
                             // best-effort restoration on the abrupt path, never mask the shutdown
                         }
+                        logPersistedSessions(tabManager.list());
                     },
-                    "yca-tui-mouse-restore");
-            Runtime.getRuntime().addShutdownHook(mouseRestoreHook);
+                    "yca-tui-shutdown");
+            Runtime.getRuntime().addShutdownHook(shutdownHook);
             try {
                 tui.run((event, runner) -> onKey(event, runner, active()), frame -> render(frame, active()));
             } finally {
@@ -710,7 +714,7 @@ public class TuiCommand implements Runnable {
                     // best-effort restoration, never mask the normal teardown
                 }
                 try {
-                    Runtime.getRuntime().removeShutdownHook(mouseRestoreHook);
+                    Runtime.getRuntime().removeShutdownHook(shutdownHook);
                 } catch (final IllegalStateException e) {
                     // the JVM is already shutting down: the hook runs or ran on its own
                 }
@@ -737,14 +741,22 @@ public class TuiCommand implements Runnable {
      * (nothing beyond an initial prompt) were deleted by {@link #disposeTab(UiState)} and skipped.
      */
     private void logOpenedSessions(final List<UiState> openStates) {
-        final var kept = new ArrayList<UiState>();
-        for (final var state : openStates) {
+        logPersistedSessions(openStates);
+    }
+
+    /**
+     * Logs each persisted, non-empty session among the given tabs. Shared by the clean-exit path
+     * (after {@code tui.close()} restored the main screen) and the JVM shutdown hook (SIGTERM /
+     * Ctrl-C, where the clean-exit block never runs but the incremental session store is already
+     * durable, so only the summary line would otherwise be lost). The summary always goes through
+     * the JUL {@code LOG.info} ({@code io.yupiik...}), not raw stdout, so it survives a detached or
+     * closing stdout.
+     */
+    private void logPersistedSessions(final List<UiState> tabs) {
+        for (final var state : tabs) {
             if (state.sessionId != null && !sessionStore.isEmpty(state.sessionId)) {
-                kept.add(state);
+                LOG.info(() -> "session " + state.sessionId + " (" + tabTitle(state) + ")");
             }
-        }
-        for (final var state : kept) {
-            LOG.info(() -> "session " + state.sessionId + " (" + tabTitle(state) + ")");
         }
     }
 

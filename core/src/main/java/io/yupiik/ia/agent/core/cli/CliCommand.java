@@ -398,7 +398,14 @@ public class CliCommand implements Runnable {
             LOGGER.fine("[yca-shutdown] cleanup: started");
         }
         final var start = System.nanoTime();
-        // give the terminal back before the closing lines so they go straight out
+        // Emit the session line while stdout/stderr are still owned and alive: on the JVM
+        // shutdown-hook path (SIGTERM / Ctrl-C without an installed signal handler) the
+        // terminal can start closing concurrently, and a late C-f line on a torn-down stream
+        // is silently lost. Written to stderr (not stdout) because stderr conventionally
+        // survives longer when stdout is redirected, piped or closed, and it is flushed by
+        // the sink. Doing this first also guarantees no teardown step can race it out.
+        writeLineErr(MarkdownColorizer.info(sessionContextLine()));
+        // give the terminal back before the remaining closing lines so they go straight out
         if (stdio.streamTarget() == externalOutput) {
             stdio.streamTarget(null);
         }
@@ -409,11 +416,6 @@ public class CliCommand implements Runnable {
         System.err.flush();
         if (LOGGER.isLoggable(Level.FINE)) {
             LOGGER.fine(() -> "[yca-shutdown] cleanup: done in " + (System.nanoTime() - start) / 1_000_000L + " ms");
-        }
-        if (sessionId != null && contextPath != null && Files.exists(contextPath)) {
-            println(MarkdownColorizer.info("session " + sessionId + " - context file: " + contextPath));
-        } else {
-            println(MarkdownColorizer.info("session " + sessionId + " (empty; no context file was created)"));
         }
     }
 
@@ -1129,6 +1131,17 @@ public class CliCommand implements Runnable {
             case "2", "e", "exit", "q" -> MenuChoice.QUIT;
             default -> MenuChoice.NONE;
         };
+    }
+
+    /**
+     * The session line emitted when the CLI exits (see {@link #cleanup()}): the id and, when a
+     * context file was actually created, its path. Routed to stderr at teardown time, so a closed
+     * or detached stdout cannot drop it.
+     */
+    private String sessionContextLine() {
+        return sessionId != null && contextPath != null && Files.exists(contextPath)
+                ? "session " + sessionId + " - context file: " + contextPath
+                : "session " + sessionId + " (empty; no context file was created)";
     }
 
     /**
