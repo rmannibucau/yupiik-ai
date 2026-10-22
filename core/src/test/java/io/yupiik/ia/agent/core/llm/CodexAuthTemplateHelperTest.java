@@ -59,6 +59,10 @@ class CodexAuthTemplateHelperTest {
     private ExtendedHttpClient client;
     private HttpClient delegate;
     private final AtomicInteger refreshCalls = new AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicReference<String> lastRefreshBody =
+            new java.util.concurrent.atomic.AtomicReference<>();
+    private final java.util.concurrent.atomic.AtomicBoolean failRefresh =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     @BeforeEach
     void start() throws IOException {
@@ -67,7 +71,12 @@ class CodexAuthTemplateHelperTest {
         issuer.createContext("/oauth/token", exchange -> {
             refreshCalls.incrementAndGet();
             final String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            if (body.contains("grant_type=refresh_token")) {
+            if (body.contains("\"grant_type\":\"refresh_token\"")) {
+                lastRefreshBody.set(body);
+                if (failRefresh.get()) {
+                    respond(exchange, 400, "{\"error\":\"invalid_grant\"}");
+                    return;
+                }
                 respond(
                         exchange,
                         200,
@@ -132,6 +141,50 @@ class CodexAuthTemplateHelperTest {
     }
 
     @Test
+    void expiredTokenRefreshCarriesProactiveReason(final JsonMapper mapper) throws Exception {
+        // an expired token (past expiry, within the 5-min window) must trigger a refresh carrying the
+        // proactive_expiry refresh_reason
+        seed(mapper, "p-proactive", new CodexTokenStore("stale", "refresh-tok", "acc", past(), "id"));
+        lastRefreshBody.set(null);
+        final var helper = helper(mapper);
+        assertEquals("refreshed", render(helper, "{{codexAuth \"p-proactive\"}}"));
+        assertTrue(
+                lastRefreshBody.get() != null
+                        && lastRefreshBody.get().contains("\"refresh_reason\":\"proactive_expiry\""),
+                "refresh body must carry proactive_expiry: " + lastRefreshBody.get());
+    }
+
+    @Test
+    void missingSessionWithDispatcherInvokesLogin(final JsonMapper mapper) throws Exception {
+        final var helper = helper(mapper);
+        // a dispatcher signs in and persists the session; the renderer must then return its token
+        final var dispatcher = new CodexLoginDispatcher() {
+            @Override
+            public CodexTokenStore signIn(final String providerName) {
+                try {
+                    final var store = new CodexTokenStore("dispatched-token", "refresh", "acc", farFuture(), "id");
+                    seed(mapper, providerName, store);
+                    return store;
+                } catch (final java.io.IOException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        };
+        helper.setCodexLoginDispatcher(dispatcher);
+        assertEquals("dispatched-token", render(helper, "{{codexAuth \"lazy-p\"}}"));
+    }
+
+    @Test
+    void missingSessionWithDispatcherThrowingSurfaces(final JsonMapper mapper) {
+        final var helper = helper(mapper);
+        helper.setCodexLoginDispatcher(providerName -> {
+            throw new IllegalStateException("no interactive shell to sign in " + providerName);
+        });
+        final var e = assertThrows(IllegalStateException.class, () -> render(helper, "{{codexAuth \"absent-d\"}}"));
+        assertTrue(e.getMessage().contains("no interactive shell"), e.getMessage());
+    }
+
+    @Test
     void missingSessionFailsLoudly(final JsonMapper mapper) {
         final var helper = helper(mapper);
         final var e = assertThrows(
@@ -139,6 +192,47 @@ class CodexAuthTemplateHelperTest {
                 () -> render(helper, "{{codexAuth \"absent\"}}"));
         assertEquals("absent", e.provider());
         assertTrue(e.getMessage().contains("interactive login"), e.getMessage());
+    }
+
+    @Test
+    void refreshFailureWithDispatcherReSignsTransparently(final JsonMapper mapper) throws Exception {
+        // an expired token whose REFRESH FAILS (revoked/invalid_grant) must transparently re-login
+        // through the dispatcher so the request still works, instead of failing the turn
+        seed(mapper, "revoked-p", new CodexTokenStore("stale", "refresh-tok", "acc", past(), "id"));
+        failRefresh.set(true);
+        final var helper = helper(mapper);
+        // first prove the refresh actually fails without a dispatcher (loudly)
+        final var preliminary =
+                assertThrows(IllegalStateException.class, () -> render(helper, "{{codexAuth \"revoked-p\"}}"));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                preliminary.getMessage().contains("Codex OAuth HTTP 400"), preliminary.getMessage());
+        // now register the dispatcher and re-render: the refresh failure must transparently re-login
+        helper.setCodexLoginDispatcher(providerName -> {
+            try {
+                final var fresh = new CodexTokenStore("re-signed-token", "refresh-2", "acc", farFuture(), "id");
+                seed(mapper, providerName, fresh);
+                return fresh;
+            } catch (final java.io.IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        assertEquals("re-signed-token", render(helper, "{{codexAuth \"revoked-p\"}}"));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                refreshCalls.get() >= 1, "the failed refresh must have been attempted");
+        // the re-signed store is persisted over the revoked one
+        final CodexTokenStore saved = mapper.fromBytes(
+                CodexTokenStore.class, Files.readAllBytes(storage.resolve("providers/revoked-p/codex.auth.json")));
+        assertEquals("re-signed-token", saved.accessToken());
+    }
+
+    @Test
+    void refreshFailureWithoutDispatcherPropagates(final JsonMapper mapper) throws Exception {
+        // no dispatcher (headless/background): a failed refresh must keep failing loudly, not silently
+        seed(mapper, "stale-p", new CodexTokenStore("stale", "refresh-tok", "acc", past(), "id"));
+        failRefresh.set(true);
+        final var helper = helper(mapper); // no dispatcher registered
+        final var e = assertThrows(IllegalStateException.class, () -> render(helper, "{{codexAuth \"stale-p\"}}"));
+        assertTrue(e.getMessage().contains("Codex OAuth HTTP 400"), e.getMessage());
     }
 
     @Test

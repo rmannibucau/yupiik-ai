@@ -271,6 +271,56 @@ backend catalog (eg. `160` for `0.160.x`, or `200` for `0.200.x`). It is an
 internal option: it is consumed by the dialect when listing models and is never
 sent on the wire. Omit it for the default of `160`.
 
+=== Interactive login is optional
+
+`/codex login <provider>` is not a hard prerequisite. The OAuth session is needed
+only when the provider's `dynamicHeaders` reference the `{{codexAuth}}` family
+(`{{codexAuth}}`, `{{codexAgentAssertion}}`, ...) - if they already carry a literal
+`authorization` (a direct bearer, a personal access token, or a `{{exec ...}}`
+result), no OAuth session is involved at all and no login is required.
+
+Even when a provider does use `{{codexAuth}}`, a first request authenticates
+lazily: if a cached, still-valid session exists, the token renders directly; if it
+expired, it is refreshed automatically (optionally carrying an OAuth
+`refresh_reason`); and if none exists and an interactive shell is active, the login
+is triggered on the spot and the token is rendered once it completes. You only
+ever need `/codex login` explicitly when you want to sign in up front, enable the
+device-code flow (`--device`), or enroll an enterprise/Agent Identity account
+eagerly (`--enterprise`). A headless/background model-listing path without an
+interactive shell will instead fail with the "no cached session" error rather than
+pop a browser.
+
+=== Codex request identity (optional)
+
+Some enterprise edges reset a client that does not identify itself as the official
+Codex CLI instead of as a browser. If you hit that, send a codex-style `user-agent`
+on the provider's requests by adding it to the provider `headers` (the same
+properties-text map that carries `originator`/`accept`), for example:
+
+[source,json]
+----
+"headers": "OpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream\nuser-agent: codex_cli_rs/0.163.0 (Ubuntu 26.04; x86_64) gnome-terminal"
+----
+
+The originator is `codex_cli_rs` by default; it is `codex-tui` only for the TUI
+binary's own logins. The example shows `0.163.0`, the latest stable Codex CLI
+version - use the release you advertise to match its catalog gating. Setting the
+`user-agent` in the provider `headers` is the preferred option because it stays
+scoped to that one provider's requests (it overrides the default Chrome user-agent
+the shared client would otherwise stamp on that provider's LLM calls) and never
+leaks to other providers.
+
+That covers the provider's API requests to its chat endpoint. The OAuth login,
+token-exchange and refresh walks run against `auth.openai.com` through the shared
+HTTP client, which the provider `headers` map does not reach (those calls are the
+login itself, not an LLM request). If you specifically need the Codex identity on
+that login leg too - for example to stop an edge resetting the token-exchange POST
+- set the `user-agent` in the global `yca.httpClient.headers` instead. Note that
+the global map applies to every request through the shared client (all providers,
+all their LLM calls, webfetch, ...), so it is a wider, visible change; a
+`user-agent` you set there is always respected (never overridden), and if you omit
+it the default Chrome value is kept.
+
 == Custom authentication and headers
 
 A provider authenticates with HTTP headers, resolved per request in this order,

@@ -68,6 +68,7 @@ public class CodexAuthTemplateHelper {
     private final Path providersHome;
     private volatile CodexOAuthClient oauth;
     private volatile CodexAgentIdentityClient agentIdentity;
+    private volatile CodexLoginDispatcher codexLoginDispatcher;
     private final ConcurrentHashMap<String, Lock> refreshLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CodexTokenStore> authCache = new ConcurrentHashMap<>();
 
@@ -111,6 +112,18 @@ public class CodexAuthTemplateHelper {
      */
     public void setAgentIdentityConfig(final CodexAgentIdentityConfig config) {
         this.agentIdentity = new CodexAgentIdentityClient(mapper, httpClient, config);
+    }
+
+    /**
+     * Registers the interactive login dispatcher used when a {@code {{codexAuth}}}-family helper needs
+     * a session that does not exist yet. The shell layer sets this from an interactive (user-facing)
+     * entry point; {@code null} (the default, and the headless/background state) keeps throwing
+     * {@link CodexNotAuthenticatedException} so a browser login is never popped off the user thread.
+     *
+     * @param dispatcher the dispatcher to use for first-use logins, or {@code null} to disable.
+     */
+    public void setCodexLoginDispatcher(final CodexLoginDispatcher dispatcher) {
+        this.codexLoginDispatcher = dispatcher;
     }
 
     private CodexOAuthClient oauth() {
@@ -275,9 +288,15 @@ public class CodexAuthTemplateHelper {
      * @return the resolved session (never {@code null}).
      */
     private CodexTokenStore resolveSession(final String providerName, final boolean refreshWhenIdle) {
-        final CodexTokenStore initial = load(providerName);
+        CodexTokenStore initial = load(providerName);
         if (initial == null) {
-            throw new CodexNotAuthenticatedException(providerName);
+            // no cached session: a well-configured provider can log in lazily through the dispatcher
+            // (interactive entry points only); headless/background contexts have no dispatcher and
+            // keep the historical failure so a browser login is never popped off the user thread.
+            initial = lazySignIn(providerName);
+            if (initial == null) {
+                throw new CodexNotAuthenticatedException(providerName);
+            }
         }
         final Lock lock = refreshLocks.computeIfAbsent(providerName, k -> new ReentrantLock());
         lock.lock();
@@ -287,6 +306,21 @@ public class CodexAuthTemplateHelper {
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Runs the first-use interactive login through the registered dispatcher, when any. Returns the
+     * freshly persisted store, or {@code null} when no dispatcher is registered (non-interactive).
+     */
+    private CodexTokenStore lazySignIn(final String providerName) {
+        final var dispatcher = codexLoginDispatcher;
+        if (dispatcher == null) {
+            return null;
+        }
+        final CodexTokenStore signedIn = dispatcher.signIn(providerName);
+        // prefer the store the dispatcher produced: a later cache/service save may not be visible to this
+        // helper's cache yet, so reloading via load() could return a stale pre-login entry
+        return signedIn == null ? load(providerName) : signedIn;
     }
 
     /**
@@ -307,9 +341,14 @@ public class CodexAuthTemplateHelper {
      * @return the resolved session carrying an Agent Identity registration (never {@code null}).
      */
     private CodexTokenStore ensureEnrolled(final String providerName, final boolean refreshWhenIdle) {
-        final CodexTokenStore initial = load(providerName);
+        CodexTokenStore initial = load(providerName);
         if (initial == null) {
-            throw new CodexNotAuthenticatedException(providerName);
+            // a well-configured provider can log in lazily through the dispatcher (interactive entry
+            // points only); headless/background contexts keep the historical failure.
+            initial = lazySignIn(providerName);
+            if (initial == null) {
+                throw new CodexNotAuthenticatedException(providerName);
+            }
         }
         final Lock lock = refreshLocks.computeIfAbsent(providerName, k -> new ReentrantLock());
         lock.lock();
@@ -363,14 +402,51 @@ public class CodexAuthTemplateHelper {
                     "Codex access token for provider '" + providerName + "' has no refresh token; re-login needed");
             return store;
         }
-        final CodexTokenStore refreshed = oauth().refresh(store);
+        final CodexTokenStore refreshed;
+        try {
+            refreshed = oauth().refresh(store, refreshReason(store));
+        } catch (final RuntimeException refreshFailure) {
+            // the refresh token is unusable (revoked/expired by the workspace: session-lifetime policy,
+            // password rotation, revoked device, ...). Refresh must be transparent: when an interactive
+            // dispatcher is available (an active shell), fall back to a fresh login so the request just
+            // works instead of failing the turn; headless/background contexts have no dispatcher and
+            // keep the historical loud failure.
+            final CodexTokenStore reSigned = lazySignIn(providerName);
+            if (reSigned != null) {
+                return reSigned;
+            }
+            throw refreshFailure;
+        }
         if (refreshed.accessToken() == null || refreshed.accessToken().isBlank()) {
             throw new IllegalStateException(
                     "Codex refresh for provider '" + providerName + "' returned no access token");
         }
-        // refresh() already carries the Agent Identity and the previous id token through
+        // refresh() already carries the Agent Identity, the api key, the provenance and the previous
+        // id token through (and a fresh last_refresh timestamp)
         save(providerName, refreshed);
         return refreshed;
+    }
+
+    /**
+     * The OAuth {@code refresh_reason} for a lazy expiry-triggered refresh, mirroring upstream codex
+     * {@code proactive_refresh_reason}. yca only refreshes on the expiry path (see
+     * {@link #refreshIfExpired}), so the token is always at or past its expiry here and the reason is
+     * {@code proactive_expiry}. The {@code scheduled} branch is defensive parity for a future
+     * scheduled/background refresh (a not-expired token would report the 8-day staleness window); yca
+     * has no forced or 401-recovery trigger today, so {@code unauthorized_recovery}/{@code forced} are
+     * never produced here either.
+     */
+    private static String refreshReason(final CodexTokenStore store) {
+        final long now = System.currentTimeMillis();
+        final var expiresAt = store.expiresAt();
+        if (expiresAt != null && expiresAt <= now + 5 * 60_000L) {
+            return "proactive_expiry";
+        }
+        final var lastRefresh = store.lastRefreshMillis();
+        if (lastRefresh != null && now - lastRefresh > 8L * 24 * 3600_000L) {
+            return "scheduled";
+        }
+        return null;
     }
 
     private CodexTokenStore load(final String providerName) {

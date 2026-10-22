@@ -28,7 +28,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.Base64;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.CompletionException;
 import java.util.function.Predicate;
 import java.util.logging.Logger;
@@ -227,23 +229,52 @@ public class CodexOAuthClient {
      * @return the refreshed store, or {@code current} unchanged when not refreshable.
      */
     public CodexTokenStore refresh(final CodexTokenStore current) {
+        return refresh(current, null);
+    }
+
+    /**
+     * Refreshes an expiring token store with an optional {@code refresh_reason} the issuer uses for
+     * diagnostics (upstream values: {@code proactive_expiry}, {@code scheduled},
+     * {@code unauthorized_recovery}, {@code forced}).
+     *
+     * <p>Mirrors upstream codex: the refresh grant is JSON-encoded at the token endpoint, the
+     * endpoint and client id route through the recorded provenance when present (else the configured
+     * defaults), the refresh reason is appended as a JSON field, and the provenance is retained on the
+     * returned store only when the endpoint actually used matches the recorded issuer (an override
+     * redirecting the refresh elsewhere drops it).</p>
+     *
+     * @param current the current store (may be expiring/expired).
+     * @param refreshReason the OAuth {@code refresh_reason}, or {@code null} to omit it.
+     * @return the refreshed store, or {@code current} unchanged when not refreshable.
+     */
+    public CodexTokenStore refresh(final CodexTokenStore current, final String refreshReason) {
         if (!current.refreshable()) {
             return current;
         }
-        final var map = new LinkedHashMap<String, Object>();
+        final String effectiveIssuer = nonBlank(current.issuer()) ? current.issuer() : issuer();
+        final String effectiveClientId = nonBlank(current.clientId()) ? current.clientId() : config.clientId();
+        final var map = new TreeMap<String, Object>();
+        map.put("client_id", effectiveClientId);
         map.put("grant_type", "refresh_token");
+        if (refreshReason != null && !refreshReason.isBlank()) {
+            map.put("refresh_reason", refreshReason);
+        }
         map.put("refresh_token", current.refreshToken());
-        map.put("client_id", config.clientId());
-        final var body = postForm(issuer() + "/oauth/token", map);
+        final var body = postJson(effectiveIssuer + "/oauth/token", mapper.toString(map), "application/json");
         final var tokens = parse(body);
-        return new CodexTokenStore(
-                string(tokens, "access_token"),
-                firstNonBlank(string(tokens, "refresh_token"), current.refreshToken()),
-                current.accountId(),
-                expiry(tokens, current.accessToken()),
+        final var usedEndpoint = effectiveIssuer + "/oauth/token";
+        // retain provenance only when the endpoint we used matches the recorded issuer (mirror codex)
+        final var retainProvenance =
+                nonBlank(current.issuer()) && usedEndpoint.equals(current.issuer() + "/oauth/token");
+        final var accessToken = string(tokens, "access_token");
+        return current.withRefreshed(
+                accessToken,
+                string(tokens, "refresh_token"),
                 // keep the previous id token when the response omits one (common on refresh)
-                firstNonBlank(string(tokens, "id_token"), current.idToken()),
-                current.agentIdentity());
+                string(tokens, "id_token"),
+                current.openaiApiKey(),
+                expiry(tokens, accessToken),
+                retainProvenance);
     }
 
     /**
@@ -268,6 +299,31 @@ public class CodexOAuthClient {
      */
     Map<String, Object> exchangeCode(final String code, final String verifier, final String redirectUri) {
         return exchangeWithVerifier(code, verifier, redirectUri);
+    }
+
+    /**
+     * Exchanges the raw id token for an API-key-style access token, mirroring the upstream Codex CLI
+     * {@code obtain_api_key} (a token-exchange grant against the same token endpoint). On success the
+     * returned key is stored as inert metadata on the session; a regular ChatGPT-oauth session never
+     * uses it as the request bearer.
+     *
+     * @param idToken the raw id token from the token exchange.
+     * @return the exchanged {@code access_token}, or {@code null} when the id token is absent/blank
+     *     or the exchange returns no access token.
+     */
+    public String obtainApiKey(final String idToken) {
+        if (idToken == null || idToken.isBlank()) {
+            return null;
+        }
+        final var map = new LinkedHashMap<String, Object>();
+        map.put("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange");
+        map.put("client_id", config.clientId());
+        map.put("requested_token", "openai-api-key");
+        map.put("subject_token", idToken);
+        map.put("subject_token_type", "urn:ietf:params:oauth:token-type:id_token");
+        final var body = postForm(issuer() + "/oauth/token", map);
+        final var tokens = parse(body);
+        return string(tokens, "access_token");
     }
 
     /** The store derived from a token payload; the account id derives from the id_token when present. */
@@ -467,7 +523,9 @@ public class CodexOAuthClient {
         try {
             final HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString(UTF_8));
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new IllegalStateException("Codex OAuth HTTP " + response.statusCode() + ": " + response.body());
+                final var requestId = requestId(response);
+                throw new IllegalStateException(
+                        "Codex OAuth HTTP " + response.statusCode() + ": " + response.body() + requestId);
             }
             return response.body();
         } catch (final IOException e) {
@@ -527,6 +585,26 @@ public class CodexOAuthClient {
 
     private static String firstNonBlank(final String preferred, final String fallback) {
         return preferred != null && !preferred.isBlank() ? preferred : fallback;
+    }
+
+    private static boolean nonBlank(final String value) {
+        return value != null && !value.isBlank();
+    }
+
+    /**
+     * The issuer request id from a rejected token response, mirroring the upstream codex diagnostics
+     * ({@code oauth/error.rs}) which pick the first present of {@code x-request-id},
+     * {@code x-openai-request-id} or {@code cf-ray}, truncate it, and append it to the error. The
+     * headers are case-insensitive and the id is read from the headers (so it survives an empty or
+     * unreadable body).
+     */
+    private static String requestId(final HttpResponse<?> response) {
+        final var id = List.of("x-request-id", "x-openai-request-id", "cf-ray").stream()
+                .map(name -> response.headers().firstValue(name).orElse(null))
+                .filter(v -> v != null && !v.isBlank())
+                .map(v -> v.length() > 128 ? v.substring(0, 128) : v)
+                .findFirst();
+        return id.map(value -> " (request id: " + value + ")").orElse("");
     }
 
     private static String urlEncode(final String value) {

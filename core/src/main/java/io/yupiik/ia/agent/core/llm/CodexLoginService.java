@@ -83,8 +83,30 @@ public class CodexLoginService {
             final boolean device,
             final Consumer<String> urlSink,
             final Predicate<Boolean> cancelled) {
-        final var oauth = new CodexOAuthClient(mapper, httpClient, CodexOAuthConfig.DEFAULT);
-        final CodexTokenStore store;
+        return signIn(provider, device, urlSink, cancelled, CodexOAuthConfig.DEFAULT);
+    }
+
+    /**
+     * Package-private variant with a tunable OAuth configuration, mainly exposed for tests that point
+     * at a mock issuer instead of {@link CodexOAuthConfig#DEFAULT}. {@link #signIn(String, boolean,
+     * Consumer, Predicate)} delegates here with the default configuration; the login logic, provenance
+     * recording and the browser-only api-key exchange are otherwise identical.
+     *
+     * @param provider the provider id to sign in.
+     * @param device true to use the device-code flow instead of the browser flow.
+     * @param urlSink receives the authorize (or verification) URL to open.
+     * @param cancelled cancellation probe.
+     * @param config the tunable OAuth settings (issuer, client id, scopes, callback port).
+     * @return the authenticated session.
+     */
+    CodexTokenStore signIn(
+            final String provider,
+            final boolean device,
+            final Consumer<String> urlSink,
+            final Predicate<Boolean> cancelled,
+            final CodexOAuthConfig config) {
+        final var oauth = new CodexOAuthClient(mapper, httpClient, config);
+        CodexTokenStore store;
         if (device) {
             final var challenge = oauth.deviceCode();
             if (urlSink != null) {
@@ -93,6 +115,24 @@ public class CodexLoginService {
             store = oauth.poll(challenge, cancelled);
         } else {
             store = oauth.browserFlow(urlSink, cancelled);
+        }
+        // record the OAuth authority (provenance) at login, in BOTH flows (mirrors upstream
+        // persist_tokens_async which always writes issuer/client_id; the device flow only omits the
+        // api key below). Do this BEFORE obtainApiKey so the id token is read from the annotated store.
+        store = store.withProvenance(config.issuer(), config.clientId());
+        if (!device) {
+            // exchange the id token for an API-key token (upstream obtain_api_key); only the browser
+            // flow does this (the device flow passes no key upstream), and the failure is tolerated.
+            String apiKey = null;
+            try {
+                apiKey = oauth.obtainApiKey(store.idToken());
+            } catch (final RuntimeException ignored) {
+                // non-fatal: the login still succeeds without the api-key token (upstream .ok())
+                apiKey = null;
+            }
+            if (apiKey != null && !apiKey.isBlank()) {
+                store = store.withApiKey(apiKey);
+            }
         }
         save(provider, store);
         return store;

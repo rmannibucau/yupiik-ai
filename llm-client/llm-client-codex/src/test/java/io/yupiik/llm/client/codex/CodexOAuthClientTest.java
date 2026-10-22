@@ -97,7 +97,7 @@ class CodexOAuthClientTest {
         issuer.createContext("/oauth/token", exchange -> {
             lastPath.set(exchange.getRequestURI().getPath());
             final String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            if (body.contains("grant_type=refresh_token")) {
+            if (body.contains("\"grant_type\":\"refresh_token\"")) {
                 respond(
                         exchange,
                         200,
@@ -292,6 +292,99 @@ class CodexOAuthClientTest {
         exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);
         exchange.close();
+    }
+
+    @Test
+    void obtainApiKeyUsesTokenExchangeBody(final JsonMapper mapper) throws Exception {
+        final AtomicReference<String> captured = new AtomicReference<>();
+        issuer.createContext("/oauth/token", exchange -> {
+            captured.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "{\"access_token\":\"openai-api-key-1\"}");
+        });
+        final CodexOAuthClient oauth = new CodexOAuthClient(mapper, client, issuerUrl);
+        final String key = oauth.obtainApiKey("the-raw-id-token");
+        assertEquals("openai-api-key-1", key);
+        final String body = captured.get();
+        assertTrue(body.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange"), body);
+        assertTrue(body.contains("requested_token=openai-api-key"), body);
+        assertTrue(body.contains("subject_token=the-raw-id-token"), body);
+        assertTrue(body.contains("subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid_token"), body);
+        assertTrue(body.contains("client_id="), body);
+    }
+
+    @Test
+    void obtainApiKeyReturnsNullWithoutIdToken(final JsonMapper mapper) {
+        final CodexOAuthClient oauth = new CodexOAuthClient(mapper, client, issuerUrl);
+        assertNull(oauth.obtainApiKey(null));
+        assertNull(oauth.obtainApiKey("  "));
+    }
+
+    @Test
+    void refreshRoutesViaProvenanceAndPreservesApiKey(final JsonMapper mapper) throws Exception {
+        final AtomicReference<String> capturedBody = new AtomicReference<>();
+        final AtomicReference<String> capturedContentType = new AtomicReference<>();
+        final AtomicReference<String> capturedHost = new AtomicReference<>();
+        final AtomicReference<String> capturedPath = new AtomicReference<>();
+        // provenance points at this issuer; the client is configured with a DIFFERENT (default) issuer
+        issuer.createContext("/oauth/token", exchange -> {
+            capturedBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            capturedContentType.set(exchange.getRequestHeaders().getFirst("content-type"));
+            capturedHost.set(exchange.getRequestHeaders().getFirst("host"));
+            capturedPath.set(exchange.getRequestURI().getPath());
+            respond(exchange, 200, "{\"access_token\":\"new-acc\",\"refresh_token\":\"new-ref\",\"expires_in\":3600}");
+        });
+        final CodexOAuthClient oauth = new CodexOAuthClient(mapper, client, "http://wrong.example.com");
+        final CodexTokenStore store = new CodexTokenStore("old-acc", "refresh-tok", "acc", 1L, "id")
+                .withApiKey("openai-api-key-1")
+                .withProvenance(issuerUrl, "cid-1");
+
+        final CodexTokenStore refreshed = oauth.refresh(store, "proactive_expiry");
+        assertEquals("new-acc", refreshed.accessToken());
+        assertEquals("new-ref", refreshed.refreshToken());
+        // the api key is preserved across refresh (inert metadata) and provenance kept (endpoint used == recorded
+        // issuer)
+        assertEquals("openai-api-key-1", refreshed.openaiApiKey());
+        assertEquals(issuerUrl, refreshed.issuer());
+        assertEquals("cid-1", refreshed.clientId());
+        assertEquals("application/json", capturedContentType.get(), "refresh must be JSON-encoded");
+        assertEquals("/oauth/token", capturedPath.get());
+        // request routed to the recorded provenance issuer host, not the configured default
+        final var host = URI.create(issuerUrl).getAuthority();
+        assertNotNull(capturedHost.get());
+        assertTrue(capturedHost.get().contains(host), "host was " + capturedHost.get());
+        assertFalse(capturedHost.get().contains("wrong.example.com"));
+        final String body = capturedBody.get();
+        assertTrue(body.contains("\"grant_type\":\"refresh_token\""), body);
+        assertTrue(body.contains("\"refresh_reason\":\"proactive_expiry\""), body);
+        assertTrue(body.contains("\"refresh_token\":\"refresh-tok\""), body);
+        assertTrue(body.contains("\"client_id\":\"cid-1\""), body);
+    }
+
+    @Test
+    void refreshOmittedReasonWhenNull(final JsonMapper mapper) throws Exception {
+        final AtomicReference<String> capturedBody = new AtomicReference<>();
+        issuer.createContext("/oauth/token", exchange -> {
+            capturedBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "{\"access_token\":\"new-acc\",\"expires_in\":3600}");
+        });
+        final CodexOAuthClient oauth = new CodexOAuthClient(mapper, client, issuerUrl);
+        final CodexTokenStore store = new CodexTokenStore("old", "refresh-tok", "acc", 1L, "id");
+        oauth.refresh(store, null);
+        assertFalse(capturedBody.get().contains("refresh_reason"), capturedBody.get());
+    }
+
+    @Test
+    void httpRejectionSurfacesRequestId(final JsonMapper mapper) throws Exception {
+        issuer.createContext("/oauth/token", exchange -> {
+            exchange.getResponseHeaders().set("content-type", "application/json");
+            exchange.getResponseHeaders().set("x-openai-request-id", "req-123");
+            respond(exchange, 403, "{\"error\":\"denied\"}");
+        });
+        final CodexOAuthClient oauth = new CodexOAuthClient(mapper, client, issuerUrl);
+        final CodexTokenStore store = new CodexTokenStore("acc", "refresh-tok", "a", 1L, "id");
+        final IllegalStateException e = assertThrows(IllegalStateException.class, () -> oauth.refresh(store, null));
+        assertTrue(e.getMessage().contains("request id: req-123"), e.getMessage());
+        assertTrue(e.getMessage().contains("Codex OAuth HTTP 403"), e.getMessage());
     }
 
     @Test
