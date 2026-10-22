@@ -240,6 +240,37 @@ class SpawnedJvmGraphParserTest {
         assertNotEquals(checksum1, jarChecksum(jarPath), "a different-build resource set must regenerate the jar");
     }
 
+    @Test
+    void customJavacOptionsStillRoundTripTheModel(final @org.junit.jupiter.api.io.TempDir Path tempDir)
+            throws Exception {
+        // javacOptions drive the spawned child JVM startup flags. A non-default list (here: replace the 3
+        // defaults with a single option) must still spawn a valid child and produce the exact same model.
+        final var scratch = tempDir.resolve("scratch");
+        final var repoRoot = repoRoot();
+        final var jars = ParserJars.classResource(
+                repoRoot.resolve("core/target/classes"), repoRoot.resolve("code-graph-index/target/classes"));
+        assertNotNull(System.getenv("JAVA_HOME"), "test needs JAVA_HOME pointing at a JDK to spawn");
+        final var parser = configured(singleJdkLocator(), scratch, jars, 30L, ParserJars.classes(), false);
+        set(parser, "javacOptions", java.util.List.of("-Xshare:auto"));
+
+        final var src = tempDir.resolve("demo/src/Demo.java");
+        Files.createDirectories(src.getParent());
+        Files.writeString(src, "package demo;\npublic class Demo { public void run() {} }\n");
+
+        final var parsed = parser.parseBatch(List.of(src));
+        final var reference = new JavaGraphParser().parseBatch(List.of(src));
+        assertEquals(
+                reference.get(src).symbols().stream()
+                        .map(GraphModel.Symbol::fqn)
+                        .sorted()
+                        .toList(),
+                parsed.get(src).symbols().stream()
+                        .map(GraphModel.Symbol::fqn)
+                        .sorted()
+                        .toList(),
+                "custom javacOptions must still yield the same symbols");
+    }
+
     private static String jarChecksum(final Path jar) throws IOException {
         try (final var jarFile = new java.util.jar.JarFile(jar.toFile())) {
             return jarFile.getManifest().getMainAttributes().getValue("X-Yca-Parser-Checksum");

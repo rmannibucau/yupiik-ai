@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.codegraph.GraphParser;
 import io.yupiik.ia.agent.core.codegraph.GraphStore;
 import io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.JavacConfiguration;
 import io.yupiik.ia.agent.core.configuration.StructuralCodeGraphConfiguration;
 import java.io.DataInputStream;
 import java.io.IOException;
@@ -78,6 +79,7 @@ public class SpawnedJvmGraphParser implements GraphParser {
     private long spawnTimeoutSeconds;
     private final String mainClass;
     private List<String> classPieces;
+    private List<String> javacOptions;
 
     private final ReentrantLock availabilityLock = new ReentrantLock();
     private boolean hasCompilerInProcess;
@@ -92,6 +94,10 @@ public class SpawnedJvmGraphParser implements GraphParser {
     /** DI constructor: config (via {@code yca.structural-code-graph.*}) drives the JDK override/pin. */
     public SpawnedJvmGraphParser(final CodingAgentConfiguration configuration) {
         this(locator(configuration == null ? null : configuration.structuralCodeGraph()));
+        final var javac = configuration == null
+                ? null
+                : configuration.structuralCodeGraph().javac();
+        this.javacOptions = javac == null ? JavacConfiguration.DEFAULT_JAVAC_OPTIONS : javac.effectiveJavacOptions();
     }
 
     private SpawnedJvmGraphParser(final JdkLocator jdkLocator) {
@@ -101,18 +107,20 @@ public class SpawnedJvmGraphParser implements GraphParser {
         this.spawnTimeoutSeconds = 60L;
         this.mainClass = HELPER_MAIN;
         this.classPieces = ParserClassSet.CLASSES;
+        this.javacOptions = JavacConfiguration.DEFAULT_JAVAC_OPTIONS;
         // On a JVM the in-process javac wins; in a native image the javac runtime APIs fail even when ToolProvider
         // reports a compiler, so engage the spawned-JVM fallback (see the imagecode property, as in OpenBrowser).
         this.hasCompilerInProcess = System.getProperty("org.graalvm.nativeimage.imagecode") == null;
     }
 
     private static JdkLocator locator(final StructuralCodeGraphConfiguration scg) {
-        final var jdkPath =
-                scg == null || scg.jdkPath() == null || scg.jdkPath().isBlank() ? null : Path.of(scg.jdkPath());
-        final Integer pin = scg == null ? null : scg.jdkFeature();
+        final var javac = scg == null ? null : scg.javac();
+        final var jdkHome =
+                javac == null || javac.jdkHome() == null || javac.jdkHome().isBlank() ? null : Path.of(javac.jdkHome());
+        final Integer pin = javac == null ? null : javac.jdkFeature();
         return new JdkLocator(
                 ParserClassSet::resourceStream,
-                new JdkLocator.Settings(jdkPath, pin, Path.of(System.getProperty("user.dir", "."))));
+                new JdkLocator.Settings(jdkHome, pin, Path.of(System.getProperty("user.dir", "."))));
     }
 
     @Override
@@ -195,6 +203,7 @@ public class SpawnedJvmGraphParser implements GraphParser {
             try {
                 final var command = new ArrayList<String>();
                 command.add(javaLauncher.toAbsolutePath().toString());
+                command.addAll(javacOptions); // JVM startup flags before -cp (short-lived child: cut boot cost)
                 command.add("-cp");
                 command.add(scratchDir.resolve(PARSER_JAR_NAME).toString());
                 command.add(mainClass);

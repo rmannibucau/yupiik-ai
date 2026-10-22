@@ -126,19 +126,10 @@ public record StructuralCodeGraphConfiguration(
 
         @Property(
                 documentation =
-                        "Optional explicit {@code java} launcher (or JDK home) used to run the spawned-JVM Java parser in the "
-                                + "native binary. When set, it is authoritative but still validated against the parser bytecode level; "
-                                + "if it cannot load the parser the Java graph is disabled rather than failing per query. Empty falls "
-                                + "back to JDK discovery (JAVA_HOME, PATH, Maven toolchains and common install roots).")
-        String jdkPath,
-
-        @Property(
-                documentation =
-                        "Optional numeric Java feature level (e.g. 21 or 25) forcing the project source level (V2) used to pick the "
-                                + "JDK for parsing project sources. Overrides {@code .sdkmanrc}/{@code .java-version} and "
-                                + "{@code maven-compiler-plugin} detection. The actual spawned JDK is never below the parser bytecode "
-                                + "level even when this is lower.")
-        Integer jdkFeature) {
+                        "JDK selection and JVM options for the spawned-JVM Java parser (native image only). Groups "
+                                + "{@code jdkHome}, {@code jdkFeature} and {@code javacOptions} under "
+                                + "{@code yca.structuralCodeGraph.javac.*}.")
+        JavacConfiguration javac) {
 
     public static final List<String> DEFAULT_IGNORE_GLOBS = List.of(
             ".yca/**",

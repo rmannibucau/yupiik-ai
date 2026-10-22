@@ -45,7 +45,7 @@ import java.util.regex.Pattern;
  *       level of the parser bytecode, read statically from the embedded {@code .class} bytes (see
  *       {@link ParserClassSet#requiredFeatureVersion}). A JDK below it cannot even load the helper.</li>
  *   <li><b>{@link #locateProjectJdk()}</b> - the JVM that parses project sources. Its floor (V2) is the project source
- *       level, detected best-effort from {@code yca.structuralCodeGraph.jdkFeature}, a {@code .sdkmanrc}/
+ *       level, detected best-effort from {@code yca.structuralCodeGraph.javac.jdkFeature}, a {@code .sdkmanrc}/
  *       {@code .java-version} in the project/ancestors, or the {@code maven-compiler-plugin} {@code release}/{@code
  *       source} of the effective {@code pom.xml}.</li>
  * </ul>
@@ -55,7 +55,7 @@ import java.util.regex.Pattern;
  * otherwise the parser JDK). Each role selects an exact match for its floor first, then the closest <em>higher</em>
  * version, then the highest version that still clears the floor.</p>
  *
- * <p>Candidates come from {@code yca.structuralCodeGraph.jdkPath} (explicit override, still validated against the
+ * <p>Candidates come from {@code yca.structuralCodeGraph.javac.jdkHome} (explicit override, still validated against the
  * parser floor), {@code JAVA_HOME}, {@code PATH}, Maven toolchains (version trusted from {@code toolchains.xml}, no
  * probe), then common install roots (per-platform). Each non-toolchain candidate is probed once - a single child spawn
  * reports both compiler presence and the class-file major it can load, so a JRE or a too-old JDK is rejected.</p>
@@ -80,10 +80,10 @@ public class JdkLocator {
 
     /**
      * Injectable settings for the locator. {@code projectDir} anchors the {@code .sdkmanrc}/{@code .java-version} scan;
-     * {@code jdkPath} is the configured {@code java} binary or JDK home; {@code pinnedFeature} is the configured
+     * {@code jdkHome} is the configured {@code java} binary or JDK home; {@code pinnedFeature} is the configured
      * override for the project source level (V2).
      */
-    public record Settings(Path jdkPath, Integer pinnedFeature, Path projectDir) {}
+    public record Settings(Path jdkHome, Integer pinnedFeature, Path projectDir) {}
 
     /** A candidate {@code java} with the class-file major it can load (measured by the probe, or declared by a toolchain). */
     public record Candidate(Path path, int classFileMajor) {}
@@ -154,9 +154,9 @@ public class JdkLocator {
         final var launchers = new ArrayList<Path>();
         final var seen = new LinkedHashSet<Path>();
         final var names = launcherNames();
-        if (settings.jdkPath() != null) {
-            addHomeJava(launchers, seen, settings.jdkPath(), names);
-            addExec(launchers, seen, settings.jdkPath());
+        if (settings.jdkHome() != null) {
+            addHomeJava(launchers, seen, settings.jdkHome(), names);
+            addExec(launchers, seen, settings.jdkHome());
         }
         addEnvironment(launchers, seen, names);
         addCommonRoots(launchers, seen, names);
@@ -179,7 +179,7 @@ public class JdkLocator {
                     "No JDK exposing a Java compiler new enough to run the parser was found (checked " + summary()
                             + " against the parser bytecode floor "
                             + v1 + "); the native structural code graph is disabled for this session. Parse output "
-                            + "will be empty until a compatible JDK or a 'yca.structuralCodeGraph.jdkPath' is provided.");
+                            + "will be empty until a compatible JDK or a 'yca.structuralCodeGraph.javac.jdkHome' is provided.");
         }
     }
 
