@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.codegraph.spawn;
 
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.security.MessageDigest;
@@ -68,6 +69,38 @@ public final class ParserClassSet {
         } catch (final IOException | NoSuchAlgorithmException e) {
             throw new IllegalStateException("Cannot fingerprint the parser class resources", e);
         }
+    }
+
+    /**
+     * The class-file major version (e.g. 69 for Java 25) of the bundled parser classes, read from the first
+     * {@code .class} resource in {@link #CLASSES}. This is the bytecode the spawned child JVM must be able to load, and
+     * therefore the hard floor for any discovered JDK. Read statically from the embedded bytes (no JVM spawn), so it
+     * always reflects whatever {@code --release} the classes were actually compiled with - never a hardcoded constant.
+     */
+    public static int classFileMajor(final Function<String, InputStream> classResource) {
+        try (final var in = classResource.apply(CLASSES.get(0))) {
+            if (in == null) {
+                throw new IOException("Missing bundled parser class resource: " + CLASSES.get(0));
+            }
+            try (final var data = new DataInputStream(in)) {
+                final int magic = data.readInt();
+                if (magic != 0xCAFEBABE) {
+                    throw new IOException("Not a valid class file: " + CLASSES.get(0));
+                }
+                data.readUnsignedShort(); // minor version
+                return data.readUnsignedShort(); // major version
+            }
+        } catch (final IOException e) {
+            throw new IllegalStateException("Cannot read the parser class-file version", e);
+        }
+    }
+
+    /**
+     * The Java feature level (e.g. 25) required to run the parser bytecode: {@code major - 44} (class-file major 52 is
+     * Java 8, 69 is Java 25). A JDK below this cannot even load the helper jar.
+     */
+    public static int requiredFeatureVersion(final Function<String, InputStream> classResource) {
+        return classFileMajor(classResource) - 44;
     }
 
     /** Ordered class-file resource paths that make up the spawned-JVM parser jar. */

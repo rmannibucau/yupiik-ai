@@ -22,6 +22,8 @@ import io.yupiik.ia.agent.core.codegraph.GraphModel;
 import io.yupiik.ia.agent.core.codegraph.GraphParser;
 import io.yupiik.ia.agent.core.codegraph.GraphStore;
 import io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.StructuralCodeGraphConfiguration;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -84,7 +86,16 @@ public class SpawnedJvmGraphParser implements GraphParser {
     private boolean warnedNoJdk;
 
     public SpawnedJvmGraphParser() {
-        this.jdkLocator = new JdkLocator();
+        this(new JdkLocator());
+    }
+
+    /** DI constructor: config (via {@code yca.structural-code-graph.*}) drives the JDK override/pin. */
+    public SpawnedJvmGraphParser(final CodingAgentConfiguration configuration) {
+        this(locator(configuration == null ? null : configuration.structuralCodeGraph()));
+    }
+
+    private SpawnedJvmGraphParser(final JdkLocator jdkLocator) {
+        this.jdkLocator = jdkLocator;
         this.scratchDir = defaultScratchDir();
         this.classResource = ParserClassSet::resourceStream;
         this.spawnTimeoutSeconds = 60L;
@@ -93,6 +104,15 @@ public class SpawnedJvmGraphParser implements GraphParser {
         // On a JVM the in-process javac wins; in a native image the javac runtime APIs fail even when ToolProvider
         // reports a compiler, so engage the spawned-JVM fallback (see the imagecode property, as in OpenBrowser).
         this.hasCompilerInProcess = System.getProperty("org.graalvm.nativeimage.imagecode") == null;
+    }
+
+    private static JdkLocator locator(final StructuralCodeGraphConfiguration scg) {
+        final var jdkPath =
+                scg == null || scg.jdkPath() == null || scg.jdkPath().isBlank() ? null : Path.of(scg.jdkPath());
+        final Integer pin = scg == null ? null : scg.jdkFeature();
+        return new JdkLocator(
+                ParserClassSet::resourceStream,
+                new JdkLocator.Settings(jdkPath, pin, Path.of(System.getProperty("user.dir", "."))));
     }
 
     @Override
@@ -146,9 +166,10 @@ public class SpawnedJvmGraphParser implements GraphParser {
     private void warnNoJdk() {
         if (!warnedNoJdk) {
             warnedNoJdk = true;
-            LOGGER.warning(
-                    "No JDK exposing a Java compiler was found (JAVA_HOME/PATH); the native structural code graph "
-                            + "is disabled for this session. Parse output will be empty until a JDK is provided.");
+            LOGGER.warning("No JDK exposing a Java compiler new enough to run the parser was found (checked JAVA_HOME, "
+                    + "PATH and common install locations against the parser bytecode level); the native "
+                    + "structural code graph is disabled for this session. Parse output will be empty until "
+                    + "a compatible JDK is provided (set codegraph.jdkPath).");
         }
     }
 

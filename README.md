@@ -340,6 +340,13 @@ based on per-file content hashes.
 
 - **Requires a JDK**: the Java parser uses the `javac` compiler API, so it does
   not run on a plain JRE. No extra JVM flags are needed.
+- **Native binary**: a native build has no in-process `javac`, so the parse is
+  delegated to an external JVM selected automatically (two roles: the parser
+  jar's bytecode floor and the project source level; exact match then closest
+  higher). Discovery covers `yca.structuralCodeGraph.jdkPath` (explicit),
+  `JAVA_HOME`, `PATH`, Maven toolchains and common install roots; when no JDK
+  clears the parser floor the Java graph is disabled with a clear warning. See
+  the website docs (Structural code graph) for the full JDK selection model.
 - **Deterministic, no LLM by default**: the structural index (types, methods,
   fields, imports, extends/implements, calls) is extracted from the parse tree
   without any model call. Optional LLM *concept nodes* (per-subsystem Markdown

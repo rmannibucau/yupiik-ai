@@ -27,6 +27,47 @@ so the tools answer queries quickly without re-parsing the tree; see
 xref:code-graph-index.adoc[Compact binary code graph index] for the format and
 the freshness guard.
 
+== JDK selection in the native binary
+
+A regular JVM build has an in-process `javac`, so the Java parser runs directly.
+A native (GraalVM) build has no in-process compiler, so parsing is delegated to
+an external `java` process that runs the packaged parser jar. That external JDK
+is located automatically and two distinct roles are modelled, because a project
+can target a different Java version than the internal parser jar was compiled
+with (for instance a Java 21 project parsed by a Java 25 parser):
+
+* *Parser jar (V1)* - a hard *floor* equal to the parser bytecode level, read
+  statically from the bundled `.class` bytes (no probe needed). A JDK below it
+  can never load the parser, so it is never selected.
+* *Project source level (V2)* - the level the project sources target, detected
+  best-effort from, in order: the `yca.structuralCodeGraph.jdkFeature`
+  (a numeric pin), a `.sdkmanrc`/`.java-version` in the project or its parents,
+  the `maven-compiler-plugin` `release`/`source` of the effective `pom.xml`, or
+  a Maven `toolchains.xml` JDK.
+
+Each role selects an exact match for its level first, then the closest *higher*
+version, then the highest version that clears its floor. `javac` runs
+in-process with the parser, so the single JVM actually spawned is the newer of
+the two roles when they differ (that JVM both loads the parser jar and parses
+the project sources).
+
+Discovery covers, in order: an explicit `yca.structuralCodeGraph.jdkPath`
+(a full `java` binary or a JDK home; authoritative but still validated against
+the parser floor), `JAVA_HOME`, `PATH`, Maven `toolchains.xml` JDKs (their
+version is trusted, so no probe is needed) and the common per-platform install
+roots (`~/.sdkman/candidates/java`, `~/.jdks`, plus per-OS system roots only:
+Linux `/usr/lib/jvm`/`/usr/java`/`/opt`, macOS `/Library/Java/JavaVirtualMachines`,
+Windows `Program Files`).
+On Windows the launcher lookup also considers `java.cmd` and `java.exe`.
+
+A candidate is only accepted when a probe confirms it exposes a compiler and
+reports a class-file level high enough; a plain JRE or a too-old JDK is
+rejected rather than trusted. When no JDK clears the parser floor the Java
+graph is disabled with a clear warning (mentioning `jdkPath`) instead of
+failing every query. See
+xref:../configuration.adoc[Configuration] for the `jdkPath`/`jdkFeature`
+options.
+
 == Documentation doc tree
 
 With `yca.structuralCodeGraph.docs` enabled (the default), the agent writes a

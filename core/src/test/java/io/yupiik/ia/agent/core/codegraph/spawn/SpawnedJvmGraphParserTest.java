@@ -83,14 +83,33 @@ class SpawnedJvmGraphParserTest {
         assertFalse(parser.available(), "with an in-process compiler the spawned parser must not engage");
     }
 
+    /** A locator confined to the real {@code JAVA_HOME} JDK (a genuine compiler is needed to spawn), so discovery does
+     * not walk every JDK on the machine. Integrational: requires {@code JAVA_HOME} to point at a JDK. */
+    private static JdkLocator singleJdkLocator() {
+        final var javaHome = System.getenv("JAVA_HOME");
+        return new JdkLocator() {
+            @Override
+            protected String env(final String name) {
+                return "JAVA_HOME".equals(name) ? javaHome : null;
+            }
+
+            @Override
+            protected List<Path> commonRoots() {
+                return List.of();
+            }
+        };
+    }
+
     @Test
     void spawnsJvmAndMatchesInProcessParser() throws IOException {
         final var scratch = tempDir.resolve("scratch");
         final var repoRoot = repoRoot();
         final var jars = ParserJars.classResource(
                 repoRoot.resolve("core/target/classes"), repoRoot.resolve("code-graph-index/target/classes"));
-        // a real JDK (this JVM launcher) has a compiler; simulate the none-in-process native case
-        final var parser = configured(new JdkLocator(), scratch, jars, 30L, ParserJars.classes(), false);
+        // a real JDK (JAVA_HOME) has a compiler; confine discovery to that single known JDK so the test does not walk
+        // or probe every JDK on the machine (hermetic apart from the genuine child JVM needed for the spawn).
+        assertNotNull(System.getenv("JAVA_HOME"), "test needs JAVA_HOME pointing at a JDK to spawn");
+        final var parser = configured(singleJdkLocator(), scratch, jars, 30L, ParserJars.classes(), false);
 
         assertTrue(parser.available(), "spawned parser should be available when a JDK is found");
 
@@ -156,10 +175,15 @@ class SpawnedJvmGraphParserTest {
 
     @Test
     void returnsEmptyAndStaysDisabledWhenNoJdk() throws IOException {
-        // an empty candidate list simulates no usable JDK (JAVA_HOME/PATH unavailable)
+        // an empty discovery simulates no usable JDK (no JAVA_HOME/PATH/common-root launchers)
         final var locator = new JdkLocator() {
             @Override
-            List<Path> candidates() {
+            protected String env(final String name) {
+                return null;
+            }
+
+            @Override
+            protected List<Path> commonRoots() {
                 return List.of();
             }
         };
@@ -199,19 +223,19 @@ class SpawnedJvmGraphParserTest {
         final var jarPath = scratch.resolve("parser.jar");
 
         // first parser assembles parser.jar fresh
-        final var first = configured(new JdkLocator(), scratch, resource, 5L, ParserJars.classes(), false);
+        final var first = configured(singleJdkLocator(), scratch, resource, 5L, ParserJars.classes(), false);
         assertTrue(first.available(), "first assembly must make the parser available");
         assertTrue(Files.isRegularFile(jarPath), "parser.jar must be assembled");
         final String checksum1 = jarChecksum(jarPath);
 
         // unchanged resources on a shared scratch -> the existing jar is up to date and reused unchanged
-        final var second = configured(new JdkLocator(), scratch, resource, 5L, ParserJars.classes(), false);
+        final var second = configured(singleJdkLocator(), scratch, resource, 5L, ParserJars.classes(), false);
         assertTrue(second.available(), "up-to-date jar must be reused");
         assertEquals(checksum1, jarChecksum(jarPath), "an up-to-date jar must NOT be regenerated");
 
         // simulate the yca binary being rebuilt with different class bytes -> the cached jar is stale -> regenerated
         changed[0] = true;
-        final var third = configured(new JdkLocator(), scratch, resource, 5L, ParserJars.classes(), false);
+        final var third = configured(singleJdkLocator(), scratch, resource, 5L, ParserJars.classes(), false);
         assertTrue(third.available(), "after regeneration the parser must still be available");
         assertNotEquals(checksum1, jarChecksum(jarPath), "a different-build resource set must regenerate the jar");
     }
