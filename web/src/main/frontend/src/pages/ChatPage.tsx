@@ -1954,8 +1954,10 @@ function Markdown({ content, writing = false }: { content: string; writing?: boo
         remarkPlugins={[remarkGfm]}
         components={{
           // Links (incl. the Codex login authorize URL) open in a new tab so the terminal/chat keeps
-          // its place while the user authorizes in the browser.
-          link({ href, children }) {
+          // its place while the user authorizes in the browser. The override key must be the HTML
+          // intrinsic element name `a` - react-markdown v9+ dropped the old `link` key (v7/8-era), so
+          // a `link`-keyed override was never invoked and the default <a> lost target=_blank.
+          a({ href, children }) {
             return (
               <a href={href} target="_blank" rel="noopener noreferrer">
                 {children}
