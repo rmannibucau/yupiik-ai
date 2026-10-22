@@ -1,0 +1,58 @@
+= yca - yupiik coding agent
+
+yca is an opencode-like coding agent for the terminal, built on the
+https://github.com/yupiik/fusion[Yupiik Fusion] framework and
+https://tamboui.dev[TamboUI], with a multi-LLM and model backend abstraction.
+
+== Features
+
+* Multiple frontends: an interactive TUI (`tui`), a plain-terminal REPL (`cli`),
+  a headless mode (`run`) and a browser UI (`web`)
+* Streaming output with reasoning/thinking support
+* Built-in tools (read/write/edit files, ls, glob, grep, bash, todos, memory)
+  exposed as a local MCP server; remote stdio and streamable HTTP MCP servers
+  are merged into the same registry
+* Context management with usage gauges and threshold-based pruning and compaction
+* Sessions (JSONL) with resume, todos, and global and per-project auto memory
+* Permission modes (`ask`, `auto_edit`, `yolo`) and plan/build access modes
+* Reliability: rate limiting, retries, and concurrency limits per provider
+
+== Minimal configuration
+
+Defaults to `https://api.openai.com/v1`.
+
+[source,shell]
+----
+export OPENAI_API_KEY=sk-...
+java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar \
+  run --prompt "list the files" --provider-model gpt-5-mini
+----
+
+== Documentation
+
+The full documentation (CLI reference, configuration, features, libraries) is at
+https://yupiik.io/fusion-coding-agent/[yupiik.io/fusion-coding-agent].
+
+== Build
+
+Requirements: Java 25+ (26 works), Maven 4.x.
+
+[source,shell]
+----
+export JAVA_HOME=~/.sdkman/candidates/java/26.0.2+1.1-zulu
+mvn clean install
+----
+
+The runnable artifact is the fatjar: `yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar`.
+
+== Contribute
+
+Generate and serve the documentation site live on http://localhost:4200:
+
+[source,shell]
+----
+mvn -pl documentation io.yupiik.maven:yupiik-tools-maven-plugin:1.2.14:serve-minisite
+----
+
+Docs authoring conventions (nav attributes, generated-vs-handwritten split) are
+recorded in `documentation/src/main/minisite/content/authoring.adoc`.
