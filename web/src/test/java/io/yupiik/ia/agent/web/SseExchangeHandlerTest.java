@@ -29,9 +29,11 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -48,6 +50,14 @@ class SseExchangeHandlerTest {
 
     private JreHttpServer server;
 
+    /** The broker backing the current {@link #server}; closed in {@link #stop()} before the server, so each SSE
+     * exchange completes deterministically (SseBroker.close() -> subscription.close() -> teardown()) instead of
+     * burning JreHttpServer's 2s stop-grace per live connection. */
+    private SseBroker broker;
+
+    /** Live SSE client connections opened by {@link #stream(String)}; cancelled in {@link #stop()}. */
+    private final List<CompletableFuture<?>> liveReaders = new ArrayList<>();
+
     @BeforeAll
     static void warm() {
         client = HttpClient.newBuilder()
@@ -58,6 +68,21 @@ class SseExchangeHandlerTest {
 
     @AfterEach
     void stop() {
+        // first close every SSE subscription from the SERVER side (SseBroker.close() -> subscription.close()
+        // -> teardown() -> subscriber.onComplete()), which un-parks each SseBody writeLoop so the in-flight
+        // exchange completes and JreHttpServer.stop(SHUTDOWN_GRACE_SECONDS=2) returns in milliseconds instead
+        // of burning a full 2s grace per connection (the exchange is a parked Flow.Subscriber that never
+        // completes on its own). This is the same deterministic shutdown path the container lifecycle uses.
+        if (broker != null) {
+            broker.close();
+        }
+        // client side: cancel any still-open SSE reader connections (no-op once the server teardown unblocked
+        // the read), purely so the client HttpClient is not left holding sockets.
+        for (final var reader : liveReaders) {
+            if (!reader.isDone()) {
+                reader.cancel(true);
+            }
+        }
         if (server != null) {
             server.close();
         }
@@ -76,6 +101,7 @@ class SseExchangeHandlerTest {
             final SseBroker broker,
             final int windowBlocks,
             final java.util.function.Function<String, List<WebEventDto>> snapshotSource) {
+        this.broker = broker;
         final var instance = new JreHttpServer(
                 new JreHttpServerConfiguration(null, 0, true),
                 List.of(new SseExchangeHandler(broker, snapshotSource, windowBlocks)));
@@ -88,14 +114,17 @@ class SseExchangeHandlerTest {
         return "http://127.0.0.1:" + s.port() + path;
     }
 
-    private static Queue<String> stream(final String url) {
+    private Queue<String> stream(final String url) {
         final var lines = new ConcurrentLinkedQueue<String>();
+        // sendAsync gives us a handle we can cancel in stop() to close a still-open SSE connection; a
+        // synchronous client.send() would block forever and leave the server's stop(2) grace to time it out.
+        final var future = client.sendAsync(
+                HttpRequest.newBuilder(URI.create(url)).GET().build(), HttpResponse.BodyHandlers.ofLines());
+        liveReaders.add(future);
         final var reader = new Thread(
                 () -> {
                     try {
-                        final var resp = client.send(
-                                HttpRequest.newBuilder(URI.create(url)).GET().build(),
-                                HttpResponse.BodyHandlers.ofLines());
+                        final var resp = future.join();
                         try (final var body = resp.body()) {
                             body.forEach(l -> {
                                 if (!l.isBlank()) {
@@ -233,8 +262,21 @@ class SseExchangeHandlerTest {
         for (final Thread p : pushers) {
             p.join();
         }
-        // give the serialized drain a moment to flush the tail frames before closing
-        Thread.sleep(300);
+        // wait until the serialized drain has flushed the tail frames (the frame count plateaus) before
+        // closing - a deterministic wait-until-done instead of a fixed sleep, so a fast drain is not charged
+        // a gratuitous 300ms and a slow one still converges before the assertion.
+        final long drainDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        long previousAgentFrames = -1;
+        while (System.nanoTime() < drainDeadline) {
+            final var current = framesPeek(tab).stream()
+                    .filter(l -> l.startsWith("event: agent"))
+                    .count();
+            if (current == previousAgentFrames) {
+                break; // stable: the drain caught up
+            }
+            previousAgentFrames = current;
+            Thread.sleep(20);
+        }
 
         final var agentFrames = framesPeek(tab).stream()
                 .filter(l -> l.startsWith("event: agent"))
