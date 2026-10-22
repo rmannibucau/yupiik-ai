@@ -660,6 +660,11 @@ public class TuiCommand implements Runnable {
             } finally {
                 // quitting the app tears every tab down: interrupt each running turn, wait
                 // for the in-flight futures and release the per-session resources
+                final var teardownStart = System.nanoTime();
+                if (LOG.isLoggable(Level.FINE)) {
+                    LOG.fine("[yca-shutdown] TUI teardown: started with "
+                            + tabManager.list().size() + " open tab(s)");
+                }
                 openStates = List.copyOf(tabManager.list());
                 for (final var state : openStates) {
                     state.interrupted = true;
@@ -684,7 +689,15 @@ public class TuiCommand implements Runnable {
                 if (gitBranchPoller != null) {
                     gitBranchPoller.close();
                 }
+                if (LOG.isLoggable(Level.FINE)) {
+                    LOG.fine(() -> "[yca-shutdown] TUI teardown: closing shared executor after "
+                            + (System.nanoTime() - teardownStart) / 1_000_000L + " ms");
+                }
                 executor.shutdown();
+                if (LOG.isLoggable(Level.FINE)) {
+                    LOG.fine(() -> "[yca-shutdown] TUI teardown: done ("
+                            + (System.nanoTime() - teardownStart) / 1_000_000L + " ms)");
+                }
                 // clean-exit path of the ?1003l restore: the event loop has ended, so write
                 // the disable here while the terminal is still ours, then drop the shutdown
                 // hook (which exists only for the abrupt path). The try-with-resources closes

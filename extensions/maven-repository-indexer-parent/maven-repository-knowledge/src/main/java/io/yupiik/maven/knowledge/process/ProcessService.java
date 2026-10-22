@@ -213,7 +213,13 @@ public class ProcessService {
      */
     @Destroy
     public void close() {
-        disposeAll();
+        final var start = System.nanoTime();
+        final List<Process> stragglers = disposeAll();
+        if (LOGGER.isLoggable(Level.FINE)) {
+            LOGGER.fine(() -> "[yca-shutdown] ProcessService.close: killed/waiting process(es) done in "
+                    + (System.nanoTime() - start) / 1_000_000L + " ms"
+                    + (stragglers.isEmpty() ? "" : "; " + stragglers.size() + " SIGKILLed but left to the OS"));
+        }
     }
 
     /** @return the current reap grace (used by tests to assert the bounds without hardcoding). */

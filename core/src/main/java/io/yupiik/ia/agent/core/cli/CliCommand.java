@@ -73,6 +73,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Interactive plain-terminal REPL for yca. Requires only a terminal
@@ -103,6 +105,8 @@ public class CliCommand implements Runnable {
     private final ShellSession session = new ShellSession();
 
     private static final long CLEANUP_AWAIT_NANOS = 1_000_000_000L;
+
+    private static final Logger LOGGER = Logger.getLogger(CliCommand.class.getName());
 
     private final AtomicBoolean cancelled = new AtomicBoolean();
     /**
@@ -390,6 +394,10 @@ public class CliCommand implements Runnable {
         if (!cleaned.compareAndSet(false, true)) {
             return;
         }
+        if (LOGGER.isLoggable(Level.FINE)) {
+            LOGGER.fine("[yca-shutdown] cleanup: started");
+        }
+        final var start = System.nanoTime();
         // give the terminal back before the closing lines so they go straight out
         if (stdio.streamTarget() == externalOutput) {
             stdio.streamTarget(null);
@@ -399,6 +407,9 @@ public class CliCommand implements Runnable {
         sessionLifecycle.release(sessionId, session.runtime());
         System.out.flush();
         System.err.flush();
+        if (LOGGER.isLoggable(Level.FINE)) {
+            LOGGER.fine(() -> "[yca-shutdown] cleanup: done in " + (System.nanoTime() - start) / 1_000_000L + " ms");
+        }
         if (sessionId != null && contextPath != null && Files.exists(contextPath)) {
             println(MarkdownColorizer.info("session " + sessionId + " - context file: " + contextPath));
         } else {
@@ -416,6 +427,10 @@ public class CliCommand implements Runnable {
             // give the in-flight turn a short window to unwind and flush its
             // session entries before we tear the gates down
             final var deadline = System.nanoTime() + CLEANUP_AWAIT_NANOS;
+            if (LOGGER.isLoggable(Level.FINE)) {
+                LOGGER.fine("[yca-shutdown] in-flight turn busy: waiting up to " + CLEANUP_AWAIT_NANOS / 1_000_000L
+                        + " ms for it to unwind");
+            }
             while (session.busy() && System.nanoTime() < deadline) {
                 try {
                     Thread.sleep(25);
@@ -423,6 +438,12 @@ public class CliCommand implements Runnable {
                     Thread.currentThread().interrupt();
                     break;
                 }
+            }
+            if (LOGGER.isLoggable(Level.FINE)) {
+                final var stayedBusy = session.busy();
+                LOGGER.fine("[yca-shutdown] turn unwind "
+                        + (stayedBusy ? "still busy after the grace window; tearing gates down anyway" : "completed")
+                        + " (" + (System.nanoTime() - deadline + CLEANUP_AWAIT_NANOS) / 1_000_000L + " ms)");
             }
         }
         quitRequested = true;

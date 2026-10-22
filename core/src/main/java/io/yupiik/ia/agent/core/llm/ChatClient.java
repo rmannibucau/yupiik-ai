@@ -67,6 +67,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -2349,6 +2350,10 @@ public class ChatClient implements AutoCloseable {
     @Override
     @Destroy
     public void close() {
+        if (LOGGER.isLoggable(Level.FINE)) {
+            LOGGER.fine("[yca-shutdown] ChatClient.close: closing dialect clients and HTTP client");
+        }
+        final var start = System.nanoTime();
         if (dialectClients != null) {
             dialectClients.values().forEach(DialectLlmClient::close);
         }
@@ -2358,6 +2363,10 @@ public class ChatClient implements AutoCloseable {
             } catch (final RuntimeException e) {
                 // ignore close failures on shutdown
             }
+        }
+        if (LOGGER.isLoggable(Level.FINE)) {
+            LOGGER.fine(() ->
+                    "[yca-shutdown] ChatClient.close: done in " + (System.nanoTime() - start) / 1_000_000L + " ms");
         }
     }
 

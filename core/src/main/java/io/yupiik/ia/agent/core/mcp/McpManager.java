@@ -32,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 @ApplicationScoped
@@ -288,9 +289,14 @@ public class McpManager {
      */
     @Destroy
     public void close() {
+        final var start = System.nanoTime();
         clients.values().forEach(this::quietClose);
         clients.clear();
         toolsByServer.clear();
+        if (logger.isLoggable(Level.FINE)) {
+            logger.fine(() -> "[yca-shutdown] McpManager.close: MCP clients closed in "
+                    + (System.nanoTime() - start) / 1_000_000L + " ms");
+        }
     }
 
     private void quietClose(final McpClient client) {
