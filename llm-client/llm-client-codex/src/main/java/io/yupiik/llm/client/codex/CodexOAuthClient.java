@@ -455,6 +455,9 @@ public class CodexOAuthClient {
                 .uri(URI.create(url))
                 .header("content-type", "application/x-www-form-urlencoded")
                 .header("accept", "application/json")
+                // no request/response timeout here on purpose: the one-time code is consumed by the
+                // first POST, so a slow-but-successful response must not be aborted (upstream codex
+                // applies a connect timeout only, see exchange_code_for_tokens)
                 .POST(HttpRequest.BodyPublishers.ofString(sb.toString(), UTF_8))
                 .build();
         return send(request);
@@ -468,7 +471,7 @@ public class CodexOAuthClient {
             }
             return response.body();
         } catch (final IOException e) {
-            throw new IllegalStateException("Codex OAuth request failed: " + e.getMessage(), e);
+            throw new IllegalStateException("Codex OAuth request failed: " + describe(e, request), e);
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted during Codex OAuth request", e);
@@ -477,8 +480,38 @@ public class CodexOAuthClient {
             if (cause instanceof RuntimeException re) {
                 throw re;
             }
-            throw new IllegalStateException("Codex OAuth request failed: " + cause.getMessage(), cause);
+            throw new IllegalStateException("Codex OAuth request failed: " + describe(cause, request), cause);
         }
+    }
+
+    /**
+     * A diagnosable description of a transport failure. The JDK client (and some of the wrappers
+     * around it) throw IOExceptions with a {@code null} message: rendering {@code null} in the
+     * user-facing error ("Codex OAuth request failed: null") tells nothing. Instead surface the
+     * exception class and the sanitized target (no query, no fragments: the authorize URL carries
+     * the PKCE state), mirroring the upstream codex diagnostics.
+     */
+    private static String describe(final Throwable error, final HttpRequest request) {
+        final var target = sanitize(request == null ? null : request.uri());
+        if (error == null) {
+            return "unknown transport error calling " + target;
+        }
+        final var message = error.getMessage();
+        return message == null || message.isBlank()
+                ? error.getClass().getSimpleName() + " calling " + target
+                : message + " (" + error.getClass().getSimpleName() + " calling " + target + ")";
+    }
+
+    /** The URL without its query/fragment (those carry the PKCE state/challenge, never log them). */
+    private static String sanitize(final URI uri) {
+        if (uri == null) {
+            return "<unknown>";
+        }
+        final var raw = uri.toString();
+        final int query = raw.indexOf('?');
+        final int fragment = raw.indexOf('#');
+        final int cut = query >= 0 && (fragment < 0 || query < fragment) ? query : fragment;
+        return cut >= 0 ? raw.substring(0, cut) : raw;
     }
 
     @SuppressWarnings("unchecked")

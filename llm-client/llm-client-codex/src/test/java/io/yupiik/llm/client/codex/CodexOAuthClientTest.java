@@ -293,4 +293,19 @@ class CodexOAuthClientTest {
         exchange.getResponseBody().write(bytes);
         exchange.close();
     }
+
+    @Test
+    void transportFailureIsDescriptive(final JsonMapper mapper) throws Exception {
+        // a dead endpoint: the JDK IOException often carries a null message, the error must still
+        // surface the exception class and the sanitized target instead of "... failed: null"
+        // (an unreachable port fails fast with ConnectException, no hang risk)
+        final int port = 1; // tcpmux, guaranteed closed locally
+        final CodexOAuthClient oauth = new CodexOAuthClient(mapper, client, "http://127.0.0.1:" + port);
+        final IllegalStateException e = assertThrows(IllegalStateException.class, () -> oauth.deviceCode());
+        final String message = e.getMessage();
+        assertNotNull(message);
+        assertFalse(message.trim().endsWith(": null"), "message must not end with 'null': " + message);
+        assertTrue(message.contains("/api/accounts/deviceauth/usercode"), "must carry the path: " + message);
+        assertFalse(message.contains("?"), "must not leak the query: " + message);
+    }
 }
