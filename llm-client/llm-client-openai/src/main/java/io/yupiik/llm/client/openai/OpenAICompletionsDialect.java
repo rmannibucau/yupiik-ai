@@ -18,11 +18,13 @@ package io.yupiik.llm.client.openai;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.llm.client.LlmResponseParseException;
+import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmTool;
+import io.yupiik.llm.client.model.LlmToolCall;
 import io.yupiik.llm.client.model.Usage;
 import io.yupiik.llm.client.openai.model.ChatChunk;
 import io.yupiik.llm.client.openai.model.ChatCompletionRequest;
@@ -35,18 +37,23 @@ import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.spi.SseParser;
 import io.yupiik.llm.client.spi.Streams;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.logging.Logger;
 
 /** OpenAI {@code /chat/completions} reactive dialect. */
 public class OpenAICompletionsDialect extends AbstractDialect {
+
+    private static final Logger LOGGER = Logger.getLogger(OpenAICompletionsDialect.class.getName());
 
     private volatile Consumer<String> onRawLine;
 
@@ -150,9 +157,10 @@ public class OpenAICompletionsDialect extends AbstractDialect {
     }
 
     private ChatCompletionRequest toWire(final LlmRequest request, final boolean stream) {
-        final var messages = request.messages() == null
+        final var sanitized = request.messages() == null ? null : sanitizeToolCalls(request.messages());
+        final var messages = sanitized == null
                 ? List.<WireMessage>of()
-                : request.messages().stream().map(WireMessage::from).toList();
+                : sanitized.stream().map(WireMessage::from).toList();
         final var tools = request.tools() == null
                 ? null
                 : request.tools().stream()
@@ -207,6 +215,171 @@ public class OpenAICompletionsDialect extends AbstractDialect {
                 "function",
                 new WireTool.WireToolFunction(tool.name(), tool.description(), tool.parameters(), tool.strict()));
     }
+
+    /**
+     * Azure / litellm strict validators reject an assistant message whose {@code tool_calls} are not answered
+     * by matching tool messages ("An assistant message with 'tool_calls' must be followed by tool messages
+     * responding to each 'tool_call_id'"), a hard 400. Anthropic carries a wire backstop for its own pairing
+     * rule; this is the symmetric OpenAI one. Older completed turns are trusted as-is (the agent loop always
+     * pairs them): only the live tail is verified, so per-request cost stays O(live tail), not O(history).
+     * Any assistant tool call whose id was never answered contiguously, and any orphan tool result, is
+     * stripped from the wire and WARN-logged - the request then validates instead of failing wholesale.
+     *
+     * <p>This is a backstop: the primary repair lives in the agent loop (it inserts an honest lost-result
+     * marker). This only fires when a broken pairing still reaches the wire (a third-party caller, a
+     * corrupted persisted session, an interrupted round the loop missed).</p>
+     *
+     * @param messages the neutral messages, mutated nowhere (a new list is returned when anything changed).
+     * @return the sanitized message list, or the input when nothing needed stripping.
+     */
+    private List<LlmMessage> sanitizeToolCalls(final List<LlmMessage> messages) {
+        if (messages.isEmpty()) {
+            return messages;
+        }
+        // most requests carry no assistant tool calls at all: skip the O(history) scan and rebuild entirely,
+        // so the common pure-text path stays zero-cost (the previous unconditional verificationStart pass ran
+        // a full-list scan on every request even when there was nothing to sanitize).
+        var hasToolRound = false;
+        for (final var probe : messages) {
+            if (probe != null
+                    && "assistant".equals(probe.role())
+                    && probe.toolCalls() != null
+                    && !probe.toolCalls().isEmpty()) {
+                hasToolRound = true;
+                break;
+            }
+        }
+        if (!hasToolRound) {
+            return messages;
+        }
+        final var verificationStart = verificationStart(messages);
+        final var matched =
+                matchedToolCallIds(messages.subList(Math.min(verificationStart, messages.size()), messages.size()));
+        final var dropped = new ArrayList<String>();
+        var changed = false;
+        final var out = new ArrayList<LlmMessage>(messages.size());
+        for (var i = 0; i < messages.size(); i++) {
+            final var message = messages.get(i);
+            if (i < verificationStart) {
+                out.add(message); // trusted: agent-loop paired, emit as-is
+                continue;
+            }
+            if (message == null) {
+                out.add(message);
+                continue;
+            }
+            if ("assistant".equals(message.role())
+                    && message.toolCalls() != null
+                    && !message.toolCalls().isEmpty()) {
+                final var kept = new ArrayList<LlmToolCall>(message.toolCalls().size());
+                for (final var call : message.toolCalls()) {
+                    if (call != null && call.id() != null && !matched.contains(call.id())) {
+                        dropped.add(call.id());
+                    } else {
+                        kept.add(call);
+                    }
+                }
+                if (kept.isEmpty()) {
+                    // no surviving call: keep a text-only assistant message (drop the empty toolCalls) so the
+                    // plain text answer, if any, is still served
+                    changed = true;
+                    out.add(new LlmMessage(
+                            message.role(),
+                            message.content(),
+                            message.name(),
+                            null,
+                            message.toolCallId(),
+                            message.extensions()));
+                } else if (kept.size() != message.toolCalls().size()) {
+                    changed = true;
+                    out.add(new LlmMessage(
+                            message.role(),
+                            message.content(),
+                            message.name(),
+                            kept,
+                            message.toolCallId(),
+                            message.extensions()));
+                } else {
+                    out.add(message);
+                }
+            } else if ("tool".equals(message.role()) && message.toolCallId() != null) {
+                // a `tool` result (even an "orphan", with no matching assistant tool_call in this history) is
+                // kept verbatim: strict backends only reject an assistant tool_calls with no response, never a
+                // standalone tool result, and a lone tool message is a legitimate client-side completion.
+                // Dropping it would silently change valid histories (and the Responses API permits standalone
+                // function_call_output items).
+                out.add(message);
+            } else {
+                out.add(message);
+            }
+        }
+        if (!dropped.isEmpty()) {
+            LOGGER.warning("sanitized " + dropped.size() + " assistant tool call(s) with no contiguously-answered "
+                    + "tool response (Azure/litellm reject an assistant 'tool_calls' with no matching tool message)"
+                    + " before sending: " + dropped
+                    + ". The agent loop should repair these inline; this is the wire backstop.");
+        }
+        return changed ? out : messages;
+    }
+
+    /** First index of the region whose tool-call pairing is verified before sending. Mirrors AnthropicDialect. */
+    private static int verificationStart(final List<LlmMessage> messages) {
+        int lastUserPrompt = -1;
+        int lastToolCallsAssistant = -1;
+        for (var i = 0; i < messages.size(); i++) {
+            final var message = messages.get(i);
+            if (message == null) {
+                continue;
+            }
+            if ("user".equals(message.role())) {
+                lastUserPrompt = i;
+            } else if ("assistant".equals(message.role())
+                    && message.toolCalls() != null
+                    && !message.toolCalls().isEmpty()) {
+                lastToolCallsAssistant = i;
+            }
+        }
+        if (lastToolCallsAssistant < 0) {
+            return lastUserPrompt + 1;
+        }
+        return Math.max(0, Math.min(lastToolCallsAssistant, lastUserPrompt + 1));
+    }
+
+    /**
+     * The set of tool call ids validly paired on the wire over a tail slice: an assistant {@code tool_calls}
+     * id is "matched" when a {@code tool}-role result carrying it appears in the contiguous run of tool
+     * messages immediately following that assistant message (before any non-tool message). Mirrors
+     * AnthropicDialect. Bounded to {@link #MAX_PENDING_TOOL_IDS} so a corrupted oversized assistant can never
+     * blow up the pending set.
+     */
+    private static Set<String> matchedToolCallIds(final List<LlmMessage> messages) {
+        final var matched = new HashSet<String>();
+        final var pending = new HashSet<String>();
+        for (final var message : messages) {
+            if ("assistant".equals(message.role())) {
+                pending.clear();
+                if (message.toolCalls() != null) {
+                    for (final var call : message.toolCalls()) {
+                        if (call != null && call.id() != null && pending.size() < MAX_PENDING_TOOL_IDS) {
+                            pending.add(call.id());
+                        }
+                    }
+                }
+            } else if ("tool".equals(message.role())) {
+                if (message.toolCallId() != null && pending.remove(message.toolCallId())) {
+                    matched.add(message.toolCallId());
+                }
+            } else {
+                // a plain user/system/assistant text message interposed between an assistant tool_calls
+                // and its results breaks the pairing for every still-pending id
+                pending.clear();
+            }
+        }
+        return matched;
+    }
+
+    /** Upper bound on the assistant tool call ids tracked as awaiting a contiguous result. */
+    private static final int MAX_PENDING_TOOL_IDS = 256;
 
     private LlmResponse toLlmResponse(final ChatCompletionResponse response) {
         final var index = new AtomicInteger();

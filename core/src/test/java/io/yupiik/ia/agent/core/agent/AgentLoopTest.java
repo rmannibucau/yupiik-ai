@@ -5183,6 +5183,110 @@ class AgentLoopTest {
     }
 
     @Test
+    void toolPairing400IsRepairedAndRetriedOnce() {
+        // Azure/litellm strict validation rejects an assistant message whose tool_calls have no matching
+        // tool response ("An assistant message with 'tool_calls' must be followed by tool messages
+        // responding to each 'tool_call_id'. The following tool_call_ids did not have response messages: ...").
+        // When that hard 400 hits a history with a dangling (interrupted/cancelled) tool call, the loop must
+        // notice it, heal the history, and retry once instead of killing the turn. streamRetriesMaxAttempts=0
+        // so the 400 propagates to the loop (ModelRoundProcessor would otherwise swallow it internally).
+        final var requests = new ArrayList<List<Message>>();
+        final var persisted = new ArrayList<SessionEntry>();
+        final var replied = new ArrayDeque<ScriptedReply>(List.of(
+                new ScriptedReply(new IOException(
+                        "LLM request failed (400): {\"detail\":\"litellm.BadRequestError: AzureException "
+                                + "BadRequestError - An assistant message with 'tool_calls' must be followed by "
+                                + "tool messages responding to each 'tool_call_id'. The following tool_call_ids "
+                                + "did not have response messages: call_1.\"}")),
+                new ScriptedReply("done", "stop", false)));
+        final var client = chatClient(replied, requests);
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                persisted.add(entry);
+            }
+        };
+        // a previous turn ended mid-tool, leaving assistant tool call call_1 with no result in history
+        final var history = new ArrayList<Message>();
+        history.add(new Message(
+                "assistant",
+                null,
+                null,
+                List.of(new ToolCall("call_1", "function", new ToolCall.FunctionCall("grep", "{}"), 0)),
+                null,
+                null));
+        final var loop = loop(
+                client,
+                new TodoStore() {},
+                configuration(true, Map.of("yca.llm.streamRetriesMaxAttempts", "0")),
+                noPruningManager(),
+                store,
+                null);
+        final var result = loop.run("do it", null, "s1", history, () -> false);
+
+        assertEquals("done", result, "the repaired retry must complete the turn instead of failing it");
+        assertEquals(2, requests.size(), "initial request (400) plus the repaired retry");
+        // the retried request carries valid pairing: call_1 is answered by its lost-result marker
+        assertAllToolCallsAreAnsweredByContiguousResults(requests.get(1));
+        assertTrue(
+                requests.get(1).stream()
+                        .anyMatch(m -> "tool".equals(m.role())
+                                && "call_1".equals(m.toolCallId())
+                                && m.content() != null
+                                && String.valueOf(m.content()).contains("tool result lost")),
+                "the retried request must answer call_1 with the lost-result marker: " + requests.get(1));
+        // the repair is persisted as an error tool entry for the interrupted call
+        assertTrue(
+                persisted.stream()
+                        .anyMatch(e -> "tool".equals(e.role())
+                                && "call_1".equals(e.toolCallId())
+                                && e.others() != null
+                                && Boolean.TRUE.equals(e.others().get("is_error"))),
+                "the lost-result marker must be persisted as an is_error tool entry: " + persisted);
+        // a repair/retry notice must be surfaced on the 400
+        assertTrue(
+                events.stream()
+                        .anyMatch(candidate -> candidate instanceof AgentEvent.Notice n
+                                && AgentEvent.Notice.Level.INFO == n.level()
+                                && n.message().contains("no matching tool result")),
+                "an INFO notice explaining the tool-pairing repair must be emitted: "
+                        + events.stream()
+                                .filter(AgentEvent.Notice.class::isInstance)
+                                .toList());
+    }
+
+    @Test
+    void nonTool400IsNotRepairedOrRetried() {
+        // a 400 unrelated to tool pairing (eg. auth, schema, token budget) must NOT trigger the
+        // tool-pairing repair/retry loop: it surfaces as an error so the real cause is never masked.
+        final var requests = new ArrayList<List<Message>>();
+        final var replied = new ArrayDeque<ScriptedReply>(List.of(new ScriptedReply(
+                new IOException("LLM request failed (400): {\"error\":{\"message\":\"invalid api key\"}}"))));
+        final var client = chatClient(replied, requests);
+        final var loop = loop(
+                client,
+                new TodoStore() {},
+                configuration(true, Map.of("yca.llm.streamRetriesMaxAttempts", "0")),
+                noPruningManager(),
+                new SessionStore() {
+                    @Override
+                    public void append(final String id, final SessionEntry entry) {
+                        // nothing
+                    }
+                },
+                null);
+        final var result = loop.run("do it", null, "s1", new ArrayList<Message>(), () -> false);
+
+        assertNull(result, "a non-tool 400 must fail the turn (no repair retry)");
+        assertEquals(1, requests.size(), "no repair retry for a non-tool 400");
+        final var infos = events.stream()
+                .filter(AgentEvent.Notice.class::isInstance)
+                .map(AgentEvent.Notice.class::cast)
+                .anyMatch(n -> n.message().contains("no matching tool result"));
+        assertFalse(infos, "the tool-pairing repair notice must NOT fire for a non-tool 400");
+    }
+
+    @Test
     void doesNotDoubleRepairAlreadyAnsweredHistory() {
         // history where the tool_use already has a contiguous result: the repair must NOT add another,
         // and the session store must not grow with a duplicate marker.

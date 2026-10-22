@@ -58,6 +58,7 @@ import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.llm.client.ContextWindowExceededException;
+import io.yupiik.llm.client.LlmHttpFailureException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningDelta;
@@ -1391,6 +1392,10 @@ public class AgentLoop {
                 .map(t -> t.function().name())
                 .collect(java.util.stream.Collectors.toSet());
         var overflowRetried = false;
+        // turns the pair old assistant tool-call/result history was healed at most once per turn, so a
+        // tool-pairing 400 (Azure/litellm "tool_calls must be followed by tool messages") can be repaired
+        // and retried once without risking an endless retry loop on a non-tool 400.
+        var toolPairingRepaired = false;
         var consecutiveCompactions = 0;
         var autoNoticeEmitted = false;
         var truncationContinues = 0;
@@ -1593,6 +1598,26 @@ public class AgentLoop {
                     emit(notice(
                             AgentEvent.Notice.Level.ERROR,
                             "Context window exceeded and compacting did not free enough context: " + e.getMessage()));
+                    throw e;
+                } catch (final IOException e) {
+                    // Azure / litellm strict validators reject an assistant message whose tool_calls are
+                    // not answered by a tool message carrying each tool_call_id ("An assistant message with
+                    // 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The
+                    // following tool_call_ids did not have response messages: ..."), a hard 400 that hits
+                    // "sometimes" when an interrupted/cancelled tool round left its result unlanded. Heal the
+                    // in-loop history (insert synthetic lost-result markers, exactly like the loop-entry
+                    // repair) and retry once; the model then sees an honest interrupted note instead of the
+                    // turn dying. Bounded to one repair per turn so a non-tool 400 can never spin.
+                    if (!toolPairingRepaired && isToolPairingRejection(e)) {
+                        toolPairingRepaired = true;
+                        emit(
+                                notice(
+                                        AgentEvent.Notice.Level.INFO,
+                                        "Provider rejected the request: an assistant tool call had no matching tool result "
+                                                + "(interrupted or cancelled tool round). Repairing the history and retrying once."));
+                        repairInterruptedToolCalls(sessionId, messages);
+                        continue;
+                    }
                     throw e;
                 }
                 usageTracker.record(usage[0]);
@@ -3642,6 +3667,31 @@ public class AgentLoop {
         }
         turnState.toolsRun++;
         turnState.toolSumMs += outcome.durationMs();
+    }
+
+    /**
+     * Whether a request failure is a strict tool-pairing rejection (Azure / litellm "An assistant message
+     * with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The following
+     * tool_call_ids did not have response messages: ..."). Mirrors {@link ChatClient}'s 400 body-marker
+     * idiom: match the {@code LLM request failed (400)} prefix on the message, then narrow on the pairing
+     * keywords so unrelated 400s (auth, schema, token budget) are never misclassified.
+     *
+     * @param failure the thrown low-level request failure (the 400 propagates to the loop as an
+     *     {@link IOException}, possibly a {@link LlmHttpFailureException} carrying the provider body).
+     * @return whether the failure is a tool-call pairing rejection that the interrupted-tool repair can fix.
+     */
+    private static boolean isToolPairingRejection(final Throwable failure) {
+        final var message = failure == null ? null : failure.getMessage();
+        if (message == null || !message.startsWith("LLM request failed (400)")) {
+            return false;
+        }
+        final var lower = (message + '\n' + (failure instanceof LlmHttpFailureException f ? f.body() : ""))
+                .toLowerCase(Locale.ROOT);
+        return lower.contains("tool_calls")
+                && (lower.contains("must be followed")
+                        || lower.contains("no response message")
+                        || lower.contains("did not have")
+                        || lower.contains("without tool messages"));
     }
 
     /**

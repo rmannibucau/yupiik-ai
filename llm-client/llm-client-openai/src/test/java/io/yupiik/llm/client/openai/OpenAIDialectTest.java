@@ -30,6 +30,7 @@ import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
+import io.yupiik.llm.client.model.LlmToolCall;
 import io.yupiik.llm.client.model.Usage;
 import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
@@ -39,6 +40,7 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -50,6 +52,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -652,6 +658,242 @@ class OpenAIDialectTest {
         assertFalse(body.contains("is_error"), "custom is_error leaked onto the responses wire: " + body);
         assertTrue(body.contains("\"output\":\"command failed: boom\""), body);
         assertTrue(body.contains("\"status\":\"incomplete\""), "failed tool output must be marked incomplete: " + body);
+    }
+
+    @Test
+    void completionsDialectStripsDanglingToolCallWhenInterposedUserBreaksPairing(final JsonMapper mapper)
+            throws Exception {
+        // Azure/litellm reject an assistant tool_calls with no matching tool response. Here a plain user
+        // message is interposed between the tool_calls and its (non-existent) result - the dangling call
+        // must NOT reach the wire, while the interposed user text is preserved.
+        server.createContext("/v1/chat/completions", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                            + "\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,"
+                            + "\"completion_tokens\":1,\"total_tokens\":2}}");
+        });
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper,
+                client,
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var request = new LlmRequest(
+                "m",
+                List.of(
+                        LlmMessage.user("do it"),
+                        LlmMessage.assistant("", List.of(LlmToolCall.of("call_1", "grep", "{}"))),
+                        LlmMessage.user("follow up!")),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                false,
+                Map.of());
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertFalse(body.contains("call_1"), "the dangling tool_calls entry must not reach the wire:\n" + body);
+        assertTrue(body.contains("follow up!"), "the interposed user text must be preserved:\n" + body);
+    }
+
+    @Test
+    void completionsDialectKeepsValidContiguousToolCallAndResultPair(final JsonMapper mapper) throws Exception {
+        // a valid history: assistant tool_calls immediately followed by its tool message - both must stay.
+        server.createContext("/v1/chat/completions", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                            + "\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,"
+                            + "\"completion_tokens\":1,\"total_tokens\":2}}");
+        });
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper,
+                client,
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var request = new LlmRequest(
+                "m",
+                List.of(
+                        LlmMessage.user("do it"),
+                        LlmMessage.assistant("", List.of(LlmToolCall.of("t1", "grep", "{}"))),
+                        LlmMessage.tool("t1", "found")),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                false,
+                Map.of());
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertTrue(body.contains("\"tool_calls\""), "the matched tool_calls must be preserved:\n" + body);
+        assertTrue(body.contains("\"id\":\"t1\""), "the matched tool call id must be preserved:\n" + body);
+        assertTrue(
+                body.contains("\"tool_call_id\":\"t1\""), "the matched tool result must reference the call:\n" + body);
+    }
+
+    @Test
+    void completionsDialectKeepsOrphanToolResultWithoutPreceedingToolCall(final JsonMapper mapper) throws Exception {
+        // a tool message that answers no assistant tool call in this history is a legitimate client-side
+        // completion (strict backends only reject an assistant tool_calls with no response, never the reverse).
+        // It must be preserved verbatim, not silently dropped.
+        server.createContext("/v1/chat/completions", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                            + "\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,"
+                            + "\"completion_tokens\":1,\"total_tokens\":2}}");
+        });
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper,
+                client,
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var request = new LlmRequest(
+                "m",
+                List.of(LlmMessage.user("do it"), LlmMessage.tool("orphan", "stale result")),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                false,
+                Map.of());
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertTrue(body.contains("\"tool_call_id\":\"orphan\""), "the orphan tool result must be preserved:\n" + body);
+        assertTrue(body.contains("do it"), "the user prompt must be preserved:\n" + body);
+    }
+
+    @Test
+    void responsesDialectStripsDanglingFunctionCallWhenInterposedUserBreaksPairing(final JsonMapper mapper)
+            throws Exception {
+        // the Responses wire has the same strict pairing: a function_call answered by no function_call_output
+        // (a plain user message interposed instead) must be stripped, the user text preserved.
+        server.createContext("/v1/responses", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "{\"id\":\"r1\",\"model\":\"m\",\"output\":[],\"usage\":{}}");
+        });
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var request = new LlmRequest(
+                "m",
+                List.of(
+                        LlmMessage.user("do it"),
+                        LlmMessage.assistant("", List.of(LlmToolCall.of("call_2", "grep", "{}"))),
+                        LlmMessage.user("follow up!")),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                false,
+                Map.of());
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertFalse(body.contains("\"call_id\":\"call_2\""), "the dangling function_call must be stripped:\n" + body);
+        assertTrue(body.contains("follow up!"), "the interposed user text must be preserved:\n" + body);
+    }
+
+    @Test
+    void warnLogsWhenSanitizerDropsDanglingToolCall(final JsonMapper mapper) throws Exception {
+        // dropped tool blocks must be observable, not silent - WARN-log each dropped id (mirror AnthropicDialect).
+        server.createContext("/v1/chat/completions", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                            + "\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,"
+                            + "\"completion_tokens\":1,\"total_tokens\":2}}");
+        });
+        server.start();
+        final var records = new ArrayList<LogRecord>();
+        final var logger = Logger.getLogger(OpenAICompletionsDialect.class.getName());
+        final var previousLevel = logger.getLevel();
+        final var previousUseParent = logger.getUseParentHandlers();
+        final var handler = new Handler() {
+            @Override
+            public void publish(final LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+        };
+        logger.addHandler(handler);
+        logger.setLevel(Level.WARNING);
+        logger.setUseParentHandlers(false);
+        try {
+            final var dialect = new OpenAICompletionsDialect(
+                    mapper,
+                    client,
+                    ProviderSpec.of(
+                            "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+            final var request = new LlmRequest(
+                    "m",
+                    List.of(
+                            LlmMessage.user("do it"),
+                            LlmMessage.assistant("", List.of(LlmToolCall.of("call_3", "grep", "{}"))),
+                            LlmMessage.user("follow up!")),
+                    null,
+                    null,
+                    64,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    false,
+                    false,
+                    Map.of());
+            dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+            final var warns = records.stream()
+                    .filter(record -> record.getLevel() == Level.WARNING)
+                    .toList();
+            assertFalse(warns.isEmpty(), "a WARN must be logged when the sanitizer drops a dangling tool call");
+            assertTrue(
+                    warns.stream()
+                            .anyMatch(record ->
+                                    String.valueOf(record.getMessage()).contains("call_3")),
+                    "the WARN must name the dropped tool call id:\n" + warns);
+        } finally {
+            logger.removeHandler(handler);
+            logger.setLevel(previousLevel);
+            logger.setUseParentHandlers(previousUseParent);
+        }
     }
 
     @Test
