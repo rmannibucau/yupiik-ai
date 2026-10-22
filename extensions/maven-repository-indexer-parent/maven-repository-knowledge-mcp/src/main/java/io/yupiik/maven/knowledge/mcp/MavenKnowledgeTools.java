@@ -21,6 +21,7 @@ import io.yupiik.fusion.framework.build.api.jsonrpc.JsonRpcParam;
 import io.yupiik.fusion.http.server.api.Request;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.mcp.api.MCPTool;
 import io.yupiik.fusion.mcp.protocol.MCPSessions;
 import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.KnowledgeFactory;
@@ -62,6 +63,17 @@ public class MavenKnowledgeTools {
     private final LocalRepository localRepository;
     private final ProcessService processes;
 
+    /**
+     * Constructor for the {@code @ApplicationScoped} subclass-proxy. The generated proxy instantiates this class by
+     * calling {@code super(null, ...)} on the dependency constructor, so the proxies fields are all null and every call
+     * is forwarded to the real instance - no real initialization is possible here, which is why the dependency
+     * constructor below guards each nullable dependency (see {@link #MavenKnowledgeTools(MavenKnowledgeConfiguration,
+     * MCPSessions, JsonMapper, ExtendedHttpClient, ProcessService)}).
+     */
+    protected MavenKnowledgeTools() {
+        this(null, null, null, null, null);
+    }
+
     public MavenKnowledgeTools(
             final MavenKnowledgeConfiguration configuration,
             final MCPSessions sessions,
@@ -73,9 +85,17 @@ public class MavenKnowledgeTools {
         this.mapper = mapper;
         this.httpClient = httpClient;
         this.processes = processes;
+        // the subclass-proxy reaches this constructor through super(null, ...): the injected params are null then, so
+        // every derivation is null-guarded - the real instance (built by the container with non-null params) gets the
+        // fully built KnowledgeConfig + LocalRepository.
+        this.knowledgeConfig = configuration == null ? null : buildKnowledgeConfig(configuration);
+        this.localRepository = knowledgeConfig == null ? null : new LocalRepository(knowledgeConfig.localRepository());
+    }
+
+    private static KnowledgeConfig buildKnowledgeConfig(final MavenKnowledgeConfiguration configuration) {
         final var repo = KnowledgeConfig.defaults(
                 Path.of(configuration.localRepository().replace("~", System.getProperty("user.home"))));
-        this.knowledgeConfig = new KnowledgeConfig(
+        return new KnowledgeConfig(
                 repo.localRepository(),
                 Math.max(1, configuration.concurrency()),
                 Math.max(1, configuration.batchSize()),
@@ -90,13 +110,13 @@ public class MavenKnowledgeTools {
                 configuration.maxSourceFiles(),
                 configuration.maxSourceFileChars(),
                 configuration.maxJavadocPages());
-        this.localRepository = new LocalRepository(knowledgeConfig.localRepository());
     }
 
     /**
      * Index (or re-index) a set of artifacts, returning per-artifact outcomes. Accepts a list of
      * {@code groupId:artifactId[:version]} coordinates; batches many GAVs per single LLM sampling call.
      */
+    @MCPTool
     @JsonRpc(
             value = "maven/knowledge/index",
             documentation = "Indexes local Maven artifacts so agents do not "
@@ -150,6 +170,7 @@ public class MavenKnowledgeTools {
     /**
      * List the artifacts already indexed (have a generated knowledge marker) under the configured repository.
      */
+    @MCPTool
     @JsonRpc(
             value = "maven/knowledge/status",
             documentation = "Reports which artifacts already have generated "
@@ -183,6 +204,7 @@ public class MavenKnowledgeTools {
      * Read generated knowledge on demand. With only a {@code gav} the artifact's {@code -knowledge-index.md}
      * is returned; pass a {@code file} short name to read the referenced sibling instead.
      */
+    @MCPTool
     @JsonRpc(
             value = "maven/knowledge/content",
             documentation = "Reads a local artifact's generated knowledge: its index by default, or the "
