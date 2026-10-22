@@ -860,9 +860,9 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void warnLogsWhenSanitizerDropsDanglingToolUse(final JsonMapper mapper) throws Exception {
+    void fineLogsWhenSanitizerDropsDanglingToolUse(final JsonMapper mapper) throws Exception {
         // dropped blocks must be observable, not silent: repairing in the agent loop is the primary
-        // path, this wire backstop logs a WARN so lost context is never invisible.
+        // path, this wire backstop logs a FINE so lost context is never invisible.
         server.createContext("/v1/messages", exchange -> {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(
@@ -890,7 +890,7 @@ class AnthropicDialectTest {
             public void close() {}
         };
         logger.addHandler(handler);
-        logger.setLevel(Level.WARNING);
+        logger.setLevel(Level.FINE);
         logger.setUseParentHandlers(false);
         try {
             final var dialect =
@@ -913,15 +913,15 @@ class AnthropicDialectTest {
                             Map.of()))
                     .toCompletableFuture()
                     .get(5, TimeUnit.SECONDS);
-            final var warns = records.stream()
-                    .filter(record -> record.getLevel() == Level.WARNING)
+            final var fines = records.stream()
+                    .filter(record -> record.getLevel() == Level.FINE)
                     .collect(Collectors.toList());
-            assertFalse(warns.isEmpty(), "a WARN must be logged when the sanitizer drops a dangling tool_use");
+            assertFalse(fines.isEmpty(), "a FINE must be logged when the sanitizer drops a dangling tool_use");
             assertTrue(
-                    warns.stream()
+                    fines.stream()
                             .anyMatch(record ->
                                     String.valueOf(record.getMessage()).contains("t1")),
-                    "the WARN must name the dropped tool call id:\n" + warns);
+                    "the FINE must name the dropped tool call id:\n" + fines);
         } finally {
             logger.removeHandler(handler);
             logger.setLevel(previousLevel);

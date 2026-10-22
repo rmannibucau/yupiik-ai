@@ -663,7 +663,8 @@ class OpenAIDialectTest {
     @Test
     void completionsDialectStripsDanglingToolCallWhenInterposedUserBreaksPairing(final JsonMapper mapper)
             throws Exception {
-        // Azure/litellm reject an assistant tool_calls with no matching tool response. Here a plain user
+        // OpenAI-compatible backends (OpenAI, sglang, Azure, litellm, ...) reject an assistant tool_calls with
+        // no matching tool response. Here a plain user
         // message is interposed between the tool_calls and its (non-existent) result - the dangling call
         // must NOT reach the wire, while the interposed user text is preserved.
         server.createContext("/v1/chat/completions", exchange -> {
@@ -825,8 +826,8 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void warnLogsWhenSanitizerDropsDanglingToolCall(final JsonMapper mapper) throws Exception {
-        // dropped tool blocks must be observable, not silent - WARN-log each dropped id (mirror AnthropicDialect).
+    void fineLogsWhenSanitizerDropsDanglingToolCall(final JsonMapper mapper) throws Exception {
+        // dropped tool blocks must be observable, not silent - FINE-log each dropped id (mirror AnthropicDialect).
         server.createContext("/v1/chat/completions", exchange -> {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(
@@ -854,7 +855,7 @@ class OpenAIDialectTest {
             public void close() {}
         };
         logger.addHandler(handler);
-        logger.setLevel(Level.WARNING);
+        logger.setLevel(Level.FINE);
         logger.setUseParentHandlers(false);
         try {
             final var dialect = new OpenAICompletionsDialect(
@@ -880,15 +881,15 @@ class OpenAIDialectTest {
                     false,
                     Map.of());
             dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
-            final var warns = records.stream()
-                    .filter(record -> record.getLevel() == Level.WARNING)
+            final var fines = records.stream()
+                    .filter(record -> record.getLevel() == Level.FINE)
                     .toList();
-            assertFalse(warns.isEmpty(), "a WARN must be logged when the sanitizer drops a dangling tool call");
+            assertFalse(fines.isEmpty(), "a FINE must be logged when the sanitizer drops a dangling tool call");
             assertTrue(
-                    warns.stream()
+                    fines.stream()
                             .anyMatch(record ->
                                     String.valueOf(record.getMessage()).contains("call_3")),
-                    "the WARN must name the dropped tool call id:\n" + warns);
+                    "the FINE must name the dropped tool call id:\n" + fines);
         } finally {
             logger.removeHandler(handler);
             logger.setLevel(previousLevel);

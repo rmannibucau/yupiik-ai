@@ -217,13 +217,14 @@ public class OpenAICompletionsDialect extends AbstractDialect {
     }
 
     /**
-     * Azure / litellm strict validators reject an assistant message whose {@code tool_calls} are not answered
-     * by matching tool messages ("An assistant message with 'tool_calls' must be followed by tool messages
-     * responding to each 'tool_call_id'"), a hard 400. Anthropic carries a wire backstop for its own pairing
-     * rule; this is the symmetric OpenAI one. Older completed turns are trusted as-is (the agent loop always
-     * pairs them): only the live tail is verified, so per-request cost stays O(live tail), not O(history).
-     * Any assistant tool call whose id was never answered contiguously, and any orphan tool result, is
-     * stripped from the wire and WARN-logged - the request then validates instead of failing wholesale.
+     * OpenAI-compatible backends (OpenAI, sglang, Azure, litellm, ...) reject an assistant message whose
+     * {@code tool_calls} are not answered by matching tool messages ("An assistant message with 'tool_calls'
+     * must be followed by tool messages responding to each 'tool_call_id'"), a hard 400. Anthropic carries a
+     * wire backstop for its own pairing rule; this is the symmetric OpenAI one. Older completed turns are
+     * trusted as-is (the agent loop always pairs them): only the live tail is verified, so per-request cost
+     * stays O(live tail), not O(history). Any assistant tool call whose id was never answered contiguously,
+     * and any orphan tool result, is stripped from the wire and FINE-logged - the request then validates
+     * instead of failing wholesale.
      *
      * <p>This is a backstop: the primary repair lives in the agent loop (it inserts an honest lost-result
      * marker). This only fires when a broken pairing still reaches the wire (a third-party caller, a
@@ -314,9 +315,9 @@ public class OpenAICompletionsDialect extends AbstractDialect {
             }
         }
         if (!dropped.isEmpty()) {
-            LOGGER.warning("sanitized " + dropped.size() + " assistant tool call(s) with no contiguously-answered "
-                    + "tool response (Azure/litellm reject an assistant 'tool_calls' with no matching tool message)"
-                    + " before sending: " + dropped
+            LOGGER.fine(() -> "sanitized " + dropped.size() + " assistant tool call(s) with no contiguously-answered "
+                    + "tool response (OpenAI-compatible backends such as OpenAI, sglang, Azure and litellm reject "
+                    + "an assistant 'tool_calls' with no matching tool message) before sending: " + dropped
                     + ". The agent loop should repair these inline; this is the wire backstop.");
         }
         return changed ? out : messages;

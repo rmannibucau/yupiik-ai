@@ -587,9 +587,9 @@ public final class AnthropicDialect extends AbstractDialect {
             }
         }
         if (!dropped.isEmpty()) {
-            LOGGER.warning("sanitized " + dropped.size() + " tool block(s) with no contiguously-paired counterpart "
+            LOGGER.fine(() -> "sanitized " + dropped.size() + " tool block(s) with no contiguously-paired counterpart "
                     + "(tool_use without an immediately-following tool_result, or orphan tool_result) before sending: "
-                    + dropped.toString() + ". The agent loop should repair these inline; this is the wire backstop.");
+                    + dropped + ". The agent loop should repair these inline; this is the wire backstop.");
         }
         final List<AnthropicTool> tools = new ArrayList<>();
         if (request.tools() != null) {

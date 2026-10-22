@@ -374,13 +374,14 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     }
 
     /**
-     * Azure / litellm strict validators reject an assistant message whose {@code tool_calls} are not answered
+     * OpenAI-compatible backends (OpenAI, sglang, Azure, litellm, ...) reject an assistant message whose
+     * {@code tool_calls} are not answered
      * by matching tool responses ("An assistant message with 'tool_calls' must be followed by tool messages
      * responding to each 'tool_call_id'"), a hard 400. Anthropic carries a wire backstop for its own pairing
      * rule; this is the symmetric OpenAI one for the Responses wire. Older completed turns are trusted as-is
      * (the agent loop always pairs them): only the live tail is verified, so per-request cost stays O(live
      * tail), not O(history). Any assistant tool call whose id was never answered contiguously, and any orphan
-     * tool response, is stripped from the wire and WARN-logged - the request then validates instead of
+     * tool response, is stripped from the wire and FINE-logged - the request then validates instead of
      * failing wholesale.
      *
      * <p>This is a backstop: the primary repair lives in the agent loop (it inserts an honest lost-result
@@ -471,9 +472,9 @@ public class OpenAIResponsesDialect extends AbstractDialect {
             }
         }
         if (!dropped.isEmpty()) {
-            LOGGER.warning("sanitized " + dropped.size() + " assistant tool call(s) with no contiguously-answered "
-                    + "tool response (Azure/litellm reject an assistant 'tool_calls' with no matching tool response)"
-                    + " before sending: " + dropped
+            LOGGER.fine(() -> "sanitized " + dropped.size() + " assistant tool call(s) with no contiguously-answered "
+                    + "tool response (OpenAI-compatible backends such as OpenAI, sglang, Azure and litellm reject "
+                    + "an assistant 'tool_calls' with no matching tool response) before sending: " + dropped
                     + ". The agent loop should repair these inline; this is the wire backstop.");
         }
         return changed ? out : messages;
