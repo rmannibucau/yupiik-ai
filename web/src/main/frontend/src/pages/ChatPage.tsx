@@ -1848,6 +1848,19 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
   if (block.kind === 'error') {
     return <div className="rounded border border-red-500/40 px-3 py-1 text-[15px] text-red-400">{block.content}</div>;
   }
+  if (block.kind === 'notice') {
+    // Server-emitted standalone fragment (e.g. the Codex authorize URL): a distinct callout card so a
+    // login prompt stands out from ordinary assistant replies, with its <url> autolink clickable in a
+    // new tab via the shared `link` component below.
+    return (
+      <div
+        className="rounded border-l-2 px-3 py-2 text-[15px]"
+        style={{ borderColor: 'var(--yca-accent)', background: 'var(--yca-panel)', borderRadius: 'var(--yca-radius)' }}
+      >
+        <Markdown content={block.content} writing={block.writing} />
+      </div>
+    );
+  }
   // Issue #10: assistant text renders markdown (bold, italics, lists, code, ...) in a subtle panel
   // card so the main thread stands out from thought/tool rows and the new .aui-md heading/code
   // prose styles have a clear surface to draw on - Issue #12.

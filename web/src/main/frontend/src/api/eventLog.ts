@@ -7,7 +7,10 @@ import type { WebEvent } from './useSessionStream';
  */
 export type Block =
   | {
-      kind: 'text' | 'thought' | 'error' | 'user';
+      // 'notice' is a standalone server-emitted transcript fragment (e.g. the Codex authorize URL)
+      // rendered as its own block; it is never merged with streaming text-delta or overwritten by
+      // turn-done consolidation, unlike 'text'. 'error' is a failed/aborted turn message.
+      kind: 'text' | 'thought' | 'notice' | 'error' | 'user';
       content: string;
       state?: string;
       output?: string;
@@ -234,7 +237,7 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
       if (stack && stack.length > 0) {
         const ord = ev.data?.ordinal;
         const idx = typeof ord === 'number' && ord > 0
-          ? stack.findIndex((i) => blocks[i]?.toolOrdinal === ord)
+          ? stack.findIndex((i) => blocks[i]?.kind === 'tool' && blocks[i].toolOrdinal === ord)
           : -1;
         if (idx >= 0) {
           toolBlock = blocks[stack.splice(idx, 1)[0]];
@@ -252,6 +255,12 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
     } else if (ev.type === 'user') {
       settle();
       blocks.push({ kind: 'user', content: ev.message ?? '' });
+    } else if (ev.type === 'transcript') {
+      // A server-emitted standalone fragment (e.g. the Codex authorize URL pushed through
+      // WebShellFrontend.transcript during login). It becomes its own 'notice' block so it is never
+      // merged with a streaming assistant text-delta nor overwritten by turn-done consolidation.
+      settle();
+      blocks.push({ kind: 'notice', content: ev.message ?? '' });
     } else if (ev.type === 'btw') {
       // /btw answers live in the status bar pill + modal (folded from the same log by foldStatus),
       // never in the transcript stream - the side conversation must not pollute the main thread.
@@ -311,7 +320,8 @@ function ordinalBlock(blocks: Block[], runningTools: Map<string, number[]>, ev: 
   const ord = ev.data?.ordinal;
   if (typeof ord === 'number' && ord > 0) {
     for (let i = stack.length - 1; i >= 0; i--) {
-      if (blocks[stack[i]]?.toolOrdinal === ord) return blocks[stack[i]];
+      const card = blocks[stack[i]];
+      if (card?.kind === 'tool' && card.toolOrdinal === ord) return card;
     }
   }
   return blocks[stack[stack.length - 1]];

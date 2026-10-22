@@ -39,6 +39,47 @@ describe('eventsToBlocks', () => {
     expect(blocks.map((b) => b.kind)).toEqual(['user', 'text']);
     expect(blocks[1]).toMatchObject({ kind: 'text', content: 'the main answer' });
   });
+
+  it('renders a transcript event as its own notice block (Codex authorize URL)', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'user', sessionId: 's1', message: 'hi' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'Let me check.' }),
+      ev({
+        type: 'transcript',
+        sessionId: 's1',
+        message: '<https://auth.openai.com/authorize?code=abc>\n\nWaiting for authorization...',
+      }),
+    ]);
+    // the login prompt is a standalone notice, never merged into the streamed assistant text
+    expect(blocks.map((b) => b.kind)).toEqual(['user', 'text', 'notice']);
+    expect(blocks[2]).toMatchObject({
+      kind: 'notice',
+      content: '<https://auth.openai.com/authorize?code=abc>\n\nWaiting for authorization...',
+    });
+  });
+
+  it('keeps a preceding transcript notice intact when a later text-delta streams (no merge)', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'transcript', sessionId: 's1', message: '<https://auth.openai.com/authorize>\n\nWaiting...' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'Signed in. Here is the answer.' }),
+    ]);
+    // the notice block is its own card; the assistant reply starts a fresh text block
+    expect(blocks.map((b) => b.kind)).toEqual(['notice', 'text']);
+    expect(blocks[0].content).toContain('https://auth.openai.com/authorize');
+    expect(blocks[1].content).toBe('Signed in. Here is the answer.');
+  });
+
+  it('keeps a transcript notice when the turn finishes (turn-done never overwrites it)', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'transcript', sessionId: 's1', message: '<https://auth.openai.com/authorize>\n\nWaiting...' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'Authorized. Running now.' }),
+      ev({ type: 'turn-done', sessionId: 's1', message: 'Authorized. Running now.' }),
+    ]);
+    // turn-done consolidates only the trailing 'text' block; the login notice is preserved untouched
+    expect(blocks.map((b) => b.kind)).toEqual(['notice', 'text']);
+    expect(blocks[0].content).toContain('https://auth.openai.com/authorize');
+    expect(blocks[1].content).toBe('Authorized. Running now.');
+  });
 });
 
 describe('lossySupersedes', () => {
