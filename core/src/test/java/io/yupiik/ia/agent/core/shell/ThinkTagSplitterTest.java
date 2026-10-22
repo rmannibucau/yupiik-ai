@@ -19,6 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter.Parts;
+import java.util.ArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class ThinkTagSplitterTest {
@@ -154,6 +157,121 @@ class ThinkTagSplitterTest {
             append(segment, afterFlush, new StringBuilder(), new StringBuilder());
         }
         assertEquals("", afterFlush.toString(), "nothing is held back after the tail streamed");
+    }
+
+    @Test
+    void concurrentFeedNeverCorruptsTheParser() throws Exception {
+        // a reactive publisher violating the sequential-delivery contract can surface concurrent
+        // onNext frames on different threads; the parser must serialize them so the carry buffer
+        // is never observed mid-mutation (regression: the check-then-act between holdTail() and
+        // emit() threw StringIndexOutOfBoundsException [0, 9) on an empty carry)
+        final var parser = splitter.create();
+        final var start = new CountDownLatch(1);
+        final int threads = 8;
+        final int chunksPerThread = 200;
+        final var failures = new AtomicReference<Throwable>();
+        final var runners = new ArrayList<Thread>();
+        for (var t = 0; t < threads; t++) {
+            final var seed = t;
+            final var thread = new Thread(() -> {
+                try {
+                    start.await();
+                    for (var c = 0; c < chunksPerThread && failures.get() == null; c++) {
+                        // mix think-tag fragments, fence fragments and plain text to force the
+                        // hold/emit transitions that used to race
+                        final var chunk = (c % 7 == 0)
+                                ? "<thi"
+                                : (c % 7 == 1)
+                                        ? "nk>"
+                                        : (c % 7 == 2)
+                                                ? "```"
+                                                : (c % 7 == 3) ? "java\ncode\n```" : "plain-visible-" + seed + "-" + c;
+                        parser.feed(chunk);
+                    }
+                } catch (final Throwable error) {
+                    failures.compareAndSet(null, error);
+                }
+            });
+            runners.add(thread);
+            thread.start();
+        }
+        start.countDown();
+        for (final var thread : runners) {
+            thread.join();
+        }
+        assertTrue(failures.get() == null, () -> "concurrent feed threw: " + failures.get());
+        // flush is idempotent under the same lock and must not throw either
+        parser.flush();
+    }
+
+    @Test
+    void outOfRangeHoldWindowNeverThrowsMidStream() {
+        // when a concurrent pass drains the carry between holdTail() computing an emit window and
+        // emit() reading it, the clamp must degrade to dropping the already-consumed tail instead of
+        // throwing a StringIndexOutOfBoundsException (which was misdiagnosed as a mid-stream failure)
+        final var parser = splitter.create();
+        // a plain-text tail long enough to engage the hold window (> WINDOW chars) with a delimiter
+        // fragment mixed in, then a flush that empties the carry
+        parser.feed("a".repeat(20));
+        parser.feed(" response");
+        // feed a chunk that transitions through THINKING so emit is reached with a range already
+        // consumed; the clamp keeps it from throwing even if the window went stale
+        parser.feed("</think>rest");
+        parser.flush();
+        parser.reset();
+    }
+
+    @Test
+    void retryResetRebuildsParserState() {
+        // on a retry the loop rebuilds the inline splitter (begin()/resetText()); a fresh parser must
+        // not inherit the failed attempt's stale carry, and an orphan close tag is then plain text
+        final var before = splitter.create();
+        before.feed("<thi"); // partial opener held in the carry
+        final var after = splitter.create(); // mimic resetInlineSplitter()
+        final var visible = new StringBuilder();
+        final var thinking = new StringBuilder();
+        for (final var segment : after.feed("a fresh answer")) {
+            append(segment, visible, thinking, new StringBuilder());
+        }
+        for (final var segment : after.flush()) {
+            append(segment, visible, thinking, new StringBuilder());
+        }
+        assertEquals("a fresh answer", visible.toString());
+        assertEquals("", thinking.toString());
+    }
+
+    @Test
+    void concurrentSingleSegmentChunksKeepPerInvocationOrdering() throws Exception {
+        // interleaving different feeds must not fabricate or drop content: each feed call is atomic
+        // under the parser lock, so two threads writing disjoint tokens and flushing must never throw
+        final var parser = splitter.create();
+        final var start = new CountDownLatch(1);
+        final var failures = new AtomicReference<Throwable>();
+        final var a = new Thread(() -> {
+            try {
+                start.await();
+                parser.feed("alpha ");
+                parser.feed("beta ");
+                parser.flush();
+            } catch (final Throwable error) {
+                failures.compareAndSet(null, error);
+            }
+        });
+        final var b = new Thread(() -> {
+            try {
+                start.await();
+                parser.feed("<th");
+                parser.feed("ink>");
+                parser.feed("</think>");
+                parser.flush();
+            } catch (final Throwable error) {
+                failures.compareAndSet(null, error);
+            }
+        });
+        start.countDown();
+        a.join();
+        b.join();
+        assertTrue(failures.get() == null, () -> "concurrent single-chunk feed threw: " + failures.get());
     }
 
     private static void append(

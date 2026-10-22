@@ -1537,11 +1537,11 @@ public class AgentLoop {
 
                                 @Override
                                 public void resetText() {
-                                    // a retry is a fresh generation: drop the stale partial reasoning text and
-                                    // opaque blobs streamed by the failed attempt so they never leak into the
-                                    // persisted message's thinking / reasoningItems
-                                    accumulatedThinking.setLength(0);
-                                    accumulatedReasoningItems.clear();
+                                    // a retry is a fresh generation: rebuild the inline splitter (dropping the
+                                    // failed attempt's stale, possibly half-consumed carry) and drop the stale
+                                    // partial reasoning text + opaque blobs so nothing leaks into the persisted
+                                    // message's thinking / reasoningItems
+                                    resetInlineSplitter();
                                     emit(textReset());
                                 }
 

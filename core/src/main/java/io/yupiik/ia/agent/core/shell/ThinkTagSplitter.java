@@ -102,36 +102,49 @@ public class ThinkTagSplitter {
         private final List<Segment> out = new ArrayList<>();
         private State state = State.NORMAL;
         private String fenceToken;
+        // The parser holds all its state in the mutable carry buffer; a single parser is
+        // shared by every retry attempt of a request and can in practice be driven by more
+        // than one thread (a reactive publisher violating the sequential-delivery contract
+        // surfaces concurrent onNext frames). A check-then-act between holdTail() computing
+        // an emit window and emit() reading the live buffer then corrupts the carry. Guard
+        // every mutating entry so an interleaved feed can never observe a half-updated state.
+        private final Object lock = new Object();
 
         /** Feeds the next stream delta and returns the segments fully classified so far. */
         public List<Segment> feed(final String delta) {
-            carry.append(delta == null ? "" : delta);
-            scan(false);
-            return drain();
+            synchronized (lock) {
+                carry.append(delta == null ? "" : delta);
+                scan(false);
+                return drain();
+            }
         }
 
         /** Ends the stream: emits every held character in the current channel. */
         public List<Segment> flush() {
-            scan(true);
-            if (carry.length() > 0) {
-                out.add(new Segment(
-                        switch (state) {
-                            case THINKING -> Channel.THINKING;
-                            case FENCED -> Channel.FENCED;
-                            case NORMAL -> Channel.VISIBLE;
-                        },
-                        carry.toString()));
-                carry.setLength(0);
+            synchronized (lock) {
+                scan(true);
+                if (carry.length() > 0) {
+                    out.add(new Segment(
+                            switch (state) {
+                                case THINKING -> Channel.THINKING;
+                                case FENCED -> Channel.FENCED;
+                                case NORMAL -> Channel.VISIBLE;
+                            },
+                            carry.toString()));
+                    carry.setLength(0);
+                }
+                return drain();
             }
-            return drain();
         }
 
         /** Drops all state (new stream). */
         public void reset() {
-            carry.setLength(0);
-            out.clear();
-            state = State.NORMAL;
-            fenceToken = null;
+            synchronized (lock) {
+                carry.setLength(0);
+                out.clear();
+                state = State.NORMAL;
+                fenceToken = null;
+            }
         }
 
         private void scan(final boolean flush) {
@@ -287,9 +300,16 @@ public class ThinkTagSplitter {
         }
 
         private void emit(final Channel channel, final int from, final int to) {
-            if (to > from) {
-                out.add(new Segment(channel, carry.substring(from, to)));
-                carry.delete(from, to);
+            // clamp to the live buffer: under the parser lock these ranges always come back
+            // consistent, but a defensive clamp guarantees a stray mismatch can never surface as
+            // a StringIndexOutOfBoundsException mid-stream (which was historically misdiagnosed
+            // as a transport failure and pointlessly retried). An out-of-range window only ever
+            // means the content was already consumed by a concurrent pass, so dropping it is
+            // safer than failing the whole turn.
+            final var end = Math.min(to, carry.length());
+            if (end > from) {
+                out.add(new Segment(channel, carry.substring(from, end)));
+                carry.delete(from, end);
             }
         }
 
