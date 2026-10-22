@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.core.wiring;
 
+import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.fusion.framework.api.configuration.ConfigurationSource;
 import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegistration;
 import io.yupiik.fusion.framework.api.io.ReaderSupplier;
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
@@ -34,6 +36,7 @@ import java.util.function.Function;
 @DefaultScoped
 public class YcaConfigurationProducer {
     private static final String PREFIX = "yca.";
+    private static final String INHERIT = "$inherit";
     private static final Function<String, String> KEY_NORMALIZER = key -> {
         final var stripped = key.startsWith(PREFIX) ? key.substring(PREFIX.length()) : key;
         return stripped.replace('-', '.');
@@ -50,10 +53,46 @@ public class YcaConfigurationProducer {
         registration.addSource().accept(new YcaPrefixShortcutConfigurationSource(args));
 
         final var configuration = registration.configuration();
-        final var path = configuration
+        final var source = createConfigurationSource(configuration);
+        if (source != null) {
+            registration.addSource().accept(source);
+        }
+    }
+
+    /**
+     * Builds the JSON configuration source for this invocation. When a project-local
+     * {@code .yca/configuration.json} exists it is the primary source and, if it declares
+     * {@code "$inherit": true}, is layered over the global configuration file. Otherwise the global
+     * file alone is returned (legacy behavior).
+     *
+     * @return the source to register, or {@code null} when no configuration file applies
+     */
+    private ConfigurationSource createConfigurationSource(final Configuration configuration) {
+        final var globalPath = resolveGlobalConfigurationFile(configuration);
+        final var child = loadJson(projectConfigurationFile(configuration));
+        if (child != null && "true".equals(child.get(INHERIT))) {
+            // the project file inherits the global file as a low-priority base when it exists
+            final var parent = loadJson(globalPath);
+            return parent == null ? child : new CombinedConfigurationSource(child, parent);
+        }
+        return child != null ? child : loadJson(globalPath);
+    }
+
+    /**
+     * Resolves the working-directory base for the project-local {@code .yca/configuration.json},
+     * mirroring {@link CodingAgentConfiguration#resolveWorkingDir()}: the configured
+     * {@code yca.workingDir} wins when set, otherwise the process working directory. Only the CLI
+     * source is visible here (the globals are loaded below), so the override is read from there.
+     */
+    private static Path projectConfigurationFile(final Configuration configuration) {
+        final var workingDir = configuration.get(PREFIX + "workingDir").orElse(".");
+        return Path.of(workingDir).toAbsolutePath().normalize().resolve(".yca").resolve("configuration.json");
+    }
+
+    private static Path resolveGlobalConfigurationFile(final Configuration configuration) {
+        return Path.of(configuration
                 .get(PREFIX + "configuration.json")
-                .orElseGet(YcaConfigurationProducer::defaultConfigurationFile);
-        loadJson(registration, Path.of(path));
+                .orElseGet(YcaConfigurationProducer::defaultConfigurationFile));
     }
 
     private static String defaultConfigurationFile() {
@@ -66,14 +105,14 @@ public class YcaConfigurationProducer {
         return Path.of(home, "configuration.json").toString();
     }
 
-    private void loadJson(final ConfigurationRegistration registration, final Path path) {
+    private ConfigurationSource loadJson(final Path path) {
         if (!Files.isRegularFile(path)) {
-            return;
+            return null;
         }
         try (final var in = Files.newInputStream(path)) {
             final var bytes = in.readAllBytes();
             final ReaderSupplier supplier = () -> new InputStreamReader(new ByteArrayInputStream(bytes));
-            registration.addSource().accept(new JsonConfigurationSource(supplier, KEY_NORMALIZER));
+            return new JsonConfigurationSource(supplier, KEY_NORMALIZER);
         } catch (final IOException e) {
             throw new UncheckedIOException("Invalid configuration file: " + path, e);
         }

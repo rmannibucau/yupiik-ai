@@ -129,9 +129,16 @@ java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-1.0.0-SNAPSHOT-f
 ## Configuration
 
 Configuration is resolved from (highest priority first): CLI arguments
-(`--yca-<key> <value>`), then `~/.yupiik/coding-agent/configuration.json` (or the
-`yca.configuration.json` key), system properties and environment variables
-(`YCA_PROVIDER_BASEURL` style).
+(`--yca-<key> <value>`), then the project-local `./.yca/configuration.json`, then
+`~/.yupiik/coding-agent/configuration.json` (or the `yca.configuration.json` key),
+system properties and environment variables (`YCA_PROVIDER_BASEURL` style).
+
+A project-local `./.yca/configuration.json` is looked up from the working directory
+(the `yca.workingDir` value, else the process working directory). When it is present
+it is the effective JSON file; set a top-level `"$inherit": true` there to layer the
+global file beneath it as a low-priority base, so keys the project file does not
+define (and list elements beyond the project's own arrays) fall through to the
+global configuration.
 
 ```json
 {

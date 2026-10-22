@@ -12,11 +12,56 @@ Configuration is resolved from, highest priority first:
 
 . CLI arguments: `--yca-<key> <value>` (for example `--yca-provider-model`). The
   `yca.` prefix may be omitted, so `--provider-model` works too.
-. JSON file: `~/.yupiik/coding-agent/configuration.json` (override the location
-  with the `yca.configuration.json` key)
+. Project-local JSON file: `./.yca/configuration.json`, looked up from the working
+  directory (`yca.workingDir`, else the process working directory)
+. Global JSON file: `~/.yupiik/coding-agent/configuration.json` (override the
+  location with the `yca.configuration.json` key)
 . System properties: `yca.provider.model` style keys
 . Environment variables: `YCA_PROVIDER_MODEL` style keys (dots/hyphens become
   underscores, uppercased)
+
+[mermaid]
+....
+flowchart TD
+    A["CLI arguments (--yca-<key> <value>)"] -->
+    B["project-local ./.yca/configuration.json"] -->
+    C["global ~/.yupiik/coding-agent/configuration.json"] -->
+    D["system properties (yca.*)"] -->
+    E["environment variables (YCA_*)"]
+    A -. first match per key wins .-> F["effective value"]
+    B -. first match per key wins .-> F
+    C -. first match per key wins .-> F
+    D -. first match per key wins .-> F
+    E -. first match per key wins .-> F
+....
+
+The project-local file is resolved from the working directory (`yca.workingDir`,
+else the process working directory). When it is present it becomes the effective
+JSON file. Set a top-level `"$inherit": true` in it to layer the global file beneath
+it as a low-priority base: keys the project file does not define fall through to
+the global one.
+
+The `length`-bounded list binding drives the override semantics:
+
+. *Lists truncate*: a project array is authoritative. If the project file defines a
+  provider list of 1 entry while the inherited global list has 3, the effective list
+  has exactly 1 provider - the parent's extra elements are hidden, not merged.
+. *Per-element fields inherit*: within an element the project file does define,
+  fields it omits still fall through to the matching parent element (so a project
+  provider can override only its `model` and inherit the parent's `baseUrl`,
+  `apiKey`, ...).
+. An empty array (`"providers": []`) resets the inherited list to empty; a list
+  omitted entirely inherits the parent's list wholesale.
+
+Inheritance is single-level: a `$inherit` inside the inherited file is ignored.
+Without `$inherit` (or with `"$inherit": false`), the project file stands alone and
+the global file is not read.
+
+NOTE: many repos git-ignore their `.yca` directory (this repository ignores the
+repo-root `/.yca/`), so a committed `./.yca/configuration.json` requires either
+force-adding it (`git add -f .yca/configuration.json`) or narrowing the ignore rule
+(`!.yca/configuration.json`). The local file still works when uncommitted - it is
+just not shared with other clones.
 
 The `provider` group (`yca.provider.*`) supports multiple providers. Each entry
 has an `id` referenced as `$<id>/<model>` anywhere a model is expected (main
