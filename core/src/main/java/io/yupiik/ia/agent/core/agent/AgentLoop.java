@@ -2795,7 +2795,7 @@ public class AgentLoop {
 
     /**
      * Exploration-nudge cascade: per-model behavior.explorationNudgeRounds > per-provider
-     * tuning.explorationNudgeRounds > the global llm.explorationNudgeRounds default (12). 0 disables
+     * tuning.explorationNudgeRounds > the global llm.explorationNudgeRounds default (20). 0 disables
      * the nudge (or falls back to the provider/global when only set to 0 higher up the chain).
      */
     private int resolvedModelExplorationNudgeRounds(final ProviderManager.ResolvedModel resolved) {

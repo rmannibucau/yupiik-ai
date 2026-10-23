@@ -2420,7 +2420,7 @@ class AgentLoopTest {
     /**
      * Exploration nudge: a spiral of NOVEL read-only rounds (fresh files every time - never redundant,
      * so the plateau/doom-loop guards stay silent) gets a one-shot wrap-up nudge injected as a user
-     * message after llm.explorationNudgeRounds (default 12) consecutive informative rounds. The turn
+     * message after llm.explorationNudgeRounds (default 20) consecutive informative rounds. The turn
      * keeps running: the nudge directs, it does not stop.
      */
     @Test

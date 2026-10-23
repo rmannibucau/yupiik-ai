@@ -84,7 +84,7 @@ public record ModelTuningConfiguration(
 
         @Property(
                 documentation =
-                        "Maximum number of consecutive informative read-only exploration rounds (novel reads/globs, no answer) after which a one-shot 'wrap up and answer' nudge is injected for this model. Unset/zero/negative keeps the provider tuning, then the global llm.explorationNudgeRounds default (12). Zero disables the nudge.")
+                        "Maximum number of consecutive informative read-only exploration rounds (novel reads/globs, no answer) after which a one-shot 'wrap up and answer' nudge is injected for this model. Unset/zero/negative keeps the provider tuning, then the global llm.explorationNudgeRounds default (20). Zero disables the nudge.")
         Integer explorationNudgeRounds,
 
         @Property(

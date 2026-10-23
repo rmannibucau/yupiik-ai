@@ -76,7 +76,7 @@ public record LlmConfiguration(
         int plateauRounds,
 
         @Property(
-                defaultValue = "12",
+                defaultValue = "20",
                 documentation =
                         "Consecutive informative read-only exploration rounds without an answer after which a one-shot 'wrap up and answer' nudge is injected. Complements the plateau guard: a spiral of NOVEL reads/globs (each round fresh, so never 'redundant' and never a plateau) still gets told to stop expanding and synthesize. No hard stop - the model can still gather if the nudge is wrong. 0 disables the nudge.")
         int explorationNudgeRounds,

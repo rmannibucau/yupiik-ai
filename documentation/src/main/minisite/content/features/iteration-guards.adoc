@@ -214,7 +214,7 @@ you can pick the right spirit for each model instead of one global setting.
   iteration window. Turn the exploration plateau into *nudge-only*
   (`behavior.plateauRounds=-1`) so redundant reads remind without risking losing
   a deep search mid-way, and give the *novel-spiral nudge* more room
-  (`behavior.explorationNudgeRounds=12`). Set `behavior.maxIterations=-1` for an
+  (`behavior.explorationNudgeRounds=20`). Set `behavior.maxIterations=-1` for an
   unbounded window so the round gate is never cut off by an iteration cap.
 * **Flash / mid models** (`deepseek-v4-flash`, `glm-5.3-flash`, ...) read one
   small novel call per round and genuinely need the plateau hard-stop to avoid
@@ -318,7 +318,7 @@ scheme).
             "behavior": {
               "turnContinuesOnTextEnd": true,
               "plateauRounds": -1,
-              "explorationNudgeRounds": 12,
+              "explorationNudgeRounds": 20,
               "maxIterations": -1
             }
           }
