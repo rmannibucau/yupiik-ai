@@ -2439,8 +2439,8 @@ class AgentLoopTest {
                         null,
                         // set an explicit low threshold so the test exercises the nudge mechanism instead of
                         // depending on the global explorationNudgeRounds default (which it does not own)
-                        configuration(true, Map.of(
-                                "yca.llm.maxIterations", "50", "yca.llm.explorationNudgeRounds", "14")),
+                        configuration(
+                                true, Map.of("yca.llm.maxIterations", "50", "yca.llm.explorationNudgeRounds", "14")),
                         noContextManager(),
                         noSessionStore(),
                         null,
