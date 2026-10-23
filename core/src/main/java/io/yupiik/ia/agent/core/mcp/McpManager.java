@@ -200,9 +200,20 @@ public class McpManager {
      * awaited at shutdown.
      */
     private void startServerAsync(final McpServerConfiguration server) {
-        pending.remove(server.name());
-        final var future = CompletableFuture.runAsync(() -> startServer(server), executor);
+        // register the in-flight future BEFORE the task is handed to the executor, and never remove it
+        // here: a first-use join (tools()/call()/serverStatuses()) must be able to observe the future as
+        // soon as it is scheduled, otherwise a fast first-use can run while the async body is still
+        // populating toolsByServer and observe a half-initialized server (or miss the join entirely).
+        final var future = new CompletableFuture<Void>();
         pending.put(server.name(), future);
+        executor.execute(() -> {
+            try {
+                startServer(server);
+                future.complete(null);
+            } catch (final Throwable t) {
+                future.completeExceptionally(t);
+            }
+        });
     }
 
     private void startServer(final McpServerConfiguration server) {
