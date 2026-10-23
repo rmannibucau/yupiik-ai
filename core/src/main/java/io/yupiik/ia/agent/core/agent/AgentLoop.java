@@ -3744,70 +3744,97 @@ public class AgentLoop {
         }
         // An assistant tool call is only "answered" when its result arrives CONTIGUOUSLY (the very next
         // tool messages, before any non-tool message) - the exact rule the OpenAI/Azure and Anthropic wire
-        // backstops and their strict validators enforce. A result (or a lost-result marker) that landed
+        // backstops and their strict validators enforce. A response (or a lost-result marker) that landed
         // ANYWHERE in history but is separated from its assistant call by an interposed assistant/user/
-        // notice message does NOT satisfy the contiguity rule and must get a synthetic lost-result marker
-        // placed IMMEDIATELY after that assistant block. Using "answered anywhere" (the pre-fix behavior)
-        // - or skipping an id merely because a marker for it exists somewhere non-contiguously - let the
-        // broken pairing survive every guard and reach Azure, which rejects it with "an assistant message
-        // with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'".
+        // notice message does NOT satisfy the contiguity rule: the assistant call gets a synthetic
+        // lost-result marker placed IMMEDIATELY after its block, and the stray response is dropped.
+        // Azure enforces BOTH directions of this adjacency ("an assistant message with 'tool_calls' must be
+        // followed by tool messages responding to each 'tool_call_id'" AND "messages with role 'tool' must
+        // be a response to a preceding message with 'tool_calls'"), so the healed history must carry
+        // exactly one response per call id, in the contiguous position.
         //
-        // The repair is per-OCCURRENCE, not per-id: each assistant tool_calls block is inspected against
-        // the contiguous run of tool messages that immediately follow it. A block whose own calls are not
-        // all cleared by that run is re-emitted with a lost-result marker right after it (so whatever
-        // interposes never sits between the call and its response on the wire). Stray/orphan markers that
-        // exist elsewhere for the same id no longer suppress this - only a genuinely contiguous result does.
-        final var repaired = new ArrayList<Message>(messages.size() + 8);
+        // The heal is per-OCCURRENCE and streaming: each assistant block opens a pending set of its own
+        // call ids; the contiguous run of tool messages immediately following it claims those ids; any
+        // tool message that does NOT claim a pending id is an orphan (a stray marker or a result whose
+        // assistant block was interposed away) and is dropped; ids still pending when a non-tool message
+        // (or the end of the history) is reached get their marker inserted right there, before whatever
+        // interposes. Stray markers elsewhere no longer suppress the heal.
         final var persistedIds = new LinkedHashSet<String>();
-        final var text = "[tool result lost: the model's tool call was interrupted before it could complete this turn]";
-        for (var i = 0; i < messages.size(); i++) {
-            final var message = messages.get(i);
-            repaired.add(message);
-            if (!"assistant".equals(message.role()) || message.toolCalls() == null) {
-                continue;
-            }
-            final var needed = new LinkedHashSet<String>();
-            for (final var call : message.toolCalls()) {
-                if (call != null && call.id() != null && needed.size() < MAX_REPAIR_PENDING_TOOL_IDS) {
-                    needed.add(call.id());
-                }
-            }
-            if (needed.isEmpty()) {
-                continue;
-            }
-            // scan the contiguous run of tool messages immediately following this assistant block; any
-            // non-tool message (a newer assistant reply, a user prompt, a notice) breaks the pairing for
-            // every still-needing id at once.
-            for (var j = i + 1; j < messages.size(); j++) {
-                final var after = messages.get(j);
-                if (!"tool".equals(after.role()) || after.toolCallId() == null) {
-                    break;
-                }
-                if (needed.remove(after.toolCallId()) && needed.isEmpty()) {
-                    break;
-                }
-            }
-            if (needed.isEmpty()) {
-                continue; // every call of this block is answered by a contiguous tool result
-            }
-            // this block's calls never landed contiguously: insert an honest lost-result marker for each
-            // still-unanswered id immediately after the block (before any interposed message). Deduped by
-            // persistedIds so a marker persisted in an earlier repair is not appended again.
-            for (final var id : needed) {
-                repaired.add(Message.tool(id, text, true));
-                if (persistedIds.add(id)) {
-                    sessionStore.append(
-                            sessionId,
-                            SessionEntry.of(clock.millis(), "tool", text, null, id, null, Map.of("is_error", true)));
-                }
+        // ids that already carried a response somewhere in the pre-repair history: the marker(s) they
+        // carried may be strays (dropped by this pass), but their session entry already exists, so the
+        // healed id must NOT be persisted again - appending would add a new orphan marker at the tail of
+        // the append-only session on every resume.
+        final var persisted = new HashSet<String>();
+        for (final var message : messages) {
+            if ("tool".equals(message.role()) && message.toolCallId() != null) {
+                persisted.add(message.toolCallId());
             }
         }
-        if (persistedIds.isEmpty()) {
+        final var repaired = new ArrayList<Message>(messages.size() + 8);
+        final var text = "[tool result lost: the model's tool call was interrupted before it could complete this turn]";
+        var droppedOrphans = 0;
+        var healed = 0;
+        var changed = false;
+        var pending = new LinkedHashSet<String>();
+        for (final var message : messages) {
+            if (!"tool".equals(message.role())) {
+                // a non-tool message (a newer assistant reply, a user prompt, a notice, the end of the
+                // history) closes the previous assistant block's contiguous run: ids still awaiting a
+                // result there are healed with a marker right before whatever now follows.
+                if (!pending.isEmpty()) {
+                    for (final var id : pending) {
+                        repaired.add(Message.tool(id, text, true));
+                        changed = true;
+                        if (persisted.add(id)) {
+                            healed++;
+                            sessionStore.append(
+                                    sessionId,
+                                    SessionEntry.of(
+                                            clock.millis(), "tool", text, null, id, null, Map.of("is_error", true)));
+                        }
+                    }
+                    pending = new LinkedHashSet<>();
+                }
+                repaired.add(message);
+                if ("assistant".equals(message.role()) && message.toolCalls() != null) {
+                    for (final var call : message.toolCalls()) {
+                        if (call != null && call.id() != null && pending.size() < MAX_REPAIR_PENDING_TOOL_IDS) {
+                            pending.add(call.id());
+                        }
+                    }
+                }
+                continue;
+            }
+            if (pending.remove(message.toolCallId())) {
+                repaired.add(message);
+            } else {
+                // orphan response: no contiguous assistant tool_calls claim it - Azure/litellm reject
+                // "messages with role 'tool' must be a response to a tool call", so it must not reach
+                // the wire (a marker for the same id, if needed, is inserted at its assistant block).
+                droppedOrphans++;
+                changed = true;
+            }
+        }
+        for (final var id : pending) {
+            repaired.add(Message.tool(id, text, true));
+            changed = true;
+            if (persisted.add(id)) {
+                healed++;
+                sessionStore.append(
+                        sessionId,
+                        SessionEntry.of(clock.millis(), "tool", text, null, id, null, Map.of("is_error", true)));
+            }
+        }
+        if (!changed) {
             return;
         }
         messages.clear();
         messages.addAll(repaired);
-        emit(status("repaired " + persistedIds.size() + " interrupted tool call(s) whose result never landed"));
+        // only a TRUE first-time heal (the id carried no response anywhere before this repair) persists a
+        // marker: an id whose stray marker existed already and was just dropped must not get a fresh tail
+        // entry, or every resume would append another orphan marker at the end of the append-only session.
+        emit(status("repaired " + healed + " interrupted tool call(s) whose result never landed"
+                + (droppedOrphans == 0 ? "" : ", dropped " + droppedOrphans + " orphan tool response(s)")));
     }
 
     /**

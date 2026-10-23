@@ -37,6 +37,7 @@ import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.spi.SseParser;
 import io.yupiik.llm.client.spi.Streams;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -235,15 +236,19 @@ public class OpenAICompletionsDialect extends AbstractDialect {
         if (messages.isEmpty()) {
             return messages;
         }
-        // most requests carry no assistant tool calls at all: skip the O(history) scan and rebuild entirely,
+        // most requests carry no tool traffic at all: skip the O(history) scan and rebuild entirely,
         // so the common pure-text path stays zero-cost (the previous unconditional verificationStart pass ran
-        // a full-list scan on every request even when there was nothing to sanitize).
+        // a full-list scan on every request even when there was nothing to sanitize). A lone tool message
+        // with no assistant tool_calls anywhere also needs the pass: it is an orphan response that strict
+        // backends reject ("messages with role 'tool' must be a response to a preceding message with
+        // 'tool_calls'"), so it must be caught even without any assistant tool round.
         var hasToolRound = false;
         for (final var probe : messages) {
             if (probe != null
-                    && "assistant".equals(probe.role())
-                    && probe.toolCalls() != null
-                    && !probe.toolCalls().isEmpty()) {
+                    && (("tool".equals(probe.role()) && probe.toolCallId() != null)
+                            || ("assistant".equals(probe.role())
+                                    && probe.toolCalls() != null
+                                    && !probe.toolCalls().isEmpty()))) {
                 hasToolRound = true;
                 break;
             }
@@ -257,6 +262,10 @@ public class OpenAICompletionsDialect extends AbstractDialect {
         final var dropped = new ArrayList<String>();
         var changed = false;
         final var out = new ArrayList<LlmMessage>(messages.size());
+        // the tool-call ids of the assistant block currently being walked through the verified region:
+        // a tool message is a valid response only while it consumes one of these (the contiguous run rule),
+        // anything else is an orphan response with no assistant tool_calls behind it.
+        var pendingResponses = new HashSet<String>();
         for (var i = 0; i < messages.size(); i++) {
             final var message = messages.get(i);
             if (i < verificationStart) {
@@ -270,12 +279,16 @@ public class OpenAICompletionsDialect extends AbstractDialect {
             if ("assistant".equals(message.role())
                     && message.toolCalls() != null
                     && !message.toolCalls().isEmpty()) {
+                pendingResponses = new HashSet<>();
                 final var kept = new ArrayList<LlmToolCall>(message.toolCalls().size());
                 for (final var call : message.toolCalls()) {
                     if (call != null && call.id() != null && unmatched.contains(call.id())) {
                         dropped.add(call.id());
                     } else {
                         kept.add(call);
+                        if (call.id() != null && pendingResponses.size() < MAX_RESPONSE_PENDING_IDS) {
+                            pendingResponses.add(call.id());
+                        }
                     }
                 }
                 if (kept.isEmpty()) {
@@ -302,24 +315,36 @@ public class OpenAICompletionsDialect extends AbstractDialect {
                     out.add(message);
                 }
             } else if ("tool".equals(message.role()) && message.toolCallId() != null) {
-                // a `tool` result (even an "orphan", with no matching assistant tool_call in this history) is
-                // kept verbatim: strict backends only reject an assistant tool_calls with no response, never a
-                // standalone tool result, and a lone tool message is a legitimate client-side completion.
-                // Dropping it would silently change valid histories (and the Responses API permits standalone
-                // function_call_output items).
-                out.add(message);
+                // a `tool` result whose id no contiguous assistant tool_call claims is an ORPHAN and must be
+                // dropped: Azure/litellm reject the reverse direction too ("messages with role 'tool' must
+                // be a response to a preceding message with 'tool_calls'"), so a lone tool message 400s the
+                // whole request. (The Responses API dialect does permit standalone function_call_output
+                // items, so only this completions backstop drops them; the agent loop repairs these inline
+                // first - this is the wire backstop.)
+                if (pendingResponses.remove(message.toolCallId())) {
+                    out.add(message);
+                } else {
+                    dropped.add(message.toolCallId());
+                    changed = true;
+                }
             } else {
+                // any non-tool message closes the contiguous run of the previous assistant block
+                pendingResponses = new HashSet<>();
                 out.add(message);
             }
         }
         if (!dropped.isEmpty()) {
-            LOGGER.fine(() -> "sanitized " + dropped.size() + " assistant tool call(s) with no contiguously-answered "
-                    + "tool response (OpenAI-compatible backends such as OpenAI, sglang, Azure and litellm reject "
-                    + "an assistant 'tool_calls' with no matching tool message) before sending: " + dropped
+            LOGGER.fine(() -> "sanitized " + dropped.size() + " orphan tool-call id(s) (an assistant tool_calls with "
+                    + "no contiguously-answered tool response, or a tool response no contiguous assistant tool_calls "
+                    + "claims - OpenAI-compatible backends such as OpenAI, sglang, Azure and litellm reject both "
+                    + "directions) before sending: " + dropped
                     + ". The agent loop should repair these inline; this is the wire backstop.");
         }
         return changed ? out : messages;
     }
+
+    /** Upper bound on the pending response ids tracked while walking the verified region. */
+    private static final int MAX_RESPONSE_PENDING_IDS = 256;
 
     /** First index of the region whose tool-call pairing is verified before sending. Mirrors AnthropicDialect. */
     private static int verificationStart(final List<LlmMessage> messages) {

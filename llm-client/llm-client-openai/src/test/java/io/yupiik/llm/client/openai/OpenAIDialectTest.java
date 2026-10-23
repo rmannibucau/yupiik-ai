@@ -749,10 +749,10 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void completionsDialectKeepsOrphanToolResultWithoutPreceedingToolCall(final JsonMapper mapper) throws Exception {
-        // a tool message that answers no assistant tool call in this history is a legitimate client-side
-        // completion (strict backends only reject an assistant tool_calls with no response, never the reverse).
-        // It must be preserved verbatim, not silently dropped.
+    void completionsDialectDropsOrphanToolResultWithoutPreceedingToolCall(final JsonMapper mapper) throws Exception {
+        // a tool message that answers no assistant tool call in this history is an ORPHAN: Azure/litellm
+        // reject it ("messages with role 'tool' must be a response to a preceding message with 'tool_calls'"),
+        // so the backstop must drop it instead of letting it 400 the whole request.
         server.createContext("/v1/chat/completions", exchange -> {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(
@@ -784,7 +784,7 @@ class OpenAIDialectTest {
                 Map.of());
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
-        assertTrue(body.contains("\"tool_call_id\":\"orphan\""), "the orphan tool result must be preserved:\n" + body);
+        assertFalse(body.contains("\"tool_call_id\":\"orphan\""), "the orphan tool result must be dropped:\n" + body);
         assertTrue(body.contains("do it"), "the user prompt must be preserved:\n" + body);
     }
 

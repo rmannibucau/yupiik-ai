@@ -5397,14 +5397,15 @@ class AgentLoopTest {
         assertTrue(
                 String.valueOf(request.get(call1Index + 1).content()).contains("tool result lost"),
                 "the first request must answer call_1 with the lost-result marker: " + request);
-        // the repair is persisted as an error tool entry for the interrupted call
-        assertTrue(
+        // the repair must NOT be persisted: call_1 already carried a response ("found it") in the
+        // pre-repair history, so the heal is in-memory only - persisting would add a new tail entry to
+        // the append-only session on every resume (the turn's own user/assistant entries are expected).
+        assertEquals(
+                0,
                 persisted.stream()
-                        .anyMatch(e -> "tool".equals(e.role())
-                                && "call_1".equals(e.toolCallId())
-                                && e.others() != null
-                                && Boolean.TRUE.equals(e.others().get("is_error"))),
-                "the lost-result marker must be persisted as an is_error tool entry: " + persisted);
+                        .filter(e -> "tool".equals(e.role()) && "call_1".equals(e.toolCallId()))
+                        .count(),
+                "an id that already carried a response in history must not be re-persisted: " + persisted);
         // the repaired history must be idempotent: running the repair again (a later post-400 path) must not
         // insert a second marker for the same id - subscribe a fresh loop over the now-healed messages.
         final var requests2 = new ArrayList<List<Message>>();
@@ -5422,12 +5423,12 @@ class AgentLoopTest {
         assertEquals("done", result2, "re-healing an already-healed history must still complete");
         assertAllToolCallsAreAnsweredByContiguousResults(requests2.getFirst());
         assertEquals(
-                1,
+                0,
                 persisted.stream()
                         .filter(e -> "tool".equals(e.role()) && "call_1".equals(e.toolCallId()))
                         .count(),
-                "running the repair over an already-healed history must not persist a duplicate lost-result "
-                        + "marker: " + persisted);
+                "running the repair over an already-healed history must not persist a lost-result " + "marker: "
+                        + persisted);
     }
 
     @Test
@@ -5494,13 +5495,97 @@ class AgentLoopTest {
         assertTrue(
                 String.valueOf(request.get(aIndex + 1).content()).contains("tool result lost"),
                 "call_1's immediate result must be the lost-result marker: " + request);
-        // the same id must not be persisted twice
+        // the same id must not be persisted twice: call_1 already carried a (stray) response in the
+        // pre-repair history, so the repositioning is in-memory only - no fresh session entry
         assertEquals(
-                1,
+                0,
                 persisted.stream()
                         .filter(e -> "tool".equals(e.role()) && "call_1".equals(e.toolCallId()))
                         .count(),
-                "call_1 must be healed with exactly one persisted lost-result entry: " + persisted);
+                "call_1 already carried a response in history, so it must not be re-persisted: " + persisted);
+    }
+
+    @Test
+    void orphanMarkerAfterUserMessagesIsDroppedAndNotRepersisted() {
+        // Regression from the real resumed session (s1a167cd41db) second failure: an id whose lost-result
+        // marker was persisted by an earlier repair at the TAIL of the append-only session - AFTER several
+        // user messages - reached Azure as an orphan tool response ("messages with role 'tool' must be a
+        // response to a tool call"). The repair must (a) heal the call at its assistant block, (b) drop the
+        // stray tail marker, and (c) NOT persist a fresh tail entry for the already-persisted id (or every
+        // resume would accumulate another orphan marker).
+        final var requests = new ArrayList<List<Message>>();
+        final var persisted = new ArrayList<SessionEntry>();
+        final var replied = new ArrayDeque<ScriptedReply>(List.of(new ScriptedReply("done", "stop", false)));
+        final var client = chatClient(replied, requests);
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                persisted.add(entry);
+            }
+        };
+        final var history = new ArrayList<Message>();
+        // the assistant call whose result never landed contiguously
+        history.add(new Message(
+                "assistant",
+                null,
+                null,
+                List.of(new ToolCall("call_1", "function", new ToolCall.FunctionCall("edit_file", "{}"), 0)),
+                null,
+                null));
+        // a second assistant block interposed (its own call answered contiguously)
+        history.add(new Message(
+                "assistant",
+                null,
+                null,
+                List.of(new ToolCall("call_2", "function", new ToolCall.FunctionCall("read", "{}"), 0)),
+                null,
+                null));
+        history.add(new Message("tool", "read output", null, null, "call_2", null));
+        // fresh user prompts after which the stray tail marker was persisted by an earlier repair
+        history.add(Message.user("while im awaiting the extraction result we can move on"));
+        history.add(
+                new Message("tool", "[tool result lost: interrupted]", null, null, "call_1", Map.of("is_error", true)));
+        final var loop = loop(
+                client,
+                new TodoStore() {},
+                configuration(true, Map.of("yca.llm.streamRetriesMaxAttempts", "0")),
+                noPruningManager(),
+                store,
+                null);
+        final var result = loop.run("do it", null, "s1", history, () -> false);
+
+        assertEquals("done", result, "the stray tail marker must be dropped and the turn completes");
+        assertEquals(1, requests.size(), "the healed history must succeed on the first request");
+        final var request = requests.getFirst();
+        assertAllToolCallsAreAnsweredByContiguousResults(request);
+        // call_1 is healed right after its assistant block
+        final var aIndex = indexOfAssistantCall(request, "call_1");
+        assertEquals("tool", request.get(aIndex + 1).role());
+        assertEquals("call_1", request.get(aIndex + 1).toolCallId());
+        // exactly ONE tool response carries call_1 on the wire: the stray tail one is dropped
+        assertEquals(
+                1,
+                request.stream()
+                        .filter(m -> "tool".equals(m.role()) && "call_1".equals(m.toolCallId()))
+                        .count(),
+                "exactly one contiguous response for call_1, no orphan: " + request);
+        // the tail marker that followed the user prompts must NOT have survived
+        for (var i = 0; i < request.size(); i++) {
+            if ("user".equals(request.get(i).role())) {
+                assertTrue(
+                        i + 1 >= request.size()
+                                || !"tool".equals(request.get(i + 1).role()),
+                        "no orphan tool response may follow a user prompt: " + request);
+            }
+        }
+        // the id was already persisted by the earlier repair: no NEW tail entry for it (the turn's own
+        // user/assistant entries are expected - only a tool entry for call_1 would be a re-persist)
+        assertEquals(
+                0,
+                persisted.stream()
+                        .filter(e -> "tool".equals(e.role()) && "call_1".equals(e.toolCallId()))
+                        .count(),
+                "an already-persisted id must not get a fresh tail entry on resume: " + persisted);
     }
 
     @Test
