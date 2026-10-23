@@ -40,6 +40,23 @@ import org.junit.jupiter.api.io.TempDir;
 class BashToolProcessTest {
 
     @Test
+    void defaultTimeoutIsDocumentedInTheSchema() {
+        // The default command timeout must be 120s + 5s headroom so a `sleep 120` is not killed on the
+        // exact bound of its own budget. Guard both the schema text (what the model sees) and that the
+        // fallback timeout_seconds default is 125.
+        final var bash = new BashTool(NOOP, new ProcessService());
+        @SuppressWarnings("unchecked")
+        final var properties = (Map<String, Object>) bash.schema().get("properties");
+        @SuppressWarnings("unchecked")
+        final var timeoutSchema = (Map<String, Object>) properties.get("timeout_seconds");
+        assertTrue(
+                String.valueOf(timeoutSchema.get("description")).contains("default 125"),
+                "the schema must document the 125s default: " + timeoutSchema.get("description"));
+        assertEquals(
+                BashTool.DEFAULT_TIMEOUT_SECONDS, 125, "the documented default and the fallback default must match");
+    }
+
+    @Test
     void timeoutKillsTheWholeTree(@TempDir final Path tmp) throws Exception {
         Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
         final var service = new ProcessService();

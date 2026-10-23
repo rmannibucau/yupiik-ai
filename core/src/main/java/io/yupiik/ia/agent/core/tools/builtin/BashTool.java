@@ -44,6 +44,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 @ApplicationScoped
 public class BashTool implements EmbeddedTool {
+    /** Default command timeout in seconds (120s + 5s headroom so `sleep 120` is not killed on the bound). */
+    static final int DEFAULT_TIMEOUT_SECONDS = 125;
+
     private final Emitter emitter;
     private final ProcessService processes;
     private final int maxOutputChars;
@@ -124,7 +127,8 @@ public class BashTool implements EmbeddedTool {
         return Schemas.object(
                 Map.of(
                         "command", Schemas.str("The shell command to run."),
-                        "timeout_seconds", Schemas.intProp("Command timeout in seconds, default 120."),
+                        "timeout_seconds",
+                                Schemas.intProp("Command timeout in seconds, default " + DEFAULT_TIMEOUT_SECONDS + "."),
                         "workdir",
                                 Schemas.str("Working directory; defaults to the session's project directory, else the"
                                         + " configured working directory.")),
@@ -142,7 +146,7 @@ public class BashTool implements EmbeddedTool {
         if (command == null || command.isBlank()) {
             return ToolResult.error("command is required");
         }
-        final var timeout = optInt(args, "timeout_seconds", 120);
+        final var timeout = optInt(args, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS);
         final var workdir = arg(args, "workdir");
         // Real bash by default (yca.tools.shell=auto): the tool is licensed as "bash" so the model may rely on
         // bash-isms (PIPESTATUS, ${VAR:-x}, [[ ]], =~ ...) that a minimal /bin/sh (dash on Debian/Ubuntu) would
