@@ -36,6 +36,7 @@ import io.yupiik.ia.agent.core.events.hooks.EventContextBuilder;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.llm.LlmWire;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
@@ -59,6 +60,7 @@ import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.llm.client.ContextWindowExceededException;
 import io.yupiik.llm.client.LlmHttpFailureException;
+import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningDelta;
@@ -108,6 +110,14 @@ public class AgentLoop {
     private static final String WRITE_MARKER = "\u0000write";
 
     private static final String REDUNDANT_MARKER = "\u0000seen:";
+
+    /**
+     * Prefix of the synthetic lost-result marker {@link #repairInterruptedToolCalls} inserts after an
+     * assistant tool call whose contiguous result never landed. Used to detect an already-healed history so
+     * the same id is not given a second marker (the loop-entry repair runs before the first request, and a
+     * post-400 repair re-runs over the same, now-healed, list).
+     */
+    private static final String INTERRUPTED_TOOL_RESULT_MARKER_PREFIX = "[tool result lost:";
 
     /**
      * One-shot nudge injected before the exploration-plateau hard stop (plateauFeedback nudge_1 /
@@ -3711,14 +3721,18 @@ public class AgentLoop {
     }
 
     /**
-     * Heals history where an assistant {@code tool_use} never got an answer (the turn ended mid-tool via
-     * cancel/interrupt/error). Anthropic requires every {@code tool_use} to be immediately answered by a
-     * {@code tool_result}; a dangling one makes the gateway reject the whole request with "tool_use ids
-     * were found without tool_result blocks immediately after". A synthetic lost-result marker is inserted
-     * IN-MEMORY immediately after each dangling assistant message - so whatever follows (a freshly appended
-     * user prompt, later turns) never sits between the {@code tool_use} and its result on the wire - and
-     * persisted via the append-only session store. Idempotent: ids that already carry a {@code tool}-role
-     * result anywhere in the history are skipped, so a repaired history is not re-repaired.
+     * Heals history where an assistant {@code tool_use} never got a CONTIGUOUS answer (the turn ended
+     * mid-tool via cancel/interrupt/error, or a non-tool message - a user prompt, notice, compaction
+     * marker - was interposed between the assistant call and its result). Anthropic requires every
+     * {@code tool_use} to be immediately answered by a {@code tool_result}, and Azure / litellm strict
+     * validators reject an assistant {@code tool_calls} with no contiguous response ("an assistant message
+     * with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'"). A synthetic
+     * lost-result marker is inserted IN-MEMORY immediately after each affected assistant message - so
+     * whatever follows (a freshly appended user prompt, later turns) never sits between the {@code tool_use}
+     * and its result on the wire - and persisted via the append-only session store. Idempotent: an id is
+     * skipped when it already carries a CONTIGUOUS {@code tool}-role result (mirroring the wire backstop's
+     * {@code matchedToolCallIds} rule) or an earlier synthetic lost-result marker, so a repaired history is
+     * not re-repaired.
      *
      * @param sessionId the session being resumed.
      * @param messages the working conversation, rebuilt per {@code loop()}, repaired in place.
@@ -3727,10 +3741,30 @@ public class AgentLoop {
         if (messages == null || messages.isEmpty()) {
             return;
         }
-        final var answered = new HashSet<String>();
+        // An assistant tool call is only "answered" when its result arrives CONTIGUOUSLY (the very next
+        // tool messages, before any non-tool message) - the exact rule the OpenAI/Azure and Anthropic wire
+        // backstops and their strict validators enforce. A result that landed ANYWHERE in history but is
+        // separated from its assistant call by an interposed user/notice/system message does NOT satisfy
+        // the contiguity rule and must still get a synthetic lost-result marker. Using "answered anywhere"
+        // (the pre-fix behavior) let exactly that non-contiguous pairing survive every guard and reach
+        // Azure, which rejects it with "an assistant message with 'tool_calls' must be followed by tool
+        // messages responding to each 'tool_call_id'".
+        //
+        // Delegate the contiguous-rule computation to LlmMessage.unmatchedToolCallIds, the single source
+        // of truth shared with the wire backstops, so the history repair can never disagree with them about
+        // what counts as "paired".
+        final var lost = LlmMessage.unmatchedToolCallIds(
+                messages.stream().map(LlmWire::toLlmMessage).collect(java.util.stream.Collectors.toList()));
+        // an id that already carries a synthetic lost-result marker (from an earlier repair in this same
+        // history, e.g. the loop-entry repair persisted it before a second post-400 repair) must not get a
+        // second marker: re-inserting would override the prior marker and duplicate the persisted entry.
+        final var alreadyMarked = new HashSet<String>();
         for (final var message : messages) {
-            if ("tool".equals(message.role()) && message.toolCallId() != null) {
-                answered.add(message.toolCallId());
+            if ("tool".equals(message.role())
+                    && message.toolCallId() != null
+                    && message.content() instanceof final String content
+                    && content.startsWith(INTERRUPTED_TOOL_RESULT_MARKER_PREFIX)) {
+                alreadyMarked.add(message.toolCallId());
             }
         }
         final var repaired = new ArrayList<Message>(messages.size() + 8);
@@ -3742,11 +3776,16 @@ public class AgentLoop {
                 continue;
             }
             for (final var call : message.toolCalls()) {
-                if (call == null || call.id() == null || answered.contains(call.id())) {
+                if (call == null || call.id() == null) {
                     continue;
                 }
-                // drop the now-answered id so a later duplicate assistant call of the same id is not answered twice
-                answered.add(call.id());
+                if (!lost.contains(call.id()) || alreadyMarked.contains(call.id())) {
+                    continue;
+                }
+                // the result never landed contiguously: heal by inserting an honest lost-result marker
+                // immediately after this assistant call (and thus before any interposed message), and drop
+                // the id so a later duplicate assistant call of the same id is not answered twice.
+                alreadyMarked.add(call.id());
                 repaired.add(Message.tool(call.id(), text, true));
                 if (persistedIds.add(call.id())) {
                     sessionStore.append(

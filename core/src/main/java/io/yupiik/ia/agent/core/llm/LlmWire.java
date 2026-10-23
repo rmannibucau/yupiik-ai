@@ -54,7 +54,7 @@ import java.util.logging.Logger;
  * {@code llm-client} library types. Also pumps a streamed publisher into the historical blocking
  * {@code Message} result.
  */
-final class LlmWire {
+public final class LlmWire {
 
     private LlmWire() {
         // utility
@@ -86,7 +86,10 @@ final class LlmWire {
                 extensions);
     }
 
-    static LlmMessage toLlmMessage(final Message message) {
+    /** Converts a core neutral {@link Message} to the {@code llm-client} neutral model. Public so the
+     * agent loop can reuse the single-source {@link LlmMessage#unmatchedToolCallIds} contiguity matcher
+     * while repairing persisted history. */
+    public static LlmMessage toLlmMessage(final Message message) {
         return new LlmMessage(
                 message.role(),
                 message.content(),

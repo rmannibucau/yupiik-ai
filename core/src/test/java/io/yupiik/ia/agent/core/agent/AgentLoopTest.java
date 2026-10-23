@@ -3168,6 +3168,22 @@ class AgentLoopTest {
                         + " in request " + messages);
     }
 
+    /** Index of the first assistant message whose tool calls include {@code callId}, or {@code -1}. */
+    private static int indexOfAssistantCall(final List<Message> messages, final String callId) {
+        for (var i = 0; i < messages.size(); i++) {
+            final var message = messages.get(i);
+            if (!"assistant".equals(message.role()) || message.toolCalls() == null) {
+                continue;
+            }
+            for (final var call : message.toolCalls()) {
+                if (call != null && callId.equals(call.id())) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
     /** A registry exposing a read-only {@code read} tool (coverage-keyed for the plateau guard). */
     private ToolRegistry readFileRegistry() {
         return registryOf(new EmbeddedTool() {
@@ -5318,6 +5334,97 @@ class AgentLoopTest {
         assertEquals("done", result, "the repaired retry must complete the turn instead of failing it");
         assertEquals(2, requests.size(), "pairing 400 must short-circuit and retry exactly once, no (1/N) storm");
         assertAllToolCallsAreAnsweredByContiguousResults(requests.get(1));
+    }
+
+    @Test
+    void nonContiguousResumeHistoryIsHealedAtLoopEntry() {
+        // Regression for a RESUMED session: a persisted history can carry an assistant tool_calls whose
+        // result landed in history but NOT contiguously - a queued user prompt / notice was interposed
+        // between the call and its result. Azure/litellm strict validation rejects exactly this ("An
+        // assistant message with 'tool_calls' must be followed by tool messages responding to each
+        // 'tool_call_id'. The following tool_call_ids did not have response messages: ..."). The pre-fix
+        // repair considered the id "answered" because a tool result existed ANYWHERE in history, so it left
+        // the pairing broken, and the wire backstop (which trusts history before verificationStart) shipped
+        // it to the provider for a 400. The fix repairs by the CONTIGUOUS rule via the shared
+        // LlmMessage.unmatchedToolCallIds matcher, inserting a lost-result marker at loop entry, so the
+        // first request is already valid and never 400s.
+        final var requests = new ArrayList<List<Message>>();
+        final var persisted = new ArrayList<SessionEntry>();
+        final var replied = new ArrayDeque<ScriptedReply>(List.of(new ScriptedReply("done", "stop", false)));
+        final var client = chatClient(replied, requests);
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                persisted.add(entry);
+            }
+        };
+        // a persisted (resumed) history: call_1's result landed, but a queued/user prompt sits between the
+        // assistant tool call and its result, breaking contiguity on the wire.
+        final var history = new ArrayList<Message>();
+        history.add(new Message(
+                "assistant",
+                null,
+                null,
+                List.of(new ToolCall("call_1", "function", new ToolCall.FunctionCall("grep", "{}"), 0)),
+                null,
+                null));
+        history.add(Message.user("a queued prompt interposed between the call and its result"));
+        history.add(new Message("tool", "found it", null, null, "call_1", null));
+        final var loop = loop(
+                client,
+                new TodoStore() {},
+                configuration(true, Map.of("yca.llm.streamRetriesMaxAttempts", "0")),
+                noPruningManager(),
+                store,
+                null);
+        final var result = loop.run("do it", null, "s1", history, () -> false);
+
+        assertEquals("done", result, "a non-contiguously-paired resume history must be healed and complete");
+        assertEquals(1, requests.size(), "the healed history must succeed on the first request, no 400 retry");
+        final var request = requests.getFirst();
+        // every assistant tool call is answered by a contiguous result - the pre-fix behavior left call_1
+        // dangling after the interposed prompt and Azure would 400
+        assertAllToolCallsAreAnsweredByContiguousResults(request);
+        // the synthetic lost-result marker answers call_1 immediately after its assistant message
+        final var call1Index = indexOfAssistantCall(request, "call_1");
+        assertTrue(call1Index >= 0, "call_1's assistant message must be present: " + request);
+        assertTrue(call1Index + 1 < request.size(), "a result must immediately follow call_1: " + request);
+        assertEquals("tool", request.get(call1Index + 1).role());
+        assertEquals("call_1", request.get(call1Index + 1).toolCallId());
+        assertTrue(
+                String.valueOf(request.get(call1Index + 1).content()).contains("tool result lost"),
+                "the first request must answer call_1 with the lost-result marker: " + request);
+        // the repair is persisted as an error tool entry for the interrupted call
+        assertTrue(
+                persisted.stream()
+                        .anyMatch(e -> "tool".equals(e.role())
+                                && "call_1".equals(e.toolCallId())
+                                && e.others() != null
+                                && Boolean.TRUE.equals(e.others().get("is_error"))),
+                "the lost-result marker must be persisted as an is_error tool entry: " + persisted);
+        // the repaired history must be idempotent: running the repair again (a later post-400 path) must not
+        // insert a second marker for the same id - subscribe a fresh loop over the now-healed messages.
+        final var requests2 = new ArrayList<List<Message>>();
+        final var replied2 = new ArrayDeque<ScriptedReply>(List.of(new ScriptedReply("done", "stop", false)));
+        final var loop2 = loop(
+                chatClient(replied2, requests2),
+                new TodoStore() {},
+                configuration(true, Map.of("yca.llm.streamRetriesMaxAttempts", "0")),
+                noPruningManager(),
+                store,
+                null);
+        // rebuild the history as it would be persisted after the first turn's repair
+        final var healed = new ArrayList<Message>(request);
+        final var result2 = loop2.run("do it again", null, "s2", healed, () -> false);
+        assertEquals("done", result2, "re-healing an already-healed history must still complete");
+        assertAllToolCallsAreAnsweredByContiguousResults(requests2.getFirst());
+        assertEquals(
+                1,
+                persisted.stream()
+                        .filter(e -> "tool".equals(e.role()) && "call_1".equals(e.toolCallId()))
+                        .count(),
+                "running the repair over an already-healed history must not persist a duplicate lost-result "
+                        + "marker: " + persisted);
     }
 
     @Test

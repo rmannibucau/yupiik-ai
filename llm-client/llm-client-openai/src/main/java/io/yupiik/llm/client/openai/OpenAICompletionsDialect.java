@@ -37,11 +37,9 @@ import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.spi.SseParser;
 import io.yupiik.llm.client.spi.Streams;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
@@ -254,8 +252,8 @@ public class OpenAICompletionsDialect extends AbstractDialect {
             return messages;
         }
         final var verificationStart = verificationStart(messages);
-        final var matched =
-                matchedToolCallIds(messages.subList(Math.min(verificationStart, messages.size()), messages.size()));
+        final var unmatched = LlmMessage.unmatchedToolCallIds(
+                messages.subList(Math.min(verificationStart, messages.size()), messages.size()));
         final var dropped = new ArrayList<String>();
         var changed = false;
         final var out = new ArrayList<LlmMessage>(messages.size());
@@ -274,7 +272,7 @@ public class OpenAICompletionsDialect extends AbstractDialect {
                     && !message.toolCalls().isEmpty()) {
                 final var kept = new ArrayList<LlmToolCall>(message.toolCalls().size());
                 for (final var call : message.toolCalls()) {
-                    if (call != null && call.id() != null && !matched.contains(call.id())) {
+                    if (call != null && call.id() != null && unmatched.contains(call.id())) {
                         dropped.add(call.id());
                     } else {
                         kept.add(call);
@@ -345,42 +343,6 @@ public class OpenAICompletionsDialect extends AbstractDialect {
         }
         return Math.max(0, Math.min(lastToolCallsAssistant, lastUserPrompt + 1));
     }
-
-    /**
-     * The set of tool call ids validly paired on the wire over a tail slice: an assistant {@code tool_calls}
-     * id is "matched" when a {@code tool}-role result carrying it appears in the contiguous run of tool
-     * messages immediately following that assistant message (before any non-tool message). Mirrors
-     * AnthropicDialect. Bounded to {@link #MAX_PENDING_TOOL_IDS} so a corrupted oversized assistant can never
-     * blow up the pending set.
-     */
-    private static Set<String> matchedToolCallIds(final List<LlmMessage> messages) {
-        final var matched = new HashSet<String>();
-        final var pending = new HashSet<String>();
-        for (final var message : messages) {
-            if ("assistant".equals(message.role())) {
-                pending.clear();
-                if (message.toolCalls() != null) {
-                    for (final var call : message.toolCalls()) {
-                        if (call != null && call.id() != null && pending.size() < MAX_PENDING_TOOL_IDS) {
-                            pending.add(call.id());
-                        }
-                    }
-                }
-            } else if ("tool".equals(message.role())) {
-                if (message.toolCallId() != null && pending.remove(message.toolCallId())) {
-                    matched.add(message.toolCallId());
-                }
-            } else {
-                // a plain user/system/assistant text message interposed between an assistant tool_calls
-                // and its results breaks the pairing for every still-pending id
-                pending.clear();
-            }
-        }
-        return matched;
-    }
-
-    /** Upper bound on the assistant tool call ids tracked as awaiting a contiguous result. */
-    private static final int MAX_PENDING_TOOL_IDS = 256;
 
     private LlmResponse toLlmResponse(final ChatCompletionResponse response) {
         final var index = new AtomicInteger();

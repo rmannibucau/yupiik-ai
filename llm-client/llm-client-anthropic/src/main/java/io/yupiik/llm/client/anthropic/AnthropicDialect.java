@@ -46,7 +46,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
@@ -493,7 +492,8 @@ public final class AnthropicDialect extends AbstractDialect {
         // already-completed turns are guaranteed-paired by the agent loop and emitted as-is, so the per
         // request cost does not grow with the total accumulated history - only with the live context.
         final var verificationStart = verificationStart(request.messages());
-        final var matchedToolCalls = matchedToolCallIds(messagesSlice(request.messages(), verificationStart));
+        final var matchedToolCalls =
+                LlmMessage.matchedToolCallIds(messagesSlice(request.messages(), verificationStart));
         final var dropped = new ArrayList<String>();
         if (request.messages() != null) {
             for (var i = 0; i < request.messages().size(); i++) {
@@ -674,63 +674,6 @@ public final class AnthropicDialect extends AbstractDialect {
         final var start = Math.max(0, Math.min(from, messages.size()));
         return messages.subList(start, messages.size());
     }
-
-    /**
-     * Computes, over a bounded slice, the set of tool call ids that are validly paired on the wire: the id
-     * of an assistant {@code tool_use} is "matched" when a {@code tool}-role result carrying it appears in
-     * the CONTIGUOUS run of {@code tool} messages immediately following that assistant message (before
-     * any non-{@code tool} message). The {@code toWire} caller uses this to strip dangling
-     * {@code tool_use} blocks (their result never landed, or a plain user text was interposed) and orphan
-     * {@code tool_result} blocks, so the request never violates Anthropic's strict adjacency rule.
-     *
-     * <p>Intended to run on the live tail slice from {@link #verificationStart}, not on the whole history:
-     * older completed rounds are guaranteed-paired by the agent loop and emitted as-is, so the cost does
-     * not grow with the accumulated conversation.
-     *
-     * <p>Implemented as a single O(n) pass tracking the assistant tool ids still awaiting a
-     * contiguous result ({@code pending}): a {@code tool} result matches while its id is pending
-     * (and is then consumed), while any other role - a plain user text, or a new assistant reply -
-     * invalidates all still-pending ids at once (the pairing is broken for good). The pending set is
-     * bounded ({@link #MAX_PENDING_TOOL_IDS}) so a single corrupted/oversized assistant can never
-     * blow it up: ids beyond the bound are simply never considered matched (safe - they get dropped
-     * as unmatched).
-     *
-     * @param messages the neutral messages to inspect, may be {@code null}.
-     * @return the set of tool call ids that are validly paired on the wire.
-     */
-    private static Set<String> matchedToolCallIds(final List<LlmMessage> messages) {
-        if (messages == null) {
-            return Set.of();
-        }
-        final var matched = new HashSet<String>();
-        final var pending = new HashSet<String>();
-        for (final var message : messages) {
-            if ("assistant".equals(message.role())) {
-                // a new assistant reply ("generation" after the tool round) breaks any pairing still
-                // awaiting a result from a previous round, before registering this round's own calls
-                pending.clear();
-                if (message.toolCalls() != null) {
-                    for (final var call : message.toolCalls()) {
-                        if (call != null && call.id() != null && pending.size() < MAX_PENDING_TOOL_IDS) {
-                            pending.add(call.id());
-                        }
-                    }
-                }
-            } else if ("tool".equals(message.role())) {
-                if (message.toolCallId() != null && pending.remove(message.toolCallId())) {
-                    matched.add(message.toolCallId());
-                }
-            } else {
-                // a plain user/system/assistant text message interposed between an assistant tool_use
-                // and its results breaks the pairing for every still-pending id
-                pending.clear();
-            }
-        }
-        return matched;
-    }
-
-    /** Upper bound on the assistant tool call ids tracked as awaiting a contiguous result. */
-    private static final int MAX_PENDING_TOOL_IDS = 256;
 
     /**
      * Anthropic caches the tools + system prefix: sending the system prompt as content blocks with an
