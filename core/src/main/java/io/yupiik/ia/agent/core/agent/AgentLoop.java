@@ -36,7 +36,6 @@ import io.yupiik.ia.agent.core.events.hooks.EventContextBuilder;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
-import io.yupiik.ia.agent.core.llm.LlmWire;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
@@ -60,7 +59,6 @@ import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.llm.client.ContextWindowExceededException;
 import io.yupiik.llm.client.LlmHttpFailureException;
-import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningDelta;
@@ -112,12 +110,11 @@ public class AgentLoop {
     private static final String REDUNDANT_MARKER = "\u0000seen:";
 
     /**
-     * Prefix of the synthetic lost-result marker {@link #repairInterruptedToolCalls} inserts after an
-     * assistant tool call whose contiguous result never landed. Used to detect an already-healed history so
-     * the same id is not given a second marker (the loop-entry repair runs before the first request, and a
-     * post-400 repair re-runs over the same, now-healed, list).
+     * Upper bound on the assistant tool call ids a single block can carry before {@link
+     * #repairInterruptedToolCalls} stops tracking them: beyond this a corrupted/oversized assistant block
+     * is impossible to heal anyway, so the repair conservatively leaves it untouched rather than blowing up.
      */
-    private static final String INTERRUPTED_TOOL_RESULT_MARKER_PREFIX = "[tool result lost:";
+    private static final int MAX_REPAIR_PENDING_TOOL_IDS = 256;
 
     /**
      * One-shot nudge injected before the exploration-plateau hard stop (plateauFeedback nudge_1 /
@@ -3729,10 +3726,14 @@ public class AgentLoop {
      * with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'"). A synthetic
      * lost-result marker is inserted IN-MEMORY immediately after each affected assistant message - so
      * whatever follows (a freshly appended user prompt, later turns) never sits between the {@code tool_use}
-     * and its result on the wire - and persisted via the append-only session store. Idempotent: an id is
-     * skipped when it already carries a CONTIGUOUS {@code tool}-role result (mirroring the wire backstop's
-     * {@code matchedToolCallIds} rule) or an earlier synthetic lost-result marker, so a repaired history is
-     * not re-repaired.
+     * and its result on the wire - and persisted via the append-only session store.
+     *
+     * <p>The heal is per-ASSISTANT-OCCURRENCE: each {@code tool_calls} block is checked against the
+     * contiguous run of {@code tool} messages immediately following it, and a marker is placed right after
+     * the block for every one of ITS OWN calls not answered by that run. A stray/orphan marker (or result)
+     * that exists elsewhere for the same id does NOT suppress the heal - only a contiguously-following
+     * result of that very block does. This is idempotent: a healed block (its calls already answered by the
+     * immediately-following run, including a previously-inserted marker) is never re-healed.
      *
      * @param sessionId the session being resumed.
      * @param messages the working conversation, rebuilt per {@code loop()}, repaired in place.
@@ -3743,55 +3744,61 @@ public class AgentLoop {
         }
         // An assistant tool call is only "answered" when its result arrives CONTIGUOUSLY (the very next
         // tool messages, before any non-tool message) - the exact rule the OpenAI/Azure and Anthropic wire
-        // backstops and their strict validators enforce. A result that landed ANYWHERE in history but is
-        // separated from its assistant call by an interposed user/notice/system message does NOT satisfy
-        // the contiguity rule and must still get a synthetic lost-result marker. Using "answered anywhere"
-        // (the pre-fix behavior) let exactly that non-contiguous pairing survive every guard and reach
-        // Azure, which rejects it with "an assistant message with 'tool_calls' must be followed by tool
-        // messages responding to each 'tool_call_id'".
+        // backstops and their strict validators enforce. A result (or a lost-result marker) that landed
+        // ANYWHERE in history but is separated from its assistant call by an interposed assistant/user/
+        // notice message does NOT satisfy the contiguity rule and must get a synthetic lost-result marker
+        // placed IMMEDIATELY after that assistant block. Using "answered anywhere" (the pre-fix behavior)
+        // - or skipping an id merely because a marker for it exists somewhere non-contiguously - let the
+        // broken pairing survive every guard and reach Azure, which rejects it with "an assistant message
+        // with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'".
         //
-        // Delegate the contiguous-rule computation to LlmMessage.unmatchedToolCallIds, the single source
-        // of truth shared with the wire backstops, so the history repair can never disagree with them about
-        // what counts as "paired".
-        final var lost = LlmMessage.unmatchedToolCallIds(
-                messages.stream().map(LlmWire::toLlmMessage).collect(java.util.stream.Collectors.toList()));
-        // an id that already carries a synthetic lost-result marker (from an earlier repair in this same
-        // history, e.g. the loop-entry repair persisted it before a second post-400 repair) must not get a
-        // second marker: re-inserting would override the prior marker and duplicate the persisted entry.
-        final var alreadyMarked = new HashSet<String>();
-        for (final var message : messages) {
-            if ("tool".equals(message.role())
-                    && message.toolCallId() != null
-                    && message.content() instanceof final String content
-                    && content.startsWith(INTERRUPTED_TOOL_RESULT_MARKER_PREFIX)) {
-                alreadyMarked.add(message.toolCallId());
-            }
-        }
+        // The repair is per-OCCURRENCE, not per-id: each assistant tool_calls block is inspected against
+        // the contiguous run of tool messages that immediately follow it. A block whose own calls are not
+        // all cleared by that run is re-emitted with a lost-result marker right after it (so whatever
+        // interposes never sits between the call and its response on the wire). Stray/orphan markers that
+        // exist elsewhere for the same id no longer suppress this - only a genuinely contiguous result does.
         final var repaired = new ArrayList<Message>(messages.size() + 8);
         final var persistedIds = new LinkedHashSet<String>();
         final var text = "[tool result lost: the model's tool call was interrupted before it could complete this turn]";
-        for (final var message : messages) {
+        for (var i = 0; i < messages.size(); i++) {
+            final var message = messages.get(i);
             repaired.add(message);
             if (!"assistant".equals(message.role()) || message.toolCalls() == null) {
                 continue;
             }
+            final var needed = new LinkedHashSet<String>();
             for (final var call : message.toolCalls()) {
-                if (call == null || call.id() == null) {
-                    continue;
+                if (call != null && call.id() != null && needed.size() < MAX_REPAIR_PENDING_TOOL_IDS) {
+                    needed.add(call.id());
                 }
-                if (!lost.contains(call.id()) || alreadyMarked.contains(call.id())) {
-                    continue;
+            }
+            if (needed.isEmpty()) {
+                continue;
+            }
+            // scan the contiguous run of tool messages immediately following this assistant block; any
+            // non-tool message (a newer assistant reply, a user prompt, a notice) breaks the pairing for
+            // every still-needing id at once.
+            for (var j = i + 1; j < messages.size(); j++) {
+                final var after = messages.get(j);
+                if (!"tool".equals(after.role()) || after.toolCallId() == null) {
+                    break;
                 }
-                // the result never landed contiguously: heal by inserting an honest lost-result marker
-                // immediately after this assistant call (and thus before any interposed message), and drop
-                // the id so a later duplicate assistant call of the same id is not answered twice.
-                alreadyMarked.add(call.id());
-                repaired.add(Message.tool(call.id(), text, true));
-                if (persistedIds.add(call.id())) {
+                if (needed.remove(after.toolCallId()) && needed.isEmpty()) {
+                    break;
+                }
+            }
+            if (needed.isEmpty()) {
+                continue; // every call of this block is answered by a contiguous tool result
+            }
+            // this block's calls never landed contiguously: insert an honest lost-result marker for each
+            // still-unanswered id immediately after the block (before any interposed message). Deduped by
+            // persistedIds so a marker persisted in an earlier repair is not appended again.
+            for (final var id : needed) {
+                repaired.add(Message.tool(id, text, true));
+                if (persistedIds.add(id)) {
                     sessionStore.append(
                             sessionId,
-                            SessionEntry.of(
-                                    clock.millis(), "tool", text, null, call.id(), null, Map.of("is_error", true)));
+                            SessionEntry.of(clock.millis(), "tool", text, null, id, null, Map.of("is_error", true)));
                 }
             }
         }

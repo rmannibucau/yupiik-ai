@@ -5431,6 +5431,79 @@ class AgentLoopTest {
     }
 
     @Test
+    void orphanMarkerNotInContiguousPositionIsRepositionedOnResume() {
+        // Regression from a real resumed session (s1a167cd41db): the persisted history had TWO consecutive
+        // assistant tool_use blocks - A(edit_file call_1) followed by a second assistant B(read call_2), a
+        // tool result for B(call_2), and only THEN a lost-result marker for A(call_1). So call_1's response
+        // existed but was NOT contiguous to its assistant A (B + call_2's result interposed), which Azure
+        // rejects ("tool_calls must be followed by tool messages responding to each 'tool_call_id'"). The
+        // pre-fix repair saw a marker for call_1 somewhere in history and (fooled by the per-id guard)
+        // skipped healing, leaving the non-contiguous pair to reach Azure. The fix must reposition the
+        // marker to sit immediately after assistant A.
+        final var requests = new ArrayList<List<Message>>();
+        final var persisted = new ArrayList<SessionEntry>();
+        final var replied = new ArrayDeque<ScriptedReply>(List.of(new ScriptedReply("done", "stop", false)));
+        final var client = chatClient(replied, requests);
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                persisted.add(entry);
+            }
+        };
+        final var history = new ArrayList<Message>();
+        // A: edit_file call_1
+        history.add(new Message(
+                "assistant",
+                null,
+                null,
+                List.of(new ToolCall("call_1", "function", new ToolCall.FunctionCall("edit_file", "{}"), 0)),
+                null,
+                null));
+        // B: a second assistant block interposed before call_1's response
+        history.add(new Message(
+                "assistant",
+                null,
+                null,
+                List.of(new ToolCall("call_2", "function", new ToolCall.FunctionCall("read", "{}"), 0)),
+                null,
+                null));
+        // call_2's result lands contiguously after B
+        history.add(new Message("tool", "read output", null, null, "call_2", null));
+        // call_1's lost-result marker exists but is NOT contiguous to its assistant A
+        history.add(
+                new Message("tool", "[tool result lost: interrupted]", null, null, "call_1", Map.of("is_error", true)));
+        final var loop = loop(
+                client,
+                new TodoStore() {},
+                configuration(true, Map.of("yca.llm.streamRetriesMaxAttempts", "0")),
+                noPruningManager(),
+                store,
+                null);
+        final var result = loop.run("do it", null, "s1", history, () -> false);
+
+        assertEquals("done", result, "the non-contiguous marker must be repositioned and the turn completes");
+        assertEquals(1, requests.size(), "the healed history must succeed on the first request");
+        final var request = requests.getFirst();
+        assertAllToolCallsAreAnsweredByContiguousResults(request);
+        // assistant A (call_1) must be immediately followed by a tool message answering call_1
+        final var aIndex = indexOfAssistantCall(request, "call_1");
+        assertTrue(aIndex >= 0, "assistant A carrying call_1 must be present: " + request);
+        assertTrue(aIndex + 1 < request.size(), "call_1 must have an immediately-following result: " + request);
+        assertEquals("tool", request.get(aIndex + 1).role());
+        assertEquals("call_1", request.get(aIndex + 1).toolCallId());
+        assertTrue(
+                String.valueOf(request.get(aIndex + 1).content()).contains("tool result lost"),
+                "call_1's immediate result must be the lost-result marker: " + request);
+        // the same id must not be persisted twice
+        assertEquals(
+                1,
+                persisted.stream()
+                        .filter(e -> "tool".equals(e.role()) && "call_1".equals(e.toolCallId()))
+                        .count(),
+                "call_1 must be healed with exactly one persisted lost-result entry: " + persisted);
+    }
+
+    @Test
     void nonTool400IsNotRepairedOrRetried() {
         // a 400 unrelated to tool pairing (eg. auth, schema, token budget) must NOT trigger the
         // tool-pairing repair/retry loop: it surfaces as an error so the real cause is never masked.
