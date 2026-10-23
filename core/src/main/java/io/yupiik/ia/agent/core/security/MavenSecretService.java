@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.crypto.Cipher;
 import javax.crypto.SecretKeyFactory;
@@ -124,6 +125,102 @@ public class MavenSecretService {
     /** True for a Maven 3 legacy ciphertext. */
     public static boolean isLegacyCiphertext(final String value) {
         return value != null && LEGACY_CIPHERTEXT.matcher(value).matches();
+    }
+
+    /**
+     * Resolves the {@code <password>} of the settings.xml {@code <server>} whose {@code <id>} matches
+     * {@code serverId}, ready to be used as a credential. The raw stored value is returned as-is when it
+     * is clear text or a Maven {@code ${env.X}} / {@code ${sys.Y}} placeholder, and a Maven 4 ciphertext
+     * is decrypted in memory against the master dispatcher resolved from the settings-security file
+     * alongside the settings file.
+     *
+     * <p>A Maven 3 legacy {@code {base64}} password cannot be recovered (MNG-8379 deems it
+     * obfuscation-grade and Maven 4 refuses to decrypt it), so its use here is a hard error pointing at
+     * {@code mvnenc}: silently sending the ciphertext to a gateway would leak a useless value.</p>
+     *
+     * @param settingsXml path to settings.xml
+     * @param serverId the server id to look up
+     * @return the resolved server password, never null
+     * @throws IllegalArgumentException when the server or its password is absent or unresolved
+     */
+    public String resolveServerPassword(final Path settingsXml, final String serverId) {
+        if (settingsXml == null || serverId == null || serverId.isBlank()) {
+            throw new IllegalArgumentException("A settings.xml path and a server id are required");
+        }
+        final var xml = read(settingsXml);
+        if (xml == null) {
+            throw new IllegalArgumentException("Cannot read Maven settings " + settingsXml);
+        }
+        final var password = findServerPassword(xml, serverId);
+        if (password == null) {
+            throw new IllegalArgumentException(
+                    "No <server><id>" + serverId + "</id></server> entry (or no <password>) found in " + settingsXml);
+        }
+        if (isLegacyCiphertext(password)) {
+            // Maven 4 and plexus-sec-dispatcher refuse legacy ciphertext; surface it loudly rather than
+            // sending an encrypted blob to a gateway expecting the real credential.
+            throw new IllegalArgumentException(
+                    "Server '" + serverId + "' uses a Maven 3 legacy {base64} password which cannot be "
+                            + "decrypted; re-encrypt it with 'mvnenc' first so {{mavenServerPassword}} can "
+                            + "decipher it in memory");
+        }
+        if (!isMaven4Ciphertext(password)) {
+            return resolvePlaceholders(password);
+        }
+        final var secretConfig = secretConfigFromSettings(settingsXml);
+        final var masterSecret = secretConfig == null ? null : masterSecret(secretConfig);
+        if (masterSecret == null) {
+            throw new IllegalArgumentException("Cannot decipher server '" + serverId
+                    + "': no resolvable master secret found (" + "settings-security4.xml with a 'source' dispatcher)");
+        }
+        final var matcher = MAVEN4_CIPHERTEXT.matcher(password);
+        if (!matcher.matches()) {
+            throw new IllegalArgumentException("Malformed Maven 4 ciphertext for server '" + serverId + "'");
+        }
+        return resolvePlaceholders(decryptMaven4(matcher.group(2), masterSecret));
+    }
+
+    /**
+     * Expands Maven's property placeholders used in server passwords: {@code ${env.NAME}} and
+     * {@code ${sys.NAME}} (dot form; the plexus-style {@code ${env:NAME}} / {@code ${sys:NAME}} is also
+     * accepted) for an environment variable / system property. An unresolved name expands to the empty
+     * string; anything else is returned verbatim.
+     */
+    private static String resolvePlaceholders(final String value) {
+        if (value == null || value.isBlank()) {
+            return value;
+        }
+        // capture the source (env|sys) and the name, tolerating a '.' or ':' separator
+        final var placeholder = Pattern.compile("\\$\\{(env|sys)[.:]([^}]+)}");
+        final var matcher = placeholder.matcher(value);
+        final var sb = new StringBuilder();
+        while (matcher.find()) {
+            final var source = matcher.group(1);
+            final var name = matcher.group(2);
+            final var resolved = "env".equals(source) ? System.getenv(name) : System.getProperty(name);
+            matcher.appendReplacement(sb, Matcher.quoteReplacement(resolved == null ? "" : resolved));
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
+    }
+
+    /** Finds the {@code <password>} of the {@code <server><id>serverId</id>...} entry in the settings XML. */
+    private static String findServerPassword(final String xml, final String serverId) {
+        try {
+            final var dbf = DocumentBuilderFactory.newInstance();
+            dbf.setNamespaceAware(false);
+            final var doc = dbf.newDocumentBuilder()
+                    .parse(new java.io.ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+            for (final var server : descendantElements(doc.getDocumentElement(), "server")) {
+                final var id = childText(server, "id");
+                if (serverId.equals(id)) {
+                    return childText(server, "password");
+                }
+            }
+        } catch (final Exception e) {
+            throw new IllegalArgumentException("Invalid Maven settings XML: " + e.getMessage(), e);
+        }
+        return null;
     }
 
     /* ---------------------------------------------------------------- */
@@ -255,16 +352,6 @@ public class MavenSecretService {
             }
         }
         return null;
-    }
-
-    private static List<org.w3c.dom.Node> childElements(final org.w3c.dom.Node parent, final String tag) {
-        final var out = new ArrayList<org.w3c.dom.Node>();
-        for (var child = parent.getFirstChild(); child != null; child = child.getNextSibling()) {
-            if (child.getNodeType() == org.w3c.dom.Node.ELEMENT_NODE && tag.equals(child.getNodeName())) {
-                out.add(child);
-            }
-        }
-        return out;
     }
 
     /** All descendant elements with the given tag (depth-first), used for the nested properties block. */

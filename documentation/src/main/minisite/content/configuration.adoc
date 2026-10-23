@@ -126,6 +126,11 @@ defaults to `true`), and every remaining argument is the command line (command
 then argv). A non-zero exit status fails the render: the header is not sent
 and the error surfaces loudly.
 
+To build a header from a credential stored in your Maven `settings.xml` (clear,
+`${env.VAR}` / `${sys.NAME}`, or a Maven 4 ciphertext deciphered in memory), use
+the `{{mavenServerPassword "serverId"}}` helper - see
+xref:features/custom-headers.adoc#the-mavenServerPassword-helper[Custom headers].
+
 == Codex (ChatGPT subscription) providers
 
 Codex-flavored providers talk to OpenAI's ChatGPT subscription backend

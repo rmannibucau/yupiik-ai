@@ -23,11 +23,11 @@ import java.nio.file.Path;
  * directory, expanding a leading {@code ~/} to the user home. Shared by the {@link
  * SecretValuesContributor}s so path handling is not duplicated.
  */
-final class SecretPaths {
+public final class SecretPaths {
 
     private SecretPaths() {}
 
-    static Path resolve(final CodingAgentConfiguration configuration, final String value) {
+    public static Path resolve(final CodingAgentConfiguration configuration, final String value) {
         if (value == null || value.isBlank()) {
             return null;
         }

@@ -90,3 +90,109 @@ The header is rendered at each request, so a helper whose value rotates (a lease
 or a short-lived token) stays fresh without manual reconfiguration. A dynamic
 header named `authorization` overrides the default `apiKey` header for that
 provider.
+
+## The `mavenServerPassword` helper
+
+yca ships a built-in helper, `{{mavenServerPassword "serverId"}}`, that resolves a
+credential from your Maven `settings.xml` and uses it to build a request header.
+It reuses the Maven secret deciphering already used for wire redaction, so no
+password is ever written back to a config file.
+
+The server id is looked up in the configured Maven settings file
+(`yca.secrets.maven.settings`, default `~/.m2/settings.xml`). The stored password
+is used as-is:
+
+* for clear text;
+* for a Maven `${env.VAR}` or `${sys.NAME}` placeholder, which is resolved to the
+  environment variable / system property at render time;
+* for a Maven 4 ciphertext (`{[...]base64}`), which is deciphered in memory
+  against the master dispatcher read from the
+  `settings-security4.xml` sitting next to the settings file.
+
+A Maven 3 legacy `{base64}` password cannot be recovered (Maven 4 refuses to
+decrypt it - see MNG-8379), so using it fails the render with a hint to
+re-encrypt with `mvnenc`. A missing server or password also fails the render, so
+a misconfiguration surfaces loudly instead of silently sending an empty header.
+
+Typical usage to authenticate against a gateway that accepts a Maven-server
+password as a bearer token:
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "gateway",
+        "baseUrl": "https://gateway.example.com/v1",
+        "api": "completions",
+        "dynamicHeaders": {
+          "authorization": "Bearer {{mavenServerPassword \"central\"}}"
+        }
+      }
+    ]
+  }
+}
+----
+
+### Point it at an isolated, fake Maven tree
+
+You do not need to reuse your real `~/.m2`. To keep gateway credentials out of
+your everyday Maven setup, point the helper (and the redaction) at a dedicated
+secrets folder under the yca home:
+
+[source,json]
+----
+{
+  "yca": {
+    "secrets": {
+      "maven": {
+        "settings": "~/.yupiik/coding-agent/secrets/settings.xml",
+        "masterSecret": "~/.yupiik/coding-agent/secrets/settings-security4.xml"
+      }
+    }
+  }
+}
+----
+
+This folder is a miniature Maven tree (a `.m2` clone), with just enough for the
+deciphering step. Because `mvnenc` writes its configuration to
+`<maven.user.conf>/settings-security4.xml`, point `maven.user.conf` at this
+folder so the tooling and yca both agree on the same master file:
+
+[source,bash]
+----
+export MAVEN_USER_CONF="$HOME/.yupiik/coding-agent/secrets"
+mkdir -p "$MAVEN_USER_CONF"
+mvnenc init   # interactive: choose a master dispatcher and source, keep the master secret safe
+mvnenc diag   # sanity-check the generated settings-security4.xml
+mvnenc encrypt  # enter the gateway password; prints the {[...base64]} value
+----
+
+Take the `{[...]base64}` value printed by `mvnenc encrypt` and write the
+`settings.xml`:
+
+[source,xml]
+----
+<settings>
+  <servers>
+    <server>
+      <id>central</id>
+      <username>gateway-user</username>
+      <password>{[name=master,cipher=AES/GCM/NoPadding,version=4.0]...}</password>
+    </server>
+  </servers>
+</settings>
+----
+
+The master `source` configured by `mvnenc init` is resolved at decipher time from
+the `settings-security4.xml` next to the settings file - as an `env:VAR`,
+`sysprop:NAME`, `property:NAME` or a plaintext file path. Because the folder is
+separate from your real `.m2`, a master used for gateway headers never leaks into
+your build-time Maven credentials. Keep the master source (and any plaintext
+master file) out of version control and restrict its permissions; the helper and
+the redactor read it only to decipher in memory and never persist the plaintext.
+
+The same `yca.secrets.maven.*` settings feed the wire redactor
+(xref:configuration.adoc[Configuration]), so the ciphertext and the deciphered
+value are also scrubbed from any conversation context that might mention them.
