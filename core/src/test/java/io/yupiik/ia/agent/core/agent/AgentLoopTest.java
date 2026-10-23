@@ -58,6 +58,7 @@ import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.llm.client.LlmHttpFailureException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
@@ -5253,6 +5254,70 @@ class AgentLoopTest {
                         + events.stream()
                                 .filter(AgentEvent.Notice.class::isInstance)
                                 .toList());
+    }
+
+    @Test
+    void toolPairing400DoesNotRetryStormUnderDefaultStreamRetryBudget() {
+        // Regression: previously a tool-pairing 400 only reached the AgentLoop repair after ModelRoundProcessor
+        // had burned its whole generic retry budget re-sending the SAME broken history ("retrying (1/3)",
+        // "(2/3)", "(3/3)") with backoff sleeps. With a positive streamRetriesMaxAttempts the pairing 400 must
+        // short-circuit on the first attempt, so exactly two requests reach the client: the failing 400 and the
+        // single restored retry. Distinguishes this from the existing toolPairing400IsRepairedAndRetriedOnce,
+        // which forces streamRetriesMaxAttempts=0 to bypass the retry storm.
+        final var requests = new ArrayList<List<Message>>();
+        // Boolean gate: null = not yet attempted, FALSE = the pairing-400 was thrown, TRUE = answered.
+        final var replied = new AtomicReference<Boolean>(null);
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                requests.add(List.copyOf(request.messages()));
+                if (replied.compareAndSet(null, Boolean.FALSE)) {
+                    throw new LlmHttpFailureException(
+                            400,
+                            "{\"detail\":\"litellm.BadRequestError: AzureException BadRequestError - An assistant "
+                                    + "message with 'tool_calls' must be followed by tool messages responding to "
+                                    + "each 'tool_call_id'. The following tool_call_ids did not have response "
+                                    + "messages: call_1.\"}",
+                            null);
+                }
+                replied.set(Boolean.TRUE);
+                return new ScriptedReply("done", "stop", false).toMessage();
+            }
+        };
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                // nothing
+            }
+        };
+        // a previous turn ended mid-tool, leaving assistant tool call call_1 with no result in history
+        final var history = new ArrayList<Message>();
+        history.add(new Message(
+                "assistant",
+                null,
+                null,
+                List.of(new ToolCall("call_1", "function", new ToolCall.FunctionCall("grep", "{}"), 0)),
+                null,
+                null));
+        // positive streamRetriesMaxAttempts on purpose: the pre-fix code would otherwise storm (1/3, 2/3, 3/3)
+        // and only repair after exhausting the budget.
+        final var loop = loop(
+                client,
+                new TodoStore() {},
+                configuration(true, Map.of("yca.llm.streamRetriesMaxAttempts", "2")),
+                noPruningManager(),
+                store,
+                null);
+        final var result = loop.run("do it", null, "s1", history, () -> false);
+
+        assertEquals("done", result, "the repaired retry must complete the turn instead of failing it");
+        assertEquals(2, requests.size(), "pairing 400 must short-circuit and retry exactly once, no (1/N) storm");
+        assertAllToolCallsAreAnsweredByContiguousResults(requests.get(1));
     }
 
     @Test

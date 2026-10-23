@@ -1566,6 +1566,14 @@ public class AgentLoop {
                                 }
 
                                 @Override
+                                public void toolCallPairingRejected() {
+                                    // Signalled by ModelRoundProcessor when it short-circuits a tool-pairing 400
+                                    // (instead of wasting the generic retry budget on the same broken history). The
+                                    // notice and the actual history repair are emitted/done by the catch(IOException)
+                                    // below, which runs on the rethrown 400 and stays the single emission point.
+                                }
+
+                                @Override
                                 public void paused(final long millis) {
                                     turnState.llmPausedMs += millis;
                                 }
@@ -1607,7 +1615,9 @@ public class AgentLoop {
                     // "sometimes" when an interrupted/cancelled tool round left its result unlanded. Heal the
                     // in-loop history (insert synthetic lost-result markers, exactly like the loop-entry
                     // repair) and retry once; the model then sees an honest interrupted note instead of the
-                    // turn dying. Bounded to one repair per turn so a non-tool 400 can never spin.
+                    // turn dying. Bounded to one repair per turn so a non-tool 400 can never spin. The
+                    // signature check is owned by ModelRoundProcessor (single source of truth) and, for the
+                    // streaming path, already short-circuits the generic retry budget before it reaches here.
                     if (!toolPairingRepaired && isToolPairingRejection(e)) {
                         toolPairingRepaired = true;
                         emit(
@@ -3672,9 +3682,12 @@ public class AgentLoop {
     /**
      * Whether a request failure is a strict tool-pairing rejection (Azure / litellm "An assistant message
      * with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The following
-     * tool_call_ids did not have response messages: ..."). Mirrors {@link ChatClient}'s 400 body-marker
-     * idiom: match the {@code LLM request failed (400)} prefix on the message, then narrow on the pairing
-     * keywords so unrelated 400s (auth, schema, token budget) are never misclassified.
+     * tool_call_ids did not have response messages: ..."). This is the caller-side (history-owner) companion
+     * to {@link ModelRoundProcessor#isToolCallPairingRejected(LlmHttpFailureException)}, which owns the
+     * retry-policy decision. Keep the {@code LLM request failed (400)} prefix gate on the message so a
+     * non-400 transport failure is never misclassified, then delegate the signature narrowing to the shared
+     * matcher for the http-failure body, falling back to a message-only check when the failure does not carry
+     * a body.
      *
      * @param failure the thrown low-level request failure (the 400 propagates to the loop as an
      *     {@link IOException}, possibly a {@link LlmHttpFailureException} carrying the provider body).
@@ -3685,13 +3698,16 @@ public class AgentLoop {
         if (message == null || !message.startsWith("LLM request failed (400)")) {
             return false;
         }
-        final var lower = (message + '\n' + (failure instanceof LlmHttpFailureException f ? f.body() : ""))
-                .toLowerCase(Locale.ROOT);
-        return lower.contains("tool_calls")
-                && (lower.contains("must be followed")
-                        || lower.contains("no response message")
-                        || lower.contains("did not have")
-                        || lower.contains("without tool messages"));
+        if (failure instanceof LlmHttpFailureException httpFailure
+                && ModelRoundProcessor.isToolCallPairingRejected(httpFailure)) {
+            return true;
+        }
+        final var lowerTxt = message.toLowerCase(Locale.ROOT);
+        return lowerTxt.contains("tool_calls")
+                && (lowerTxt.contains("must be followed")
+                        || lowerTxt.contains("no response message")
+                        || lowerTxt.contains("did not have")
+                        || lowerTxt.contains("without tool messages"));
     }
 
     /**
