@@ -61,13 +61,15 @@ public record ModelsResponse(List<Model> data) {
          * can be far smaller than {@code n_ctx_train}; when only the training window is present it
          * is still used as a best-effort upper bound rather than assuming a huge default.
          * Anthropic exposes it as {@code max_input_tokens}. Detected values are totals
-         * (prompt + completion combined).
+         * (prompt + completion combined). Gateways that nest the window under a provider
+         * object (e.g. {@code top_provider} on OpenRouter/Kilo) are read as a fallback.
          */
         public Integer contextWindow() {
             final var primary = firstPositive(
                     "/context_window",
                     "/model_context_window",
                     "/context_length",
+                    "/top_provider/context_length",
                     "/max_model_len",
                     "/max_input_tokens",
                     "/meta/n_ctx");
@@ -82,9 +84,16 @@ public record ModelsResponse(List<Model> data) {
          * from the vendor extensions, or null when unknown. Anthropic exposes it as
          * {@code max_tokens}; OpenAI models occasionally set {@code max_completion_tokens};
          * sglang gateways (and some vLLM deploys) use {@code max_output_length}. All are token counts.
+         * Gateways that nest the cap under {@code top_provider.max_completion_tokens}
+         * (Kilo/OpenRouter style) are read as a fallback.
          */
         public Integer maxTokens() {
-            return firstPositive("/max_tokens", "/max_completion_tokens", "/output_token_limit", "/max_output_length");
+            return firstPositive(
+                    "/max_tokens",
+                    "/max_completion_tokens",
+                    "/top_provider/max_completion_tokens",
+                    "/output_token_limit",
+                    "/max_output_length");
         }
 
         private Integer firstPositive(final String... pointers) {

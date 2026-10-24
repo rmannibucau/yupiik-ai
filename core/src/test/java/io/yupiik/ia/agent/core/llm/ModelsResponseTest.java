@@ -70,4 +70,22 @@ class ModelsResponseTest {
         assertEquals(1_000_000, res.data().get(0).contextWindow(), "context_length is a token total window");
         assertEquals(393_216, res.data().get(0).maxTokens(), "max_output_length is a token output cap");
     }
+
+    @Test
+    void topProviderNestedWindowAndMaxTokensAreRead(final JsonMapper mapper) {
+        final var res = mapper.fromString(
+                ModelsResponse.class,
+                "{\"data\":[{\"id\":\"kilo-auto/free\",\"owned_by\":\"kilo\",\"context_length\":256000,\"top_provider\":{\"context_length\":256000,\"max_completion_tokens\":32768}}]}");
+        assertEquals(256_000, res.data().get(0).contextWindow(), "top_provider.context_length is a token total window");
+        assertEquals(32_768, res.data().get(0).maxTokens(), "top_provider.max_completion_tokens is a token output cap");
+    }
+
+    @Test
+    void topProviderIsUsedWhenNoFlatVendorValueExists(final JsonMapper mapper) {
+        final var noFlat = mapper.fromString(
+                ModelsResponse.class,
+                "{\"data\":[{\"id\":\"m\",\"owned_by\":\"x\",\"top_provider\":{\"context_length\":131072,\"max_completion_tokens\":65536}}]}");
+        assertEquals(131_072, noFlat.data().get(0).contextWindow(), "falls back to top_provider.context_length");
+        assertEquals(65_536, noFlat.data().get(0).maxTokens(), "falls back to top_provider.max_completion_tokens");
+    }
 }
