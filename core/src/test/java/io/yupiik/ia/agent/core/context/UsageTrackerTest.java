@@ -300,7 +300,7 @@ class UsageTrackerTest {
     }
 
     @Test
-    void equalLiteLLMCapsAreNotATrustedPartition() throws IOException {
+    void equalLiteLLMCapsAreNotATrustedPartition() {
         // the user's /v1/models payload: max_input_tokens == max_output_tokens per model
         modelsBody = """
                 {"data":[
@@ -308,6 +308,13 @@ class UsageTrackerTest {
                  {"id":"gemma4-26b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":131072,"max_output_tokens":131072},
                  {"id":"qwen3-8b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":40960,"max_output_tokens":40960}
                 ],"object":"list"}""";
+        // the equal caps are per-side limits, not a partition: the conservative reserve applies
+        assertLiteLLMUsable("qwen3.8-27b", 131_072, 111_072);
+        assertLiteLLMUsable("gemma4-26b", 131_072, 111_072);
+        assertLiteLLMUsable("qwen3-8b", 40_960, 30_720);
+    }
+
+    private void assertLiteLLMUsable(final String model, final int window, final int usable) {
         final var entries = new HashMap<String, String>();
         entries.put("yca.storageHome", storageHome.toString());
         entries.put("yca.provider.providers.length", "1");
@@ -316,7 +323,7 @@ class UsageTrackerTest {
                 "yca.provider.providers.0.baseUrl",
                 "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions");
         entries.put("yca.provider.providers.0.apiKey", "test-key");
-        entries.put("yca.provider.providers.0.model", "qwen3.8-27b");
+        entries.put("yca.provider.providers.0.model", model);
         entries.put("yca.provider.providers.0.api", "auto");
         entries.put("yca.provider.providers.0.timeoutSeconds", "5");
         final var cfg = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
@@ -325,10 +332,9 @@ class UsageTrackerTest {
         try {
             final var tracker =
                     new UsageTracker(pm, c, new ContextWindowCache(cfg, mapper, Clock.systemUTC()), Clock.systemUTC());
-            assertEquals(131_072, tracker.contextWindowTokenCount().value());
-            assertEquals(131_072, tracker.declaredOutputTokensTokenCount().value());
-            // the equal caps are per-side limits, not a partition: the conservative reserve applies
-            assertEquals(111_072, tracker.usableWindow());
+            assertEquals(window, tracker.contextWindowTokenCount().value());
+            assertEquals(window, tracker.declaredOutputTokensTokenCount().value());
+            assertEquals(usable, tracker.usableWindow());
         } finally {
             c.close();
         }
