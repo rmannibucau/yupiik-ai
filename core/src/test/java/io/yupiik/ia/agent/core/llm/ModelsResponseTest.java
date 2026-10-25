@@ -44,8 +44,8 @@ class ModelsResponseTest {
                 {"models":[{"name":"qwen3.8-27b","model":"qwen3.8-27b","modified_at":"","size":"","digest":"","type":"model","description":"","tags":[""],"capabilities":["completion"],"parameters":"","details":{"parent_model":"","format":"gguf","family":"","families":[""],"parameter_size":"","quantization_level":""}}],"object":"list","data":[{"id":"qwen3.8-27b","aliases":["qwen3.8-27b"],"tags":[],"object":"model","created":1788896358,"owned_by":"llamacpp","meta":{"vocab_type":2,"n_vocab":248320,"n_ctx":196608,"n_ctx_train":262144,"n_embd":5120,"n_params":27320697856,"size":16453443584,"ftype":"Q4_K - Medium"}}]}""");
         final var window = res.data().get(0).contextWindow();
         assertEquals(196608, window.value());
-        assertFalse(window.absolute(), "meta.n_ctx is runtime metadata, not a documented hard limit");
-        assertEquals(ModelsResponse.SourceType.DETECTED_RELATIVE, window.sourceType());
+        assertTrue(window.absolute(), "meta.n_ctx is the enforced runtime KV-cache slot, a hard limit");
+        assertEquals(ModelsResponse.SourceType.DETECTED_ABSOLUTE, window.sourceType());
         assertEquals("/meta/n_ctx", window.sourcePointer());
     }
 

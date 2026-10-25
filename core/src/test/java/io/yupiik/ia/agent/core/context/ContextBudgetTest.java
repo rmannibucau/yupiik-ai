@@ -69,13 +69,17 @@ class ContextBudgetTest {
     }
 
     @Test
-    void outputCapLargerThanTheWindowIsNotATrustedPartition() {
-        // a detected window at or below the output cap is per-side (nothing reserved); a configured
-        // window is a total, so a contradictory cap falls back to the heuristic
+    void outputCapNotSmallerThanADetectedWindowIsPerSide() {
+        // a detected window at or below the output cap is per-side: nothing is reserved
         assertEquals(0, ContextBudget.outputReserve(detectedWindow(32_768), output(32_768, true)));
         assertEquals(32_768, ContextBudget.usableWindow(detectedWindow(32_768), output(32_768, true)));
         assertEquals(0, ContextBudget.outputReserve(detectedWindow(32_768), output(65_536, true)));
         assertEquals(32_768, ContextBudget.usableWindow(detectedWindow(32_768), output(65_536, true)));
+    }
+
+    @Test
+    void outputCapNotSmallerThanAConfiguredWindowFallsBackToTheHeuristic() {
+        // a configured window is always a total, so a contradictory cap falls back to the heuristic
         assertEquals(1_024, ContextBudget.outputReserve(window(4_096), output(8_192, true)));
         assertEquals(3_072, ContextBudget.usableWindow(window(4_096), output(8_192, true)));
     }

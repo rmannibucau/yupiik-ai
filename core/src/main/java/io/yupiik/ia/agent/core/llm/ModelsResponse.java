@@ -57,7 +57,7 @@ public record ModelsResponse(List<Model> data) {
         CONFIGURED,
         /** Hard limit from vendor extensions (context_window, max_input_tokens, max_tokens, max_completion_tokens, top_provider/*, max_output_tokens) */
         DETECTED_ABSOLUTE,
-        /** Runtime/training metadata that may not reflect active limits (meta.n_ctx, meta.n_ctx_train, max_output_length, output_token_limit) */
+        /** Runtime/training metadata that may not reflect active limits (meta.n_ctx_train, max_output_length, output_token_limit) */
         DETECTED_RELATIVE,
         /** Conservative fallback when nothing is known */
         AUTO_BASELINE,
@@ -89,8 +89,10 @@ public record ModelsResponse(List<Model> data) {
          * (prompt + completion combined). Gateways that nest the window under a provider
          * object (e.g. {@code top_provider} on OpenRouter/Kilo) are read as a fallback.
          *
-         * Absolute=true for documented hard limits (context_window, max_input_tokens, top_provider/context_length).
-         * Absolute=false for training/runtime metadata (meta.n_ctx, meta.n_ctx_train).
+         * Absolute=true for documented hard limits (context_window, max_input_tokens, top_provider/context_length)
+         * and for the llama.cpp runtime KV-cache slot (meta.n_ctx), which the server enforces as a hard limit.
+         * Absolute=false for training metadata (meta.n_ctx_train), which is only an upper bound and may
+         * overstate the real runtime window.
          */
         public TokenCount contextWindow() {
             // Tier 1: documented hard limits (absolute)
@@ -104,12 +106,12 @@ public record ModelsResponse(List<Model> data) {
             if (tier1 != null) {
                 return new TokenCount(tier1.value(), true, SourceType.DETECTED_ABSOLUTE, tier1.pointer());
             }
-            // Tier 2: runtime metadata (relative/estimated)
+            // Tier 2: runtime KV-cache slot (llama.cpp `-c`): a hard enforced limit, requests exceeding it reject
             final var tier2 = firstPositive("/meta/n_ctx");
             if (tier2 != null) {
-                return new TokenCount(tier2.value(), false, SourceType.DETECTED_RELATIVE, tier2.pointer());
+                return new TokenCount(tier2.value(), true, SourceType.DETECTED_ABSOLUTE, tier2.pointer());
             }
-            // Tier 3: training context only (relative/estimated)
+            // Tier 3: training context only (relative/estimated) - may overstate the effective runtime window
             final var tier3 = firstPositive("/meta/n_ctx_train");
             if (tier3 != null) {
                 return new TokenCount(tier3.value(), false, SourceType.DETECTED_RELATIVE, tier3.pointer());
