@@ -15,33 +15,18 @@
  */
 package io.yupiik.ia.agent.core.wiring;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
-import io.yupiik.fusion.framework.api.configuration.ConfigurationSource;
 import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegistration;
-import io.yupiik.fusion.framework.api.io.ReaderSupplier;
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.framework.build.api.order.Order;
-import io.yupiik.fusion.json.configuration.JsonConfigurationSource;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.UncheckedIOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.function.Function;
 
+/**
+ * Registers the CLI {@link ArgsConfigSource} prefix shortcut and the lazily-loaded global/project
+ * {@code .yca} JSON {@link io.yupiik.fusion.framework.api.configuration.ConfigurationSource}.
+ */
 @DefaultScoped
 public class YcaConfigurationProducer {
-    private static final String PREFIX = "yca.";
-    private static final String INHERIT = "$inherit";
-    private static final Function<String, String> KEY_NORMALIZER = key -> {
-        final var stripped = key.startsWith(PREFIX) ? key.substring(PREFIX.length()) : key;
-        return stripped.replace('-', '.');
-    };
-
     private final ArgsConfigSource args;
 
     public YcaConfigurationProducer(final ArgsConfigSource args) {
@@ -52,69 +37,11 @@ public class YcaConfigurationProducer {
         // first the CLI args (highest priority), wrapped so --provider-model etc. work as --yca-provider-model
         registration.addSource().accept(new YcaPrefixShortcutConfigurationSource(args));
 
-        final var configuration = registration.configuration();
-        final var source = createConfigurationSource(configuration);
-        if (source != null) {
-            registration.addSource().accept(source);
-        }
-    }
-
-    /**
-     * Builds the JSON configuration source for this invocation. When a project-local
-     * {@code .yca/configuration.json} exists it is the primary source and, if it declares
-     * {@code "$inherit": true}, is layered over the global configuration file. Otherwise the global
-     * file alone is returned (legacy behavior).
-     *
-     * @return the source to register, or {@code null} when no configuration file applies
-     */
-    private ConfigurationSource createConfigurationSource(final Configuration configuration) {
-        final var globalPath = resolveGlobalConfigurationFile(configuration);
-        final var child = loadJson(projectConfigurationFile(configuration));
-        if (child != null && "true".equals(child.get(INHERIT))) {
-            // the project file inherits the global file as a low-priority base when it exists
-            final var parent = loadJson(globalPath);
-            return parent == null ? child : new CombinedConfigurationSource(child, parent);
-        }
-        return child != null ? child : loadJson(globalPath);
-    }
-
-    /**
-     * Resolves the working-directory base for the project-local {@code .yca/configuration.json},
-     * mirroring {@link CodingAgentConfiguration#resolveWorkingDir()}: the configured
-     * {@code yca.workingDir} wins when set, otherwise the process working directory. Only the CLI
-     * source is visible here (the globals are loaded below), so the override is read from there.
-     */
-    private static Path projectConfigurationFile(final Configuration configuration) {
-        final var workingDir = configuration.get(PREFIX + "workingDir").orElse(".");
-        return Path.of(workingDir).toAbsolutePath().normalize().resolve(".yca").resolve("configuration.json");
-    }
-
-    private static Path resolveGlobalConfigurationFile(final Configuration configuration) {
-        return Path.of(configuration
-                .get(PREFIX + "configuration.json")
-                .orElseGet(YcaConfigurationProducer::defaultConfigurationFile));
-    }
-
-    private static String defaultConfigurationFile() {
-        var home = System.getProperty(PREFIX + "storage.home", System.getenv("YCA_STORAGE_HOME"));
-        if (home == null || home.isBlank()) {
-            home = System.getProperty("user.home") + "/.yupiik/coding-agent";
-        } else {
-            home = CodingAgentConfiguration.expandHome(home);
-        }
-        return Path.of(home, "configuration.json").toString();
-    }
-
-    private ConfigurationSource loadJson(final Path path) {
-        if (!Files.isRegularFile(path)) {
-            return null;
-        }
-        try (final var in = Files.newInputStream(path)) {
-            final var bytes = in.readAllBytes();
-            final ReaderSupplier supplier = () -> new InputStreamReader(new ByteArrayInputStream(bytes));
-            return new JsonConfigurationSource(supplier, KEY_NORMALIZER);
-        } catch (final IOException e) {
-            throw new UncheckedIOException("Invalid configuration file: " + path, e);
-        }
+        // The global/project .yca JSON is loaded lazily on first access: the captured registration
+        // Configuration is the live one every bean reads from, so by the time a key is requested it is
+        // fully settled (all sources registered) and the file locations are resolved through it instead
+        // of raw System.* reads. A building flag prevents the internal path lookups from re-entering this
+        // source's own build (no recursion / stack overflow).
+        registration.addSource().accept(new LazyJsonConfigurationSource(registration.configuration()));
     }
 }

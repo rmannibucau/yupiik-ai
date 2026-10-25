@@ -141,13 +141,13 @@ class TuiCommandHeadlessTest {
                 "yca.storageHome",
                 temp.resolve("home").toString(),
                 // YcaConfigurationProducer looks the file up in the configuration before falling
-                // back to the "yca.storage.home" system property, hence pointing it at a file
-                // that does not exist: this container wires the *real* agent graph, and reading
-                // the developer's ~/.yupiik/coding-agent/configuration.json would make the test
-                // call the configured provider (real tokens) and run real tools. No system
-                // property involved, and the listener registering the source below has a higher
-                // priority (Integer.MIN_VALUE) so the value is already visible when the producer
-                // asks for it.
+                // back to the resolved "yca.storage.home" (via the fusion configuration, not a system
+                // property), hence pointing it at a file that does not exist: this container wires
+                // the *real* agent graph, and reading the developer's ~/.yupiik/coding-agent/
+                // configuration.json would make the test call the configured provider (real tokens)
+                // and run real tools. No system property involved, and the listener registering the
+                // source below has a higher priority (Integer.MIN_VALUE) so the value is already
+                // visible when the producer asks for it.
                 "yca.configuration.json",
                 temp.resolve("configuration.json").toString(),
                 "yca.provider.baseUrl",

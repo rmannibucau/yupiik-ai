@@ -15,7 +15,9 @@ Configuration is resolved from, highest priority first:
 . Project-local JSON file: `./.yca/configuration.json`, looked up from the working
   directory (`yca.workingDir`, else the process working directory)
 . Global JSON file: `~/.yupiik/coding-agent/configuration.json` (override the
-  location with the `yca.configuration.json` key)
+  location with the `yca.configuration.json` key, or with the storage home
+  `yca.storage.home` system property / `YCA_STORAGE_HOME` environment variable -
+  the default is `${storageHome}/configuration.json`)
 . System properties: `yca.provider.model` style keys
 . Environment variables: `YCA_PROVIDER_MODEL` style keys (dots/hyphens become
   underscores, uppercased)
@@ -56,6 +58,21 @@ The `length`-bounded list binding drives the override semantics:
 Inheritance is single-level: a `$inherit` inside the inherited file is ignored.
 Without `$inherit` (or with `"$inherit": false`), the project file stands alone and
 the global file is not read.
+
+The global JSON config file (`configuration.json`) is looked up in this order:
+
+. the `yca.configuration.json` key (a CLI argument, system property or environment
+  variable) - an explicit full path to the file to load;
+. else the storage home, which must be provided as the `yca.storage.home` system
+  property or the `YCA_STORAGE_HOME` environment variable:
+  `${storageHome}/configuration.json`;
+. else the default `${user.home}/.yupiik/coding-agent/configuration.json`.
+
+A leading `~` in the storage home (or in `yca.configuration.json`) expands to the
+user home. In other words: to point yca at a non-default global configuration, set
+`yca.configuration.json`, or set `yca.storage.home`/`YCA_STORAGE_HOME` so the JSON
+file is resolved from it. The project-local `./.yca/configuration.json` overrides
+the global file entirely (see above) when it is present.
 
 NOTE: many repos git-ignore their `.yca` directory (this repository ignores the
 repo-root `/.yca/`), so a committed `./.yca/configuration.json` requires either

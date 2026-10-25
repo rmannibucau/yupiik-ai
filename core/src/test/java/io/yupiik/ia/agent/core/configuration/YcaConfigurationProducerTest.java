@@ -30,7 +30,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -39,6 +38,11 @@ import org.junit.jupiter.api.io.TempDir;
  * merge semantics) by invoking {@code register} directly against a captured set of added sources and
  * binding them into a real {@link CodingAgentConfiguration} with the annotation-processor-generated
  * factory (the same length-bounded binding the runtime uses).
+ *
+ * <p>The lazily-loaded JSON source resolves its file paths from the {@code Configuration} passed by
+ * {@code register} (the prefix/CLI-args source carries {@code yca.configuration.json},
+ * {@code yca.workingDir} and {@code yca.storage.home}), then its values are bound into the final
+ * configuration alongside the sources {@code register} appended.</p>
  */
 class YcaConfigurationProducerTest {
 
@@ -47,15 +51,15 @@ class YcaConfigurationProducerTest {
 
     private CodingAgentConfiguration config(final List<String> args) {
         final var producer = new YcaConfigurationProducer(new ArgsConfigSource(args));
+        final var prefixSource = new YcaPrefixShortcutConfigurationSource(new ArgsConfigSource(args));
+
         final List<ConfigurationSource> added = new ArrayList<>();
-        final Consumer<ConfigurationSource> sink = added::add;
-        final ConfigurationRegistration registration = new ConfigurationRegistration(
-                new ConfigurationImpl(List.of(new YcaPrefixShortcutConfigurationSource(new ArgsConfigSource(args)))),
-                sink);
+        final ConfigurationRegistration registration =
+                new ConfigurationRegistration(new ConfigurationImpl(List.of(prefixSource)), added::add);
         producer.register(registration);
 
         final var sources = new ArrayList<ConfigurationSource>();
-        sources.add(new YcaPrefixShortcutConfigurationSource(new ArgsConfigSource(args)));
+        sources.add(prefixSource);
         sources.addAll(added);
         final var configuration = new ConfigurationImpl(sources);
         return new CodingAgentConfiguration$FusionConfigurationFactory(configuration).get();
@@ -194,5 +198,16 @@ class YcaConfigurationProducerTest {
         final var cfg = config(
                 List.of("--yca.workingDir", customWork.toString(), "--yca.configuration.json", globalConfigPath()));
         assertEquals("proj", cfg.provider().model(), "project file must be taken from the configured working dir");
+    }
+
+    @Test
+    void defaultGlobalResolvedFromConfiguredStorageHome() throws IOException {
+        // no yca.configuration.json: the lazy source must locate the global file through the
+        // Configuration (here the CLI yca.storage.home) instead of raw System.* reads
+        final var home = temp.resolve("storage-home");
+        write(home.resolve("configuration.json"), "{\"yca\":{\"provider\":{\"model\":\"storage-home\"}}}");
+        final var cfg = config(List.of("--yca.storage.home", home.toString()));
+        assertEquals(
+                "storage-home", cfg.provider().model(), "global file must be found under the configured storage home");
     }
 }

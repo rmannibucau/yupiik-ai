@@ -165,11 +165,11 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
         final var provider = readHomeProvider();
         final var config = new LinkedHashMap<String, String>();
         config.put("yca.storageHome", storageHome.toString());
-        // YcaConfigurationProducer looks this file up before falling back to the "yca.storage.home"
-        // system property: pointing it at a file that does not exist keeps the user home
-        // configuration out of the benchmark, the provider settings being injected explicitly
-        // above (readHomeProvider). Without it, the home file would be registered first and its
-        // keys would win over this map.
+        // YcaConfigurationProducer looks this file up before falling back to the resolved
+        // "yca.storage.home" (via the fusion configuration, not a system property): pointing it at
+        // a file that does not exist keeps the user home configuration out of the benchmark, the
+        // provider settings being injected explicitly above (readHomeProvider). Without it, the home
+        // file would be registered first and its keys would win over this map.
         config.put(
                 "yca.configuration.json",
                 storageHome.resolve("configuration.json").toString());
