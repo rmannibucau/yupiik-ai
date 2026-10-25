@@ -54,13 +54,13 @@ public record ProviderConfiguration(
         @Property(
                 defaultValue = "-1",
                 documentation =
-                        "Context window size in tokens, used by the usage gauges and thresholds. Zero or negative (the default) auto-detects it from the provider /v1/models vendor extensions (context_window, model_context_window, context_length, max_model_len, max_input_tokens, llama.cpp meta.n_ctx, or meta.n_ctx_train when smaller than the default), caches it one day per provider and model under the storage home and falls back to 128000. Detected values are totals (prompt + completion combined); the pruning and compaction thresholds keep headroom for completions.")
+                        "Context window size in tokens, used by the usage gauges and thresholds. Zero or negative (the default) auto-detects it from the provider /v1/models vendor extensions (context_window, model_context_window, context_length, top_provider.context_length, max_model_len, max_input_tokens, llama.cpp meta.n_ctx, or meta.n_ctx_train when smaller than the default), caches it one day per provider and model under the storage home and falls back to 128000. Detected values are totals (prompt + completion combined): the usable input budget subtracts the declared output cap (per-model behavior.outputTokens, outputTokens or the detected top_provider.max_completion_tokens/max_tokens) and falls back to a min(20000, window/4) reserve when no cap is declared.")
         int contextWindow,
 
         @Property(
                 defaultValue = "-1",
                 documentation =
-                        "Default output token budget (the max_tokens parameter for providers that require it, such as Anthropic). Zero or negative (the default) auto-detects it from the provider /v1/models max_tokens, cached one day per provider and model under the storage home, and falls back to 32000. This is the per-provider default; a per-model value configured in the models behavior field wins over it.")
+                        "Default output token budget (the max_tokens parameter for providers that require it, such as Anthropic). Zero or negative (the default) auto-detects it from the provider /v1/models max_tokens, cached one day per provider and model under the storage home, and falls back to 32000. This is the per-provider default; a per-model value configured in the models behavior field wins over it. A declared value also sizes the completion headroom reserved from the context window (a value greater than the window cannot be honoured and falls back to the min(20000, window/4) heuristic).")
         int outputTokens,
 
         @Property(

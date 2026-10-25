@@ -286,6 +286,46 @@ class UsageTrackerTest {
     }
 
     @Test
+    void topProviderOutputCapIsReservedFromTheDetectedWindow() {
+        modelsBody = "{\"data\":[{\"id\":\"test-model\",\"top_provider\":{\"is_moderated\":false,"
+                + "\"context_length\":262144,\"max_completion_tokens\":32768}}]}";
+        final var tracker = tracker();
+        assertEquals(262_144, tracker.contextWindow());
+        assertEquals(32_768, tracker.declaredOutputTokens());
+        assertEquals(229_376, tracker.usableWindow());
+    }
+
+    @Test
+    void configuredOutputTokensIsReservedFromAConfiguredWindow() {
+        final var cfg = configuration(200_000, 8_000);
+        final var tracker = new UsageTracker(new ProviderManager(cfg, mapper), null, null, Clock.systemUTC());
+        assertEquals(8_000, tracker.declaredOutputTokens());
+        assertEquals(192_000, tracker.usableWindow());
+    }
+
+    @Test
+    void configuredOutputTokensWinsOverTheDetectedCap() {
+        modelsBody = "{\"data\":[{\"id\":\"test-model\",\"context_length\":128000,\"max_completion_tokens\":32768}]}";
+        final var cfg = configuration(-1, 4_000);
+        final var tracker = new UsageTracker(
+                new ProviderManager(cfg, mapper),
+                client,
+                new ContextWindowCache(cfg, mapper, Clock.systemUTC()),
+                Clock.systemUTC());
+        assertEquals(128_000, tracker.contextWindow());
+        assertEquals(4_000, tracker.declaredOutputTokens());
+        assertEquals(124_000, tracker.usableWindow());
+    }
+
+    @Test
+    void outputCapNotSmallerThanTheWindowFallsBackToTheHeuristic() {
+        final var cfg = configuration(4_096, 8_192);
+        final var tracker = new UsageTracker(new ProviderManager(cfg, mapper), null, null, Clock.systemUTC());
+        assertEquals(8_192, tracker.declaredOutputTokens());
+        assertEquals(3_072, tracker.usableWindow(), "a cap larger than the window cannot be honoured");
+    }
+
+    @Test
     void contextPercentIsComputedAgainstTheUsableWindow() {
         assertEquals(10.0, calibratedTracker().contextPercent(8_000), 0.001);
     }
@@ -303,6 +343,10 @@ class UsageTrackerTest {
     }
 
     private CodingAgentConfiguration configuration(final int contextWindow) {
+        return configuration(contextWindow, -1);
+    }
+
+    private CodingAgentConfiguration configuration(final int contextWindow, final int outputTokens) {
         return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
                 Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "1"),
@@ -314,6 +358,7 @@ class UsageTrackerTest {
                 Map.entry("yca.provider.providers.0.model", "test-model"),
                 Map.entry("yca.provider.providers.0.api", "auto"),
                 Map.entry("yca.provider.providers.0.contextWindow", String.valueOf(contextWindow)),
+                Map.entry("yca.provider.providers.0.outputTokens", String.valueOf(outputTokens)),
                 Map.entry("yca.provider.providers.0.timeoutSeconds", "5"),
                 Map.entry("yca.llm.retriesMaxAttempts", "1"),
                 Map.entry("yca.llm.retriesBaseDelayMs", "1"),

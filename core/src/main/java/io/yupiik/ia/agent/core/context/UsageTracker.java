@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.context;
 
+import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -31,13 +32,6 @@ import java.util.logging.Logger;
 
 public class UsageTracker {
     private static final Logger LOGGER = Logger.getLogger(UsageTracker.class.getName());
-
-    /**
-     * Output headroom reserved when converting the provider context window into a usable input
-     * budget: the completion the model is about to produce also lives in the window, so triggers
-     * computed on the usable budget fire before the request actually overflows.
-     */
-    private static final int OUTPUT_RESERVE = 20_000;
 
     private final ProviderManager providerManager;
     private final ChatClient chatClient;
@@ -228,14 +222,15 @@ public class UsageTracker {
     }
 
     /**
-     * The context window minus the reserved output headroom: the budget the input may actually
-     * grow into before the request risks overflowing. Thresholds compare against this, not the
-     * raw window.
+     * The context window minus the completion headroom: the budget the input may actually grow into
+     * before the request risks overflowing. Thresholds compare against this, not the raw window. The
+     * headroom is the output cap the model declares (per-model, per-provider or detected from
+     * {@code /v1/models}, see {@link #declaredOutputTokens()}) so a window of 262144 declaring 32768
+     * completion tokens leaves 229376 for the input; without a declared cap the historical
+     * {@code min(20000, window / 4)} heuristic applies (see {@link ContextBudget}).
      */
     public int usableWindow() {
-        final var window = contextWindow();
-        final var reserve = Math.min(OUTPUT_RESERVE, window / 4);
-        return Math.max(1_024, window - reserve);
+        return ContextBudget.usableWindow(contextWindow(), declaredOutputTokens());
     }
 
     public long promptTokens() {
@@ -334,11 +329,7 @@ public class UsageTracker {
      * overflow-triggered auto-halving is never persisted for it.
      */
     public int contextWindow() {
-        final var current = settings == null
-                ? (providerManager == null ? null : providerManager.current())
-                : (settings.providerId() == null
-                        ? providerManager == null ? null : providerManager.current()
-                        : providerManager == null ? null : providerManager.provider(settings.providerId()));
+        final var current = currentProvider();
         if (current == null) {
             return rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE);
         }
@@ -368,6 +359,58 @@ public class UsageTracker {
             return rememberExplicit(cached.get());
         }
         return detect(providerId, model).orElseGet(() -> rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE));
+    }
+
+    /**
+     * The output budget the current model declares, in tokens, or {@code 0} when unknown: the per-model
+     * {@code behavior.outputTokens}, else the per-provider {@code outputTokens}, else the value detected
+     * from {@code /v1/models} and cached for a day. Unlike {@link ChatClient#outputTokens(ChatSettings)}
+     * the {@code 32000} fallback is not applied, so callers can tell a real declaration from the resolver
+     * default and reserve it from the context window (see {@link #usableWindow()}).
+     */
+    public int declaredOutputTokens() {
+        final var provider = currentProvider();
+        if (provider == null) {
+            return 0;
+        }
+        final var model = currentModel(provider);
+        final var override = providerManager == null ? 0 : providerManager.outputTokensOverride(provider, model);
+        if (override > 0) {
+            return override;
+        }
+        if (provider.outputTokens() > 0) {
+            return provider.outputTokens();
+        }
+        if (contextWindowCache == null || model == null || model.isBlank()) {
+            return 0;
+        }
+        return contextWindowCache.getMaxTokens(providerId(provider), model).orElse(0);
+    }
+
+    /** The provider targeted by the session selection, else the process current provider; {@code null} when unknown. */
+    private ProviderConfiguration currentProvider() {
+        if (providerManager == null) {
+            return null;
+        }
+        if (settings == null || settings.providerId() == null) {
+            return providerManager.current();
+        }
+        return providerManager.provider(settings.providerId());
+    }
+
+    /** The effective model name of the session, falling back to the provider default without a client. */
+    private String currentModel(final ProviderConfiguration provider) {
+        if (chatClient != null) {
+            final var model = chatClient.model(settings);
+            if (model != null && !model.isBlank()) {
+                return model;
+            }
+        }
+        return provider == null ? null : provider.model();
+    }
+
+    private static String providerId(final ProviderConfiguration provider) {
+        return provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
     }
 
     /**

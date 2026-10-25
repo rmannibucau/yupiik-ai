@@ -473,7 +473,7 @@ public class CliCommand implements Runnable {
         modelData.put("name", model);
         modelData.put("contextPercentage", usage == null ? 0 : (int) Math.round(usage.contextPercent()));
         modelData.put("contextTokens", usage == null ? 0 : usage.estimatedContextTokens());
-        modelData.put("contextWindow", session.runtime().usage().contextWindow());
+        modelData.put("contextWindow", session.runtime().usage().usableWindow());
 
         final var data = new LinkedHashMap<String, Object>();
         data.put("mode", mode);
@@ -911,7 +911,7 @@ public class CliCommand implements Runnable {
                     "~%,d tokens (%.1f%% of %,d)",
                     usage.estimatedContextTokens(),
                     usage.contextPercent(),
-                    session.runtime().usage().contextWindow()));
+                    session.runtime().usage().usableWindow()));
             if (usage.usage() != null && usage.usage().cacheReadTokens() > 0) {
                 final var cached = MetricsFormat.cachedTokens(
                         usage.usage().cacheReadTokens(), usage.usage().promptTokens());

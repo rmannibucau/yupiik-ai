@@ -745,11 +745,44 @@ class SystemPromptBuilderTest {
                 "yca.mode", "build",
                 "yca.provider.providers.length", "1",
                 "yca.provider.providers.0.model", "m",
-                "yca.provider.providers.0.contextWindow", "8192"));
-        final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
+                "yca.provider.providers.0.contextWindow", "8192",
+                "yca.llm.systemPromptMaxChars", "0"));
+        final var promptBuilder = builder(cfg, todoResolver(), providerManager(cfg));
         // 8k window -> usable = 8192 - 8192/4 = 6144; (6144/2)*4 = 12288 char cap
+        assertEquals(12_288, promptBuilder.resolvedSystemPromptCap());
+        final var prompt = promptBuilder.build();
         assertTrue(prompt.length() <= 12_288, "small window must shrink the system prompt, but got " + prompt.length());
         assertFalse(prompt.contains("char budget"), "the assembled prompt should already fit the derived cap");
+    }
+
+    @Test
+    void systemPromptCapFollowsTheDeclaredOutputBudget() {
+        // 8k window declaring 3k output tokens -> usable = 5192; (5192/2)*4 = 10384 char cap
+        final var withCap = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build",
+                "yca.provider.providers.length", "1",
+                "yca.provider.providers.0.model", "m",
+                "yca.provider.providers.0.contextWindow", "8192",
+                "yca.provider.providers.0.outputTokens", "3000",
+                "yca.llm.systemPromptMaxChars", "0"));
+        assertEquals(
+                10_384,
+                builder(withCap, todoResolver(), providerManager(withCap)).resolvedSystemPromptCap(),
+                "the declared output cap must be reserved from the window");
+        // no declared output cap -> historical min(20000, window/4) reserve: 8192 - 2048 = 6144; (6144/2)*4
+        final var withoutCap = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build",
+                "yca.provider.providers.length", "1",
+                "yca.provider.providers.0.model", "m",
+                "yca.provider.providers.0.contextWindow", "8192",
+                "yca.llm.systemPromptMaxChars", "0"));
+        assertEquals(
+                12_288,
+                builder(withoutCap, todoResolver(), providerManager(withoutCap)).resolvedSystemPromptCap());
     }
 
     @Test

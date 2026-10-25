@@ -452,24 +452,23 @@ public class CompactionCoordinator {
     }
 
     /**
-     * Guarantees the compacted message list fits under the provider context window (with a small
-     * completion headroom). The kept raw messages are normally preserved verbatim; when the kept tail
-     * alone is heavy or the window is small, it is progressively spilled: tool outputs are capped,
-     * retried until the list is within budget but at least once shrunk. The {@code digestIndex}
-     * message (the generated summary) is never spoken to, so the compacted context survives the
-     * size-fitting unchanged. This closes the gap where compaction "succeeded" but the output still
-     * overflowed.
+     * Guarantees the compacted message list fits under the usable provider context window (the window
+     * minus the completion headroom, see {@code UsageTracker#usableWindow()}). The kept raw messages are
+     * normally preserved verbatim; when the kept tail alone is heavy or the window is small, it is
+     * progressively spilled: tool outputs are capped, retried until the list is within budget but at least
+     * once shrunk. The {@code digestIndex} message (the generated summary) is never spoken to, so the
+     * compacted context survives the size-fitting unchanged. This closes the gap where compaction
+     * "succeeded" but the output still overflowed.
      */
     private List<Message> ensureUnderWindow(final List<Message> out, final boolean tight, final int digestIndex) {
         if (usageTracker == null) {
             return out;
         }
-        final var window = usageTracker.contextWindow();
-        final var headroom = Math.max(1_000, (int) (window * 0.1));
+        final var window = usageTracker.usableWindow();
         var list = out;
         final var cap = tight ? effectiveSpliceChars() / 2 : effectiveSpliceChars();
         for (var guard = 0; guard < 8; guard++) {
-            if (usageTracker.estimateContext(list) <= window - headroom) {
+            if (usageTracker.estimateContext(list) <= window) {
                 break;
             }
             final var next = shrinkTail(list, cap, digestIndex);

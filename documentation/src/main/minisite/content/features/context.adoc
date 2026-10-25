@@ -46,9 +46,9 @@ text: the footprint estimate, the last real prompt tokens and the calibration
 ratio, plus whether the context window came from an explicit value or the
 auto-detected baseline.
 
-All percentages are computed against the _usable_ window: the configured or
-auto-detected context window minus an output headroom of
-`min(20000, window / 4)` tokens, so prompts leave room for completions.
+All percentages are computed against the _usable_ window: the configured or auto-detected context window minus the output budget the model declares, so prompts leave room for completions.
+The declared output budget comes from the per-model `behavior.outputTokens`, the provider `outputTokens`, or the detected `/v1/models` `max_tokens` / `top_provider.max_completion_tokens`: a 262144 window declaring 32768 completion tokens leaves a usable window of 229376.
+When no output budget is declared, or when it is not smaller than the window (hence cannot be honoured), a conservative `min(20000, window / 4)` headroom is reserved instead.
 
 === Context window resolution
 
@@ -62,15 +62,18 @@ order:
    tokens, `0` or negative = unset);
 3. a value auto-detected once a day from the provider `/v1/models` vendor
    extensions (`context_window`, `model_context_window`, `context_length`,
-   `max_model_len`, `max_input_tokens`, llama.cpp `meta.n_ctx`, or
-   `meta.n_ctx_train` when smaller), cached per provider and model under the
-   storage home;
+   `top_provider.context_length`, `max_model_len`, `max_input_tokens`,
+   llama.cpp `meta.n_ctx`, or `meta.n_ctx_train` when smaller), cached per
+   provider and model under the storage home;
 4. a conservative `32000`-token baseline when nothing is known (guessing too
    high on a small-window model would turn every request into a context-window
    overflow).
 
 Detected and configured values are totals (prompt + completion combined) in
-_tokens_. The per-model and provider values count as explicit configuration: an
+_tokens_, and the output budget declared next to them (configured
+`outputTokens`, or detected `max_tokens`/`top_provider.max_completion_tokens`)
+is reserved from that total to compute the usable window.
+The per-model and provider values count as explicit configuration: an
 overflow-triggered auto-shrink never persists a halved window for a model or
 provider carrying an explicit value, it only affects the auto-detected cache.
 

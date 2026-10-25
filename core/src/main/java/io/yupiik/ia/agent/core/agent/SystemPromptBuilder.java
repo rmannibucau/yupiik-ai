@@ -19,6 +19,7 @@ import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
+import io.yupiik.ia.agent.core.context.ContextBudget;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
@@ -460,8 +461,10 @@ public class SystemPromptBuilder {
      * cascade: per-model {@code behavior.systemPromptMaxChars} > per-provider {@code tuning.systemPromptMaxChars} >
      * the global {@code llm.systemPromptMaxChars} > a value derived from the provider context window (big windows keep
      * {@link #SYSTEM_PROMPT_CAP}, small ones shrink to leave the usable input budget room for the messages and tools).
+     * The derived value reserves the declared output budget from the window (see {@link ContextBudget}), so a model
+     * declaring a large completion budget gets a proportionally smaller prompt.
      */
-    private int resolvedSystemPromptCap() {
+    public int resolvedSystemPromptCap() {
         final var provider = providerManager == null ? null : provider(settings);
         final var model = provider == null
                 ? null
@@ -482,14 +485,19 @@ public class SystemPromptBuilder {
             return global;
         }
         // effective window: per-model override first, then provider value (both explicit); 0 = unknown
-        final var window = provider == null || model == null
-                ? (provider == null ? 0 : provider.contextWindow())
-                : providerManager.contextWindowOverride(provider, model);
+        final var window = provider == null
+                ? 0
+                : model == null ? provider.contextWindow() : providerManager.contextWindowOverride(provider, model);
         if (window <= 0) {
             return SYSTEM_PROMPT_CAP;
         }
-        // mirror UsageTracker.usableWindow(): reserve a quarter of the window (capped at 20k) for output
-        final var usable = window - Math.min(window / 4, 20_000);
+        // mirror UsageTracker.usableWindow(): reserve the declared output cap (per-model then provider), else
+        // min(20k, window / 4); detected values are not consulted here since the prompt is built before the
+        // /v1/models lookup and only an explicit window drives this derivation
+        final var outputOverride = provider == null ? 0 : providerManager.outputTokensOverride(provider, model);
+        final var declaredOutput =
+                outputOverride > 0 ? outputOverride : (provider == null ? 0 : provider.outputTokens());
+        final var usable = ContextBudget.usableWindow(window, declaredOutput);
         // budget roughly half of the usable input for the system prompt, ~4 chars per token, clamped to the hard cap
         return Math.max(2_000, Math.min(SYSTEM_PROMPT_CAP, (usable / 2) * 4));
     }
