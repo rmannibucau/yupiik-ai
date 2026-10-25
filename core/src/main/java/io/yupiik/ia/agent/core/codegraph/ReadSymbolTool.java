@@ -146,6 +146,27 @@ public class ReadSymbolTool implements EmbeddedTool {
             if (dot != null) {
                 return dot;
             }
+            // class-aware fallback: enumerate every method whose name sits under the given class prefix so a
+            // short prefix (eg. `ModelsResponse.Model#maxTokens`) resolves against the stored fully-qualified
+            // FQN; a unique match wins, several matches under the same prefix are reported as not found
+            final var hashIdx = symbol.indexOf('#');
+            final var classPrefix = symbol.substring(0, hashIdx);
+            final var methodName = symbol.substring(hashIdx + 1);
+            if (!classPrefix.isEmpty() && !methodName.isEmpty()) {
+                final var candidates = idx.find(classPrefix + ".", GraphModel.Kind.METHOD, idx.symbolCount());
+                GraphModel.Symbol match = null;
+                for (final var cand : candidates) {
+                    if (cand.fqn().endsWith("." + methodName)) {
+                        if (match != null) {
+                            return null; // ambiguous under the given class prefix
+                        }
+                        match = cand;
+                    }
+                }
+                if (match != null) {
+                    return match;
+                }
+            }
         }
         // strip a possible member suffix (`Foo#bar`) before falling back to the unique simple-name match
         final var name = symbol.indexOf('#') >= 0 ? symbol.substring(symbol.indexOf('#') + 1) : symbol;
