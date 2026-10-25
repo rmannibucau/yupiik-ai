@@ -149,7 +149,7 @@ public class MavenSecretService {
         }
         final var xml = read(settingsXml);
         if (xml == null) {
-            throw new IllegalArgumentException("Cannot read Maven settings " + settingsXml);
+            throw new IllegalArgumentException("Cannot read Maven settings '" + settingsXml + "'");
         }
         final var password = findServerPassword(xml, serverId);
         if (password == null) {

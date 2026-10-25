@@ -135,7 +135,8 @@ public class ContextWindowCache {
                 writeUpserted(entry);
             }
         } catch (final IOException e) {
-            throw new UncheckedIOException("Could not persist context window for " + providerId + "/" + model, e);
+            throw new UncheckedIOException(
+                    "Could not persist context window for '" + providerId + "/" + model + "'", e);
         }
     }
 

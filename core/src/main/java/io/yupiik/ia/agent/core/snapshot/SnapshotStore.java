@@ -103,7 +103,7 @@ public class SnapshotStore {
             Files.deleteIfExists(file(sessionId));
             Files.deleteIfExists(legacyFile(sessionId));
         } catch (final IOException e) {
-            throw new UncheckedIOException("Cannot delete snapshot state for " + sessionId, e);
+            throw new UncheckedIOException("Cannot delete snapshot state for '" + sessionId + "'", e);
         }
     }
 
@@ -148,7 +148,7 @@ public class SnapshotStore {
             Files.writeString(tmp, sb.toString());
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
         } catch (final IOException e) {
-            throw new UncheckedIOException("Cannot persist snapshot state for " + sessionId, e);
+            throw new UncheckedIOException("Cannot persist snapshot state for '" + sessionId + "'", e);
         }
     }
 

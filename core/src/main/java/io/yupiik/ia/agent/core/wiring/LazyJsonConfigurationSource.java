@@ -146,7 +146,7 @@ public class LazyJsonConfigurationSource implements ConfigurationSource {
             final ReaderSupplier supplier = () -> new InputStreamReader(new ByteArrayInputStream(bytes));
             return new JsonConfigurationSource(supplier, KEY_NORMALIZER);
         } catch (final IOException e) {
-            throw new UncheckedIOException("Invalid configuration file: " + path, e);
+            throw new UncheckedIOException("Invalid configuration file: '" + path + "'", e);
         }
     }
 }

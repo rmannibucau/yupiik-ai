@@ -162,7 +162,7 @@ public class WebSearchManager {
         }
         final var text = client.client.callTool(provider.toolName(), arguments(provider, query, numResults));
         if (text == null || text.isBlank()) {
-            throw new IOException("Empty " + provider + " response");
+            throw new IOException("Empty '" + provider + "' response");
         }
         return parse(provider, text);
     }

@@ -262,7 +262,7 @@ public class McpManager {
                     mapper,
                     processes);
         }
-        throw new IllegalArgumentException("MCP server " + server.name() + " has neither url nor command");
+        throw new IllegalArgumentException("MCP server '" + server.name() + "' has neither url nor command");
     }
 
     private void close(final String name) {
@@ -339,7 +339,7 @@ public class McpManager {
         awaitPending(serverName);
         final var client = clients.get(serverName);
         if (client == null) {
-            throw new IllegalStateException("MCP server " + serverName + " is not started");
+            throw new IllegalStateException("MCP server '" + serverName + "' is not started");
         }
         try {
             return client.callTool(toolName, args);

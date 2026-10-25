@@ -189,7 +189,7 @@ public class RunCommand implements Runnable {
         });
         final var agentName = conf.agent() == null || conf.agent().isBlank() ? null : conf.agent();
         if (agentName != null && agentProvider.byName(agentName) == null) {
-            throw new IllegalArgumentException("Unknown agent: " + agentName + " (configure one under yca.agents)");
+            throw new IllegalArgumentException("Unknown agent: '" + agentName + "' (configure one under yca.agents)");
         }
         // abrupt-exit memory backup: the double-Ctrl-C "forced exit" path (System.exit) and SIGKILL
         // bypass the finally below, so persist the pending delta from a shutdown hook, capped so the

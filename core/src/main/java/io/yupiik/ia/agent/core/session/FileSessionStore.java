@@ -147,7 +147,7 @@ public class FileSessionStore implements SessionStore {
             }
             return new HousekeepingReport(compressed, deleted, kept);
         } catch (final IOException e) {
-            throw new UncheckedIOException("Cannot clean up the session directory " + dir(), e);
+            throw new UncheckedIOException("Cannot clean up the session directory '" + dir() + "'", e);
         }
     }
 
@@ -200,7 +200,7 @@ public class FileSessionStore implements SessionStore {
         try {
             return Files.createDirectories(dir);
         } catch (final IOException e) {
-            throw new UncheckedIOException("Cannot create the session directory " + dir, e);
+            throw new UncheckedIOException("Cannot create the session directory '" + dir + "'", e);
         }
     }
 
@@ -360,7 +360,7 @@ public class FileSessionStore implements SessionStore {
                 } catch (final IOException ignored) {
                     // best effort cleanup
                 }
-                throw new UncheckedIOException("Cannot replace the session " + id, e);
+                throw new UncheckedIOException("Cannot replace the session '" + id + "'", e);
             }
         } finally {
             fileLock.unlock();

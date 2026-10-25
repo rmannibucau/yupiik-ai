@@ -287,7 +287,7 @@ public class SpawnedJvmGraphParser implements GraphParser {
                 for (final var piece : classPieces) {
                     try (final var from = classResource.apply(piece)) {
                         if (from == null) {
-                            throw new IOException("Missing bundled parser class resource: " + piece);
+                            throw new IOException("Missing bundled parser class resource: '" + piece + "'");
                         }
                         final var data = from.readAllBytes();
                         out.putNextEntry(new JarEntry(piece));

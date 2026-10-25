@@ -343,7 +343,7 @@ public class ApplyPatchTool implements EmbeddedTool {
         }
         final var candidate = base.resolve(clean).normalize();
         if (!candidate.startsWith(base)) {
-            throw new PatchException("Patch path escapes the project directory: " + raw);
+            throw new PatchException("Patch path escapes the project directory: '" + raw + "'");
         }
         return candidate;
     }
@@ -556,10 +556,10 @@ public class ApplyPatchTool implements EmbeddedTool {
         try {
             bytes = Files.readAllBytes(path);
         } catch (final IOException e) {
-            throw new PatchException("Failed to read file: " + path);
+            throw new PatchException("Failed to read file: '" + path + "'");
         }
         if (!Files.isRegularFile(path)) {
-            throw new PatchException("Failed to read file to update: " + path);
+            throw new PatchException("Failed to read file to update: '" + path + "'");
         }
         final boolean bom = bytes.length >= 3
                 && (bytes[0] & 0xFF) == 0xEF
@@ -602,7 +602,7 @@ public class ApplyPatchTool implements EmbeddedTool {
                 }
                 Files.write(path, toBytes(content));
             } catch (final IOException e) {
-                throw new PatchException("Cannot write file " + path + ": " + e.getMessage());
+                throw new PatchException("Cannot write file '" + path + "': " + e.getMessage());
             }
             if (create) {
                 created.add(path.toString());
@@ -626,7 +626,7 @@ public class ApplyPatchTool implements EmbeddedTool {
                     deleted.add(path.toString());
                 }
             } catch (final IOException e) {
-                throw new PatchException("Cannot delete file " + path + ": " + e.getMessage());
+                throw new PatchException("Cannot delete file '" + path + "': " + e.getMessage());
             }
         }
     }
@@ -651,7 +651,7 @@ public class ApplyPatchTool implements EmbeddedTool {
                 Files.write(target, toBytes(content));
                 Files.deleteIfExists(source);
             } catch (final IOException e) {
-                throw new PatchException("Cannot move file " + source + " to " + target + ": " + e.getMessage());
+                throw new PatchException("Cannot move file '" + source + "' to '" + target + "': " + e.getMessage());
             }
             applied.add(target.toString());
             deleted.add(source.toString());

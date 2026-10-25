@@ -58,7 +58,7 @@ public final class ParserClassSet {
             for (final var piece : CLASSES) {
                 try (final var in = classResource.apply(piece)) {
                     if (in == null) {
-                        throw new IOException("Missing bundled parser class resource: " + piece);
+                        throw new IOException("Missing bundled parser class resource: '" + piece + "'");
                     }
                     digest.update(piece.getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     digest.update((byte) 0);
@@ -80,12 +80,12 @@ public final class ParserClassSet {
     public static int classFileMajor(final Function<String, InputStream> classResource) {
         try (final var in = classResource.apply(CLASSES.get(0))) {
             if (in == null) {
-                throw new IOException("Missing bundled parser class resource: " + CLASSES.get(0));
+                throw new IOException("Missing bundled parser class resource: '" + CLASSES.get(0) + "'");
             }
             try (final var data = new DataInputStream(in)) {
                 final int magic = data.readInt();
                 if (magic != 0xCAFEBABE) {
-                    throw new IOException("Not a valid class file: " + CLASSES.get(0));
+                    throw new IOException("Not a valid class file: '" + CLASSES.get(0) + "'");
                 }
                 data.readUnsignedShort(); // minor version
                 return data.readUnsignedShort(); // major version
