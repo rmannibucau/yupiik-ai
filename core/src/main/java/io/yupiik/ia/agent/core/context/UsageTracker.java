@@ -25,7 +25,9 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -52,6 +54,18 @@ public class UsageTracker {
     protected final Clock clock;
     private final AtomicLong contextWindowResolutions = new AtomicLong();
     private final AtomicLong autoContextWindowResolutions = new AtomicLong();
+    /**
+     * Retention window for a failed auto-detection of the context window, matching
+     * {@link ContextWindowCache}'s one-day dedup dimension so a flaky/unreachable {@code /v1/models}
+     * does not re-fail (and re-warn) on every resolution but at most once per day.
+     */
+    private static final long DETECTION_FAILURE_TTL_MILLIS = 24L * 60L * 60L * 1000L;
+    /** Last time auto-detection of the context window failed for a (provider id, model) key. */
+    private final Map<Key, Long> detectionFailedAt = new ConcurrentHashMap<>();
+
+    /** Stable identity for the (provider id, model) dimension over which auto-detection is coalesced. */
+    private record Key(String providerId, String model) {}
+
     protected volatile Anchor anchor;
 
     /** The session's per-tab selection (provider/model): when set, context window resolution follows it. */
@@ -307,6 +321,13 @@ public class UsageTracker {
         if (cached.isPresent()) {
             return rememberExplicit(cached.get());
         }
+        if (failedAutoDetectionRecently(providerId, model)) {
+            return rememberAuto(new ModelsResponse.TokenCount(
+                    ModelsResponse.AUTO_DETECTED_BASELINE,
+                    false,
+                    ModelsResponse.SourceType.AUTO_BASELINE,
+                    "auto-baseline"));
+        }
         return detectTokenCount(providerId, model)
                 .orElseGet(() -> rememberAuto(new ModelsResponse.TokenCount(
                         ModelsResponse.AUTO_DETECTED_BASELINE,
@@ -493,6 +514,7 @@ public class UsageTracker {
                 }
             }
         } catch (final IOException | RuntimeException e) {
+            detectionFailedAt.put(new Key(providerId, model), clock.millis());
             LOGGER.log(
                     Level.WARNING,
                     e,
@@ -502,6 +524,15 @@ public class UsageTracker {
             Thread.currentThread().interrupt();
         }
         return Optional.empty();
+    }
+
+    /** Whether auto-detection already failed for the key within the retention window, so we stop re-attempting. */
+    private boolean failedAutoDetectionRecently(final String providerId, final String model) {
+        if (clock == null) {
+            return false;
+        }
+        final var failedAt = detectionFailedAt.get(new Key(providerId, model));
+        return failedAt != null && clock.millis() - failedAt < DETECTION_FAILURE_TTL_MILLIS;
     }
 
     /** The provider targeted by the session selection, else the process current provider; {@code null} when unknown. */

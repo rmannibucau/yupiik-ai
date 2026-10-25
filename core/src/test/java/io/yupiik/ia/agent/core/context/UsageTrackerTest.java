@@ -236,6 +236,24 @@ class UsageTrackerTest {
     }
 
     @Test
+    void modelsFailureIsCoalescedOnSubsequentResolutions() {
+        modelsStatus = 500;
+        final var tracker = tracker();
+        // first resolution fails -> warning fires, falls back to the conservative baseline
+        assertEquals(
+                ModelsResponse.AUTO_DETECTED_BASELINE,
+                tracker.contextWindowTokenCount().value());
+        // the failure is remembered, so a rapid follow-up must not re-hit /v1/models: even though the
+        // endpoint recovered, the second resolution stays on the baseline instead of re-detecting
+        modelsStatus = 200;
+        modelsBody = "{\"data\":[{\"id\":\"test-model\",\"context_window\":8192}]}";
+        assertEquals(
+                ModelsResponse.AUTO_DETECTED_BASELINE,
+                tracker.contextWindowTokenCount().value(),
+                "a recent auto-detection failure must be coalesced, not re-attempted every resolution");
+    }
+
+    @Test
     void effectiveContextFallsBackToRawEstimateWithoutAnchor() {
         final var tracker = calibratedTracker();
         final var messages = List.of(Message.user("hello world"));
