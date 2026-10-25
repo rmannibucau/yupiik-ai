@@ -27,8 +27,13 @@ import io.yupiik.ia.agent.core.llm.ModelsResponse;
  * declared cap is not smaller than the window, hence cannot be honoured - a conservative quarter of the
  * window (capped at {@link #DEFAULT_OUTPUT_RESERVE} tokens) is reserved instead.</p>
  *
- * <p>When the output cap comes from a relative/estimated source (not an absolute hard limit), it is
- * treated as a hint and the conservative reserve applies instead of trusting it as a hard partition.</p>
+ * <p>Two window conventions are distinguished by comparing the declared output cap to the window. When
+ * the cap is strictly smaller (the total-window convention, eg. gpt-4o 128000/16384 or Anthropic
+ * 1000000/128000), the window is the combined input+output budget and the cap is reserved from it. When
+ * the cap is at least the window (the per-side convention, eg. LiteLLM {@code max_input_tokens} equal to
+ * {@code max_output_tokens}), the window is the input limit itself and nothing is reserved. When the
+ * window is only a relative/estimated figure (training metadata, overflow-adjusted), the conservative
+ * reserve applies regardless.</p>
  */
 public final class ContextBudget {
     /** Output headroom reserved when the model does not declare a usable output cap. */
@@ -56,9 +61,19 @@ public final class ContextBudget {
             return 0;
         }
         final int declared = declaredOutputTokens == null ? 0 : declaredOutputTokens.value();
-        // Only trust absolute (hard limit) output caps that are smaller than the total window
-        if (declared > 0 && declaredOutputTokens.absolute() && declared < w) {
-            return declared;
+        if (declared > 0 && declaredOutputTokens.absolute()) {
+            if (declared < w) {
+                // total-window convention (gpt-4o 128k/16k, Anthropic 1M/128k): the output cap is a
+                // strict partition of the window, so it is what gets reserved
+                return declared;
+            }
+            if (window.sourceType() == ModelsResponse.SourceType.DETECTED_ABSOLUTE) {
+                // per-side convention (LiteLLM max_input_tokens == max_output_tokens): a detected
+                // hard window at or below the output cap is the input limit itself, not a total, so
+                // nothing is reserved. A configured window is always a total, so a contradictory cap
+                // falls back to the heuristic instead of reinterpreting the operator's figure.
+                return 0;
+            }
         }
         return Math.min(DEFAULT_OUTPUT_RESERVE, w / 4);
     }

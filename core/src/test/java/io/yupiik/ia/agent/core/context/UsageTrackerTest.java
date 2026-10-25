@@ -308,10 +308,10 @@ class UsageTrackerTest {
                  {"id":"gemma4-26b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":131072,"max_output_tokens":131072},
                  {"id":"qwen3-8b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":40960,"max_output_tokens":40960}
                 ],"object":"list"}""";
-        // the equal caps are per-side limits, not a partition: the conservative reserve applies
-        assertLiteLLMUsable("qwen3.8-27b", 131_072, 111_072);
-        assertLiteLLMUsable("gemma4-26b", 131_072, 111_072);
-        assertLiteLLMUsable("qwen3-8b", 40_960, 30_720);
+        // the equal caps are per-side limits, not a partition: the input limit is taken directly
+        assertLiteLLMUsable("qwen3.8-27b", 131_072, 131_072);
+        assertLiteLLMUsable("gemma4-26b", 131_072, 131_072);
+        assertLiteLLMUsable("qwen3-8b", 40_960, 40_960);
     }
 
     private void assertLiteLLMUsable(final String model, final int window, final int usable) {

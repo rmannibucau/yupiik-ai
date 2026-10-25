@@ -26,6 +26,10 @@ class ContextBudgetTest {
         return new TokenCount(value, true, SourceType.CONFIGURED, "test");
     }
 
+    private static TokenCount detectedWindow(final int value) {
+        return new TokenCount(value, true, SourceType.DETECTED_ABSOLUTE, "test");
+    }
+
     private static TokenCount output(final int value, final boolean absolute) {
         return new TokenCount(
                 value, absolute, absolute ? SourceType.DETECTED_ABSOLUTE : SourceType.DETECTED_RELATIVE, "test");
@@ -46,11 +50,34 @@ class ContextBudgetTest {
     }
 
     @Test
-    void declaredCapNotSmallerThanTheWindowFallsBackToTheHeuristic() {
-        assertEquals(8_192, ContextBudget.outputReserve(window(32_768), output(32_768, true)));
-        assertEquals(24_576, ContextBudget.usableWindow(window(32_768), output(32_768, true)));
-        assertEquals(8_192, ContextBudget.outputReserve(window(32_768), output(65_536, true)));
-        assertEquals(24_576, ContextBudget.usableWindow(window(32_768), output(65_536, true)));
+    void windowNotExceededByAnAbsoluteCapIsATrustedPartition() {
+        // total-window convention (gpt-4o 128k/16k, Anthropic 1M/128k): the cap partitions the window
+        assertEquals(16_384, ContextBudget.outputReserve(window(128_000), output(16_384, true)));
+        assertEquals(111_616, ContextBudget.usableWindow(window(128_000), output(16_384, true)));
+        assertEquals(128_000, ContextBudget.outputReserve(window(1_000_000), output(128_000, true)));
+        assertEquals(872_000, ContextBudget.usableWindow(window(1_000_000), output(128_000, true)));
+    }
+
+    @Test
+    void equalInputAndOutputCapsArePerSideLimits() {
+        // per-side convention (LiteLLM max_input_tokens == max_output_tokens): a detected window at
+        // or below the output cap is the input limit itself, so nothing is reserved
+        assertEquals(0, ContextBudget.outputReserve(detectedWindow(131_072), output(131_072, true)));
+        assertEquals(131_072, ContextBudget.usableWindow(detectedWindow(131_072), output(131_072, true)));
+        assertEquals(0, ContextBudget.outputReserve(detectedWindow(40_960), output(40_960, true)));
+        assertEquals(40_960, ContextBudget.usableWindow(detectedWindow(40_960), output(40_960, true)));
+    }
+
+    @Test
+    void outputCapLargerThanTheWindowIsNotATrustedPartition() {
+        // a detected window at or below the output cap is per-side (nothing reserved); a configured
+        // window is a total, so a contradictory cap falls back to the heuristic
+        assertEquals(0, ContextBudget.outputReserve(detectedWindow(32_768), output(32_768, true)));
+        assertEquals(32_768, ContextBudget.usableWindow(detectedWindow(32_768), output(32_768, true)));
+        assertEquals(0, ContextBudget.outputReserve(detectedWindow(32_768), output(65_536, true)));
+        assertEquals(32_768, ContextBudget.usableWindow(detectedWindow(32_768), output(65_536, true)));
+        assertEquals(1_024, ContextBudget.outputReserve(window(4_096), output(8_192, true)));
+        assertEquals(3_072, ContextBudget.usableWindow(window(4_096), output(8_192, true)));
     }
 
     @Test
@@ -64,14 +91,6 @@ class ContextBudgetTest {
     void largeDeclaredCapIsReservedInFullWhenItFits() {
         assertEquals(32_000, ContextBudget.outputReserve(window(128_000), output(32_000, true)));
         assertEquals(96_000, ContextBudget.usableWindow(window(128_000), output(32_000, true)));
-    }
-
-    @Test
-    void equalInputAndOutputCapsAreNotATrustedPartition() {
-        // LiteLLM style metadata: max_input_tokens == max_output_tokens; the cap is a per-side
-        // limit, not a hard partition of the window, so the conservative reserve applies
-        assertEquals(20_000, ContextBudget.outputReserve(window(131_072), output(131_072, true)));
-        assertEquals(111_072, ContextBudget.usableWindow(window(131_072), output(131_072, true)));
     }
 
     @Test
