@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.core.context;
 
+import io.yupiik.ia.agent.core.llm.ModelsResponse;
+
 /**
  * Converts the context window reported by a provider into the input budget the agent can really use.
  *
@@ -24,6 +26,9 @@ package io.yupiik.ia.agent.core.context;
  * declaring 32768 completion tokens leaves 229376 for the input. Without a declared cap - or when the
  * declared cap is not smaller than the window, hence cannot be honoured - a conservative quarter of the
  * window (capped at {@link #DEFAULT_OUTPUT_RESERVE} tokens) is reserved instead.</p>
+ *
+ * <p>When the output cap comes from a relative/estimated source (not an absolute hard limit), it is
+ * treated as a hint and the conservative reserve applies instead of trusting it as a hard partition.</p>
  */
 public final class ContextBudget {
     /** Output headroom reserved when the model does not declare a usable output cap. */
@@ -39,34 +44,38 @@ public final class ContextBudget {
     /**
      * The completion headroom to reserve in a context window.
      *
-     * @param window               the total context window in tokens, or a non-positive value when unknown.
-     * @param declaredOutputTokens the output cap declared by the model/provider, or a non-positive value
-     *                             when unknown.
-     * @return the declared cap when positive and smaller than the window, else
+     * @param window               the total context window in tokens (with absolute flag), or non-positive when unknown.
+     * @param declaredOutputTokens the output cap declared by the model/provider (with absolute flag), or non-positive when unknown.
+     * @return the declared cap when positive, absolute, and smaller than the window, else
      *         {@code min(20000, window / 4)}; {@code 0} for an unknown window.
      */
-    public static int outputReserve(final int window, final int declaredOutputTokens) {
-        if (window <= 0) {
+    public static int outputReserve(
+            final ModelsResponse.TokenCount window, final ModelsResponse.TokenCount declaredOutputTokens) {
+        final int w = window == null ? 0 : window.value();
+        if (w <= 0) {
             return 0;
         }
-        if (declaredOutputTokens > 0 && declaredOutputTokens < window) {
-            return declaredOutputTokens;
+        final int declared = declaredOutputTokens == null ? 0 : declaredOutputTokens.value();
+        // Only trust absolute (hard limit) output caps that are smaller than the total window
+        if (declared > 0 && declaredOutputTokens.absolute() && declared < w) {
+            return declared;
         }
-        return Math.min(DEFAULT_OUTPUT_RESERVE, window / 4);
+        return Math.min(DEFAULT_OUTPUT_RESERVE, w / 4);
     }
 
     /**
-     * The window minus {@link #outputReserve(int, int)}, never below {@link #MIN_USABLE_WINDOW}.
+     * The window minus {@link #outputReserve(TokenCount, TokenCount)}, never below {@link #MIN_USABLE_WINDOW}.
      *
-     * @param window               the total context window in tokens, or a non-positive value when unknown.
-     * @param declaredOutputTokens the output cap declared by the model/provider, or a non-positive value
-     *                             when unknown.
+     * @param window               the total context window in tokens (with absolute flag), or non-positive when unknown.
+     * @param declaredOutputTokens the output cap declared by the model/provider (with absolute flag), or non-positive when unknown.
      * @return the input budget the agent may fill without risking a window overflow.
      */
-    public static int usableWindow(final int window, final int declaredOutputTokens) {
-        if (window <= 0) {
+    public static int usableWindow(
+            final ModelsResponse.TokenCount window, final ModelsResponse.TokenCount declaredOutputTokens) {
+        final int w = window == null ? 0 : window.value();
+        if (w <= 0) {
             return MIN_USABLE_WINDOW;
         }
-        return Math.max(MIN_USABLE_WINDOW, window - outputReserve(window, declaredOutputTokens));
+        return Math.max(MIN_USABLE_WINDOW, w - outputReserve(window, declaredOutputTokens));
     }
 }

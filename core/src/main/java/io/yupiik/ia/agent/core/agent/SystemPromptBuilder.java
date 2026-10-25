@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.context.ContextBudget;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
@@ -497,7 +498,13 @@ public class SystemPromptBuilder {
         final var outputOverride = provider == null ? 0 : providerManager.outputTokensOverride(provider, model);
         final var declaredOutput =
                 outputOverride > 0 ? outputOverride : (provider == null ? 0 : provider.outputTokens());
-        final var usable = ContextBudget.usableWindow(window, declaredOutput);
+        // both figures are explicit configuration, hence absolute hard limits for the budget
+        final var usable = ContextBudget.usableWindow(
+                new ModelsResponse.TokenCount(window, true, ModelsResponse.SourceType.CONFIGURED, "provider-config"),
+                declaredOutput > 0
+                        ? new ModelsResponse.TokenCount(
+                                declaredOutput, true, ModelsResponse.SourceType.CONFIGURED, "provider-config")
+                        : null);
         // budget roughly half of the usable input for the system prompt, ~4 chars per token, clamped to the hard cap
         return Math.max(2_000, Math.min(SYSTEM_PROMPT_CAP, (usable / 2) * 4));
     }

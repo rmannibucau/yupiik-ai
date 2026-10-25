@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -57,39 +58,79 @@ class ContextWindowCacheTest {
     @Test
     void holdingAtMostOneEntryPerProviderAndModel(final JsonMapper mapper) throws Exception {
         final var cache = cache(mapper);
-        cache.put("freeinference", "deepseek-v4-flash", 1_000_000, 393_216, now());
-        cache.put("freeinference", "glm-5.3", 1_000_000, 131_072, now());
+        cache.put(
+                "freeinference",
+                "deepseek-v4-flash",
+                new ModelsResponse.TokenCount(1_000_000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                new ModelsResponse.TokenCount(393_216, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                now());
+        cache.put(
+                "freeinference",
+                "glm-5.3",
+                new ModelsResponse.TokenCount(1_000_000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                new ModelsResponse.TokenCount(131_072, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                now());
         // re-fetch of the same pair must replace, not append
-        cache.put("freeinference", "deepseek-v4-flash", 1_000_000, 393_216, now() + 1);
+        cache.put(
+                "freeinference",
+                "deepseek-v4-flash",
+                new ModelsResponse.TokenCount(1_000_000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                new ModelsResponse.TokenCount(393_216, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                now() + 1);
 
         assertSingleEntryPerKey(cache, mapper);
-        assertEquals(Optional.of(1_000_000), cache.get("freeinference", "deepseek-v4-flash"));
-        assertEquals(Optional.of(1_000_000), cache.get("freeinference", "glm-5.3"));
+        assertEquals(1_000_000, cache.getInt("freeinference", "deepseek-v4-flash"));
+        assertEquals(1_000_000, cache.getInt("freeinference", "glm-5.3"));
     }
 
     @Test
     void freshestOverflowHalvingReplacesTheDetectedWindow(final JsonMapper mapper) throws Exception {
         final var cache = cache(mapper);
-        cache.put("freeinference", "deepseek-v4-flash", 500_000, 131_072, now()); // /models detection
+        cache.put(
+                "freeinference",
+                "deepseek-v4-flash",
+                new ModelsResponse.TokenCount(500_000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                new ModelsResponse.TokenCount(131_072, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                now()); // /models detection
         // overflow halving writes the corrected (fresher) value for the same pair
-        cache.put("freeinference", "deepseek-v4-flash", 250_000, null, now() + 1);
+        cache.put(
+                "freeinference",
+                "deepseek-v4-flash",
+                new ModelsResponse.TokenCount(250_000, false, ModelsResponse.SourceType.OVERFLOW_ADJUSTED, "test"),
+                null,
+                now() + 1);
 
         assertSingleEntryPerKey(cache, mapper);
-        assertEquals(Optional.of(250_000), cache.get("freeinference", "deepseek-v4-flash"));
+        assertEquals(250_000, cache.getInt("freeinference", "deepseek-v4-flash"));
         assertEquals(Optional.empty(), cache.getMaxTokens("freeinference", "deepseek-v4-flash"));
     }
 
     @Test
     void distinctProvidersAndModelsArePreserved(final JsonMapper mapper) throws Exception {
         final var cache = cache(mapper);
-        cache.put("freeinference", "deepseek-v4-flash", 1_000_000, 393_216, now());
-        cache.put("pro", "deepseek-v4-flash", 128_000, 32_768, now()); // same model, other provider
-        cache.put("pro", "other-model", 64_000, 16_384, now());
+        cache.put(
+                "freeinference",
+                "deepseek-v4-flash",
+                new ModelsResponse.TokenCount(1_000_000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                new ModelsResponse.TokenCount(393_216, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                now());
+        cache.put(
+                "pro",
+                "deepseek-v4-flash",
+                new ModelsResponse.TokenCount(128_000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                new ModelsResponse.TokenCount(32_768, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                now()); // same model, other provider
+        cache.put(
+                "pro",
+                "other-model",
+                new ModelsResponse.TokenCount(64_000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                new ModelsResponse.TokenCount(16_384, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                now());
 
         assertSingleEntryPerKey(cache, mapper);
-        assertEquals(Optional.of(1_000_000), cache.get("freeinference", "deepseek-v4-flash"));
-        assertEquals(Optional.of(128_000), cache.get("pro", "deepseek-v4-flash"));
-        assertEquals(Optional.of(64_000), cache.get("pro", "other-model"));
+        assertEquals(1_000_000, cache.getInt("freeinference", "deepseek-v4-flash"));
+        assertEquals(128_000, cache.getInt("pro", "deepseek-v4-flash"));
+        assertEquals(64_000, cache.getInt("pro", "other-model"));
     }
 
     @Test
@@ -98,24 +139,34 @@ class ContextWindowCacheTest {
         Files.createDirectories(file.getParent());
         // duplicate lines for the same pair (as legacy appends produce), both fresh enough to be read
         Files.writeString(file, """
-                {"providerId":"freeinference","model":"deepseek-v4-flash","window":1000000,"maxTokens":393216,"fetchedAt":%s}
-                {"providerId":"freeinference","model":"deepseek-v4-flash","window":1000000,"maxTokens":393216,"fetchedAt":%s}
+                {"providerId":"freeinference","model":"deepseek-v4-flash","window":{"value":1000000,"absolute":true,"sourceType":"DETECTED_ABSOLUTE","sourcePointer":"test"},"maxTokens":{"value":393216,"absolute":true,"sourceType":"DETECTED_ABSOLUTE","sourcePointer":"test"},"fetchedAt":%s}
+                {"providerId":"freeinference","model":"deepseek-v4-flash","window":{"value":1000000,"absolute":true,"sourceType":"DETECTED_ABSOLUTE","sourcePointer":"test"},"maxTokens":{"value":393216,"absolute":true,"sourceType":"DETECTED_ABSOLUTE","sourcePointer":"test"},"fetchedAt":%s}
                 """.formatted(now(), now() + 1));
 
         final var cache = cache(mapper);
         // read still resolves to the freshest duplicate
-        assertEquals(Optional.of(1_000_000), cache.get("freeinference", "deepseek-v4-flash"));
+        assertEquals(1_000_000, cache.getInt("freeinference", "deepseek-v4-flash"));
         // a write to a *different* key must collapse the duplicates for a key that is re-written too
-        cache.put("freeinference", "glm-5.3", 1_000_000, 131_072, now());
+        cache.put(
+                "freeinference",
+                "glm-5.3",
+                new ModelsResponse.TokenCount(1_000_000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                new ModelsResponse.TokenCount(131_072, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                now());
         assertSingleEntryPerKey(cache, mapper);
-        assertEquals(Optional.of(1_000_000), cache.get("freeinference", "deepseek-v4-flash"));
-        assertEquals(Optional.of(1_000_000), cache.get("freeinference", "glm-5.3"));
+        assertEquals(1_000_000, cache.getInt("freeinference", "deepseek-v4-flash"));
+        assertEquals(1_000_000, cache.getInt("freeinference", "glm-5.3"));
     }
 
     @Test
     void tmpFileIsNotLeftBehind(final JsonMapper mapper) throws Exception {
         final var cache = cache(mapper);
-        cache.put("freeinference", "deepseek-v4-flash", 1_000_000, 393_216, now());
+        cache.put(
+                "freeinference",
+                "deepseek-v4-flash",
+                new ModelsResponse.TokenCount(1_000_000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                new ModelsResponse.TokenCount(393_216, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                now());
         assertTrue(Files.list(cacheFile().getParent())
                 .noneMatch(p -> p.getFileName().toString().endsWith(".tmp")));
     }

@@ -48,6 +48,31 @@ public record ModelsResponse(List<Model> data) {
                         .toList();
     }
 
+    /**
+     * Categorizes the provenance of a token count for budget decisions.
+     */
+    @JsonModel
+    public enum SourceType {
+        /** Explicit configuration in provider/model settings */
+        CONFIGURED,
+        /** Hard limit from vendor extensions (context_window, max_input_tokens, max_tokens, max_completion_tokens, top_provider/*, max_output_tokens) */
+        DETECTED_ABSOLUTE,
+        /** Runtime/training metadata that may not reflect active limits (meta.n_ctx, meta.n_ctx_train, max_output_length, output_token_limit) */
+        DETECTED_RELATIVE,
+        /** Conservative fallback when nothing is known */
+        AUTO_BASELINE,
+        /** Derived from overflow adjustment */
+        OVERFLOW_ADJUSTED
+    }
+
+    /**
+     * A token count with metadata about its provenance and whether it represents an absolute
+     * hard limit (verified constraint) or a relative/estimated value (fallback, training metadata,
+     * duplicated legacy field, etc.).
+     */
+    @JsonModel
+    public record TokenCount(int value, boolean absolute, SourceType sourceType, String sourcePointer) {}
+
     @JsonModel
     public record Model(
             String id,
@@ -63,48 +88,79 @@ public record ModelsResponse(List<Model> data) {
          * Anthropic exposes it as {@code max_input_tokens}. Detected values are totals
          * (prompt + completion combined). Gateways that nest the window under a provider
          * object (e.g. {@code top_provider} on OpenRouter/Kilo) are read as a fallback.
+         *
+         * Absolute=true for documented hard limits (context_window, max_input_tokens, top_provider/context_length).
+         * Absolute=false for training/runtime metadata (meta.n_ctx, meta.n_ctx_train).
          */
-        public Integer contextWindow() {
-            final var primary = firstPositive(
+        public TokenCount contextWindow() {
+            // Tier 1: documented hard limits (absolute)
+            final var tier1 = firstPositive(
                     "/context_window",
                     "/model_context_window",
                     "/context_length",
                     "/top_provider/context_length",
                     "/max_model_len",
-                    "/max_input_tokens",
-                    "/meta/n_ctx");
-            if (primary != null) {
-                return primary;
+                    "/max_input_tokens");
+            if (tier1 != null) {
+                return new TokenCount(tier1.value(), true, SourceType.DETECTED_ABSOLUTE, tier1.pointer());
             }
-            return firstPositive("/meta/n_ctx_train");
+            // Tier 2: runtime metadata (relative/estimated)
+            final var tier2 = firstPositive("/meta/n_ctx");
+            if (tier2 != null) {
+                return new TokenCount(tier2.value(), false, SourceType.DETECTED_RELATIVE, tier2.pointer());
+            }
+            // Tier 3: training context only (relative/estimated)
+            final var tier3 = firstPositive("/meta/n_ctx_train");
+            if (tier3 != null) {
+                return new TokenCount(tier3.value(), false, SourceType.DETECTED_RELATIVE, tier3.pointer());
+            }
+            return null;
         }
 
         /**
          * Best effort max output tokens (the cap for the {@code max_tokens} parameter) extracted
          * from the vendor extensions, or null when unknown. Anthropic exposes it as
          * {@code max_tokens}; OpenAI models occasionally set {@code max_completion_tokens};
-         * sglang gateways (and some vLLM deploys) use {@code max_output_length}. All are token counts.
+         * sglang gateways (and some vLLM deploys) use {@code max_output_length};
+         * LiteLLM exposes {@code max_output_tokens}. All are token counts.
          * Gateways that nest the cap under {@code top_provider.max_completion_tokens}
          * (Kilo/OpenRouter style) are read as a fallback.
+         *
+         * Absolute=true for documented output limits (max_tokens, max_completion_tokens,
+         * top_provider/max_completion_tokens, max_output_tokens).
+         * Absolute=false for gateway-specific fields that may be derived/duplicated
+         * (max_output_length, output_token_limit).
          */
-        public Integer maxTokens() {
-            return firstPositive(
+        public TokenCount maxTokens() {
+            // Tier 1: documented output limits (absolute)
+            final var tier1 = firstPositive(
                     "/max_tokens",
                     "/max_completion_tokens",
                     "/top_provider/max_completion_tokens",
-                    "/output_token_limit",
-                    "/max_output_length");
+                    "/max_output_tokens");
+            if (tier1 != null) {
+                return new TokenCount(tier1.value(), true, SourceType.DETECTED_ABSOLUTE, tier1.pointer());
+            }
+            // Tier 2: gateway-specific / possibly derived fields (relative)
+            final var tier2 = firstPositive("/output_token_limit", "/max_output_length");
+            if (tier2 != null) {
+                return new TokenCount(tier2.value(), false, SourceType.DETECTED_RELATIVE, tier2.pointer());
+            }
+            return null;
         }
 
-        private Integer firstPositive(final String... pointers) {
+        private Hit firstPositive(final String... pointers) {
             for (final var pointer : pointers) {
                 final var value = tryLookup(pointer);
                 if (value instanceof final Number number && number.intValue() > 0) {
-                    return number.intValue();
+                    return new Hit(number.intValue(), pointer);
                 }
             }
             return null;
         }
+
+        /** A positive vendor-extension hit with the pointer it came from. */
+        private record Hit(int value, String pointer) {}
 
         private Object tryLookup(final String pointer) {
             if (others == null) {

@@ -802,9 +802,7 @@ public class ChatClient implements AutoCloseable {
             return provider.contextWindow();
         }
         final var id = providerIdOf(provider);
-        return contextWindowCache == null
-                ? 0
-                : contextWindowCache.get(id, model).orElse(0);
+        return contextWindowCache == null ? 0 : contextWindowCache.getInt(id, model);
     }
 
     /**
@@ -830,14 +828,12 @@ public class ChatClient implements AutoCloseable {
         final Integer contextWindow = provider.contextWindow() > 0 ? provider.contextWindow() : null;
         final var resolvedWindow = contextWindow != null
                 ? contextWindow
-                : (contextWindowCache == null
-                        ? null
-                        : contextWindowCache.get(id, model).orElse(null));
+                : (contextWindowCache == null ? null : contextWindowCache.getInt(id, model));
         return OutputBudgetResolver.resolve(
                 null,
                 providerManager.outputTokensOverride(provider, model),
                 provider.outputTokens(),
-                detectedMax,
+                detectedMax == null ? null : detectedMax.value(),
                 resolvedWindow);
     }
 
@@ -1224,14 +1220,12 @@ public class ChatClient implements AutoCloseable {
         final Integer contextWindow = provider.contextWindow() > 0 ? provider.contextWindow() : null;
         final var resolvedWindow = contextWindow != null
                 ? contextWindow
-                : (contextWindowCache == null
-                        ? null
-                        : contextWindowCache.get(provider.id(), model).orElse(null));
+                : (contextWindowCache == null ? null : contextWindowCache.getInt(provider.id(), model));
         return OutputBudgetResolver.resolve(
                 null,
                 providerManager.outputTokensOverride(provider, model),
                 provider.outputTokens(),
-                detectedMax,
+                detectedMax == null ? null : detectedMax.value(),
                 resolvedWindow);
     }
 
@@ -1511,13 +1505,17 @@ public class ChatClient implements AutoCloseable {
         final var providerId = providerIdOf(provider);
         Integer contextWindow = provider.contextWindow() > 0 ? provider.contextWindow() : null;
         if (contextWindow == null) {
-            contextWindow = contextWindowCache.get(providerId, model).orElse(null);
+            contextWindow = contextWindowCache.getInt(providerId, model);
         }
         final var detectedMaxTokens = flavor == ApiFlavor.ANTHROPIC
                 ? contextWindowCache.getMaxTokens(providerId, model).orElse(null)
                 : null;
         final var decision = OutputBudgetResolver.resolveTracked(
-                request.maxTokens(), perModel, perProvider, detectedMaxTokens, contextWindow);
+                request.maxTokens(),
+                perModel,
+                perProvider,
+                detectedMaxTokens == null ? null : detectedMaxTokens.value(),
+                contextWindow);
         // the Anthropic API caps max_tokens per model family; only auto-resolved budgets (fallback or
         // detected /v1/models value) are clamped, an explicit request/configured value always wins
         final var budget = flavor == ApiFlavor.ANTHROPIC ? anthropicCeiling(model, decision) : decision.budget();

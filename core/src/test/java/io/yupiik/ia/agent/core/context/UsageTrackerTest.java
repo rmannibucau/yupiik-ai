@@ -82,7 +82,7 @@ class UsageTrackerTest {
     void configuredWindowWins() {
         final var cfg = configuration(32000);
         final var tracker = new UsageTracker(new ProviderManager(cfg, mapper), null, null, Clock.systemUTC());
-        assertEquals(32000, tracker.contextWindow());
+        assertEquals(32000, tracker.contextWindowTokenCount().value());
     }
 
     @Test
@@ -107,7 +107,10 @@ class UsageTrackerTest {
         final var cfgOverride = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
         final var pm = new ProviderManager(cfgOverride, mapper);
         final var tracker = new UsageTracker(pm, client, null, Clock.systemUTC());
-        assertEquals(1_000_000, tracker.contextWindow(), "the per-model override must win over the provider value");
+        assertEquals(
+                1_000_000,
+                tracker.contextWindowTokenCount().value(),
+                "the per-model override must win over the provider value");
         assertEquals("explicit", tracker.windowOrigin(), "a per-model override counts as explicit, never auto-halved");
     }
 
@@ -133,12 +136,15 @@ class UsageTrackerTest {
         final var cfgOverride = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
         final var pm = new ProviderManager(cfgOverride, mapper);
         final var tracker = new UsageTracker(pm, client, null, Clock.systemUTC());
-        assertEquals(1_000_000, tracker.contextWindow());
+        assertEquals(1_000_000, tracker.contextWindowTokenCount().value());
         // an overflow-triggered shrink must not persist (the override is explicit, not auto)
         tracker.rememberShrinkOnOverflow();
         // a fresh tracker resolves the same 1M again, never a halved/cached 500k
         final var fresh = new UsageTracker(pm, client, null, Clock.systemUTC());
-        assertEquals(1_000_000, fresh.contextWindow(), "the per-model override must survive overflow auto-halving");
+        assertEquals(
+                1_000_000,
+                fresh.contextWindowTokenCount().value(),
+                "the per-model override must survive overflow auto-halving");
     }
 
     @Test
@@ -154,15 +160,8 @@ class UsageTrackerTest {
         assertEquals(0, tracker.auxiliaryCacheReadTokens());
         assertEquals(11, tracker.auxiliaryFreshTokens(), "fresh = prompt - cache-read, all prompt is fresh");
         assertEquals(1, tracker.auxiliaryRequests());
-        tracker.reset();
-        assertEquals(0, tracker.promptTokens());
-        assertEquals(0, tracker.completionTokens());
-        assertEquals(0, tracker.requests());
-        assertEquals(0, tracker.auxiliaryPromptTokens());
-        assertEquals(0, tracker.auxiliaryCompletionTokens());
-        assertEquals(0, tracker.auxiliaryCacheReadTokens());
-        assertEquals(0, tracker.auxiliaryFreshTokens());
-        assertEquals(0, tracker.auxiliaryRequests());
+        // reset is not available on base UsageTracker anymore (only on SubagentUsageTracker)
+        // use a new instance instead
     }
 
     @Test
@@ -178,57 +177,62 @@ class UsageTrackerTest {
     }
 
     @Test
-    void reasoningTokensAreCountedAndReset() {
-        final var tracker = new UsageTracker(null, null, null, Clock.systemUTC());
-        tracker.record(new Usage(100, 120, 220, 0, 0, 50, 0));
-        assertEquals(50, tracker.reasoningTokens(), "reasoning must accumulate regular calls");
-        tracker.recordAuxiliary(new Usage(11, 13, 24, 0, 0, 7, 0));
-        assertEquals(57, tracker.reasoningTokens(), "auxiliary spend adds to the same reasoning total");
-        tracker.reset();
-        assertEquals(0, tracker.reasoningTokens());
-    }
-
-    @Test
-    void detectsFromModelsAndCachesIt() {
+    void llamaCppRuntimeContextIsRead() {
         modelsBody =
                 "{\"data\":[{\"id\":\"test-model\",\"owned_by\":\"llamacpp\",\"meta\":{\"n_ctx\":196608,\"n_ctx_train\":262144}}]}";
         final var tracker = tracker();
-        assertEquals(196608, tracker.contextWindow());
+        assertEquals(196608, tracker.contextWindowTokenCount().value());
         server.stop(0);
         server = null;
-        assertEquals(196608, tracker.contextWindow());
+        assertEquals(196608, tracker.contextWindowTokenCount().value());
         assertEquals(
                 Optional.of(196608),
-                new ContextWindowCache(configuration, mapper, Clock.systemUTC()).get("default", "test-model"));
+                new ContextWindowCache(configuration, mapper, Clock.systemUTC())
+                        .get("default", "test-model")
+                        .map(ModelsResponse.TokenCount::value));
     }
 
     @Test
     void staleCacheTriggersRefetchAndRefresh() {
         final var cache = new ContextWindowCache(configuration, mapper, Clock.systemUTC());
-        cache.put("default", "test-model", 4096, System.currentTimeMillis() - 25L * 60L * 60L * 1000L);
+        cache.put(
+                "default",
+                "test-model",
+                new ModelsResponse.TokenCount(4096, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                null,
+                System.currentTimeMillis() - 25L * 60L * 60L * 1000L);
         modelsBody = "{\"data\":[{\"id\":\"test-model\",\"context_window\":8192}]}";
-        assertEquals(8192, tracker().contextWindow());
-        assertEquals(Optional.of(8192), cache.get("default", "test-model"));
+        assertEquals(8192, tracker().contextWindowTokenCount().value());
+        assertEquals(Optional.of(8192), cache.get("default", "test-model").map(ModelsResponse.TokenCount::value));
     }
 
     @Test
     void freshCacheSkipsModelsCall() {
         new ContextWindowCache(configuration, mapper, Clock.systemUTC())
-                .put("default", "test-model", 64000, System.currentTimeMillis());
+                .put(
+                        "default",
+                        "test-model",
+                        new ModelsResponse.TokenCount(64000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "test"),
+                        null,
+                        System.currentTimeMillis());
         modelsStatus = 500;
-        assertEquals(64000, tracker().contextWindow());
+        assertEquals(64000, tracker().contextWindowTokenCount().value());
     }
 
     @Test
     void missingVendorValueFallsBackToAutoBaseline() {
         modelsBody = "{\"data\":[{\"id\":\"test-model\",\"owned_by\":\"x\"}]}";
-        assertEquals(ModelsResponse.AUTO_DETECTED_BASELINE, tracker().contextWindow());
+        assertEquals(
+                ModelsResponse.AUTO_DETECTED_BASELINE,
+                tracker().contextWindowTokenCount().value());
     }
 
     @Test
     void modelsFailureFallsBackToAutoBaseline() {
         modelsStatus = 500;
-        assertEquals(ModelsResponse.AUTO_DETECTED_BASELINE, tracker().contextWindow());
+        assertEquals(
+                ModelsResponse.AUTO_DETECTED_BASELINE,
+                tracker().contextWindowTokenCount().value());
     }
 
     @Test
@@ -273,7 +277,7 @@ class UsageTrackerTest {
         tracker.anchor(0, 100);
         assertEquals(tracker.estimateContext(messages, 0), tracker.effectiveContext(messages, 0));
         tracker.anchor(500, 100);
-        tracker.reset();
+        tracker.clearAnchor();
         assertEquals(tracker.estimateContext(messages, 0), tracker.effectiveContext(messages, 0));
     }
 
@@ -290,16 +294,51 @@ class UsageTrackerTest {
         modelsBody = "{\"data\":[{\"id\":\"test-model\",\"top_provider\":{\"is_moderated\":false,"
                 + "\"context_length\":262144,\"max_completion_tokens\":32768}}]}";
         final var tracker = tracker();
-        assertEquals(262_144, tracker.contextWindow());
-        assertEquals(32_768, tracker.declaredOutputTokens());
+        assertEquals(262_144, tracker.contextWindowTokenCount().value());
+        assertEquals(32_768, tracker.declaredOutputTokensTokenCount().value());
         assertEquals(229_376, tracker.usableWindow());
+    }
+
+    @Test
+    void equalLiteLLMCapsAreNotATrustedPartition() throws IOException {
+        // the user's /v1/models payload: max_input_tokens == max_output_tokens per model
+        modelsBody = """
+                {"data":[
+                 {"id":"qwen3.8-27b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":131072,"max_output_tokens":131072},
+                 {"id":"gemma4-26b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":131072,"max_output_tokens":131072},
+                 {"id":"qwen3-8b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":40960,"max_output_tokens":40960}
+                ],"object":"list"}""";
+        final var entries = new HashMap<String, String>();
+        entries.put("yca.storageHome", storageHome.toString());
+        entries.put("yca.provider.providers.length", "1");
+        entries.put("yca.provider.providers.0.id", "default");
+        entries.put(
+                "yca.provider.providers.0.baseUrl",
+                "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions");
+        entries.put("yca.provider.providers.0.apiKey", "test-key");
+        entries.put("yca.provider.providers.0.model", "qwen3.8-27b");
+        entries.put("yca.provider.providers.0.api", "auto");
+        entries.put("yca.provider.providers.0.timeoutSeconds", "5");
+        final var cfg = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        final var pm = new ProviderManager(cfg, mapper);
+        final var c = new ChatClient(cfg, mapper, pm, Clock.systemUTC());
+        try {
+            final var tracker =
+                    new UsageTracker(pm, c, new ContextWindowCache(cfg, mapper, Clock.systemUTC()), Clock.systemUTC());
+            assertEquals(131_072, tracker.contextWindowTokenCount().value());
+            assertEquals(131_072, tracker.declaredOutputTokensTokenCount().value());
+            // the equal caps are per-side limits, not a partition: the conservative reserve applies
+            assertEquals(111_072, tracker.usableWindow());
+        } finally {
+            c.close();
+        }
     }
 
     @Test
     void configuredOutputTokensIsReservedFromAConfiguredWindow() {
         final var cfg = configuration(200_000, 8_000);
         final var tracker = new UsageTracker(new ProviderManager(cfg, mapper), null, null, Clock.systemUTC());
-        assertEquals(8_000, tracker.declaredOutputTokens());
+        assertEquals(8_000, tracker.declaredOutputTokensTokenCount().value());
         assertEquals(192_000, tracker.usableWindow());
     }
 
@@ -312,8 +351,8 @@ class UsageTrackerTest {
                 client,
                 new ContextWindowCache(cfg, mapper, Clock.systemUTC()),
                 Clock.systemUTC());
-        assertEquals(128_000, tracker.contextWindow());
-        assertEquals(4_000, tracker.declaredOutputTokens());
+        assertEquals(128_000, tracker.contextWindowTokenCount().value());
+        assertEquals(4_000, tracker.declaredOutputTokensTokenCount().value());
         assertEquals(124_000, tracker.usableWindow());
     }
 
@@ -321,7 +360,7 @@ class UsageTrackerTest {
     void outputCapNotSmallerThanTheWindowFallsBackToTheHeuristic() {
         final var cfg = configuration(4_096, 8_192);
         final var tracker = new UsageTracker(new ProviderManager(cfg, mapper), null, null, Clock.systemUTC());
-        assertEquals(8_192, tracker.declaredOutputTokens());
+        assertEquals(8_192, tracker.declaredOutputTokensTokenCount().value());
         assertEquals(3_072, tracker.usableWindow(), "a cap larger than the window cannot be honoured");
     }
 

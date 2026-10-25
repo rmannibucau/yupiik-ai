@@ -15,10 +15,13 @@
  */
 package io.yupiik.ia.agent.core.context;
 
+import static java.lang.System.currentTimeMillis;
+
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.channels.FileChannel;
@@ -59,17 +62,26 @@ public class ContextWindowCache {
     }
 
     @JsonModel
-    public record Entry(String providerId, String model, int window, Integer maxTokens, long fetchedAt) {}
+    public record Entry(
+            String providerId,
+            String model,
+            ModelsResponse.TokenCount window,
+            ModelsResponse.TokenCount maxTokens,
+            long fetchedAt) {}
 
     /** The cached window for the provider+model pair when fresher than a day; the last entry wins. */
-    public Optional<Integer> get(final String providerId, final String model) {
+    public Optional<ModelsResponse.TokenCount> get(final String providerId, final String model) {
         return getEntry(providerId, model).map(Entry::window);
     }
 
+    /** @return the window value as int, or 0 if not cached/unknown */
+    public int getInt(final String providerId, final String model) {
+        return get(providerId, model).map(ModelsResponse.TokenCount::value).orElse(0);
+    }
+
     /** The cached max output tokens for the provider+model pair when fresher than a day; nullable when absent or unknown. */
-    public Optional<Integer> getMaxTokens(final String providerId, final String model) {
-        return getEntry(providerId, model)
-                .flatMap(e -> e.maxTokens() == null ? Optional.empty() : Optional.of(e.maxTokens()));
+    public Optional<ModelsResponse.TokenCount> getMaxTokens(final String providerId, final String model) {
+        return getEntry(providerId, model).map(Entry::maxTokens);
     }
 
     private Optional<Entry> getEntry(final String providerId, final String model) {
@@ -104,15 +116,16 @@ public class ContextWindowCache {
         }
     }
 
-    public void put(final String providerId, final String model, final int window, final long fetchedAt) {
+    public void put(
+            final String providerId, final String model, final ModelsResponse.TokenCount window, final long fetchedAt) {
         put(providerId, model, window, null, fetchedAt);
     }
 
     public void put(
             final String providerId,
             final String model,
-            final int window,
-            final Integer maxTokens,
+            final ModelsResponse.TokenCount window,
+            final ModelsResponse.TokenCount maxTokens,
             final long fetchedAt) {
         final var entry = new Entry(providerId, model, window, maxTokens, fetchedAt);
         try {
@@ -169,12 +182,12 @@ public class ContextWindowCache {
 
     /** Bounded acquire of the exclusive file lock, so a transient contention just waits a little. */
     private FileLock lock(final FileChannel channel) throws IOException {
-        final var deadline = System.currentTimeMillis() + LOCK_TIMEOUT_MILLIS;
+        final var deadline = currentTimeMillis() + LOCK_TIMEOUT_MILLIS;
         FileLock lock = null;
         while (lock == null) {
             lock = channel.tryLock();
             if (lock == null) {
-                if (System.currentTimeMillis() > deadline) {
+                if (currentTimeMillis() > deadline) {
                     throw new IOException("Timed out waiting for the context-window cache lock");
                 }
                 try {

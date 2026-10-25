@@ -2142,7 +2142,7 @@ public class AgentLoop {
         return new ContextView.Snapshot(
                 messages.size(),
                 effective,
-                usageTracker.contextWindow(),
+                usageTracker.contextWindowTokenCount().value(),
                 usageTracker.usableWindow(),
                 usageTracker.contextPercent(effective),
                 configuration.pruning().enabled() ? configuration.pruning().thresholdPercent() : Integer.MAX_VALUE,

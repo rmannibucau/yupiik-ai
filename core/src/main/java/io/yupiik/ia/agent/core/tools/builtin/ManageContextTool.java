@@ -130,7 +130,7 @@ public class ManageContextTool implements EmbeddedTool {
             out.put("pruneTriggersAt", snapshot.pruneThresholdPercent());
             out.put("compactTriggersAt", snapshot.compactThresholdPercent());
         } else {
-            final var window = usageTracker.contextWindow();
+            final var window = usageTracker.contextWindowTokenCount().value();
             out.put("contextWindow", window);
             out.put("usableWindow", usageTracker.usableWindow());
         }

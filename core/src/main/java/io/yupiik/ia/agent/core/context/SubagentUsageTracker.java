@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.core.context;
 
+import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.llm.Usage;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -99,7 +101,7 @@ public class SubagentUsageTracker extends UsageTracker {
     }
 
     @Override
-    public int effectiveContext(final List<io.yupiik.ia.agent.core.llm.Message> messages, final int extraToolTokens) {
+    public int effectiveContext(final List<Message> messages, final int extraToolTokens) {
         final var current = anchor;
         final var estimate = estimateContext(messages, extraToolTokens);
         if (current == null || estimate <= current.estimateAtAnchor()) {
@@ -179,7 +181,6 @@ public class SubagentUsageTracker extends UsageTracker {
         return Math.max(0, optimizedCharsBefore.get() - optimizedCharsAfter.get());
     }
 
-    @Override
     public void reset() {
         promptTokens.set(0);
         completionTokens.set(0);
@@ -193,18 +194,13 @@ public class SubagentUsageTracker extends UsageTracker {
     }
 
     @Override
-    public int estimateContext(final List<io.yupiik.ia.agent.core.llm.Message> messages) {
-        return parent.estimateContext(messages);
-    }
-
-    @Override
-    public int estimateContext(final List<io.yupiik.ia.agent.core.llm.Message> messages, final int extraToolTokens) {
+    public int estimateContext(final List<Message> messages, final int extraToolTokens) {
         return parent.estimateContext(messages, extraToolTokens);
     }
 
     @Override
-    public int contextWindow() {
-        return parent.contextWindow();
+    public ModelsResponse.TokenCount contextWindowTokenCount() {
+        return parent.contextWindowTokenCount();
     }
 
     @Override
@@ -225,6 +221,11 @@ public class SubagentUsageTracker extends UsageTracker {
     @Override
     public double contextPercent(final int estimatedTokens) {
         return parent.contextPercent(estimatedTokens);
+    }
+
+    @Override
+    public ModelsResponse.TokenCount declaredOutputTokensTokenCount() {
+        return parent.declaredOutputTokensTokenCount();
     }
 
     /**

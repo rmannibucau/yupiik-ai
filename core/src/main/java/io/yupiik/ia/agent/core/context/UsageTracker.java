@@ -222,15 +222,133 @@ public class UsageTracker {
     }
 
     /**
-     * The context window minus the completion headroom: the budget the input may actually grow into
+     * {@link #estimateContext(List, int)} plus an explicit contribution for the injected tool schema
+     * (which is never part of the message list but IS part of every request). Callers building a
+     * {@code ChatCompletionRequest} should pass an estimate of their wire tools to avoid the
+     * thresholds firing late because tool definitions were uncounted.
+     */
+    public int estimateContext(final List<Message> messages) {
+        return estimateContext(messages, 0);
+    }
+
+    /**
+     * Heuristic token estimation for a message list using TokenEstimator, plus an explicit contribution
+     * for the injected tool schema (which is never part of the message list but IS part of every request).
+     * Callers building a {@code ChatCompletionRequest} should pass an estimate of their wire tools to avoid
+     * the thresholds firing late because tool definitions were uncounted.
+     */
+    public int estimateContext(final List<Message> messages, final int extraToolTokens) {
+        var total = Math.max(0, extraToolTokens);
+        if (messages != null) {
+            for (final var m : messages) {
+                total += 8;
+                total += TokenEstimator.estimate(m.role());
+                total += TokenEstimator.estimate(m.content() instanceof String s ? s : String.valueOf(m.content()));
+                total += TokenEstimator.estimate(m.name());
+                total += TokenEstimator.estimate(m.toolCallId());
+                if (m.toolCalls() != null) {
+                    for (final var tc : m.toolCalls()) {
+                        total += TokenEstimator.estimate(
+                                tc.function() == null ? null : tc.function().name());
+                        total += TokenEstimator.estimate(
+                                tc.function() == null ? null : tc.function().arguments());
+                    }
+                }
+            }
+        }
+        return total;
+    }
+
+    /**
+     * The effective context window as a TokenCount (value + absolute flag + source).
+     * Falls back to AUTO_DETECTED_BASELINE with absolute=false when nothing is configured/detected.
+     */
+    public ModelsResponse.TokenCount contextWindowTokenCount() {
+        final var current = currentProvider();
+        if (current == null) {
+            return rememberAuto(new ModelsResponse.TokenCount(
+                    ModelsResponse.AUTO_DETECTED_BASELINE,
+                    false,
+                    ModelsResponse.SourceType.AUTO_BASELINE,
+                    "auto-baseline"));
+        }
+        // per-model override wins over the provider value: resolve it first when a concrete model is known
+        if (chatClient != null && providerManager != null) {
+            final var model = chatClient.model(settings);
+            if (model != null && !model.isBlank()) {
+                final var override = providerManager.contextWindowOverride(current, model);
+                if (override > 0) {
+                    return rememberExplicit(new ModelsResponse.TokenCount(
+                            override, true, ModelsResponse.SourceType.CONFIGURED, "model-config"));
+                }
+            }
+        }
+        if (current.contextWindow() > 0) {
+            return rememberExplicit(new ModelsResponse.TokenCount(
+                    current.contextWindow(), true, ModelsResponse.SourceType.CONFIGURED, "provider-config"));
+        }
+        if (chatClient == null || contextWindowCache == null) {
+            return rememberAuto(new ModelsResponse.TokenCount(
+                    ModelsResponse.AUTO_DETECTED_BASELINE,
+                    false,
+                    ModelsResponse.SourceType.AUTO_BASELINE,
+                    "auto-baseline"));
+        }
+        final var model = chatClient.model(settings);
+        if (model == null || model.isBlank()) {
+            return rememberAuto(new ModelsResponse.TokenCount(
+                    ModelsResponse.AUTO_DETECTED_BASELINE,
+                    false,
+                    ModelsResponse.SourceType.AUTO_BASELINE,
+                    "auto-baseline"));
+        }
+        final var providerId = current.id() == null || current.id().isBlank() ? "default" : current.id();
+        final var cached = contextWindowCache.get(providerId, model);
+        if (cached.isPresent()) {
+            return rememberExplicit(cached.get());
+        }
+        return detectTokenCount(providerId, model)
+                .orElseGet(() -> rememberAuto(new ModelsResponse.TokenCount(
+                        ModelsResponse.AUTO_DETECTED_BASELINE,
+                        false,
+                        ModelsResponse.SourceType.AUTO_BASELINE,
+                        "auto-baseline")));
+    }
+
+    /**
+     * The output budget the current model declares, as a TokenCount (value + absolute flag + source),
+     * or null when unknown.
+     */
+    public ModelsResponse.TokenCount declaredOutputTokensTokenCount() {
+        final var provider = currentProvider();
+        if (provider == null) {
+            return null;
+        }
+        final var model = currentModel(provider);
+        final var override = providerManager == null ? 0 : providerManager.outputTokensOverride(provider, model);
+        if (override > 0) {
+            return new ModelsResponse.TokenCount(override, true, ModelsResponse.SourceType.CONFIGURED, "model-config");
+        }
+        if (provider.outputTokens() > 0) {
+            return new ModelsResponse.TokenCount(
+                    provider.outputTokens(), true, ModelsResponse.SourceType.CONFIGURED, "provider-config");
+        }
+        if (contextWindowCache == null || model == null || model.isBlank()) {
+            return null;
+        }
+        return contextWindowCache.getMaxTokens(providerId(provider), model).orElse(null);
+    }
+
+    /** The context window minus the completion headroom: the budget the input may actually grow into
      * before the request risks overflowing. Thresholds compare against this, not the raw window. The
      * headroom is the output cap the model declares (per-model, per-provider or detected from
-     * {@code /v1/models}, see {@link #declaredOutputTokens()}) so a window of 262144 declaring 32768
+     * {@code /v1/models}, see {@link #declaredOutputTokensTokenCount()}) so a window of 262144 declaring 32768
      * completion tokens leaves 229376 for the input; without a declared cap the historical
-     * {@code min(20000, window / 4)} heuristic applies (see {@link ContextBudget}).
-     */
+     * {@code min(20000, window / 4)} heuristic applies (see {@link ContextBudget}). */
     public int usableWindow() {
-        return ContextBudget.usableWindow(contextWindow(), declaredOutputTokens());
+        final var window = contextWindowTokenCount();
+        final var output = declaredOutputTokensTokenCount();
+        return ContextBudget.usableWindow(window, output);
     }
 
     public long promptTokens() {
@@ -261,160 +379,20 @@ public class UsageTracker {
         return auxiliaryCompletionTokens.get();
     }
 
-    /** Background (auxiliary) prompt tokens that were served from the provider cache. */
     public long auxiliaryCacheReadTokens() {
         return auxiliaryCacheReadTokens.get();
-    }
-
-    /** Background (auxiliary) billed prompt tokens: prompt minus cache-read. */
-    public long auxiliaryFreshTokens() {
-        return Math.max(0, auxiliaryPromptTokens.get() - auxiliaryCacheReadTokens.get());
     }
 
     public long auxiliaryRequests() {
         return auxiliaryRequests.get();
     }
 
-    public void reset() {
-        promptTokens.set(0);
-        completionTokens.set(0);
-        reasoningTokens.set(0);
-        requests.set(0);
-        auxiliaryPromptTokens.set(0);
-        auxiliaryCompletionTokens.set(0);
-        auxiliaryCacheReadTokens.set(0);
-        auxiliaryRequests.set(0);
-        optimizedOutputs.set(0);
-        optimizedCharsBefore.set(0);
-        optimizedCharsAfter.set(0);
-        anchor = null;
-    }
-
-    public int estimateContext(final List<Message> messages) {
-        return estimateContext(messages, 0);
+    public long auxiliaryFreshTokens() {
+        return Math.max(0, auxiliaryPromptTokens.get() - auxiliaryCacheReadTokens.get());
     }
 
     /**
-     * {@link #estimateContext(List)} plus an explicit contribution for the injected tool schema
-     * (which is never part of the message list but IS part of every request). Callers building a
-     * {@code ChatCompletionRequest} should pass an estimate of their wire tools to avoid the
-     * thresholds firing late because tool definitions were uncounted.
-     */
-    public int estimateContext(final List<Message> messages, final int extraToolTokens) {
-        var total = Math.max(0, extraToolTokens);
-        for (final var m : messages) {
-            total += 8;
-            total += TokenEstimator.estimate(m.role());
-            total += TokenEstimator.estimate(m.content() instanceof String s ? s : String.valueOf(m.content()));
-            total += TokenEstimator.estimate(m.name());
-            total += TokenEstimator.estimate(m.toolCallId());
-            if (m.toolCalls() != null) {
-                for (final var tc : m.toolCalls()) {
-                    total += TokenEstimator.estimate(
-                            tc.function() == null ? null : tc.function().name());
-                    total += TokenEstimator.estimate(
-                            tc.function() == null ? null : tc.function().arguments());
-                }
-            }
-        }
-        return total;
-    }
-
-    /**
-     * The effective context window in tokens: the per-model configured {@code models[].contextWindow} when set,
-     * else the provider configured value when positive, else a value detected from the provider /v1/models
-     * vendor extensions and cached for a day per provider and model, else {@link ModelsResponse#AUTO_DETECTED_BASELINE}.
-     * Detection failures are logged at warning level. Auto-detection fallbacks are tracked so callers can surface an
-     * honest once-per-session notice to the user. A per-model or provider configured value counts as explicit, so an
-     * overflow-triggered auto-halving is never persisted for it.
-     */
-    public int contextWindow() {
-        final var current = currentProvider();
-        if (current == null) {
-            return rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE);
-        }
-        // per-model override wins over the provider value: resolve it first when a concrete model is known
-        if (chatClient != null && providerManager != null) {
-            final var model = chatClient.model(settings);
-            if (model != null && !model.isBlank()) {
-                final var override = providerManager.contextWindowOverride(current, model);
-                if (override > 0) {
-                    return rememberExplicit(override);
-                }
-            }
-        }
-        if (current.contextWindow() > 0) {
-            return rememberExplicit(current.contextWindow());
-        }
-        if (chatClient == null || contextWindowCache == null) {
-            return rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE);
-        }
-        final var model = chatClient.model(settings);
-        if (model == null || model.isBlank()) {
-            return rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE);
-        }
-        final var providerId = current.id() == null || current.id().isBlank() ? "default" : current.id();
-        final var cached = contextWindowCache.get(providerId, model);
-        if (cached.isPresent()) {
-            return rememberExplicit(cached.get());
-        }
-        return detect(providerId, model).orElseGet(() -> rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE));
-    }
-
-    /**
-     * The output budget the current model declares, in tokens, or {@code 0} when unknown: the per-model
-     * {@code behavior.outputTokens}, else the per-provider {@code outputTokens}, else the value detected
-     * from {@code /v1/models} and cached for a day. Unlike {@link ChatClient#outputTokens(ChatSettings)}
-     * the {@code 32000} fallback is not applied, so callers can tell a real declaration from the resolver
-     * default and reserve it from the context window (see {@link #usableWindow()}).
-     */
-    public int declaredOutputTokens() {
-        final var provider = currentProvider();
-        if (provider == null) {
-            return 0;
-        }
-        final var model = currentModel(provider);
-        final var override = providerManager == null ? 0 : providerManager.outputTokensOverride(provider, model);
-        if (override > 0) {
-            return override;
-        }
-        if (provider.outputTokens() > 0) {
-            return provider.outputTokens();
-        }
-        if (contextWindowCache == null || model == null || model.isBlank()) {
-            return 0;
-        }
-        return contextWindowCache.getMaxTokens(providerId(provider), model).orElse(0);
-    }
-
-    /** The provider targeted by the session selection, else the process current provider; {@code null} when unknown. */
-    private ProviderConfiguration currentProvider() {
-        if (providerManager == null) {
-            return null;
-        }
-        if (settings == null || settings.providerId() == null) {
-            return providerManager.current();
-        }
-        return providerManager.provider(settings.providerId());
-    }
-
-    /** The effective model name of the session, falling back to the provider default without a client. */
-    private String currentModel(final ProviderConfiguration provider) {
-        if (chatClient != null) {
-            final var model = chatClient.model(settings);
-            if (model != null && !model.isBlank()) {
-                return model;
-            }
-        }
-        return provider == null ? null : provider.model();
-    }
-
-    private static String providerId(final ProviderConfiguration provider) {
-        return provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
-    }
-
-    /**
-     * Whether the last {@link #contextWindow()} resolution (if any) fell back to the auto-detected
+     * Whether the last {@link #contextWindowTokenCount()} resolution (if any) fell back to the auto-detected
      * baseline rather than an explicit/explicitly detected value. Useful to avoid spamming a
      * 'context window auto-detected' notice on every turn.
      */
@@ -424,7 +402,7 @@ public class UsageTracker {
     }
 
     /**
-     * Where the last {@link #contextWindow()} resolution came from: {@code "explicit"} for a
+     * Where the last {@link #contextWindowTokenCount()} resolution came from: {@code "explicit"} for a
      * provider-configured or vendor-detected/cached value, {@code "auto"} for the
      * {@link ModelsResponse#AUTO_DETECTED_BASELINE} fallback. Ordered after
      * {@link #lastResolutionWasAuto()} so a pending detection first call still reports the
@@ -434,12 +412,12 @@ public class UsageTracker {
         return lastResolutionWasAuto() ? "auto" : "explicit";
     }
 
-    private int rememberExplicit(final int window) {
+    private ModelsResponse.TokenCount rememberExplicit(final ModelsResponse.TokenCount window) {
         contextWindowResolutions.incrementAndGet();
         return window;
     }
 
-    private int rememberAuto(final int window) {
+    private ModelsResponse.TokenCount rememberAuto(final ModelsResponse.TokenCount window) {
         contextWindowResolutions.incrementAndGet();
         autoContextWindowResolutions.incrementAndGet();
         return window;
@@ -466,19 +444,25 @@ public class UsageTracker {
      */
     public int rememberShrinkOnOverflow() {
         if (chatClient == null || contextWindowCache == null) {
-            return contextWindow();
+            return contextWindowTokenCount().value();
         }
         final var current = providerManager == null ? null : providerManager.current();
         if (current == null) {
-            return contextWindow();
+            return contextWindowTokenCount().value();
         }
         final var model = current.model();
         if (model == null || model.isBlank()) {
-            return contextWindow();
+            return contextWindowTokenCount().value();
         }
         final var providerId = current.id() == null || current.id().isBlank() ? "default" : current.id();
-        final var halved = Math.max(4_096, contextWindow() / 2);
-        if (lastResolutionWasAuto()) {
+        final var currentWindow = contextWindowTokenCount();
+        final var halvedValue = Math.max(4_096, currentWindow.value() / 2);
+        final var halved = new ModelsResponse.TokenCount(
+                halvedValue,
+                false,
+                ModelsResponse.SourceType.OVERFLOW_ADJUSTED,
+                currentWindow.sourcePointer() + "-halved");
+        if (!currentWindow.absolute()) {
             try {
                 contextWindowCache.put(providerId, model, halved, clock.millis());
             } catch (final RuntimeException e) {
@@ -488,10 +472,10 @@ public class UsageTracker {
                         () -> "Could not persist reduced context window for " + providerId + "/" + model);
             }
         }
-        return halved;
+        return halvedValue;
     }
 
-    private Optional<Integer> detect(final String providerId, final String model) {
+    private Optional<ModelsResponse.TokenCount> detectTokenCount(final String providerId, final String model) {
         try {
             final var response = chatClient.models();
             if (response == null || response.data() == null) {
@@ -500,8 +484,9 @@ public class UsageTracker {
             for (final var entry : response.data()) {
                 if (model.equals(entry.id())) {
                     final var window = entry.contextWindow();
-                    if (window != null && window > 0) {
-                        contextWindowCache.put(providerId, model, window, entry.maxTokens(), clock.millis());
+                    final var maxTokens = entry.maxTokens();
+                    if (window != null && window.value() > 0) {
+                        contextWindowCache.put(providerId, model, window, maxTokens, clock.millis());
                         return Optional.of(window);
                     }
                     break;
@@ -517,5 +502,31 @@ public class UsageTracker {
             Thread.currentThread().interrupt();
         }
         return Optional.empty();
+    }
+
+    /** The provider targeted by the session selection, else the process current provider; {@code null} when unknown. */
+    private ProviderConfiguration currentProvider() {
+        if (providerManager == null) {
+            return null;
+        }
+        if (settings == null || settings.providerId() == null) {
+            return providerManager.current();
+        }
+        return providerManager.provider(settings.providerId());
+    }
+
+    /** The effective model name of the session, falling back to the provider default without a client. */
+    private String currentModel(final ProviderConfiguration provider) {
+        if (chatClient != null) {
+            final var model = chatClient.model(settings);
+            if (model != null && !model.isBlank()) {
+                return model;
+            }
+        }
+        return provider == null ? null : provider.model();
+    }
+
+    private static String providerId(final ProviderConfiguration provider) {
+        return provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
     }
 }
