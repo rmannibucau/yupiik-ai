@@ -51,7 +51,6 @@ import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.wiring.HackStdIo;
-import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.lang.reflect.Proxy;
 import java.nio.file.Files;
@@ -91,7 +90,6 @@ public class CliCommand implements Runnable {
     private final AgentProvider agentProvider;
     private final SessionRuntimeFactory sessionRuntimeFactory;
     private final ChatClient chatClient;
-    private final ProviderManager providerManager;
     private final AgentSessionService agentSessionService;
     private final MavenRepositoryKnowledgeService mavenKnowledgeService;
     private final SlashRegistry slashRegistry;
@@ -165,7 +163,6 @@ public class CliCommand implements Runnable {
             final SessionRuntimeFactory sessionRuntimeFactory,
             final AgentProvider agentProvider,
             final ChatClient chatClient,
-            final ProviderManager providerManager,
             final AgentSessionService agentSessionService,
             final MavenRepositoryKnowledgeService mavenKnowledgeService,
             final TurnRunner turnRunner,
@@ -186,7 +183,6 @@ public class CliCommand implements Runnable {
         this.agentProvider = agentProvider;
         this.sessionRuntimeFactory = sessionRuntimeFactory;
         this.chatClient = chatClient;
-        this.providerManager = providerManager;
         this.agentSessionService = agentSessionService;
         this.mavenKnowledgeService = mavenKnowledgeService;
         this.turnRunner = turnRunner;
@@ -997,7 +993,7 @@ public class CliCommand implements Runnable {
     private void refreshLabels() {
         final var ctx = new SpeakerLabels.Ctx(
                 chatClient.model(session.chatSettings()),
-                providerManager == null ? null : providerManager.currentProviderId(),
+                chatClient.providerId(session.chatSettings()),
                 activeAgent,
                 session.runtime() == null
                         ? null

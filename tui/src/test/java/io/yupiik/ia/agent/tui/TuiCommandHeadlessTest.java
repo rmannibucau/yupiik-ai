@@ -456,8 +456,7 @@ class TuiCommandHeadlessTest {
                     new SpeakerLabels(
                             List.of(new FormatDatePromptHelper(Clock.systemDefaultZone())),
                             d.configuration(),
-                            d.chatClient(),
-                            d.providerManager()),
+                            d.chatClient()),
                     autoLogConfigurer.instance(),
                     d.mcpManager(),
                     new ProcessService(),

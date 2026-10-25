@@ -91,8 +91,7 @@ class SpeakerLabelsTest {
         return new SpeakerLabels(
                 List.of(new FormatDatePromptHelper(Clock.systemDefaultZone())),
                 configuration,
-                chatClient(configuration),
-                providerManager(configuration));
+                chatClient(configuration));
     }
 
     @Test
@@ -116,6 +115,18 @@ class SpeakerLabelsTest {
                 labels(configuration).assistantLabel(new SpeakerLabels.Ctx(null, null, null, "plan", "s1", null));
         assertTrue(fallenBack.startsWith(stamp()), fallenBack);
         assertTrue(fallenBack.endsWith("Assistant"), fallenBack);
+    }
+
+    @Test
+    void assistantLabelUsesTheCtxProviderNotTheProcessCurrentOne() {
+        // the process-wide current provider is "default"; the session runs on another one and
+        // the label must reflect the ctx provider, never the process current one
+        final var configuration = configuration(Map.of());
+        final var rendered = labels(configuration)
+                .assistantLabel(new SpeakerLabels.Ctx("session-model", "session-provider", null, "plan", "s1", null));
+        assertTrue(rendered.startsWith(stamp()), rendered);
+        assertTrue(rendered.endsWith("session-provider::session-model"), rendered);
+        assertFalse(rendered.contains("default"), rendered);
     }
 
     @Test

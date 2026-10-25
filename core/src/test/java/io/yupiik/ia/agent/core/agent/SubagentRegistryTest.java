@@ -19,12 +19,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
+import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -231,5 +234,34 @@ class SubagentRegistryTest {
         registry.complete(state.id(), SubagentRegistry.SubagentResult.success("done", "conv", List.of()));
         assertTrue(registry.collect(state.id()).isPresent(), "first collect returns the result");
         assertTrue(registry.collect(state.id()).isEmpty(), "second collect is empty (one-shot)");
+    }
+
+    @Test
+    void transcriptUsesStoredIdentityThenFallsBackToProcessCurrent() {
+        // a $provider/model spawn runs on a provider other than the process-wide current one:
+        // the runner stores the effective tuple, the lazily created transcript must use it
+        final var labels = new SpeakerLabels(
+                List.of(new FormatDatePromptHelper(Clock.systemDefaultZone())), config(Map.of()), null);
+        final var registry = new SubagentRegistry(config(Map.of()), providerManager(4), labels);
+        final var state = registry.start("parent", "task").orElseThrow();
+        registry.setTranscriptIdentity(state.id(), "child-provider", "child-model");
+        final var transcript = registry.transcriptOf(state.id());
+        assertTrue(transcript.assistantLabel().endsWith("child-provider::child-model"), transcript.assistantLabel());
+        // after dropTranscript the identity is gone: a fresh transcript falls back to the process current
+        registry.dropTranscript(state.id());
+        final var fresh = registry.transcriptOf(state.id());
+        assertTrue(fresh.assistantLabel().endsWith("default::model"), fresh.assistantLabel());
+    }
+
+    @Test
+    void setTranscriptIdentityIgnoresBlankIds() {
+        final var labels = new SpeakerLabels(
+                List.of(new FormatDatePromptHelper(Clock.systemDefaultZone())), config(Map.of()), null);
+        final var registry = new SubagentRegistry(config(Map.of()), providerManager(4), labels);
+        registry.setTranscriptIdentity(null, "p", "m");
+        registry.setTranscriptIdentity("", "p", "m");
+        registry.setTranscriptIdentity("   ", "p", "m");
+        // no exception, no entry stored: a real transcript still falls back to the process current
+        assertTrue(registry.transcriptOf("any").assistantLabel().endsWith("default::model"));
     }
 }

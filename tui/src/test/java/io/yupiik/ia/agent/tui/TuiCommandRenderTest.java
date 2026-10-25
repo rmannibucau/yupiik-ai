@@ -1344,11 +1344,7 @@ class TuiCommandRenderTest {
                 new SessionLifecycle(sessionStore),
                 chatClient,
                 new io.yupiik.ia.agent.core.style.ModelStyleService(configuration, chatClient),
-                new SpeakerLabels(
-                        List.of(new FormatDatePromptHelper(clock)),
-                        configuration,
-                        chatClient,
-                        new ProviderManager(configuration, formatMapper)),
+                new SpeakerLabels(List.of(new FormatDatePromptHelper(clock)), configuration, chatClient),
                 new AutoLogConfigurer(configuration),
                 mcpManager,
                 new ProcessService(),

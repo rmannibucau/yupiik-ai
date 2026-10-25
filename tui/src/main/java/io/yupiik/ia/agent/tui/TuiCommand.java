@@ -1010,8 +1010,13 @@ public class TuiCommand implements Runnable {
         final var mode = target.session.runtime() == null
                 ? null
                 : String.valueOf(target.session.runtime().permissions().mode());
-        final var ctx = speakerLabels.minimalistCtx(
-                chatClient == null ? null : chatClient.model(settings), target.activeAgent, mode, target.sessionId);
+        final var ctx = new SpeakerLabels.Ctx(
+                chatClient == null ? null : chatClient.model(settings),
+                chatClient == null ? null : chatClient.providerId(settings),
+                target.activeAgent,
+                mode,
+                target.sessionId,
+                null);
         target.model.appendTranscript(ConversationTranscript.LOG_BEGIN + "\n"
                 + speakerLabels.logsLabel(ctx) + "\n"
                 + level.getName() + " " + shortLoggerName(loggerName) + "\n"
@@ -2486,8 +2491,13 @@ public class TuiCommand implements Runnable {
         final var mode = state.session.runtime() == null
                 ? null
                 : String.valueOf(state.session.runtime().permissions().mode());
-        final var ctx = speakerLabels.minimalistCtx(
-                chatClient == null ? null : chatClient.model(settings), state.activeAgent, mode, state.sessionId);
+        final var ctx = new SpeakerLabels.Ctx(
+                chatClient == null ? null : chatClient.model(settings),
+                chatClient == null ? null : chatClient.providerId(settings),
+                state.activeAgent,
+                mode,
+                state.sessionId,
+                null);
         state.model.setLabels(speakerLabels.userLabel(ctx), speakerLabels.assistantLabel(ctx));
         state.model.setLabelResolver((identity, user) -> {
             final var ictx =

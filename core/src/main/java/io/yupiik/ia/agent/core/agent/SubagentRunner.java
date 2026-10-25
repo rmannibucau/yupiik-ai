@@ -328,6 +328,11 @@ public class SubagentRunner {
                                         .defaultSubagentModel());
         final var subagentSettings = effectiveModel.settings();
         agentLoop.updateChatSettings(subagentSettings);
+        // the transcript's default speaker labels must reflect this child's effective provider/model
+        // (a $provider/model spawn may target a provider other than the process-wide current one);
+        // the transcript may already have been created lazily by the UI, so the identity is stored
+        // and read back at creation time, not pushed into an existing transcript
+        subagentRegistry.setTranscriptIdentity(state.id(), subagentSettings.providerId(), subagentSettings.model());
         agentLoop.agentModelTuning(profile == null ? null : profile.model());
         agentLoop.skipConfiguredAgentModel(true);
         agentLoop.allowedTools(effectiveAllowedTools);

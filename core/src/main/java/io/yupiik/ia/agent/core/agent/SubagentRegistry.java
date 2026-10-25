@@ -41,6 +41,12 @@ public class SubagentRegistry {
     private final Map<String, SubagentState> subagents = new ConcurrentHashMap<>();
     private final Map<String, ConversationTranscript> subagentTranscripts = new ConcurrentHashMap<>();
     /**
+     * The effective (provider, model) tuple of a sub-agent, captured when its runner resolves the
+     * model routing, so {@link #transcriptOf} can seed the transcript's default speaker labels from
+     * what the child actually runs on instead of the process-wide current provider.
+     */
+    private final Map<String, TranscriptIdentity> transcriptIdentities = new ConcurrentHashMap<>();
+    /**
      * Completed sub-agent results keyed by sub-agent id. Kept separately from {@link #subagents} so
      * {@code collect} can still return a finished result even after the state was LRU-evicted from
      * {@link #subagents} (the {@code get -> collect} race). Bounded (via an insertion-ordered eviction
@@ -195,28 +201,55 @@ public class SubagentRegistry {
         return cancelled;
     }
 
+    /** The effective (provider, model) a sub-agent runs on, captured by its runner at model-resolution time. */
+    public record TranscriptIdentity(String provider, String model) {}
+
+    /**
+     * Records the effective (provider, model) tuple of a sub-agent, resolved by its runner when
+     * the model routing is known. Lets {@link #transcriptOf} seed the transcript's default speaker
+     * labels from what the child actually runs on (a {@code $provider/model} spawn may target a
+     * provider different from the process-wide current one).
+     */
+    public void setTranscriptIdentity(final String subagentId, final String provider, final String model) {
+        if (subagentId == null || subagentId.isBlank()) {
+            return;
+        }
+        transcriptIdentities.put(subagentId, new TranscriptIdentity(provider, model));
+    }
+
     /**
      * The per-subagent transcript capture for the given id, lazily created. This
      * instance folds the subagent-tagged events (they are dropped from the parent
      * transcript) so the TUI can render the child conversation through
-     * {@code /subagents <id>} without mixing two model voices in one pane.
+     * {@code /subagents <id>} without mixing two model voices in one pane. The default
+     * speaker labels use the identity stored by {@link #setTranscriptIdentity} when known,
+     * else the process-wide current provider (the transcript is sometimes created before
+     * the runner resolves the routing).
      */
     public ConversationTranscript transcriptOf(final String subagentId) {
         return subagentTranscripts.computeIfAbsent(subagentId, id -> {
             final var t = new ConversationTranscript(true);
             if (speakerLabels != null) {
-                final var current = providerManager == null ? null : providerManager.current();
-                final var ctx = new SpeakerLabels.Ctx(
-                        current == null || current.model() == null ? null : current.model(),
-                        providerManager == null ? null : providerManager.currentProviderId(),
-                        id,
-                        null,
-                        null,
-                        null);
+                final var identity = transcriptIdentities.get(id);
+                final var provider = identity != null
+                                && identity.provider() != null
+                                && !identity.provider().isBlank()
+                        ? identity.provider()
+                        : (providerManager == null ? null : providerManager.currentProviderId());
+                final var model = identity != null
+                                && identity.model() != null
+                                && !identity.model().isBlank()
+                        ? identity.model()
+                        : (providerManager == null
+                                        || providerManager.current() == null
+                                        || providerManager.current().model() == null
+                                ? null
+                                : providerManager.current().model());
+                final var ctx = new SpeakerLabels.Ctx(model, provider, id, null, null, null);
                 t.setLabels(speakerLabels.userLabel(ctx), speakerLabels.assistantLabel(ctx));
-                t.setLabelResolver((identity, user) -> {
+                t.setLabelResolver((identity2, user) -> {
                     final var ictx = new SpeakerLabels.Ctx(
-                            identity.model(), identity.provider(), identity.agent(), null, null, null);
+                            identity2.model(), identity2.provider(), identity2.agent(), null, null, null);
                     return user ? speakerLabels.userLabel(ictx) : speakerLabels.assistantLabel(ictx);
                 });
             }
@@ -227,6 +260,7 @@ public class SubagentRegistry {
     /** Drops the transient subagent captures that already completed; bounded by the LRU cleanup. */
     public void dropTranscript(final String subagentId) {
         subagentTranscripts.remove(subagentId);
+        transcriptIdentities.remove(subagentId);
     }
 
     public Optional<SubagentResult> collect(final String subagentId) {

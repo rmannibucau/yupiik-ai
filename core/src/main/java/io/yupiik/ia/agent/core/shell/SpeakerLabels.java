@@ -23,7 +23,6 @@ import io.yupiik.ia.agent.core.cli.PromptHandlebarsHelper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.LabelsConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
-import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -50,7 +49,6 @@ public class SpeakerLabels {
     private final Template assistantTemplate;
     private final Template logsTemplate;
     private final ChatClient chatClient;
-    private final ProviderManager providerManager;
 
     /** Bean proxy constructor: leaves the real fields unset, the active instance is created by the injection point. */
     protected SpeakerLabels() {
@@ -58,23 +56,17 @@ public class SpeakerLabels {
         this.assistantTemplate = null;
         this.logsTemplate = null;
         this.chatClient = null;
-        this.providerManager = null;
     }
 
-    public SpeakerLabels(
-            final CodingAgentConfiguration configuration,
-            final ChatClient chatClient,
-            final ProviderManager providerManager) {
-        this(List.of(), configuration, chatClient, providerManager);
+    public SpeakerLabels(final CodingAgentConfiguration configuration, final ChatClient chatClient) {
+        this(List.of(), configuration, chatClient);
     }
 
     public SpeakerLabels(
             final List<PromptHandlebarsHelper> helpers,
             final CodingAgentConfiguration configuration,
-            final ChatClient chatClient,
-            final ProviderManager providerManager) {
+            final ChatClient chatClient) {
         this.chatClient = chatClient;
-        this.providerManager = providerManager;
         final var labels = configuration == null ? null : configuration.labels();
         final var user = labels == null ? null : labels.userTemplate();
         final var assistant = labels == null ? null : labels.assistantTemplate();
@@ -99,7 +91,10 @@ public class SpeakerLabels {
     /**
      * Context snapshot the template is rendered against. One instance is built at each
      * turn boundary; model/provider/agent are read at render time so a running session
-     * always reflects the current model/provider/agent from the next written block.
+     * always reflects the current model/provider/agent from the next written block. The
+     * provider must be the session-effective one (per-session override included), resolved
+     * by the caller (eg. {@link ChatClient#providerId(ChatSettings)}): this class never
+     * guesses it from the process-wide current provider.
      */
     public record Ctx(
             String modelName,
@@ -154,19 +149,5 @@ public class SpeakerLabels {
         if (value != null && !(value instanceof String s && s.isBlank())) {
             map.put(key, value);
         }
-    }
-
-    /**
-     * A short practical context snapshot without the full configuration map, for
-     * callers that only need model/provider/agent (the TUI sidebar).
-     */
-    public Ctx minimalistCtx(final String modelName, final String agent, final String mode, final String sessionId) {
-        return new Ctx(
-                modelName,
-                providerManager == null ? null : providerManager.currentProviderId(),
-                agent,
-                mode,
-                sessionId,
-                null);
     }
 }
