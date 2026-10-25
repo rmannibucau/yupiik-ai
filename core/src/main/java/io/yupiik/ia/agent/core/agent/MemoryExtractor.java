@@ -411,7 +411,12 @@ public class MemoryExtractor {
             if (snippet != null && !snippet.isBlank()) {
                 memoryStore.appendText(false, snippet);
             }
-            resetFailures();
+            // NOTE: do NOT resetFailures() here. A provider that persistently lacks structured output
+            // returns structured=false on every pass; resetting the consecutive-failure counter would
+            // re-emit the 'rejected by the provider' WARN on every pass (the counter is reset by a
+            // genuine structured success at the top of this method, clearing the streak so a real
+            // recovery re-arms the notice). Keeping the counter non-zero makes notifyFailure's
+            // `failures == 1` gate warn exactly once per consecutive non-structured window.
             watermark.set(messages.size());
         } catch (final IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
@@ -428,7 +433,10 @@ public class MemoryExtractor {
                     notifyFailure("memory extraction (structured facts) failed: " + e.getMessage());
                 } else {
                     memoryStore.appendText(false, snippet);
-                    resetFailures();
+                    // NOTE: like the `structured=false` path above, a wire-failure salvage that persists
+                    // memory is a steady-state degraded condition: do NOT resetFailures() here, or the
+                    // 'rejected by the provider' WARN re-fires on every pass for a persistently-throwing
+                    // backend. Only a genuine structured success (top of the method) clears the streak.
                     notifyFailure("memory extraction (structured facts) failed: " + e.getMessage()
                             + "; saving a plain snippet instead: " + clamp(snippet, 200));
                 }

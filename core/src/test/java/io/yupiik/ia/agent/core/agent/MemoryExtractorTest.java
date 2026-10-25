@@ -155,6 +155,130 @@ class MemoryExtractorTest {
     }
 
     @Test
+    void persistentStructuredLackWarnsOnceAcrossConsecutivePasses() throws Exception {
+        // a provider that persistently lacks structured output (eg. yupiik's NInfer gateway) returns
+        // structured=false on every pass. The 'rejected by the provider; saving a plain snippet instead'
+        // WARN must fire exactly once for the whole consecutive streak - not on every memory pass - so a
+        // permanently non-structured backend does not spam the user each turn. A later structured success
+        // (resetFailures on the structured branch) would re-arm the notice.
+        final var config = config(home);
+        final var store = new MemoryStore(config);
+        final var events = new ArrayList<AgentEvent>();
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
+                    throws IOException {
+                // always degrade to the plain path: the provider cannot do constrained output
+                return new StructuredResult(
+                        new ChatResult(Message.assistant("plain fallback answer", null), new Usage(1, 1, 2)), false);
+            }
+
+            @Override
+            public ChatResult chat(final ChatCompletionRequest request) throws IOException, InterruptedException {
+                return new ChatResult(
+                        Message.assistant("- a durable fact about the project\n", null), new Usage(1, 1, 2));
+            }
+        };
+        final var extractor = new MemoryExtractor(
+                chat,
+                config,
+                null, // provider manager: the global memory model chain applies
+                store,
+                mapper,
+                EXECUTOR,
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        if (event instanceof AgentEvent agentEvent) {
+                            events.add(agentEvent);
+                        }
+                    }
+                },
+                Clock.systemUTC(),
+                null,
+                "s-test",
+                null,
+                null, // memory production policy (default: enabled)
+                null);
+        // two consecutive passes over a growing transcript (the watermark advances after each pass, so a
+        // fresh delta is required - mirroring deltaExtractsOnlyNewMessages), both ending in the
+        // structured=false plain-snippet fallback
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.user("user said: project uses tabs now"));
+        extractor.forceExtractNow(messages, ChatSettings.EMPTY);
+        messages.add(Message.user("user said: we standardize on tabs"));
+        extractor.forceExtractNow(messages, ChatSettings.EMPTY);
+
+        final var warns = events.stream()
+                .filter(e -> e instanceof AgentEvent.Notice notice && notice.level() == AgentEvent.Notice.Level.WARN)
+                .count();
+        assertEquals(1, warns, "the consistent structured=false must warn exactly once across the streak: " + events);
+    }
+
+    @Test
+    void persistentWireFailureSalvageWarnsOnceAcrossConsecutivePasses() throws Exception {
+        // a provider that consistently throws on the structured call (e.g. a gateway that streams
+        // unconditionally) but whose plain-snippet fallback still salvages memory. Like the
+        // structured=false case, the WARN must fire exactly once across the consecutive streak - not on
+        // every pass - and the snippet must still be persisted every pass. Only a genuine structured
+        // success re-arms the notice.
+        final var config = config(home);
+        final var store = new MemoryStore(config);
+        final var events = new ArrayList<AgentEvent>();
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
+                    throws IOException {
+                throw new IOException("anthropic-messages: unparseable response (HTTP 200, text/event-stream)");
+            }
+
+            @Override
+            public ChatResult chat(final ChatCompletionRequest request) throws IOException, InterruptedException {
+                return new ChatResult(
+                        Message.assistant("- a durable fact about the project\n", null), new Usage(1, 1, 2));
+            }
+        };
+        final var extractor = new MemoryExtractor(
+                chat,
+                config,
+                null, // provider manager: the global memory model chain applies
+                store,
+                mapper,
+                EXECUTOR,
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        if (event instanceof AgentEvent agentEvent) {
+                            events.add(agentEvent);
+                        }
+                    }
+                },
+                Clock.systemUTC(),
+                null,
+                "s-test",
+                null,
+                null, // memory production policy (default: enabled)
+                null);
+        // two consecutive passes over a growing transcript, both salvaged via the plain snippet
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.user("user said: project uses tabs now"));
+        extractor.forceExtractNow(messages, ChatSettings.EMPTY);
+        messages.add(Message.user("user said: we standardize on tabs"));
+        extractor.forceExtractNow(messages, ChatSettings.EMPTY);
+
+        final var warns = events.stream()
+                .filter(e -> e instanceof AgentEvent.Notice notice && notice.level() == AgentEvent.Notice.Level.WARN)
+                .count();
+        assertEquals(1, warns, "a persistent wire-failure salvage must warn exactly once across the streak: " + events);
+        final var project = store.readProject();
+        assertTrue(
+                project.contains("a durable fact about the project"),
+                "the fallback snippet must still be saved on every pass: " + project);
+    }
+
+    @Test
     void structuredExceptionFallsBackToSnippetAndWarns() throws Exception {
         // P0-D: a wire failure of the structured call (e.g. a gateway that streams unconditionally) used
         // to lose the whole memory pass; now it must still save a plain snippet and name the phase
