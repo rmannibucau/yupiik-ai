@@ -409,6 +409,53 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void chatStructuredNInferNoConstrainedOutputDegradesOnceAndRemembers() throws Exception {
+        // a gateway that cannot provide constrained output (eg. yupiik's local NInfer backend) rejects
+        // the response_format with a 400 'response_format_not_supported ... requires constrained output,
+        // which NInfer cannot guarantee; only {"type":"text"} is available'. That must be recognised as a
+        // structured-output rejection: degrade once to the plain request (not a hard IOException) and
+        // memoize it per (provider, model, schema) so subsequent passes skip the structured round-trip.
+        stop();
+        final var structuredHits = new AtomicInteger();
+        final var plainHits = new AtomicInteger();
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
+        server.createContext("/v1/chat/completions", exchange -> {
+            final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            if (body.contains("response_format") || body.contains("json_schema")) {
+                structuredHits.incrementAndGet();
+                respond(
+                        exchange,
+                        400,
+                        "{\"error\":{\"code\":\"response_format_not_supported\",\"message\":\"this response_format "
+                                + "requires constrained output, which NInfer cannot guarantee; only {\\\"type\\\":\\\"text\\\"} "
+                                + "is available\",\"param\":\"response_format\",\"type\":\"invalid_request_error\"}}",
+                        "application/json");
+            } else {
+                plainHits.incrementAndGet();
+                respond(exchange, 200, """
+                        {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain answer"},"finish_reason":"stop"}]}""", "application/json");
+            }
+        });
+        server.start();
+        final var cfg = configuration();
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        // first call: the constrained-output 400 must degrade once to the plain request, not re-throw
+        final var first = client.chatStructured(request(), "memory_facts", Map.of("type", "object"));
+        assertFalse(first.structured(), "NInfer's constrained-output refusal must degrade to the plain path");
+        assertEquals("plain answer", first.result().message().content());
+        assertEquals(1, structuredHits.get());
+        assertEquals(1, plainHits.get());
+
+        // second call on the same (provider, model, schema): memoized, structured request skipped
+        final var second = client.chatStructured(request(), "memory_facts", Map.of("type", "object"));
+        assertFalse(second.structured());
+        assertEquals(1, structuredHits.get(), "the rejection must be memoized per (provider, model, schema)");
+        assertEquals(2, plainHits.get());
+    }
+
+    @Test
     void chatStructuredSurfacesNonSchema400WithoutFallingBack() throws Exception {
         stop();
         final var hits = new AtomicInteger();

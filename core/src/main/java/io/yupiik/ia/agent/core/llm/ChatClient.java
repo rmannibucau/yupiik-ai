@@ -1703,14 +1703,20 @@ public class ChatClient implements AutoCloseable {
             final var m = e.getMessage();
             final var lower = m == null ? "" : m.toLowerCase(Locale.ROOT);
             // body markers of a schema/structured-output rejection (Anthropic 'json was malformed',
-            // output_config/output_format, an explicit json_schema/invalid-schema marker).
+            // output_config/output_format, an explicit json_schema/invalid-schema marker, and
+            // OpenAI-compatible gateways that cannot provide constrained output - eg. NInfer's
+            // 'response_format_not_supported ... requires constrained output ... only {"type":"text"}'
+            // - which must degrade to the plain request exactly like a schema rejection).
             final var schemaRejection = lower.contains("json was malformed")
                     || lower.contains("output_config")
                     || lower.contains("output_format")
                     || lower.contains("json_schema")
                     || lower.contains("invalid schema")
                     || lower.contains("not a valid json schema")
-                    || lower.contains("unsupported schema");
+                    || lower.contains("unsupported schema")
+                    || lower.contains("response_format_not_supported")
+                    || lower.contains("constrained output")
+                    || lower.contains("only {\"type\":\"text\"}");
             if (schemaRejection) {
                 // guard: the generic "Invalid JSON or schema in request body" (a body-JSON parse /
                 // max_tokens / config error, e.g. freeinference rejecting max_tokens:-1) contains the
