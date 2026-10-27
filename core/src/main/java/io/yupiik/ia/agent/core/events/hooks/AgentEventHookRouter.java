@@ -100,7 +100,7 @@ public class AgentEventHookRouter {
         if (context == null) {
             return;
         }
-        runner.run("CompactionDone", new CompactionDoneEvent(context, event.kind(), event.mode()).payload(), 0);
+        runner.run("CompactionDone", new CompactionDoneEvent(context, event.kinds(), event.mode()).payload(), 0);
     }
 
     public void onNotice(@OnEvent final AgentEvent.Notice event) {

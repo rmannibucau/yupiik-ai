@@ -394,7 +394,7 @@ public class RunCommand implements Runnable {
                 perCallReasoning = 0;
             } else if (event instanceof final AgentEvent.Compacted c) {
                 compactions.incrementAndGet();
-                detail.compact(started, c.kind(), c.mode());
+                detail.compact(started, String.join(",", c.kinds()), c.mode());
             } else if (event instanceof final AgentEvent.ToolStarted t) {
                 toolCalls.incrementAndGet();
                 if (t.name().startsWith("code_")) {

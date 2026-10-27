@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class TuiTranscriptModelTest {
@@ -376,16 +377,28 @@ class TuiTranscriptModelTest {
         model.onEvent(new AgentEvent.Compacted("auto", "SUMMARY", "s1"));
         assertEquals("", model.status());
         assertEquals(1, model.appliances().size());
-        assertEquals("auto", model.appliances().getFirst().kind());
+        assertEquals(List.of("auto"), model.appliances().getFirst().kinds());
         assertEquals("SUMMARY", model.appliances().getFirst().mode());
         assertTrue(model.transcript().toString().contains("> context auto applied (summary)"));
         // the next appliance replaces the previous in the sidebar slot (newest first, capped)
         model.onEvent(new AgentEvent.Compacted("dedup", "CLEARED", "s1"));
         assertEquals(2, model.appliances().size());
-        assertEquals("dedup", model.appliances().getFirst().kind());
+        assertEquals(List.of("dedup"), model.appliances().getFirst().kinds());
         assertEquals("CLEARED", model.appliances().getFirst().mode());
         // the status is still untouched by the second event
         assertEquals("", model.status());
+    }
+
+    @Test
+    void mergedCompactedRendersASingleJointLine() {
+        // several reductions of the same checkpoint are merged into one event carrying all the
+        // kinds: the transcript must show a single line instead of one line per strategy
+        model.onEvent(new AgentEvent.Compacted(List.of("dedup", "prune"), "CLEARED", "s1"));
+        assertEquals(1, model.appliances().size());
+        assertEquals(List.of("dedup", "prune"), model.appliances().getFirst().kinds());
+        assertTrue(
+                model.transcript().toString().contains("> context dedup, prune applied (cleared)"),
+                "transcript: " + model.transcript());
     }
 
     @Test

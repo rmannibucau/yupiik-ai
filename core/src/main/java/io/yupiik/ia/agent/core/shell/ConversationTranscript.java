@@ -475,7 +475,7 @@ public class ConversationTranscript {
         } else if (event
                 instanceof
                 AgentEvent.Compacted(
-                        String kind,
+                        List<String> kinds,
                         String mode,
                         String sessionId,
                         String subagentId,
@@ -483,10 +483,10 @@ public class ConversationTranscript {
             // side feedback only: record the appliance for the sidebar instead of touching the
             // leading status, which must stay on the short busy/ready state (a stale "context
             // dedup done..." used to hide the current spinner/error at the bottom)
-            recordAppliance(new AgentEvent.Compacted(kind, mode, sessionId, subagentId, subagentName));
+            recordAppliance(new AgentEvent.Compacted(kinds, mode, sessionId, subagentId, subagentName));
             transcript
                     .append("\n\n> context ")
-                    .append(kind)
+                    .append(String.join(", ", kinds))
                     .append(" applied (")
                     .append(mode.toLowerCase(Locale.ROOT))
                     .append(")\n");

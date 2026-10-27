@@ -3627,7 +3627,7 @@ class AgentLoopTest {
         assertEquals("do it", String.valueOf(persisted.get(persisted.size() - 1).content()));
         final var compacted = compactedEvents();
         assertEquals(1, compacted.size());
-        assertEquals("compact", compacted.get(0).kind());
+        assertEquals(List.of("compact"), compacted.get(0).kinds());
         assertEquals("SUMMARY", compacted.get(0).mode());
     }
 
@@ -3724,7 +3724,7 @@ class AgentLoopTest {
         assertEquals(1, compactRuns.get(), "the directive must be applied exactly once");
         final var compacted = compactedEvents();
         assertEquals(1, compacted.size());
-        assertEquals("tool", compacted.get(0).kind());
+        assertEquals(List.of("tool"), compacted.get(0).kinds());
         assertNull(view.poll(), "the directive must be consumed");
     }
 
@@ -3733,6 +3733,74 @@ class AgentLoopTest {
                 .filter(AgentEvent.Compacted.class::isInstance)
                 .map(AgentEvent.Compacted.class::cast)
                 .toList();
+    }
+
+    @Test
+    void automaticPruneCheckpointMergesZeroLlmPruneAndCompactIntoOneEvent() {
+        // dedup + prune + LLM compact all run at the same checkpoint in a single round: they must
+        // collapse into ONE Compacted event carrying the applied kinds (single "context applied"
+        // line), with the most informative mode (SUMMARY wins over CLEARED).
+        final var manager = new ContextManager() {
+            @Override
+            public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
+                return true;
+            }
+
+            @Override
+            public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                return true;
+            }
+
+            @Override
+            public CompactionResult prune(final List<Message> messages) {
+                return new CompactionResult(
+                        List.of(messages.get(0), Message.user("<pruned-context>\ndigest\n</pruned-context>")),
+                        CompactionResult.Mode.CLEARED,
+                        "");
+            }
+
+            @Override
+            public CompactionResult compact(
+                    final List<Message> messages,
+                    final boolean force,
+                    final String focus,
+                    final int keepLast,
+                    final BooleanSupplier cancelled,
+                    final ChatSettings settings) {
+                return new CompactionResult(
+                        List.of(
+                                messages.get(0),
+                                Message.user("<compacted-context>\ndigest\n</compacted-context>"),
+                                messages.get(messages.size() - 1)),
+                        CompactionResult.Mode.SUMMARY,
+                        "");
+            }
+        };
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {}
+
+            @Override
+            public void replace(final String id, final List<Message> messages) {}
+        };
+        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("all done", "stop", false)));
+        // build a history with a duplicate tool call so the dedup zero-LLM strategy fires
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.assistant(
+                null, List.of(new ToolCall("c1", "function", new ToolCall.FunctionCall("same_tool", "{\"a\":1}"), 0))));
+        messages.add(Message.tool("c1", "out-1"));
+        messages.add(Message.assistant(
+                null, List.of(new ToolCall("c2", "function", new ToolCall.FunctionCall("same_tool", "{\"a\":1}"), 0))));
+        messages.add(Message.tool("c2", "out-2"));
+        messages.add(Message.user("do it"));
+        loop(chatClient(replies, new ArrayList<>()), null, configuration(true), manager, store, null)
+                .run("do it", null, "s1", messages, () -> false);
+
+        final var compacted = compactedEvents();
+        assertEquals(1, compacted.size(), "all reductions of the same checkpoint must be merged: " + compacted);
+        assertEquals(List.of("dedup", "prune", "compact"), compacted.get(0).kinds());
+        assertEquals(
+                "SUMMARY", compacted.get(0).mode(), "the LLM compaction mode must win over the prune/zero-LLM CLEARED");
     }
 
     @Test

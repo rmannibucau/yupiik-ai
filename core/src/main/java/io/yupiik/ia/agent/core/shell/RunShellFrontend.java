@@ -124,8 +124,8 @@ public class RunShellFrontend implements ShellFrontend {
             }
         } else if (event instanceof final AgentEvent.Compacted c) {
             ensureStderrNewline();
-            LOGGER.info(() ->
-                    prefix + "context " + c.kind() + " applied (" + c.mode().toLowerCase(Locale.ROOT) + ")");
+            LOGGER.info(() -> prefix + "context " + String.join(", ", c.kinds()) + " applied ("
+                    + c.mode().toLowerCase(Locale.ROOT) + ")");
         } else if (event
                 instanceof
                 AgentEvent.Notice(

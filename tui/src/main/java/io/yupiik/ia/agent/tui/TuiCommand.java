@@ -3941,7 +3941,9 @@ public class TuiCommand implements Runnable {
             text.add(Line.from(
                     Span.styled("ctx ", label),
                     Span.styled(
-                            ellipsize(app.kind() + " " + modeLabel(app.mode()), Math.max(8, width - 4)),
+                            ellipsize(
+                                    String.join(", ", app.kinds()) + " " + modeLabel(app.mode()),
+                                    Math.max(8, width - 4)),
                             Style.EMPTY.fg(Color.hex(palette.info())))));
         }
         final var lines = Text.from(text.toArray(Line[]::new));

@@ -198,6 +198,11 @@ of identical tool calls, superseding of overwritten writes and purging of
 failed-tool inputs - always report `CLEARED`, since none of them invokes the
 summarizer.
 
+Every reduction of the same checkpoint is delivered as a single
+`AgentEvent.Compacted` (and `CompactionDoneEvent`) whose `kinds` list carries
+the applied strategies in execution order, e.g. `["dedup", "prune"]` when
+identical tool calls were removed and old tool outputs were cleared together.
+
 The digest is delivered to the model as a user message wrapped in
 `<compacted-context>` followed by explicit guidance: it must treat the
 compacted context as _historical state_ and must not reload, reconstruct or

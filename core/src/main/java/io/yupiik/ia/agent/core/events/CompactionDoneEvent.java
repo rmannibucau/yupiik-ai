@@ -16,16 +16,17 @@
 package io.yupiik.ia.agent.core.events;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import java.util.List;
 
 /**
  * Fires after context compaction resolved (wraps {@code AgentEvent.Compacted}). Observe-only; a callback may print a
  * {@code HookResponse} ack (cosmetic) but cannot block. Config key {@code yca.hooks.CompactionDone}.
  */
-public record CompactionDoneEvent(EventContext eventContext, String kind, String mode) implements YcaEvent {
+public record CompactionDoneEvent(EventContext eventContext, List<String> kinds, String mode) implements YcaEvent {
 
     @Override
     public Object payload() {
-        return new Payload(eventContext, kind, mode);
+        return new Payload(eventContext, kinds, mode);
     }
 
     @Override
@@ -38,7 +39,7 @@ public record CompactionDoneEvent(EventContext eventContext, String kind, String
         return """
                 Fires after context compaction completed. Config key `yca.hooks.CompactionDone`.
 
-                Input payload (`CompactionDoneEvent.Payload`): `eventContext`, `kind`, `mode`.
+                Input payload (`CompactionDoneEvent.Payload`): `eventContext`, `kinds`, `mode`.
                 Observe-only; output `context` is cosmetic.
 
                 The `mode` is one of `NONE` (nothing was done), `SUMMARY` (the LLM summarizer
@@ -47,12 +48,14 @@ public record CompactionDoneEvent(EventContext eventContext, String kind, String
                 locally, no LLM call) or `SHRUNK` (old verbose tool outputs were spliced to
                 their head and tail, no LLM call).
 
-                The `kind` is `compact`, `compact-retry` or `round-compact` (LLM compaction),
+                The `kinds` list reports every reduction applied in the same checkpoint, in
+                execution order: `compact`, `compact-retry` or `round-compact` (LLM compaction),
                 `prune` or `round-prune` (local tool-output pruning), `tool` (per-tool output
                 reduction), or `dedup`, `supersede`, `purge-errors` (the zero-LLM context
-                strategies, always reported with `mode` `CLEARED`).""";
+                strategies, always reported with `mode` `CLEARED`). Several entries are merged
+                into a single event when they run together (e.g. `["dedup", "prune"]`).""";
     }
 
     @JsonModel
-    public record Payload(EventContext eventContext, String kind, String mode) {}
+    public record Payload(EventContext eventContext, List<String> kinds, String mode) {}
 }

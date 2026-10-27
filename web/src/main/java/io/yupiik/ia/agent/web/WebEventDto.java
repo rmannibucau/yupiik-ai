@@ -79,7 +79,7 @@ public record WebEventDto(
             case AgentEvent.TurnMetrics _ -> null;
             case AgentEvent.TurnDone t -> t.content();
             case AgentEvent.TurnCancelled _ -> null;
-            case AgentEvent.Compacted t -> t.kind() + '|' + t.mode();
+            case AgentEvent.Compacted t -> t.kinds().isEmpty() ? "" : String.join(",", t.kinds()) + '|' + t.mode();
             case AgentEvent.Error t -> t.message();
             case AgentEvent.SubagentStarted t -> t.task();
             case AgentEvent.SubagentCompleted t -> t.summary();

@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.llm.Usage;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /** Mapping of the tool lifecycle events to the flat SSE DTO the browser consumes. */
@@ -71,5 +72,15 @@ class WebEventDtoTest {
         assertEquals(40, dto.data().get("reasoningTokens"));
         assertEquals(50, dto.data().get("estimatedContextTokens"));
         assertEquals(2.0, dto.data().get("contextPercent"));
+    }
+
+    @Test
+    void compactedCarriesTheMergedKindsAndMode() {
+        // several reductions of the same checkpoint are merged into one event: the message keeps
+        // the flat "kinds|mode" shape with the comma-joined kinds, so the web frontend can split
+        // on the pipe without re-parsing per-kind payloads
+        final var dto = WebEventDto.of(new AgentEvent.Compacted(List.of("dedup", "prune"), "CLEARED", "s1"));
+        assertEquals("compacted", dto.type());
+        assertEquals("dedup,prune|CLEARED", dto.message());
     }
 }

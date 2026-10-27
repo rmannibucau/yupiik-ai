@@ -481,15 +481,15 @@ public class AnsiShellFrontend implements ShellFrontend {
         } else if (event
                 instanceof
                 AgentEvent.Compacted(
-                        String kind,
+                        List<String> kinds,
                         String mode,
                         String sessionId,
                         String subagentId,
                         String subagentName)) {
             stopSpinner();
             ensureStderrNewline();
-            printlnErr(MarkdownColorizer.status(prefix + symbols.infoMarker() + " context " + kind + " applied ("
-                    + mode.toLowerCase(Locale.ROOT) + ")"));
+            printlnErr(MarkdownColorizer.status(prefix + symbols.infoMarker() + " context " + String.join(", ", kinds)
+                    + " applied (" + mode.toLowerCase(Locale.ROOT) + ")"));
         } else if (event
                 instanceof
                 AgentEvent.Notice(

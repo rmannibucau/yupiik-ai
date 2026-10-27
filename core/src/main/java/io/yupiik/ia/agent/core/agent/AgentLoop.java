@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
+import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.TokenEstimator;
@@ -1300,7 +1301,32 @@ public class AgentLoop {
     }
 
     private AgentEvent.Compacted compacted(final String kind, final String mode) {
-        return new AgentEvent.Compacted(kind, mode, currentSessionId, subagentId, subagentName);
+        return compacted(List.of(kind), mode);
+    }
+
+    private AgentEvent.Compacted compacted(final List<String> kinds, final String mode) {
+        return new AgentEvent.Compacted(kinds, mode, currentSessionId, subagentId, subagentName);
+    }
+
+    /**
+     * Picks the most informative mode among the reductions merged into one checkpoint event:
+     * {@code SUMMARY} (LLM summarizer ran) {@code > SHRUNK > TRUNCATE > CLEARED}. All the
+     * zero-LLM strategies report {@code CLEARED}, so a prune/zero-LLM-only round stays
+     * {@code CLEARED} while an LLM compaction makes the event carry {@code SUMMARY}.
+     * The enum declaration order is NOT used (NONE then SUMMARY then TRUNCATE then CLEARED
+     * then SHRUNK would rank SHRUNK above SUMMARY): the ranking is explicit here.
+     */
+    private static final Map<CompactionResult.Mode, Integer> MODE_RANK = Map.of(
+            CompactionResult.Mode.CLEARED, 0,
+            CompactionResult.Mode.TRUNCATE, 1,
+            CompactionResult.Mode.SHRUNK, 2,
+            CompactionResult.Mode.SUMMARY, 3);
+
+    private static String bestMode(final List<CompactionResult.Mode> modes) {
+        return modes.stream()
+                .max(Comparator.comparingInt(m -> MODE_RANK.getOrDefault(m, -1)))
+                .orElse(CompactionResult.Mode.CLEARED)
+                .name();
     }
 
     private AgentEvent.Status status(final String message) {
@@ -1458,18 +1484,25 @@ public class AgentLoop {
                 // the automatic-prune check point: like the prune, they mutate already-sent messages, so
                 // running them on every iteration would invalidate the prompt prefix cache for no gain.
                 // When they change something the result is persisted and the usage anchor cleared.
+                // All reductions of this checkpoint (zero-LLM + prune + LLM compact) are reported as a
+                // single merged Compacted event carrying the applied kinds, so the transcript shows one
+                // "context <kinds> applied (<mode>)" line instead of one line per strategy.
                 var compactedThisTurn = false;
+                final var appliedKinds = new ArrayList<String>(4);
+                var appliedModes = new ArrayList<CompactionResult.Mode>(2);
                 if (contextManager.pruneNeeded(messages, toolsTokens)) {
-                    final var zeroLlmChanged = applyZeroLlmStrategies(messages);
-                    if (zeroLlmChanged) {
+                    appliedKinds.addAll(applyZeroLlmStrategies(messages));
+                    if (!appliedKinds.isEmpty()) {
                         persistContext(sessionId, messages);
                         usageTracker.clearAnchor();
+                        appliedModes.add(CompactionResult.Mode.CLEARED);
                     }
                     final var pruned = contextManager.prune(messages);
                     if (pruned.changed()) {
                         messages.clear();
                         messages.addAll(pruned.messages());
-                        emit(compacted("prune", pruned.mode().name()));
+                        appliedKinds.add("prune");
+                        appliedModes.add(pruned.mode());
                         persistContext(sessionId, messages);
                         compactedThisTurn = true;
                     }
@@ -1479,10 +1512,14 @@ public class AgentLoop {
                     if (compacted.changed()) {
                         messages.clear();
                         messages.addAll(compacted.messages());
-                        emit(compacted("compact", compacted.mode().name()));
+                        appliedKinds.add("compact");
+                        appliedModes.add(compacted.mode());
                         persistContext(sessionId, messages);
                         compactedThisTurn = true;
                     }
+                }
+                if (!appliedKinds.isEmpty()) {
+                    emit(compacted(appliedKinds, bestMode(appliedModes)));
                 }
                 if (compactedThisTurn) {
                     consecutiveCompactions++;
@@ -2339,41 +2376,29 @@ public class AgentLoop {
      *   <li>supersede write inputs overwritten by a later read of the same file (opt-in);</li>
      *   <li>purge the (potentially large) inputs of failed tool calls after a number of turns.</li>
      * </ol>
-     * Each strategy reports a single {@code Compacted} event when it changed the history. The
+     * Each applied strategy reports its {@code Compacted} kind through the returned list (the caller
+     * merges it with the automatic prune/compact of the same checkpoint into a single event). The
      * conversation list is mutated in place because the loop owns it and keeps the call/result
      * pairing intact.
+     *
+     * @return the kinds of the strategies that changed the history, in execution order
      */
-    private boolean applyZeroLlmStrategies(final List<Message> messages) {
+    private List<String> applyZeroLlmStrategies(final List<Message> messages) {
         final var p = configuration.pruning();
-        var deduped = 0;
-        if (p.deduplicateToolCalls()) {
-            deduped = deduplicateToolCalls(messages);
+        final var applied = new ArrayList<String>(4);
+        if (p.deduplicateToolCalls() && deduplicateToolCalls(messages) > 0) {
+            applied.add("dedup");
         }
-        var superseded = 0;
-        if (p.supersedeOverwrittenWrites()) {
-            superseded = supersedeOverwrittenWrites(messages);
+        if (p.supersedeOverwrittenWrites() && supersedeOverwrittenWrites(messages) > 0) {
+            applied.add("supersede");
         }
-        var purged = 0;
-        if (p.purgeFailedToolInputs()) {
-            purged = purgeFailedToolInputs(messages);
+        if (p.purgeFailedToolInputs() && purgeFailedToolInputs(messages) > 0) {
+            applied.add("purge-errors");
         }
-        var delivered = 0;
-        if (p.purgeDeliveredSubagents()) {
-            delivered = purgeDeliveredSubagents(messages);
+        if (p.purgeDeliveredSubagents() && purgeDeliveredSubagents(messages) > 0) {
+            applied.add("purge-subagents");
         }
-        if (deduped > 0) {
-            emit(compacted("dedup", "CLEARED"));
-        }
-        if (superseded > 0) {
-            emit(compacted("supersede", "CLEARED"));
-        }
-        if (purged > 0) {
-            emit(compacted("purge-errors", "CLEARED"));
-        }
-        if (delivered > 0) {
-            emit(compacted("purge-subagents", "CLEARED"));
-        }
-        return deduped > 0 || superseded > 0 || purged > 0 || delivered > 0;
+        return applied;
     }
 
     /** Tools whose calls/results are never deduplicated, superseded or input-purged (state/decisions). */
@@ -2658,12 +2683,15 @@ public class AgentLoop {
         if (contextManager == null) {
             return;
         }
+        final var appliedKinds = new ArrayList<String>(2);
+        var appliedModes = new ArrayList<CompactionResult.Mode>(2);
         if (contextManager.pruneNeeded(messages, toolsTokens)) {
             final var pruned = contextManager.prune(messages);
             if (pruned.changed()) {
                 messages.clear();
                 messages.addAll(pruned.messages());
-                emit(compacted("round-prune", pruned.mode().name()));
+                appliedKinds.add("round-prune");
+                appliedModes.add(pruned.mode());
                 persistContext(sessionId, messages);
                 usageTracker.clearAnchor();
             }
@@ -2673,10 +2701,14 @@ public class AgentLoop {
             if (compacted.changed()) {
                 messages.clear();
                 messages.addAll(compacted.messages());
-                emit(compacted("round-compact", compacted.mode().name()));
+                appliedKinds.add("round-compact");
+                appliedModes.add(compacted.mode());
                 persistContext(sessionId, messages);
                 usageTracker.clearAnchor();
             }
+        }
+        if (!appliedKinds.isEmpty()) {
+            emit(compacted(appliedKinds, bestMode(appliedModes)));
         }
     }
 

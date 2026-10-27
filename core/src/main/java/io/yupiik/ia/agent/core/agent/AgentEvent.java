@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.ia.agent.core.llm.Usage;
+import java.util.List;
 
 /**
  * Events emitted on the global bus by the agent loops. Every event is tagged
@@ -147,10 +148,16 @@ public sealed interface AgentEvent {
         }
     }
 
-    record Compacted(String kind, String mode, String sessionId, String subagentId, String subagentName)
+    record Compacted(List<String> kinds, String mode, String sessionId, String subagentId, String subagentName)
             implements AgentEvent {
+        /** Convenience for the single-strategy case (explicit tool request, LLM-only compaction...). */
         public Compacted(String kind, String mode, String sessionId) {
-            this(kind, mode, sessionId, null, null);
+            this(List.of(kind), mode, sessionId, null, null);
+        }
+
+        /** Convenience for the merged-strategy case (several reductions of the same checkpoint). */
+        public Compacted(List<String> kinds, String mode, String sessionId) {
+            this(kinds, mode, sessionId, null, null);
         }
     }
 
