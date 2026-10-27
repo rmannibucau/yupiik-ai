@@ -141,6 +141,12 @@ public final class SessionRuntime {
         loop.updateChatSettings(value);
     }
 
+    /** Attaches the current provider's quota and pushes a UsageUpdated so the TUI/web gauges reflect it
+     * even before any turn ran (a fresh tab or an explicit /provider on an already-active provider). */
+    public void refreshUsage() {
+        loop.refreshUsage();
+    }
+
     /** Releases the session: fires the {@code yca.hooks.SessionEnded} hook once (idempotent like the loop). */
     public void close() {
         loop.close();

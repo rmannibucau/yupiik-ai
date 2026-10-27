@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
@@ -501,6 +502,12 @@ public class ConfigCommands implements SlashCommandSet {
         if (!arg.isBlank()) {
             final var updated = agentSessionService.setProvider(arg, settings);
             env.session().runtime().updateChatSettings(updated);
+            // an explicit /provider on an already-active provider is a no-op for updateChatSettings
+            // (no provider change, hence no quota push): force the live attach + push so the TUI/web
+            // gauge still shows usage immediately, also before the first turn
+            if (sameProvider(settings, updated)) {
+                env.session().runtime().refreshUsage();
+            }
             final var effective = updated.providerId() == null
                     ? (agentSessionService.lastProviderId() == null ? arg : agentSessionService.lastProviderId())
                     : updated.providerId();
@@ -513,9 +520,22 @@ public class ConfigCommands implements SlashCommandSet {
             }
             final var updated = agentSessionService.setProvider(selected.get(), settings);
             env.session().runtime().updateChatSettings(updated);
+            if (sameProvider(settings, updated)) {
+                env.session().runtime().refreshUsage();
+            }
             final var effective = updated.providerId() == null ? selected.get() : updated.providerId();
             return autoLoginCodex(effective, env);
         });
+    }
+
+    /** True when the effective provider id is identical between two selections (blank = process default). */
+    private static boolean sameProvider(final ChatSettings before, final ChatSettings after) {
+        return normalizeProvider(before == null ? null : before.providerId())
+                .equals(normalizeProvider(after == null ? null : after.providerId()));
+    }
+
+    private static String normalizeProvider(final String id) {
+        return id == null || id.isBlank() ? "" : id.strip().toLowerCase(Locale.ROOT);
     }
 
     /**

@@ -841,6 +841,112 @@ class AgentLoopTest {
     }
 
     /**
+     * A fresh session opened on a Codex provider must show its usage before any turn ran even when no
+     * provider switch happened (the default provider is already the codex one): {@code refreshUsage}
+     * attaches the current provider and pushes the quota without relying on a provider change, which is
+     * what the tab-shell registration pushes at startup and an explicit {@code /provider <active-id>}
+     * runs.
+     */
+    @Test
+    void refreshUsageBeforeFirstTurnPushesQuota() throws Exception {
+        final var fetches = new AtomicInteger();
+        final var server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        final var serverUrl = "http://localhost:" + server.getAddress().getPort();
+        server.createContext("/wham/usage", exchange -> {
+            fetches.incrementAndGet();
+            final var body = """
+                    {"plan_type":"plus",
+                     "rate_limit":{"primary_window":{"used_percent":42.0,"limit_window_seconds":18000,"reset_at":1700000000}},
+                     "credits":{"has_credits":true,"balance":"10"}}
+                    """;
+            final var bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            final var delegate = HttpClient.newBuilder().build();
+            final var httpClient = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
+            try {
+                final var cfg = configuration(
+                        true,
+                        Map.of(
+                                "yca.provider.providers.length", "1",
+                                "yca.provider.providers.0.id", "codex",
+                                "yca.provider.providers.0.baseUrl", serverUrl + "/codex",
+                                "yca.provider.providers.0.apiKey", "",
+                                "yca.provider.providers.0.api", "auto",
+                                "yca.provider.providers.0.capabilities.codex.enableUsage", "true"));
+                providerManagerOverride = new ProviderManager(cfg, mapper);
+                final var auth = new CodexAuthTemplateHelper(mapper, httpClient, cfg);
+                auth.setOAuthConfig(new CodexOAuthConfig(serverUrl, "test", "openid", serverUrl + "/device", 1455));
+                final var tokenFile = storageHome.resolve("providers/codex/codex.auth.json");
+                Files.createDirectories(tokenFile.getParent());
+                Files.write(
+                        tokenFile,
+                        mapper.toBytes(new CodexTokenStore("access", "refresh", "acc", Long.MAX_VALUE / 1000L, "id")));
+                final var quotaStore = new io.yupiik.ia.agent.core.usage.QuotaSnapshotStore(
+                        mapper, httpClient, auth, providerManagerOverride, Clock.systemUTC());
+
+                final var client = new ChatClient() {
+                    @Override
+                    public Message stream(
+                            final ChatCompletionRequest request,
+                            final Consumer<PauseEvent> pauseListener,
+                            final Consumer<LlmStreamEvent> onDelta,
+                            final BooleanSupplier cancelled) {
+                        onDelta.accept(new End("stop", null));
+                        return new Message("assistant", "ok", null, List.of(), null, null);
+                    }
+                };
+                // no run() and no provider switch on purpose: currentSessionId is null and the provider
+                // stays the default one (codex), exactly the "fresh tab already on codex" TUI/web scenario
+                final var loop = loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        quotaStore,
+                        "s1");
+
+                loop.refreshUsage();
+
+                final var pushed = events.stream()
+                        .filter(AgentEvent.UsageUpdated.class::isInstance)
+                        .map(AgentEvent.UsageUpdated.class::cast)
+                        .toList();
+                assertEquals(1, pushed.size(), "a startup refresh must push exactly one quota UsageUpdated");
+                assertEquals(
+                        "s1",
+                        pushed.get(0).sessionId(),
+                        "the pre-turn push must be tagged with the loop's stable session id so ShellRegistry routes it");
+                final var quota = pushed.get(0).quota();
+                assertNotNull(quota, "the pushed quota must be present");
+                assertTrue(quota.enabled(), "the codex provider enables usage");
+                assertTrue(quota.supported(), "the codex provider is supported");
+                assertEquals(42.0, quota.usedPercent(), "the refresh-time fetch carries the live usage");
+                assertEquals(1, fetches.get(), "the startup attach must force exactly one fetch");
+                assertTrue(
+                        quotaStore.cachedSnapshot("s1").supported(),
+                        "the quota is keyed on the loop's stable session id, not a null key");
+            } finally {
+                httpClient.close();
+                delegate.shutdownNow();
+                delegate.close();
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /**
      * A truncation give-up with pending todos falls through to the todo auto-continue instead of ending
      * the turn: hitting the output limit is an accident, not a reason to abandon unfinished work.
      */

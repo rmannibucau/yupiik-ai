@@ -4132,6 +4132,21 @@ public class AgentLoop {
                 currentQuota()));
     }
 
+    /**
+     * Attaches the session's current provider to the quota store (forcing a live usage fetch when the
+     * provider enables Codex usage) and immediately pushes a {@link UsageUpdated}. Unlike the
+     * provider-switch path in {@link #updateChatSettings(ChatSettings)}, this also runs when the
+     * provider did not change, so a freshly opened tab/session shows the sidebar gauge before any turn
+     * ran. Pre-first-turn safe: the store is keyed on the loop's stable session id and the pushed
+     * event carries the same id so {@code ShellRegistry} routes it to the owning shell.
+     */
+    public void refreshUsage() {
+        if (quotaStore != null) {
+            quotaStore.attach(currentSessionId != null ? currentSessionId : this.sessionId, chatSettings());
+        }
+        pushUsageQuota();
+    }
+
     private io.yupiik.ia.agent.core.llm.Usage currentUsage() {
         if (usageTracker == null || usageTracker.promptTokens() <= 0) {
             return io.yupiik.ia.agent.core.llm.Usage.EMPTY;
