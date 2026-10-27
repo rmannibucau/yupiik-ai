@@ -485,7 +485,7 @@ class TuiCommandRenderTest {
         uiThread.start();
         awaitTui();
         awaitText("% context");
-        awaitTextGone("left");
+        awaitTextGone("%/quota");
 
         final var sessionId = shellRegistry.sessions().iterator().next();
         final var frontend = shellRegistry.active(sessionId).frontend();
@@ -502,16 +502,16 @@ class TuiCommandRenderTest {
                     null,
                     new AgentEvent.UsageUpdated.Quota(
                             true, true, "a-very-long-codex-plan-name", percent, 0, 0, null, null, false)));
-            final var remaining = 100 - Math.clamp(percent, 0, 100);
-            final var usageLabel = "quota " + remaining + "% left";
-            awaitText(usageLabel);
+            final var usedPercent = Math.round(Math.clamp(percent, 0, 100));
+            final var usageRowMarker = usedPercent + "%"; // fallback kind row renders "quota <bar> N%"
+            awaitText(usageRowMarker);
             awaitText("18% context");
             final var rows = backend.text().lines().toList();
             final var usageRow = rows.stream()
-                    .filter(r -> r.contains(usageLabel))
+                    .filter(r -> r.contains("quota") && r.contains(usageRowMarker))
                     .findFirst()
                     .orElseThrow(() -> new AssertionError("missing quota label: " + backend.text()));
-            assertTrue(usageRow.contains(usageLabel), backend.text());
+            assertTrue(usageRow.contains(usageRowMarker), backend.text());
             assertTrue(rows.stream().anyMatch(r -> r.contains("18% context")), backend.text());
             assertTrue(usageRow.endsWith("\u2502"), "usage must not overwrite the sidebar border:\n" + backend.text());
             assertFalse(usageRow.contains("a-very-long-codex-plan-name"), backend.text());
@@ -529,7 +529,7 @@ class TuiCommandRenderTest {
                 null,
                 null,
                 new AgentEvent.UsageUpdated.Quota(true, false, "plus", 42, 0, 0, null, null, false)));
-        awaitTextGone("left");
+        awaitTextGone("%/quota");
         assertTrue(backend.text().lines().toList().stream().anyMatch(r -> r.contains("18% context")));
 
         // Existing visibility is based on supported quota data, not the refresh toggle.
@@ -544,9 +544,9 @@ class TuiCommandRenderTest {
                 null,
                 null,
                 new AgentEvent.UsageUpdated.Quota(false, true, "plus", 42, 0, 0, null, null, false)));
-        awaitText("quota 58% left");
+        awaitText("42%");
         frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72000, 18, sessionId));
-        awaitTextGone("left");
+        awaitTextGone("%/quota");
         assertTrue(backend.text().lines().toList().stream().anyMatch(r -> r.contains("18% context")));
         quit();
     }
@@ -564,9 +564,9 @@ class TuiCommandRenderTest {
 
         final var sessionId = shellRegistry.sessions().iterator().next();
         final var frontend = shellRegistry.active(sessionId).frontend();
-        // two rate-limit windows: a 5h window with heavy usage (5h 10% left) and a weekly window
-        // with light usage (weekly 90% left). The renderer sorts windows by duration ascending,
-        // so the 5h window must appear above the weekly one.
+        // two rate-limit windows: a 5h window with heavy usage (90% consumed) and a weekly
+        // window with light usage (10% consumed). The renderer sorts windows by duration
+        // ascending, so the 5h window must appear above the weekly one.
         final var fiveHours = 5 * 3600L;
         final var week = 7 * 86400L;
         final var windows = List.of(
@@ -585,27 +585,36 @@ class TuiCommandRenderTest {
                 new AgentEvent.UsageUpdated.Quota(
                         true, true, "plus", 90.0, fiveHours, 1_705_000_000L, "primary", null, false, windows)));
 
-        awaitText("5h 10% left");
-        awaitText("weekly 90% left");
         awaitText("18% context");
 
         final var rows = backend.text().lines().toList();
-        final var fiveHourRow =
-                rows.stream().filter(r -> r.contains("5h 10% left")).findFirst().orElseThrow();
-        final var weeklyRow = rows.stream()
-                .filter(r -> r.contains("weekly 90% left"))
+        // each window renders as one row with the kind label on the left, the consumed
+        // percentage on the right and a block fill bar sizing the consumed share between them.
+        final var fiveHourRow = rows.stream()
+                .filter(r -> r.contains("5h") && r.contains("90%"))
                 .findFirst()
                 .orElseThrow();
-        // the 5h window has 10% left (thin fill on the left); the weekly has 90% left (near-full
-        // bar that reaches the right edge before the sidebar border). Verifying the fill extent at
-        // the two ends is robust even though the centered gauge label overlays the middle cells:
-        // the 10%-left bar must NOT place a fill block at the right edge, while the 90%-left bar must.
-        assertTrue(leftFilled(fiveHourRow), "5h gauge should be partially filled:\n" + fiveHourRow);
-        assertFalse(rightFilled(fiveHourRow), "10% left must not reach the right edge:\n" + fiveHourRow);
-        assertTrue(rightFilled(weeklyRow), "90% left must reach the right edge:\n" + weeklyRow);
+        final var weeklyRow = rows.stream()
+                .filter(r -> r.contains("7d") && r.contains("10%"))
+                .findFirst()
+                .orElseThrow();
+        assertTrue(fiveHourRow.contains("90%"), "5h window should surface the consumed 90%:\n" + fiveHourRow);
+        assertTrue(weeklyRow.contains("10%"), "weekly window should surface the consumed 10%:\n" + weeklyRow);
+        // the 5h window has heavily used (90% consumed, near-full bar); the weekly window is
+        // lightly used (10% consumed, short bar). Fill must scale with the consumed share.
+        final var fiveFill = blockCount(fiveHourRow);
+        final var weekFill = blockCount(weeklyRow);
         assertTrue(
-                rightFilled(weeklyRow) && !rightFilled(fiveHourRow),
-                "fill extent must scale with remaining:\n" + backend.text());
+                fiveFill > weekFill,
+                "fill extent must scale with the consumed share (5h=" + fiveFill + " weekly=" + weekFill + "):\n"
+                        + backend.text());
+        // the two windows share the same window kind width and bar region, so their consumed
+        // fills are directly comparable: 90% consumed must fill ~9x the 10% window.
+        assertTrue(
+                fiveFill >= weekFill * 4L && weekFill >= 1,
+                "90% consumed should fill most of the bar while 10% fills only a short one (5h=" + fiveFill
+                        + " weekly=" + weekFill + "):\n"
+                        + backend.text());
         // both windows are sorted by duration so 5h sits above weekly in the sidebar
         assertTrue(rows.indexOf(fiveHourRow) < rows.indexOf(weeklyRow), backend.text());
         assertTrue(
@@ -619,8 +628,9 @@ class TuiCommandRenderTest {
     }
 
     /**
-     * A reached quota (usedPercent=100, nothing left) must stay visible in the sidebar and render
-     * "0% left", never being dropped or hidden - the whole point of surfacing usage at switch time.
+     * A fully-reached quota (usedPercent=100) must stay visible in the sidebar and render
+     * the consumed "100%", never being dropped or hidden - the whole point of surfacing usage
+     * at switch time.
      */
     @Test
     void sidebarRendersReachedQuotaAsVisible() throws Exception {
@@ -658,38 +668,96 @@ class TuiCommandRenderTest {
                         false,
                         List.of(new AgentEvent.UsageUpdated.Quota.Window(
                                 "PRIMARY", "primary", 100.0, fiveHours, 1_705_000_000L)))));
-        awaitText("5h 0% left");
+        awaitText("100%");
         awaitText("18% context");
         final var rows = backend.text().lines().toList();
         assertTrue(
-                rows.stream().anyMatch(r -> r.contains("5h 0% left")),
-                "a reached quota must render 0% left instead of being hidden:\n" + backend.text());
+                rows.stream().anyMatch(r -> r.contains("5h") && r.contains("100%")),
+                "a fully-reached quota must render its consumed 100% instead of being hidden:\n" + backend.text());
         quit();
     }
 
-    /** True when the row has a Gauge fill block at or before its last non-empty cell (bar reaches the right edge). */
-    private static boolean rightFilled(final String row) {
-        final var last = row.length() - 1;
-        for (int i = last; i >= 0; i--) {
-            final char c = row.charAt(i);
-            if (c == ' ' || c == '\u2502' || c == '\u2500' || c == ' ') {
-                continue;
+    /** Hovering a sidebar quota gauge surfaces its reset time as a floating chip; hiding the quota removes the chip. */
+    @Test
+    void sidebarQuotaHoverShowsResetTooltipAndHidesWithProvider() throws Exception {
+        backend = new HeadlessBackend(120, 40);
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-sidebar-quota-tooltip-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("% context");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        final var fiveHours = 5 * 3600L;
+        // a deadline far in the future so the reset caption ("Resets in 100d 0h") is stable across the
+        // test's retries (formatQuotaReset reads the real clock).
+        final var resetAt = java.time.Instant.now().getEpochSecond() + 8_640_000L;
+        final var window = new AgentEvent.UsageUpdated.Quota.Window("PRIMARY", "primary", 90.0, fiveHours, resetAt);
+        frontend.onEvent(new AgentEvent.UsageUpdated(
+                new Usage(0, 0, 0),
+                72000,
+                18,
+                0,
+                -1,
+                null,
+                sessionId,
+                null,
+                null,
+                new AgentEvent.UsageUpdated.Quota(
+                        true, true, "plus", 90.0, fiveHours, resetAt, "primary", null, false, List.of(window))));
+        awaitText("5h");
+
+        // locate the gauge row from the rendered text and hover it: the reset chip appears
+        final var lines = backend.text().split("\n");
+        int gaugeY = -1;
+        int gaugeX = -1;
+        for (var i = 0; i < lines.length; i++) {
+            final var col = lines[i].indexOf("5h");
+            if (col >= 0) {
+                gaugeY = i;
+                gaugeX = col; // the whole row is a hover area
+                break;
             }
-            return isGaugeBlock(c);
         }
-        return false;
+        assertTrue(gaugeY >= 0, "quota gauge row must be visible:\n" + backend.text());
+        tuiRef.get().dispatch(MouseEvent.move(gaugeX, gaugeY));
+        awaitTextWithin("Resets in 100d", 2_000);
+
+        // moving the pointer away dismisses the chip
+        tuiRef.get().dispatch(MouseEvent.move(5, 20));
+        awaitTextGoneWithin("Resets in 100d", 2_000);
+
+        // provider switch: a no-quota UsageUpdated hides the bars; re-hovering yields no chip
+        frontend.onEvent(new AgentEvent.UsageUpdated(
+                new Usage(0, 0, 0),
+                72000,
+                18,
+                0,
+                -1,
+                null,
+                sessionId,
+                null,
+                null,
+                new AgentEvent.UsageUpdated.Quota(
+                        true, false, "plus", 10.0, fiveHours, resetAt, "primary", null, false, List.of(window))));
+        awaitTextGoneWithin("5h", 2_000);
+        tuiRef.get().dispatch(MouseEvent.move(gaugeX, gaugeY));
+        awaitTextGoneWithin("Resets in 100d", 2_000);
+        quit();
     }
 
-    /** True when the row has a Gauge fill block in its leading cells (bar is at least partially filled). */
-    private static boolean leftFilled(final String row) {
+    /** Count of Unicode block fill chars in a row - the extent of the consumed-share bar. */
+    private static int blockCount(final String row) {
+        int count = 0;
         for (int i = 0; i < row.length(); i++) {
-            final char c = row.charAt(i);
-            if (c == ' ' || c == '\u2502') {
-                continue;
+            if (isGaugeBlock(row.charAt(i))) {
+                count++;
             }
-            return isGaugeBlock(c);
         }
-        return false;
+        return count;
     }
 
     private static boolean isGaugeBlock(final char c) {

@@ -1602,12 +1602,12 @@ public class TuiCommand implements Runnable {
             return scrollTopOverlay(wheel, state);
         }
         if (event instanceof final MouseEvent move && move.kind() == MouseEventKind.MOVE) {
-            // a MOVE can drive either the tab-bar title tooltip or the tool-output
-            // modal footer tooltip; both are pure hover state with no fallthrough.
-            // repaint when either hover state changed (a moved pointer over the footer
-            // tooltip must schedule a redraw or the chip never appears)
+            // a MOVE can drive the tab-bar title tooltip, the tool-output modal footer
+            // tooltip, or the sidebar quota-gauge reset tooltip; these are pure hover
+            // states with no fallthrough. repaint when any hover state changed (a moved
+            // pointer over a footer/sidebar must schedule a redraw or the chip never appears)
             final var footerHovered = state.toolOverlay != null && onToolFooterHover(move, state);
-            return footerHovered | onTabHover(move, state);
+            return footerHovered | onTabHover(move, state) | onQuotaHover(move, state);
         }
         if (state.toolOverlay != null) {
             return onToolOverlayEvent(event, runner, state);
@@ -1660,6 +1660,8 @@ public class TuiCommand implements Runnable {
                 if (state.hoverTitle != null) {
                     state.hoverTitle = null;
                 }
+                state.hoverQuotaReset = null;
+                state.hoverQuotaRect = null;
                 // tab close zones first: they are sub-rects of the tab cells
                 for (var i = 0; i < tabCloseRects.size(); i++) {
                     if (i < tabManager.size() && tabCloseRects.get(i).contains(mouse.x(), mouse.y())) {
@@ -3091,6 +3093,32 @@ public class TuiCommand implements Runnable {
         return true;
     }
 
+    /**
+     * Mouse motion over a sidebar quota gauge: surfaces the reset time ("Resets in ...",
+     * or "now") in a floating chip below the hovered gauge row, cleared when the pointer
+     * leaves the bar. Only repaints when the hovered gauge (and thus the caption) changed.
+     * Hit-testing uses the current-frame {@link UiState#quotaHoverAreas}, which are cleared
+     * whenever the quota gauges are not drawn, so no tooltip appears over a hidden bar
+     * (e.g. after switching to a provider that exposes no quota).
+     */
+    private boolean onQuotaHover(final MouseEvent move, final UiState state) {
+        String next = null;
+        Rect nextRect = null;
+        for (final var area : state.quotaHoverAreas) {
+            if (area.rect().contains(move.x(), move.y())) {
+                next = formatQuotaReset(area.resetAtEpochSeconds());
+                nextRect = area.rect();
+                break;
+            }
+        }
+        if (Objects.equals(state.hoverQuotaReset, next)) {
+            return false;
+        }
+        state.hoverQuotaReset = next;
+        state.hoverQuotaRect = nextRect;
+        return true;
+    }
+
     /** Index of the tab whose bar cell contains the given coordinates, or {@code -1}. */
     private int tabIndexAt(final int x, final int y) {
         for (var i = 0; i < tabRects.size(); i++) {
@@ -3110,6 +3138,8 @@ public class TuiCommand implements Runnable {
         if (state.hoverTitle != null) {
             state.hoverTitle = null;
         }
+        state.hoverQuotaReset = null;
+        state.hoverQuotaRect = null;
         if (state.toolOverlay != null) {
             scrollToolOverlay(state, delta);
         } else if (tabManager.isListOpen()) {
@@ -3710,6 +3740,9 @@ public class TuiCommand implements Runnable {
         if (state.hoverTitle != null && !state.hoverTitle.isBlank()) {
             renderTabTooltip(frame, state);
         }
+        if (state.hoverQuotaReset != null && !state.hoverQuotaReset.isBlank()) {
+            renderQuotaTooltip(frame, state);
+        }
         if (state.searchOpen) {
             renderSearchBar(frame, state);
         }
@@ -4012,34 +4045,32 @@ public class TuiCommand implements Runnable {
         final var overflow = Math.max(0, lines.height() - textRect.height());
         frame.renderWidget(Paragraph.builder().text(lines).scroll(overflow).build(), textRect);
         // Account usage shares the sidebar width with context, rather than overflowing a text row.
+        // The hover hit-areas are populated/cleared under this exact showQuota gate so they only
+        // ever track the frames where a gauge is actually drawn (no tooltip after a provider switch).
+        final var hoverAreas = new ArrayList<UiState.QuotaHoverArea>();
         if (showQuota && !rows.get(1).isEmpty()) {
             for (var i = 0; i < quotaWindows.size() && i < rows.get(1).height(); i++) {
                 final var window = quotaWindows.get(i);
                 final Double used = window.usedPercent() == null ? null : Math.clamp(window.usedPercent(), 0, 100);
-                final var remaining = used == null ? 0 : (int) Math.round(100 - used);
-                final var kind = window.displayLabel();
-                final var reset = formatQuotaReset(window.resetAtEpochSeconds());
-                final var resetLabel = reset.isBlank() ? "" : " · " + reset;
-                final var fullLabel =
-                        (used == null ? kind + " unknown" : kind + " " + remaining + "% left") + resetLabel;
-                final var barPercent = Math.clamp(remaining, 0, 100);
+                final var kind = compactWindowLabel(window);
+                final var pctText = used == null ? "?" : Math.round(used) + "%";
                 final Color color = Color.hex(
-                        used == null
-                                ? "#777777"
-                                : remaining <= 10 ? "#ef4444" : remaining <= 25 ? "#f59e0b" : "#3b82f6");
+                        used == null ? "#777777" : used >= 90 ? "#ef4444" : used >= 70 ? "#f59e0b" : "#3b82f6");
+                final var rowRect = new Rect(
+                        rows.get(1).x(), rows.get(1).y() + i, rows.get(1).width(), 1);
                 frame.renderWidget(
-                        Gauge.builder()
-                                .percent(barPercent)
-                                .label(Span.raw(ellipsize(fullLabel, rows.get(1).width())))
-                                .gaugeColor(color)
+                        Paragraph.builder()
+                                .text(Text.from(
+                                        quotaWindowRow(rows.get(1).width(), kind, pctText, used, color, label, value)))
                                 .build(),
-                        new Rect(
-                                rows.get(1).x(),
-                                rows.get(1).y() + i,
-                                rows.get(1).width(),
-                                1));
+                        rowRect);
+                final var reset = window.resetAtEpochSeconds();
+                if (reset != null && reset > 0) {
+                    hoverAreas.add(new UiState.QuotaHoverArea(rowRect, reset));
+                }
             }
         }
+        state.quotaHoverAreas = showQuota ? List.copyOf(hoverAreas) : List.of();
 
         if (!rows.get(2).isEmpty()) {
             final var percent = Math.clamp(state.model.contextPercent(), 0, 100);
@@ -4081,10 +4112,90 @@ public class TuiCommand implements Runnable {
                 .orElse(labels.isEmpty() ? "context updated" : labels.getFirst());
     }
 
-    private String formatQuotaReset(final Long resetAt) {
-        if (resetAt == null || resetAt <= 0) {
-            return "";
+    /**
+     * Compact, numeric-only label for a quota window, e.g. 5h, 7d, 30m, so the gauge
+     * label stays short and leaves the horizontal bar visible. Unlike displayLabel() it
+     * never uses a named form (so a weekly window is "7d" not "weekly"); unnamed windows
+     * fall back to their label or "quota".
+     */
+    private static String compactWindowLabel(final AgentEvent.UsageUpdated.Quota.Window window) {
+        final var seconds = window.windowSeconds();
+        if (seconds != null && seconds > 0) {
+            if (seconds % 86400 == 0) {
+                return seconds / 86400 + "d";
+            }
+            if (seconds % 3600 == 0) {
+                return seconds / 3600 + "h";
+            }
+            if (seconds % 60 == 0) {
+                return seconds / 60 + "m";
+            }
+            return seconds + "s";
         }
+        final var label = window.label();
+        return label == null || label.isBlank() ? "quota" : label;
+    }
+
+    // Unicode block fill chars mirror the Gauge widget's sub-cell rendering; the partial
+    // blocks (\u258f..\u2589) give a smooth fill edge between 0 and full (\u2588).
+    private static final char QUOTA_BLOCK_FULL = '\u2588';
+    private static final char[] QUOTA_BLOCK_PARTIAL = {
+        '\u258f', '\u258e', '\u258d', '\u258c', '\u258b', '\u258a', '\u2589'
+    };
+
+    /**
+     * Renders a single account-quota window into one sidebar row with the labels around the
+     * bar, mirroring the web panel: the compact window kind on the left, the consumed {@code used}
+     * percentage on the right, and a Unicode-block fill bar across the middle. Unlike the Gauge
+     * widget (which only centers its label) this places both labels at the row edges so the bar,
+     * sized by {@code used} (0-100; {@code null} = unknown), stays visible between them.
+     */
+    private static Line quotaWindowRow(
+            final int width,
+            final String kind,
+            final String pct,
+            final Double used,
+            final Color barColor,
+            final Style labelStyle,
+            final Style valueStyle) {
+        final var kindText = ellipsize(kind, Math.max(1, width - pct.length() - 2));
+        final var barStart = kindText.length() + 1; // one space after the kind
+        final var barEnd = Math.max(barStart, width - pct.length());
+        final var barWidth = barEnd - barStart;
+        final var bar = new StringBuilder(barWidth);
+        if (barWidth > 0 && used != null) {
+            final var filled = (int) Math.round(barWidth * used / 100.0);
+            int x;
+            for (x = 0; x < Math.min(filled, barWidth); x++) {
+                bar.append(QUOTA_BLOCK_FULL);
+            }
+            if (filled < barWidth) {
+                final var frac = barWidth * used / 100.0 - filled;
+                if (frac > 0 && x < barWidth) {
+                    bar.append(QUOTA_BLOCK_PARTIAL[Math.min(QUOTA_BLOCK_PARTIAL.length - 1, (int) (frac * 8))]);
+                    x++;
+                }
+            }
+            while (x < barWidth) {
+                bar.append(' ');
+                x++;
+            }
+        } else {
+            bar.append(" ".repeat(Math.max(0, barWidth)));
+        }
+        final var barStyle = Style.EMPTY.fg(barColor);
+        return Line.from(
+                Span.styled(kindText, labelStyle),
+                Span.styled(bar.toString(), barStyle),
+                Span.styled(" " + pct, valueStyle));
+    }
+
+    /**
+     * Compact "time until reset" caption from an epoch seconds reset deadline, e.g. "now",
+     * "in 2d 3h", "in 2h 15m", "in 10m". {@code resetAt <= 0} (already at/over the deadline)
+     * yields "now".
+     */
+    private static String formatQuotaReset(final long resetAt) {
         final var seconds = Math.max(0, resetAt - java.time.Instant.now().getEpochSecond());
         if (seconds == 0) {
             return "now";
@@ -6141,6 +6252,35 @@ public class TuiCommand implements Runnable {
     }
 
     /**
+     * Floating chip just below a hovered sidebar quota gauge: shows the gauge's reset time
+     * ("Resets in ...", or "Resets now"). Anchored under the hovered gauge row so it reads
+     * without covering the account-share bar, clamped to the frame so it never escapes the
+     * viewport (the sidebar is bottom-left, so the chip grows upward when near the bottom edge).
+     */
+    private void renderQuotaTooltip(final dev.tamboui.terminal.Frame frame, final UiState state) {
+        final var caption = state.hoverQuotaReset;
+        final var rect = state.hoverQuotaRect;
+        if (caption == null || caption.isBlank() || rect == null) {
+            return;
+        }
+        final var text = "Resets " + caption;
+        final var width = Math.max(1, Math.min(frame.area().width() - 2, text.length() + 4));
+        final var tooltipBg =
+                palette.mono() ? null : TuiColors.blend(palette.borderActive(), palette.backgroundPanel(), 0.85);
+        final var tooltipStyle = palette.mono()
+                ? Style.EMPTY
+                : Style.EMPTY.fg(Color.hex(palette.text())).bg(tooltipBg);
+        final var x = Math.max(0, Math.min(frame.area().width() - width, rect.x()));
+        final var y = Math.max(1, Math.min(frame.height() - 1, rect.y() + rect.height()));
+        frame.renderWidget(
+                Paragraph.builder()
+                        .text(Text.from(Line.from(Span.styled(" " + text + " ", tooltipStyle))))
+                        .overflow(Overflow.CLIP)
+                        .build(),
+                new Rect(x, y, width, 1));
+    }
+
+    /**
      * Floating chip over the tool output modal footer: shows the full (raw) tool args
      * JSON the footer only ellipsizes. A multi-line wrapped chip anchored just above
      * the footer row so it reads without covering the output the user is looking at;
@@ -6601,6 +6741,8 @@ public class TuiCommand implements Runnable {
         // any press/drag/release steals the pointer for selection: drop the hover tooltip
         // so it cannot overlap the drag selection being drawn
         state.hoverToolCmd = null;
+        state.hoverQuotaReset = null;
+        state.hoverQuotaRect = null;
         if (mouse.isPress() && mouse.isLeftButton()) {
             state.selection.press(mouse.x(), mouse.y(), state.screenGrid, copyZones(state));
             return true;
@@ -8483,6 +8625,31 @@ public class TuiCommand implements Runnable {
          * floating chip over the modal; cleared on scroll / press / drag / release.
          */
         private volatile String hoverToolCmd;
+
+        /**
+         * Per-window quota gauge hit-areas (sidebar), recorded by the render thread each frame
+         * so the event thread can hit-test a MOVE and surface the reset time in a hover tooltip.
+         * Populated only while the quota gauges are actually drawn ({@code showQuota}); cleared
+         * to an empty list on every frame where quota is hidden, so switching to a no-quota
+         * provider removes the hit-areas on the next repaint and the tooltip never hovers a bar
+         * that is not shown.
+         */
+        private volatile List<QuotaHoverArea> quotaHoverAreas = List.of();
+
+        /**
+         * Reset-time caption ("Resets in ...", or "now") of the quota gauge the pointer currently
+         * hovers in the sidebar, or {@code null}. Rendered by the render thread as a floating chip
+         * below the gauge row; cleared on scroll / press / drag / leave / provider switch.
+         */
+        private volatile String hoverQuotaReset;
+
+        /**
+         * Screen rect of the quota gauge the pointer currently hovers (used to anchor the
+         * reset tooltip chip below it), or {@code null} when not hovering a quota gauge.
+         */
+        private volatile Rect hoverQuotaRect;
+
+        private record QuotaHoverArea(Rect rect, long resetAtEpochSeconds) {}
 
         private volatile BtwOverlay btw;
 

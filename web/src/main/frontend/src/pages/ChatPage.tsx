@@ -1359,26 +1359,23 @@ function Sidebar({
               ? `Resets ${formatQuotaReset(window.resetAtEpochSeconds)}` : '';
             if (window.usedPercent == null) {
               return (
-                <div key={`${window.kind}-${window.windowSeconds}-${window.resetAtEpochSeconds}`}>
+                <div key={`${window.kind}-${window.windowSeconds}-${window.resetAtEpochSeconds}`} title={resetLabel || undefined}>
                   <div className="flex justify-between gap-2">
-                    <span style={{ color: 'var(--yca-muted)' }}>{label} remaining</span>
+                    <span style={{ color: 'var(--yca-muted)' }}>{label}</span>
                     <span className="font-mono">unknown</span>
                   </div>
                   <div className="mt-1 h-1 w-full rounded-full" style={{ background: 'var(--yca-panel-2)' }} />
-                  {resetLabel && <div className="text-right text-xs" style={{ color: 'var(--yca-muted)' }}>{resetLabel}</div>}
                 </div>
               );
             }
-            const used = Math.min(100, Math.max(0, window.usedPercent));
-            const remaining = Math.round(100 - used);
+            const usedPercent = Math.round(Math.min(100, Math.max(0, window.usedPercent)));
             return (
-              <div key={`${window.kind}-${window.windowSeconds}-${window.resetAtEpochSeconds}`}>
+              <div key={`${window.kind}-${window.windowSeconds}-${window.resetAtEpochSeconds}`} title={resetLabel || undefined}>
                 <div className="flex justify-between gap-2">
-                  <span style={{ color: 'var(--yca-muted)' }}>{label} remaining</span>
-                  <span className="font-mono">{remaining}%</span>
+                  <span style={{ color: 'var(--yca-muted)' }}>{label}</span>
+                  <span className="font-mono">{usedPercent}%</span>
                 </div>
-                <ContextBar percent={remaining} remaining />
-                {resetLabel && <div className="text-right text-xs" style={{ color: 'var(--yca-muted)' }}>{resetLabel}</div>}
+                <ContextBar percent={usedPercent} />
               </div>
             );
           })}
