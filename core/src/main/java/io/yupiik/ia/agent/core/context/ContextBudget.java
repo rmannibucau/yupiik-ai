@@ -79,6 +79,27 @@ public final class ContextBudget {
     }
 
     /**
+     * The prompt size that triggers automatic compaction in buffer mode (opencode core parity):
+     * {@code window - max(window * bufferPercent / 100, bufferMinTokens)}. A non-positive percentage
+     * and floor disable the buffer (the whole window must be filled); the result is never below
+     * {@link #MIN_USABLE_WINDOW}.
+     *
+     * @param window        the raw context window in tokens.
+     * @param bufferPercent the reserved headroom percentage (15 by default).
+     * @param bufferMinTokens the reserved headroom floor in tokens (16000 by default).
+     * @return the prompt token count triggering compaction.
+     */
+    public static int compactionTrigger(final int window, final int bufferPercent, final int bufferMinTokens) {
+        if (window <= 0) {
+            return MIN_USABLE_WINDOW;
+        }
+        final var percent = Math.max(0, bufferPercent);
+        final var floor = Math.max(0, bufferMinTokens);
+        final var reserve = Math.max((long) window * percent / 100L, floor);
+        return (int) Math.max(MIN_USABLE_WINDOW, window - Math.min(window, reserve));
+    }
+
+    /**
      * The window minus {@link #outputReserve(TokenCount, TokenCount)}, never below {@link #MIN_USABLE_WINDOW}.
      *
      * @param window               the total context window in tokens (with absolute flag), or non-positive when unknown.

@@ -1516,6 +1516,7 @@ public class AgentLoop {
                     iteration++) {
                 if (contextView != null) {
                     contextView.publish(snapshot(messages, toolsTokens));
+                    contextView.publishMessages(messages);
                 }
                 if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
                     userInjected = true;
@@ -1567,6 +1568,10 @@ public class AgentLoop {
                         messages.addAll(compacted.messages());
                         appliedKinds.add("compact");
                         appliedModes.add(compacted.mode());
+                        if (contextView != null) {
+                            // the digest replaces the history the blocks pointed at: never re-apply them
+                            contextView.compression().absorbAll();
+                        }
                         persistContext(sessionId, messages);
                         compactedThisTurn = true;
                     }
@@ -1577,8 +1582,8 @@ public class AgentLoop {
                 if (compactedThisTurn) {
                     consecutiveCompactions++;
                     if (consecutiveCompactions >= maxConsecutiveCompactions
-                            && usageTracker.contextPercent(usageTracker.effectiveContext(messages, toolsTokens))
-                                    >= configuration.compaction().thresholdPercent()) {
+                            && usageTracker.effectiveContext(messages, toolsTokens)
+                                    >= contextManager.compactionTriggerTokens()) {
                         emit(
                                 notice(
                                         AgentEvent.Notice.Level.ERROR,
@@ -1607,8 +1612,16 @@ public class AgentLoop {
                 attachSessionSettings(requestSettings);
                 final var model = requestModel(resolved, requestSettings);
                 // secret redaction: let observer(s) (the default SecretRedactor, or custom
-                // extensions) transform the outgoing messages before they reach the provider
-                final var outbound = new OutboundLlmRequest(messages, requestSettings, sessionId);
+                // extensions) transform the outgoing messages before they reach the provider.
+                // compression is a wire-only view: active blocks replace closed ranges and the
+                // stable refs are tagged here, so the transcript itself stays append-only.
+                final var compressed = contextView == null
+                        ? messages
+                        : contextView.compression().rewrite(messages);
+                final var wireSource = contextView == null
+                        ? compressed
+                        : contextView.compression().renderRefs(compressed);
+                final var outbound = new OutboundLlmRequest(wireSource, requestSettings, sessionId);
                 emitter.emit(outbound);
                 final var wireMessages = outbound.messages();
                 lastLlmPayload = new LlmPayload(
@@ -2279,11 +2292,15 @@ public class AgentLoop {
         if (!result.changed()) {
             emit(notice(
                     AgentEvent.Notice.Level.INFO,
-                    "manage_context " + directive.action() + " had nothing to reclaim; context left untouched."));
+                    "compress " + directive.action() + " had nothing to reclaim; context left untouched."));
             return;
         }
         messages.clear();
         messages.addAll(result.messages());
+        if (!"prune".equals(directive.action()) && contextView != null) {
+            // the whole-context digest supersedes every active compression block
+            contextView.compression().absorbAll();
+        }
         emit(compacted("tool", result.mode().name()));
         persistContext(sessionId, messages);
         emit(notice(
@@ -4145,6 +4162,16 @@ public class AgentLoop {
      * fires. Kept out of the stable system prefix so prompt caching is unaffected.
      */
     String contextUsageLine(final List<Message> messages, final int toolsTokens) {
+        final var compression = configuration.compression();
+        if (compression != null && compression.enabled() && contextView != null) {
+            final var window = usageTracker.contextWindowTokenCount().value();
+            final var raw = usageTracker.effectiveContext(messages, toolsTokens);
+            final var effective = contextView.compression().effectiveTokens(messages, raw);
+            final var percent = Math.round(usageTracker.contextPercent(effective) / 5d) * 5;
+            return "Context usage: ~" + (int) percent + "% of the usable window (compress at "
+                    + compression.resolveLimit(compression.minContextLimit(), window, 50000) + " / must at "
+                    + compression.resolveLimit(compression.maxContextLimit(), window, 100000) + " tokens).\n";
+        }
         final var percent =
                 Math.round(usageTracker.contextPercent(usageTracker.effectiveContext(messages, toolsTokens)) / 5d) * 5;
         return "Context usage: ~" + (int) percent + "% of the usable window (prune at "
@@ -4153,28 +4180,45 @@ public class AgentLoop {
     }
 
     /**
-     * Soft context-usage nudge appended to the volatile session state (never to the stable prefix, so
-     * prompt caching is unaffected). Only fires when {@code nudgeThresholdPercent} is non-zero, the
-     * estimated usage is above it, the estimate is large enough (see {@code nudgeMinTokens}) and at
-     * least {@code nudgeIterationThreshold} iterations ran since the last user message. The wording
-     * escalates once usage reaches the prune threshold.
+     * Context-usage nudge appended to the volatile session state. With compression enabled this
+     * follows opencode-dcp: a soft reminder once the effective size crosses the configured minimum
+     * and enough iterations passed since the last user message, then a hard MUST-compress reminder
+     * above the maximum, repeated at most every {@code nudgeFrequency} iterations. The legacy
+     * prune/compaction nudge remains for the pruning opt-in (disabled by default).
      */
     String nudgeBlock(final List<Message> messages, final int toolsTokens) {
+        final var compression = configuration.compression();
+        if (compression != null && compression.enabled() && contextView != null) {
+            final var window = usageTracker.contextWindowTokenCount().value();
+            final var min = compression.resolveLimit(compression.minContextLimit(), window, 50000);
+            final var max = compression.resolveLimit(compression.maxContextLimit(), window, 100000);
+            if (min <= 0 && max <= 0) {
+                return "";
+            }
+            final var sinceLastUser = iterationsSinceLastUser(messages);
+            final var raw = usageTracker.effectiveContext(messages, toolsTokens);
+            final var effective = contextView.compression().effectiveTokens(messages, raw);
+            if (max > 0
+                    && effective >= max
+                    && (compression.nudgeFrequency() <= 0 || sinceLastUser % compression.nudgeFrequency() == 0)) {
+                return "\n<nudge>You MUST use the `compress` tool now. Do not continue normal exploration until"
+                        + " compression is handled. The context is ~" + effective + " tokens (limit " + max
+                        + "): compress a genuinely closed section (or several non-overlapping ranges) and"
+                        + " keep the active work verbatim.</nudge>";
+            }
+            if (min > 0 && effective >= min && sinceLastUser >= compression.iterationNudgeThreshold()) {
+                return "\n<nudge>Context is ~" + effective + " tokens (compress at " + min + " / must at " + max
+                        + "). If a chapter is genuinely closed, call `compress` on its range now and write an"
+                        + " exhaustive summary; keep the current task and its recent messages verbatim.</nudge>";
+            }
+            return "";
+        }
         final var p = configuration.pruning();
         final var threshold = p.nudgeThresholdPercent();
         if (threshold <= 0) {
             return "";
         }
-        var sinceLastUser = 0;
-        for (var i = messages.size() - 1; i >= 0; i--) {
-            if (isVolatileTail(messages.get(i))) {
-                continue; // synthetic session-state tail: not a user turn and not a real iteration
-            }
-            if ("user".equals(messages.get(i).role())) {
-                break;
-            }
-            sinceLastUser++;
-        }
+        final var sinceLastUser = iterationsSinceLastUser(messages);
         if (sinceLastUser < p.nudgeIterationThreshold()) {
             return "";
         }
@@ -4203,6 +4247,20 @@ public class AgentLoop {
                 + "</nudge>";
     }
 
+    private int iterationsSinceLastUser(final List<Message> messages) {
+        var sinceLastUser = 0;
+        for (var i = messages.size() - 1; i >= 0; i--) {
+            if (isVolatileTail(messages.get(i))) {
+                continue; // synthetic session-state tail: not a user turn and not a real iteration
+            }
+            if ("user".equals(messages.get(i).role())) {
+                break;
+            }
+            sinceLastUser++;
+        }
+        return sinceLastUser;
+    }
+
     /**
      * Effective absolute-token floor below which the nudge is suppressed: the smaller of 90% of the
      * usable window and {@code nudgeMinTokens}, so small-window providers are only nudged close to the
@@ -4218,9 +4276,12 @@ public class AgentLoop {
     }
 
     private String manageContextActions() {
-        return configuration.tools().manageContext() != null
-                        && configuration.tools().manageContext().enabled()
-                ? "run manage_context with action=prune or action=compact"
+        return configuration.compression() != null
+                        && configuration.compression().enabled()
+                        && (configuration.tools() == null
+                                || configuration.tools().manageContext() == null
+                                || configuration.tools().manageContext().enabled())
+                ? "run compress with action=prune or action=compact"
                 : "interrupt with a short summary of the remaining steps";
     }
 

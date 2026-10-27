@@ -140,7 +140,7 @@ public class SessionRuntimeFactory {
         final var todos = new TodoStore(configuration, mapper, sessionKey);
         todos.load();
         final var status = new StatusReporter();
-        final var contextView = new ContextView();
+        final var contextView = new ContextView(configuration.compression());
         final var compactionCoordinator =
                 new CompactionCoordinator(configuration, chatClient, usage, providerManager, emitter, sessionId);
         final var contextManager = new ContextManager(configuration, usage, compactionCoordinator);

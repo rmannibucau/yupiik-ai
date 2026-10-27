@@ -4257,7 +4257,7 @@ class AgentLoopTest {
         assertTrue(nudge.contains("Do not start new work"), nudge);
         assertTrue(nudge.contains("above the prune threshold"), nudge);
         assertTrue(
-                nudge.contains("manage_context with action=prune or action=compact"),
+                nudge.contains("run compress with action=prune or action=compact"),
                 "the %ACTIONS% placeholder must be resolved to the tool suggestion when enabled, got: " + nudge);
     }
 
@@ -4339,7 +4339,8 @@ class AgentLoopTest {
                         true,
                         Map.of(
                                 "yca.provider.providers.0.contextWindow", "2000",
-                                "yca.pruning.thresholdPercent", "90")));
+                                "yca.pruning.thresholdPercent", "90",
+                                "yca.compaction.thresholdPercent", "80")));
         final var messages = new ArrayList<Message>();
         messages.add(Message.user("u"));
         messages.add(Message.tool("t1", "x".repeat(2500)));

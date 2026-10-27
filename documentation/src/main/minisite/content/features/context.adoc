@@ -2,12 +2,21 @@
 :minisite-breadcrumb: Home[index.html] > Features > Context management
 :minisite-nav-prev-link: mcp.html
 :minisite-nav-prev-label: MCP support
-:minisite-nav-next-link: memory.html
-:minisite-nav-next-label: Memory
+:minisite-nav-next-link: compaction.html
+:minisite-nav-next-label: Compaction and compression
 
 As a conversation grows, context usage is tracked with live gauges.
 When usage crosses configured thresholds, yca prunes or compacts the
 conversation to stay within the active model's window.
+
+NOTE: since 1.0.x the default context management is the two-layer model
+described in xref:features/compaction.adoc[Compaction and compression]: core
+compaction triggers near the model window (window minus max(15%, 16k) tokens)
+while a model-invoked `compress` tool keeps the working context small with
+absolute nudges at 50k/100k tokens. The legacy percentage bands below apply to
+the opt-in pruning layer (`yca.pruning.enabled=true`, off by default) and to
+compaction when a legacy percent override is configured
+(`yca.compaction.thresholdPercent` > 0).
 
 The default thresholds carve the usable window into bands, so the model always
 sees its usage relative to the automatic actions that will fire:

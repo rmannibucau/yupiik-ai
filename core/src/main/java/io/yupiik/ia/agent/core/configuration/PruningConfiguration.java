@@ -21,8 +21,9 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 @JsonModel
 public record PruningConfiguration(
         @Property(
-                defaultValue = "true",
-                documentation = "Automatically prune the context (cheaper than compaction, applied first).")
+                defaultValue = "false",
+                documentation =
+                        "Legacy automatic pruning (percentage trigger). Disabled by default: model-driven compression (yca.compression) handles steady-state growth and core compaction guards the window. Enable it to restore the historical percentage-based prune.")
         boolean enabled,
 
         @Property(defaultValue = "65", documentation = "Usable context window usage percentage triggering the pruning.")

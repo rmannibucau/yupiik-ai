@@ -105,4 +105,32 @@ class ContextBudgetTest {
         assertEquals(20_000, ContextBudget.outputReserve(window(131_072), output(65_536, false)));
         assertEquals(111_072, ContextBudget.usableWindow(window(131_072), output(65_536, false)));
     }
+
+    @Test
+    void compactionTriggerUsesTheLargerOfPercentBufferAndTokenFloor() {
+        // 15% of 1M (150k) dominates the 16k floor: 1M - 150k
+        assertEquals(850_000, ContextBudget.compactionTrigger(1_000_000, 15, 16_000));
+        // 15% of 128k (19.2k) dominates: 128k - 19.2k
+        assertEquals(108_800, ContextBudget.compactionTrigger(128_000, 15, 16_000));
+        // 15% of 32k is only 4.8k, so the 16k floor dominates: 32k - 16k
+        assertEquals(16_000, ContextBudget.compactionTrigger(32_000, 15, 16_000));
+        // a 0 bufferPercent means the floor alone reserves the headroom
+        assertEquals(80_000, ContextBudget.compactionTrigger(100_000, 0, 20_000));
+    }
+
+    @Test
+    void compactionTriggerNeverDropsBelowTheUsableFloor() {
+        // tiny window: the result is floored to the minimum usable window, never below
+        assertEquals(ContextBudget.MIN_USABLE_WINDOW, ContextBudget.compactionTrigger(1_024, 15, 16_000));
+        assertEquals(ContextBudget.MIN_USABLE_WINDOW, ContextBudget.compactionTrigger(1_500, 50, 16_000));
+        assertEquals(ContextBudget.MIN_USABLE_WINDOW, ContextBudget.compactionTrigger(0, 15, 16_000));
+        assertEquals(ContextBudget.MIN_USABLE_WINDOW, ContextBudget.compactionTrigger(-100, 15, 16_000));
+    }
+
+    @Test
+    void compactionTriggerWithZeroFloorKeepsFullPercentBuffer() {
+        // bufferMinTokens=0 means only the percent buffer applies
+        assertEquals(85_000, ContextBudget.compactionTrigger(100_000, 15, 0));
+        assertEquals(80_000, ContextBudget.compactionTrigger(100_000, 20, 0));
+    }
 }

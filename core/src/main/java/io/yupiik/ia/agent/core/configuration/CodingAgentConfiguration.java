@@ -66,6 +66,11 @@ public record CodingAgentConfiguration(
         @Property(documentation = "Context pruning settings (applied before compaction).")
         PruningConfiguration pruning,
 
+        @Property(
+                documentation =
+                        "Model-driven context compression settings (compress tool, range summaries and usage nudges).")
+        CompressConfiguration compression,
+
         @Property(documentation = "Auto memory settings.") MemoryConfiguration memory,
 
         @Property(documentation = "Todo list settings (guidance injection and auto-continuation on unfinished work).")

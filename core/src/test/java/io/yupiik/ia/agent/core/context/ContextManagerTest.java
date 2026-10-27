@@ -376,7 +376,7 @@ class ContextManagerTest {
 
     @Test
     void toolSchemasCountTowardTheTriggers() {
-        final var cfg = config(6);
+        final var cfg = config(6, 128_000, Map.of("yca.pruning.enabled", "true"));
         final var manager = new ContextManager(
                 cfg,
                 new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),

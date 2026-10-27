@@ -354,6 +354,7 @@ class McpManagerTest {
                 base.llm(),
                 base.compaction(),
                 base.pruning(),
+                base.compression(),
                 base.memory(),
                 base.todos(),
                 base.optimize(),

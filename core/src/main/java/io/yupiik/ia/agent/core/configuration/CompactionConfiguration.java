@@ -26,9 +26,22 @@ public record CompactionConfiguration(
         boolean enabled,
 
         @Property(
-                defaultValue = "80",
-                documentation = "Usable context window usage percentage triggering the compaction.")
+                defaultValue = "0",
+                documentation =
+                        "Legacy compaction trigger as a percentage of the usable window; 0 (default) uses the opencode-style buffer trigger instead (window minus max(bufferPercent, bufferMinTokens)). Set to a positive value to restore the historical percentage trigger.")
         int thresholdPercent,
+
+        @Property(
+                defaultValue = "15",
+                documentation =
+                        "Buffer mode trigger: compact when the estimated prompt reaches this percentage of the raw context window. Matches opencode's default 15% buffer.")
+        int bufferPercent,
+
+        @Property(
+                defaultValue = "16000",
+                documentation =
+                        "Buffer mode trigger floor: the reserved headroom is at least this many tokens, so small windows keep a usable safety margin. Matches opencode's 16k minimum buffer.")
+        int bufferMinTokens,
 
         @Property(
                 defaultValue = "0",

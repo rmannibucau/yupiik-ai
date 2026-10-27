@@ -7838,11 +7838,19 @@ public class TuiCommand implements Runnable {
         return (m > 9 ? String.format("%.0fM", m) : String.format("%.1fM", m)).replace(",", ".");
     }
 
-    /** The compaction threshold in %, falling back to a safe default when configuration is absent (rendering tests). */
+    /**
+     * The compaction threshold in %. A non-positive threshold means buffer mode (compaction fires
+     * when the prompt approaches the model window minus a token buffer), which cannot be expressed
+     * as a percentage: the percent warning banner is then disabled (returns 100 so it never fires)
+     * and the token-level trigger stays visible in the agent context line and compress tool status.
+     * Falls back to 80 when configuration is absent (rendering tests).
+     */
     private int compactionThreshold() {
-        return configuration == null || configuration.compaction() == null
-                ? 80
-                : configuration.compaction().thresholdPercent();
+        if (configuration == null || configuration.compaction() == null) {
+            return 80;
+        }
+        final var percent = configuration.compaction().thresholdPercent();
+        return percent > 0 ? percent : 100;
     }
 
     /**

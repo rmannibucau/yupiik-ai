@@ -15,7 +15,9 @@
  */
 package io.yupiik.ia.agent.core.context;
 
+import io.yupiik.ia.agent.core.configuration.CompressConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
+import java.util.List;
 
 /**
  * Bridge between the agent loop and context-aware tools: the loop publishes a live usage snapshot
@@ -59,11 +61,37 @@ public class ContextView {
         }
     }
 
+    private final ContextCompression compression;
     private volatile Snapshot snapshot;
     private volatile Directive directive;
+    private volatile List<Message> messages = List.of();
+
+    public ContextView() {
+        this(null);
+    }
+
+    public ContextView(final CompressConfiguration compression) {
+        this.compression = new ContextCompression(compression);
+    }
 
     public void publish(final Snapshot snapshot) {
         this.snapshot = snapshot;
+    }
+
+    /** Publishes the live working list so compression tools can resolve the refs the model saw. */
+    public void publishMessages(final List<Message> messages) {
+        this.messages = messages == null ? List.of() : messages;
+        if (compression != null) {
+            compression.publish(this.messages);
+        }
+    }
+
+    public List<Message> messages() {
+        return messages;
+    }
+
+    public ContextCompression compression() {
+        return compression;
     }
 
     public Snapshot snapshot() {

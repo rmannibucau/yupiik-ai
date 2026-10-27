@@ -590,7 +590,7 @@ class SystemPromptBuilderTest {
     }
 
     @Test
-    void systemPromptTeachesProactiveManageContextWhenNudgeIsEnabled() {
+    void systemPromptTeachesCompressionWhenEnabled() {
         final var cfg = config(Map.of(
                 "yca.storageHome",
                 storageHome.toString(),
@@ -602,26 +602,26 @@ class SystemPromptBuilderTest {
                 "true"));
         final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
         assertTrue(
-                prompt.contains("proactively call manage_context (action=prune or action=compact)"),
-                "with the nudge enabled the rules must invite proactive context management");
+                prompt.contains("The ONLY tool you have for context management is `compress`"),
+                "with compression enabled the rules must teach proactive context management");
     }
 
     @Test
-    void systemPromptOmitsManageContextRuleWhenNudgeOrToolIsDisabled() {
-        final var nudgeOff = config(Map.of(
+    void systemPromptOmitsCompressionRuleWhenDisabled() {
+        final var compressionOff = config(Map.of(
                 "yca.storageHome",
                 storageHome.toString(),
                 "yca.workingDir",
                 project.toString(),
                 "yca.mode",
                 "build",
-                "yca.pruning.nudgeThresholdPercent",
-                "0"));
+                "yca.compression.enabled",
+                "false"));
         assertFalse(
-                builder(nudgeOff, todoResolver(), providerManager(nudgeOff))
+                builder(compressionOff, todoResolver(), providerManager(compressionOff))
                         .build()
-                        .contains("proactively call manage_context"),
-                "no need to push proactive compaction when the nudge is disabled");
+                        .contains("The ONLY tool you have for context management"),
+                "no need to push compression when it is disabled");
 
         final var toolOff = config(Map.of(
                 "yca.storageHome",
@@ -635,7 +635,7 @@ class SystemPromptBuilderTest {
         assertFalse(
                 builder(toolOff, todoResolver(), providerManager(toolOff))
                         .build()
-                        .contains("proactively call manage_context"),
+                        .contains("The ONLY tool you have for context management"),
                 "must not mention a disabled tool");
     }
 

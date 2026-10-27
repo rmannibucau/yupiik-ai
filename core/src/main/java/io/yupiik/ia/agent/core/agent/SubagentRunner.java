@@ -274,7 +274,7 @@ public class SubagentRunner {
                 todoPromptResolver,
                 mavenRepositoryKnowledge,
                 secretRedactor);
-        final var subagentContextView = new ContextView();
+        final var subagentContextView = new ContextView(configuration.compression());
         final var subagentCompactionCoordinator = new CompactionCoordinator(
                 configuration, chatClient, subagentUsageTracker, providerManager, emitter, state.parentSessionId());
         final var subagentContextManager =

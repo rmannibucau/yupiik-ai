@@ -64,9 +64,33 @@ public class ContextManager {
 
     public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
         final var c = configuration.compaction();
-        return c.enabled()
-                && usageTracker.contextPercent(usageTracker.effectiveContext(messages, extraToolTokens))
-                        >= c.thresholdPercent();
+        if (!c.enabled()) {
+            return false;
+        }
+        final var effective = usageTracker.effectiveContext(messages, extraToolTokens);
+        if (c.thresholdPercent() > 0) {
+            return usageTracker.contextPercent(effective) >= c.thresholdPercent();
+        }
+        return effective >= compactionTriggerTokens();
+    }
+
+    /**
+     * The prompt token count that triggers the next automatic compaction: the legacy percentage of the
+     * usable window when {@code thresholdPercent > 0}, else the opencode-style buffer trigger. Also used
+     * by the anti-thrash notice and the usage status so every surface reports the same wall.
+     *
+     * @return the trigger in estimated prompt tokens, or {@link Integer#MAX_VALUE} when compaction is disabled.
+     */
+    public int compactionTriggerTokens() {
+        final var c = configuration.compaction();
+        if (!c.enabled()) {
+            return Integer.MAX_VALUE;
+        }
+        if (c.thresholdPercent() > 0) {
+            return (int) Math.ceil(usageTracker.usableWindow() * c.thresholdPercent() / 100.0);
+        }
+        return ContextBudget.compactionTrigger(
+                usageTracker.contextWindowTokenCount().value(), c.bufferPercent(), c.bufferMinTokens());
     }
 
     public CompactionResult prune(final List<Message> messages) {

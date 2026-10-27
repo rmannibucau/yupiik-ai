@@ -181,11 +181,21 @@ public class SystemPromptBuilder {
                 "- The conversation carries <session-state> blocks with the current todo list, mode, date and memory; the most recent one is authoritative. Read it at the start of every turn: pending items are the task queue - continue with them unless the user redirects. Keep the list accurate with write_todo as work progresses.\n");
         sb.append(
                 "- A <compacted-context> digest of earlier history is authoritative: never reload or repeat actions already described in it.\n");
-        if (configuration.pruning().nudgeThresholdPercent() > 0
-                && configuration.tools().manageContext() != null
-                && configuration.tools().manageContext().enabled()) {
+        if (configuration.compression() != null
+                && configuration.compression().enabled()
+                && (configuration.tools() == null
+                        || configuration.tools().manageContext() == null
+                        || configuration.tools().manageContext().enabled())) {
             sb.append(
-                    "- When <session-state> shows context usage near the thresholds, proactively call manage_context (action=prune or action=compact) instead of waiting for the hard limit.\n");
+                    "- You operate in a context-constrained environment. The ONLY tool you have for context management is `compress`.\n");
+            sb.append(
+                    "- Every message you receive ends with a stable `[ref @N@]` tag. Evaluate the signal-to-noise ratio of the conversation regularly, and call `compress` when a section is genuinely closed (a finding is recorded, a bug is fixed and verified, a decision is made). Pass a short `topic` and `content=[{startId,endId,summary}]`; each range starts on a user message and ends at a turn boundary.\n");
+            sb.append(
+                    "- Write the summary yourself and make it exhaustive: decisions, constraints, findings, file paths, commands, test results and next steps. Compression costs no extra model call and the transcript is never modified, only the outgoing request.\n");
+            sb.append(
+                    "- Never compress active work: the current task, the messages you still need, or a section whose conclusion is not written yet. Prefer compressing one closed chapter at a time and keep the recent tail verbatim.\n");
+            sb.append(
+                    "- When a summary must preserve an already compressed block, include its `@bN@` placeholder exactly once in the new summary; placeholders are expanded and the consumed block is superseded.\n");
         }
         sb.append("- Persist durable facts/decisions with memory_write.\n");
         sb.append("- Verify your work (compile/test) when feasible.\n");

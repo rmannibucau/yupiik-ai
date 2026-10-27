@@ -1,7 +1,7 @@
 = Memory
 :minisite-breadcrumb: Home[index.html] > Features > Memory
-:minisite-nav-prev-link: context.html
-:minisite-nav-prev-label: Context management
+:minisite-nav-prev-link: compaction.html
+:minisite-nav-prev-label: Compaction and compression
 :minisite-nav-next-link: sessions.html
 :minisite-nav-next-label: Sessions and memory
 
