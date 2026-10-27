@@ -546,6 +546,24 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void codexReasoningIncludeIsConsumedNotSentOnTheWire() throws Exception {
+        // reasoning_include is an internal consumer option (it drives the dialect's encrypted-reasoning
+        // include flag), so it must not leak as a wire field while unrelated options still flow through
+        final var cfg = configuration(Map.of(
+                "yca.provider.providers.0.providerSpecificOptions",
+                "{\"reasoning_include\":true,\"temperature\":0.7}"));
+        client.close();
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        final var result = client.chat(request());
+        assertEquals("hello there", result.message().content());
+        final var body = bodies.get(bodies.size() - 1);
+        assertEquals(0, occurrences(body, "reasoning_include"), "the internal option must be dropped: " + body);
+        assertEquals(0, occurrences(body, "reasoning.include"), "no encrypted-reasoning include on the wire: " + body);
+        assertTrue(body.contains("\"temperature\":0.7"), "unrelated options still flow through: " + body);
+    }
+
+    @Test
     void providerReasoningConfigFullyOverridesTheVariantExtras() throws Exception {
         // an explicitly configured reasoning shape (thinking/output_config) must win verbatim over the
         // selected variant extras: the variant must not fill in missing sub-keys (e.g. a 'display')

@@ -59,6 +59,14 @@ public class CodexDialect extends OpenAIResponsesDialect {
     private final int clientVersion;
 
     /**
+     * Explicit override for the encrypted-reasoning {@code include} decision, used only when the provider
+     * option is not carried by the {@code ProviderSpec}. Defaults to {@code false} for the Codex flavor:
+     * the real ChatGPT backend and many stricter Codex/gov edges reject the {@code include} directive with
+     * an unknown-parameter 400, and the common path works with just {@code {"effort","summary"}}.
+     */
+    private final boolean includeEncryptedReasoning;
+
+    /**
      * Optional 3p auto-upgrade: given the provider, returns the signed {@code AgentAssertion {...}}
      * header value for the retry (it lazily enrolls the enterprise identity on first use). {@code null}
      * (the default) disables the auto-upgrade, in which case the delegated-access 4xx surfaces as-is.
@@ -111,9 +119,35 @@ public class CodexDialect extends OpenAIResponsesDialect {
             final ProviderSpec provider,
             final int clientVersion,
             final java.util.function.Function<String, String> assertionUpgrader) {
+        this(mapper, client, provider, clientVersion, assertionUpgrader, false);
+    }
+
+    /**
+     * Creates the dialect with a tunable Codex client version, an optional 3p auto-upgrade callback and an
+     * explicit encrypted-reasoning {@code include} decision.
+     *
+     * @param mapper JSON mapper used for wire serialization.
+     * @param client HTTP client used for provider calls.
+     * @param provider provider coordinates; {@code baseUrl} should end in {@code .../codex/responses}.
+     * @param clientVersion the whole part of the Codex client version this dialect advertises (eg. 160 for 0.160.x).
+     * @param assertionUpgrader when non-null, invoked on a {@code 3p_delegated_access_policy_denied}
+     *     rejection with the provider id to produce the signed {@code AgentAssertion {...}} header for
+     *     a single retry (it lazily enrolls the enterprise identity); {@code null} disables the
+     *     auto-upgrade. See {@link #DELEGATED_ACCESS_POLICY}.
+     * @param includeEncryptedReasoning whether to request the opaque {@code reasoning.encrypted_content}
+     *     blob; defaults to {@code false} for the Codex flavor.
+     */
+    public CodexDialect(
+            final JsonMapper mapper,
+            final ExtendedHttpClient client,
+            final ProviderSpec provider,
+            final int clientVersion,
+            final java.util.function.Function<String, String> assertionUpgrader,
+            final boolean includeEncryptedReasoning) {
         super(mapper, client, provider);
         this.clientVersion = clientVersion <= 0 ? DEFAULT_CLIENT_VERSION : clientVersion;
         this.assertionUpgrader = assertionUpgrader;
+        this.includeEncryptedReasoning = includeEncryptedReasoning;
     }
 
     /** The routing identifier of this dialect. */
@@ -138,6 +172,24 @@ public class CodexDialect extends OpenAIResponsesDialect {
     @Override
     protected boolean forceStream() {
         return true;
+    }
+
+    /**
+     * The Codex flavor defaults to {@code false}: the ChatGPT backend and stricter Codex/gov edges reject
+     * the {@code include} directive with an unknown-parameter 400, and the common path works with just
+     * {@code {"effort","summary"}}. Overridable per provider through the constructor flag (the
+     * {@code reasoning_include} provider option).
+     *
+     * @return {@code false} by default, or the per-provider override.
+     */
+    @Override
+    protected boolean includeEncryptedReasoning() {
+        if (provider.options() != null
+                && !provider.options().isEmpty()
+                && provider.options().get(REASONING_INCLUDE_KEY) instanceof Boolean b) {
+            return b;
+        }
+        return includeEncryptedReasoning;
     }
 
     /**

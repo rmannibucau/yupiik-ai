@@ -42,6 +42,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Flow;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -58,6 +59,11 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     // events are only emitted as a fallback (when no delta was seen) and never double-appended.
     private final Set<String> streamedArgIds = ConcurrentHashMap.newKeySet();
 
+    // Set once a backend rejects the encrypted-reasoning include (reasoning.include) and a retry without it
+    // succeeded: from then on the dialect stops sending the directive for this provider, so each later request
+    // no longer pays a guaranteed 400 + retry round-trip.
+    private final AtomicBoolean encryptedReasoningRejected = new AtomicBoolean();
+
     /**
      * Extension key on an assistant {@link LlmMessage} carrying the opaque reasoning items to replay as
      * {@code type:reasoning} input items (see {@link #replayReasoningItems}). Produced by the loop from
@@ -65,6 +71,10 @@ public class OpenAIResponsesDialect extends AbstractDialect {
      * recover its multi-turn reasoning continuity on the Responses wire.
      */
     static final String REASONING_ITEMS_KEY = "reasoningItems";
+
+    /** Provider-option key toggling the {@code include:["reasoning.encrypted_content"]} directive (shared by
+     *  every Responses dialect - used by Codex and any Responses gateway that rejects it by default). */
+    public static final String REASONING_INCLUDE_KEY = "reasoning_include";
 
     /**
      * Creates the dialect.
@@ -115,13 +125,25 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     }
 
     /**
+     * Whether the first attempt of a request should carry the {@code reasoning.include} directive. Memoizes a
+     * backend that rejected the directive (a retry-without-it already succeeded): once {@link
+     * #encryptedReasoningRejected} is set the directive is never sent again for this provider, avoiding the
+     * guaranteed 400 + downgrade retry on every subsequent request.
+     *
+     * @return {@code false} once a {@code reasoning.include} rejection was observed and auto-recovered.
+     */
+    private boolean firstAttemptIncludeEncryptedReasoning() {
+        return !encryptedReasoningRejected.get() && includeEncryptedReasoning();
+    }
+
+    /**
      * The {@code reasoning} request config: the effort plus the summary mode (which is what makes the
      * backend stream the displayable reasoning-summary deltas at all). When
      * {@link #includeEncryptedReasoning()} is true, also requests the opaque replayable
      * {@code encrypted_content} blob via {@code include}.
      */
-    private Map<String, Object> reasoningConfig(final String effort) {
-        if (!includeEncryptedReasoning()) {
+    private Map<String, Object> reasoningConfig(final String effort, final boolean includeEncryptedReasoning) {
+        if (!includeEncryptedReasoning) {
             return Map.of("effort", effort, "summary", "auto");
         }
         return Map.of("effort", effort, "summary", "auto", "include", List.of("reasoning.encrypted_content"));
@@ -155,8 +177,24 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     @Override
     public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
         try {
-            final var payload = mapper.toBytes(toWire(request, false));
+            final var include = firstAttemptIncludeEncryptedReasoning();
+            final var payload = mapper.toBytes(toWire(request, false, include));
             return post(payload).thenCompose(response -> {
+                if (response.statusCode() == 400
+                        && include
+                        && request.reasoningEffort() != null
+                        && isReasoningIncludeRejectedBody(response.body())) {
+                    // a gateway rejected the encrypted-reasoning include: downgrade once and resend
+                    return post(mapper.toBytes(toWire(request, false, false))).thenCompose(retry -> {
+                        encryptedReasoningRejected.set(true);
+                        try {
+                            return CompletableFuture.completedFuture(
+                                    toLlmResponse(asMap(parseResponse(Map.class, retry))));
+                        } catch (final LlmResponseParseException e) {
+                            return failed(e);
+                        }
+                    });
+                }
                 try {
                     return CompletableFuture.completedFuture(toLlmResponse(asMap(parseResponse(Map.class, response))));
                 } catch (final LlmResponseParseException e) {
@@ -173,12 +211,28 @@ public class OpenAIResponsesDialect extends AbstractDialect {
             final LlmRequest request, final BooleanSupplier cancelled) {
         try {
             streamedArgIds.clear();
-            final var payload = mapper.toBytes(toWire(request, true));
-            return openStream(payload, cancelled)
-                    .thenCompose(attempt -> attempt.ok()
-                            ? CompletableFuture.completedFuture(
-                                    Streams.toEvents(attempt.live(), cancelled, this::mapEvent, () -> null, onRawLine))
-                            : streamError(attempt));
+            final var include = firstAttemptIncludeEncryptedReasoning();
+            final var payload = mapper.toBytes(toWire(request, true, include));
+            return openStream(payload, cancelled).thenCompose(attempt -> {
+                if (attempt.ok()) {
+                    return CompletableFuture.completedFuture(
+                            Streams.toEvents(attempt.live(), cancelled, this::mapEvent, () -> null, onRawLine));
+                }
+                if (include && request.reasoningEffort() != null && isReasoningIncludeRejected(attempt)) {
+                    // a gateway/edge rejected the encrypted-reasoning include: transparently
+                    // downgrade once and resend without it (bounded single retry)
+                    return retryWithoutEncryptedReasoning(request, true, cancelled)
+                            .thenCompose(retry -> {
+                                if (retry.ok()) {
+                                    encryptedReasoningRejected.set(true);
+                                    return CompletableFuture.completedFuture(Streams.toEvents(
+                                            retry.live(), cancelled, this::mapEvent, () -> null, onRawLine));
+                                }
+                                return streamError(attempt);
+                            });
+                }
+                return streamError(attempt);
+            });
         } catch (final RuntimeException e) {
             return failed(e);
         }
@@ -199,27 +253,117 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     protected CompletionStage<LlmResponse> assemble(final LlmRequest request, final BooleanSupplier cancelled) {
         try {
             streamedArgIds.clear();
-            final var payload = mapper.toBytes(toWire(request, true));
+            final var include = firstAttemptIncludeEncryptedReasoning();
+            final var payload = mapper.toBytes(toWire(request, true, include));
             return openStream(payload, cancelled).thenCompose(attempt -> {
                 if (!attempt.ok()) {
-                    // mirror the streaming error classification but surface it on the single-shot stage
-                    return streamError(attempt)
-                            .thenCompose(ignored -> failed(new LlmResponseParseException(
-                                    name(),
-                                    provider.baseUrl(),
-                                    attempt.statusCode(),
-                                    attempt.headers().firstValue("content-type").orElse(null),
-                                    null,
-                                    new IllegalStateException("failed to assemble single-shot response"))));
+                    if (include && request.reasoningEffort() != null && isReasoningIncludeRejected(attempt)) {
+                        // a strict backend rejected the encrypted-reasoning include: downgrade once and retry
+                        return retryWithoutEncryptedReasoning(request, true, cancelled)
+                                .thenCompose(retry -> {
+                                    if (retry.ok()) {
+                                        encryptedReasoningRejected.set(true);
+                                        return assembleEvents(retry.live(), cancelled);
+                                    }
+                                    return assembleFailure(attempt);
+                                });
+                    }
+                    return assembleFailure(attempt);
                 }
-                final var future = new CompletableFuture<LlmResponse>();
-                Streams.toEvents(attempt.live(), cancelled, this::mapEvent, () -> null, onRawLine)
-                        .subscribe(new LlmResponseAssembler(future));
-                return future;
+                return assembleEvents(attempt.live(), cancelled);
             });
         } catch (final RuntimeException e) {
             return failed(e);
         }
+    }
+
+    /**
+     * Assembles a live SSE stream into a single {@link LlmResponse}.
+     */
+    private CompletionStage<LlmResponse> assembleEvents(
+            final Flow.Publisher<List<java.nio.ByteBuffer>> live, final BooleanSupplier cancelled) {
+        final var future = new CompletableFuture<LlmResponse>();
+        Streams.toEvents(live, cancelled, this::mapEvent, () -> null, onRawLine)
+                .subscribe(new LlmResponseAssembler(future));
+        return future;
+    }
+
+    /**
+     * Surfaces a failed single-shot stream attempt as a classified {@link LlmResponse} failure.
+     */
+    private CompletionStage<LlmResponse> assembleFailure(final io.yupiik.llm.client.spi.StreamAttempt attempt) {
+        return streamError(attempt)
+                .thenCompose(ignored -> failed(new LlmResponseParseException(
+                        name(),
+                        provider.baseUrl(),
+                        attempt.statusCode(),
+                        attempt.headers().firstValue("content-type").orElse(null),
+                        null,
+                        new IllegalStateException("failed to assemble single-shot response"))));
+    }
+
+    /**
+     * True when a failed stream attempt is the OpenAI Responses {@code reasoning.include} unknown-parameter
+     * rejection: some backends (eg. strict Codex/gov edges or Responses-compliant gateways) reject the
+     * {@code include:["reasoning.encrypted_content"]} directive with a 400.
+     *
+     * @param attempt the failed stream attempt.
+     * @return {@code true} when the error is a {@code reasoning.include} unknown-parameter rejection.
+     */
+    protected boolean isReasoningIncludeRejected(final io.yupiik.llm.client.spi.StreamAttempt attempt) {
+        if (attempt.statusCode() != 400 || attempt.errorBody() == null || attempt.errorBody().length == 0) {
+            return false;
+        }
+        final var body = new String(attempt.errorBody(), java.nio.charset.StandardCharsets.UTF_8);
+        return isReasoningIncludeRejectedBody(body);
+    }
+
+    /**
+     * True when a transparent retry is needed because the request carries the encrypted-reasoning
+     * {@code include} directive and the backend rejected it. The body is deserialized through the
+     * {@code JsonMapper} and the structured {@code error} object inspected ({@code code}, {@code param},
+     * {@code message}); when the body does not parse as the expected shape the rejection is NOT classified
+     * as a {code reasoning.include} one, so the original error surfaces unchanged instead of a wrong retry.
+     */
+    private boolean isReasoningIncludeRejectedBody(final String body) {
+        if (body == null) {
+            return false;
+        }
+        try {
+            final Object parsed = mapper.fromString(Map.class, body);
+            if (!(parsed instanceof Map<?, ?> root)) {
+                return false;
+            }
+            final Object error = root.get("error");
+            if (!(error instanceof Map<?, ?> err)) {
+                return false;
+            }
+            final Object code = err.get("code");
+            final Object param = err.get("param");
+            final Object message = err.get("message");
+            final boolean reasoningParam = param != null && "reasoning.include".equals(String.valueOf(param));
+            final boolean unknownReasoningInclude = "unknown_parameter".equals(String.valueOf(code))
+                    && (reasoningParam || String.valueOf(message).contains("reasoning.include"));
+            return reasoningParam || unknownReasoningInclude;
+        } catch (final RuntimeException e) {
+            // the body is not the expected JSON error shape: report the original error, no silent retry
+            return false;
+        }
+    }
+
+    /**
+     * Re-encodes a request without the encrypted-reasoning {@code include} directive and resends it once.
+     * Used to self-heal a {@code reasoning.include} rejection transparently.
+     *
+     * @param request the neutral request to re-encode.
+     * @param stream {@code true} to produce a streaming retry payload.
+     * @param cancelled cancellation probe.
+     * @return a stage completing with the retried stream attempt.
+     */
+    protected CompletionStage<io.yupiik.llm.client.spi.StreamAttempt> retryWithoutEncryptedReasoning(
+            final LlmRequest request, final boolean stream, final BooleanSupplier cancelled) {
+        final var payload = mapper.toBytes(toWire(request, stream, false));
+        return openStream(payload, cancelled);
     }
 
     /** Subscriber accumulating streamed events into a single {@link LlmResponse}. */
@@ -312,6 +456,11 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     }
 
     private ResponsesRequest toWire(final LlmRequest request, final boolean stream) {
+        return toWire(request, stream, includeEncryptedReasoning());
+    }
+
+    private ResponsesRequest toWire(
+            final LlmRequest request, final boolean stream, final boolean includeEncryptedReasoning) {
         final var instructions = new ArrayList<String>();
         final var input = new ArrayList<ResponsesInput>();
         final var sanitized = request.messages() == null ? null : sanitizeToolCalls(request.messages());
@@ -355,7 +504,9 @@ public class OpenAIResponsesDialect extends AbstractDialect {
         }
         // 'summary' is required by the official API to stream reasoning deltas at all
         // (gateways often emit them unrequested); 'auto' keeps the payload small
-        final var reasoning = request.reasoningEffort() == null ? null : reasoningConfig(request.reasoningEffort());
+        final var reasoning = request.reasoningEffort() == null
+                ? null
+                : reasoningConfig(request.reasoningEffort(), includeEncryptedReasoning);
         return new ResponsesRequest(
                 request.model(),
                 input,

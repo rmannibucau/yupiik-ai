@@ -32,6 +32,7 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -201,10 +202,10 @@ class CodexDialectTest {
     }
 
     @Test
-    void reasoningRequestsEncryptedContentBlobForReplay(final JsonMapper mapper) throws Exception {
-        // codex must ask for the opaque reasoning.encrypted_content blob (so the loop can replay it
-        // across turns for multi-turn reasoning continuity) alongside the displayable summary, and keep
-        // the effort the caller asked for.
+    void reasoningDoesNotRequestEncryptedContentBlobByDefault(final JsonMapper mapper) throws Exception {
+        // the Codex flavor defaults includeEncryptedReasoning() to false: the ChatGPT backend and
+        // stricter Codex/gov edges reject the reasoning.include directive with an unknown-parameter 400,
+        // so the common path keeps just {effort, summary} and does not ask for the encrypted blob.
         final AtomicReference<String> reqBody = new AtomicReference<>();
         server.createContext("/codex/responses", exchange -> {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
@@ -235,9 +236,55 @@ class CodexDialectTest {
         org.junit.jupiter.api.Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
         assertTrue(body.contains("\"effort\":\"medium\""), body);
         assertTrue(body.contains("\"summary\":\"auto\""), body);
+        org.junit.jupiter.api.Assertions.assertFalse(
+                body.contains("reasoning.encrypted_content"),
+                "codex must NOT request the encrypted reasoning blob by default: " + body);
+    }
+
+    @Test
+    void reasoningRequestsEncryptedContentBlobWhenOptedIn(final JsonMapper mapper) throws Exception {
+        // the reasoning_include provider option re-enables the opaque encrypted-content blob for
+        // backends that support it (multi-turn reasoning continuity).
+        final AtomicReference<String> reqBody = new AtomicReference<>();
+        server.createContext("/codex/responses", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "{}");
+        });
+        final var request = new io.yupiik.llm.client.model.LlmRequest(
+                "gpt-6-luna",
+                List.of(new io.yupiik.llm.client.model.LlmMessage("user", "hi", null, null, null, null)),
+                null,
+                null,
+                null,
+                null,
+                List.of(),
+                null,
+                null,
+                "medium",
+                true,
+                java.util.Map.of());
+
+        // drive the option through the ProviderSpec options map (how ChatClient wires providerSpecificOptions)
+        final CodexDialect dialect = new CodexDialect(
+                mapper,
+                client,
+                new ProviderSpec(
+                        base + "/codex/responses",
+                        "key",
+                        null,
+                        java.util.Map.of(CodexDialect.REASONING_INCLUDE_KEY, true),
+                        b -> b.setHeader("authorization", "Bearer t")),
+                CodexDialect.DEFAULT_CLIENT_VERSION,
+                null);
+        dialect.chat(request, () -> false).toCompletableFuture().get(5, java.util.concurrent.TimeUnit.SECONDS);
+
+        final var body = reqBody.get();
+        org.junit.jupiter.api.Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
+        assertTrue(body.contains("\"effort\":\"medium\""), body);
+        assertTrue(body.contains("\"summary\":\"auto\""), body);
         assertTrue(
                 body.contains("\"include\":[\"reasoning.encrypted_content\"]"),
-                "codex must request the replayable encrypted reasoning blob: " + body);
+                "codex must request the replayable encrypted reasoning blob when opted in: " + body);
     }
 
     @Test
@@ -411,6 +458,81 @@ class CodexDialectTest {
                 cause instanceof io.yupiik.llm.client.LlmHttpFailureException, "" + cause);
         assertEquals(429, ((io.yupiik.llm.client.LlmHttpFailureException) cause).status());
         assertEquals(1, authCount.get(), "only the original request is sent, no silent retry");
+    }
+
+    @Test
+    void reasoningIncludeRejectionAutoDowngradesWhenOptedIn(final JsonMapper mapper) throws Exception {
+        // when a codex provider opted into the encrypted-reasoning include and a strict backend rejects
+        // it with an unknown-parameter 400, the dialect must transparently retry once without the include
+        // and surface the successful response.
+        // opted-in dialect: first request carries the include directive and is rejected, the retry drops it
+        final AtomicReference<String> firstBody = new AtomicReference<>();
+        final AtomicReference<String> secondBody = new AtomicReference<>();
+        final AtomicInteger calls = new AtomicInteger();
+        final var request = new io.yupiik.llm.client.model.LlmRequest(
+                "gpt-6-luna",
+                List.of(new io.yupiik.llm.client.model.LlmMessage("user", "hi", null, null, null, null)),
+                null,
+                null,
+                null,
+                null,
+                List.of(),
+                null,
+                null,
+                "medium",
+                true,
+                java.util.Map.of());
+        server.createContext("/codex/responses", exchange -> {
+            final var b = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            if (calls.incrementAndGet() == 1) {
+                firstBody.set(b);
+                respond(
+                        exchange,
+                        400,
+                        "{\"error\":{\"message\":\"Unknown parameter: 'reasoning.include'.\","
+                                + "\"type\":\"invalid_request_error\",\"param\":\"reasoning.include\",\"code\":\"unknown_parameter\"}}");
+            } else {
+                secondBody.set(b);
+                respond(exchange, 200, "{}");
+            }
+        });
+
+        final CodexDialect dialect = new CodexDialect(
+                mapper,
+                client,
+                new ProviderSpec(
+                        base + "/codex/responses", "key", null, null, b -> b.setHeader("authorization", "Bearer t")),
+                CodexDialect.DEFAULT_CLIENT_VERSION,
+                null,
+                true);
+        final AtomicReference<Throwable> stageError = new AtomicReference<>();
+        dialect.chat(request, () -> false)
+                .whenComplete((r, e) -> stageError.set(e))
+                .handle((r, e) -> null)
+                .toCompletableFuture()
+                .join();
+
+        assertEquals(2, calls.get(), "the include rejection must be retried once");
+        assertTrue(
+                firstBody.get().contains("\"include\":[\"reasoning.encrypted_content\"]"),
+                "the first request must carry the include directive: " + firstBody.get());
+        assertTrue(
+                !secondBody.get().contains("reasoning.encrypted_content"),
+                "the retried request must drop the include directive: " + secondBody.get());
+        org.junit.jupiter.api.Assertions.assertNull(stageError.get(), "no error after the auto-downgrade");
+
+        // the backend rejection is memoized: a second chat must NOT send the include directive again
+        final var secondStageError = new AtomicReference<Throwable>();
+        dialect.chat(request, () -> false)
+                .whenComplete((r, e) -> secondStageError.set(e))
+                .handle((r, e) -> null)
+                .toCompletableFuture()
+                .join();
+        assertEquals(3, calls.get(), "the memoized rejection must not trigger another include round-trip");
+        assertTrue(
+                !secondBody.get().contains("reasoning.encrypted_content"),
+                "the second request must also drop the include directive: " + secondBody.get());
+        org.junit.jupiter.api.Assertions.assertNull(secondStageError.get(), "no error on the second request");
     }
 
     private io.yupiik.llm.client.model.LlmRequest request() {

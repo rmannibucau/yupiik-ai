@@ -378,7 +378,7 @@ public class ChatClient implements AutoCloseable {
                     ChatRoutes.chatEndpoint(provider.baseUrl(), flavor),
                     provider.resolveApiKey(),
                     Duration.ofSeconds(provider.timeoutSeconds()),
-                    null,
+                    providerManager.providerOptions(provider),
                     headersCustomizer(provider));
             final var bounds = provider.maxConcurrent() >= 0
                     ? provider.maxConcurrent()
@@ -477,7 +477,8 @@ public class ChatClient implements AutoCloseable {
                         // enterprise Agent Identity and retries once with the signed assertion.
                         providerId == null || providerId.isBlank()
                                 ? null
-                                : ignored -> codexAuthTemplateHelper.resolveAgentAssertion(providerId));
+                                : ignored -> codexAuthTemplateHelper.resolveAgentAssertion(providerId),
+                        reasoningInclude(provider));
                 if (debugLogger != null) {
                     d.setOnRawLine(debugLogger::fine);
                 }
@@ -497,6 +498,9 @@ public class ChatClient implements AutoCloseable {
     /** The wire key carrying the Codex client version inside {@code providerSpecificOptions}. */
     private static final String CODEX_CLIENT_VERSION_KEY = "codex_client_version";
 
+    /** The wire key enabling the encrypted-reasoning {@code include} for a Responses provider. */
+    private static final String REASONING_INCLUDE_KEY = "reasoning_include";
+
     /**
      * The Codex client version a provider advertises for model gating, read from its
      * {@code providerSpecificOptions} (key {@code codex_client_version}) and defaulting to 160. Only
@@ -513,6 +517,22 @@ public class ChatClient implements AutoCloseable {
             return n.intValue() > 0 ? n.intValue() : 160;
         }
         return 160;
+    }
+
+    /**
+     * Whether a provider opts into the encrypted-reasoning {@code include} directive (requesting the
+     * opaque {@code reasoning.encrypted_content} blob for multi-turn continuity). Read from
+     * {@code providerSpecificOptions} (key {@code reasoning_include}); default {@code false} because the
+     * ChatGPT/Codex and stricter Codex/gov edges reject the directive with an unknown-parameter 400, and the
+     * base Responses dialect auto-downgrades once when a gateway rejects it anyway. Internal only (never
+     * sent on the wire - see the filtering in {@link #others(Map, ...)}).
+     */
+    private boolean reasoningInclude(final ProviderConfiguration provider) {
+        if (provider == null || provider.providerSpecificOptions() == null) {
+            return false;
+        }
+        final var value = providerManager.providerOptions(provider).get(REASONING_INCLUDE_KEY);
+        return value instanceof Boolean b && b;
     }
 
     /**
@@ -910,7 +930,7 @@ public class ChatClient implements AutoCloseable {
         if (!providerOptions.isEmpty()) {
             for (final var entry : providerOptions.entrySet()) {
                 // internal consumer options ride in providerSpecificOptions but must not hit the wire
-                if (CODEX_CLIENT_VERSION_KEY.equals(entry.getKey())) {
+                if (CODEX_CLIENT_VERSION_KEY.equals(entry.getKey()) || REASONING_INCLUDE_KEY.equals(entry.getKey())) {
                     continue;
                 }
                 others.put(entry.getKey(), entry.getValue());
