@@ -3606,10 +3606,22 @@ public class AgentLoop {
             return new ToolOutcome(call.id(), name, gateDenial, false, false);
         }
         final var toolStartNanos = precisionDurationMarker.now();
-        final ToolResult result;
+        ToolResult result;
         try {
             result = toolExecutionService.execute(
                     tool, args, toolContext(cancelled, callCancel::get, ordinal, settings));
+        } catch (final RuntimeException | Error exception) {
+            // a crashing tool (or a throwing post-execution event observer, e.g. a ToolUsePost hook) must never
+            // leave the transcript holding an open "running" tool card: normalize it into a failed result so the
+            // unconditional tool-finished emission below still closes the card.
+            LOGGER.log(SessionAwareLogRecord.of(
+                    LOGGER,
+                    currentSessionId,
+                    Level.WARNING,
+                    "tool '" + name + "' crashed instead of returning a result"
+                            + " - marking it finished with a diagnostic",
+                    exception));
+            result = ToolResult.error(toolCrashedDiagnostic(name, exception));
         } finally {
             unregisterRunningTool(ordinal);
             // the turn keeps running after a per-call cancel: only the tool result is marked
@@ -3989,6 +4001,23 @@ public class AgentLoop {
     private static String unknownToolDiagnostic(final String name) {
         return "Unknown tool \"" + name + "\": not in this session's toolset (built-in or enabled MCP)."
                 + " Run /tools to list the valid tools; only exact names from the request's tools field are accepted.";
+    }
+
+    private static String toolCrashedDiagnostic(final String name, final Throwable exception) {
+        final var cause =
+                exception.getMessage() == null || exception.getMessage().isBlank()
+                        ? exception.getClass().getSimpleName()
+                        : exception.getMessage();
+        return "Tool \"" + name + "\" crashed before returning a result (" + sanitizeSingleLine(cause)
+                + ") - the call was aborted and marked finished. Inspect the logs for the full stack trace.";
+    }
+
+    private static String sanitizeSingleLine(final String value) {
+        return value.lines()
+                .map(String::trim)
+                .filter(l -> !l.isBlank())
+                .findFirst()
+                .orElse("");
     }
 
     /**

@@ -220,6 +220,80 @@ class AgentLoopTest {
                 .anyMatch(result -> result.output().contains("not allowed for this agent run")));
     }
 
+    @Test
+    void crashingToolExecutionStillEmitsToolFinished() {
+        // regression: if ToolExecutionService.execute throws (a crashing tool, or a throwing post-execution event
+        // observer such as a ToolUsePost hook), runTool must STILL emit ToolFinished - otherwise the transcript
+        // keeps the tool in its running-tools map and the TUI card is stuck "working" forever. The crash is
+        // normalized into a failed diagnostic and the card closes normally.
+        final var executed = new ArrayList<String>();
+        final var tool = testTool("crashy", executed);
+        final var registry = new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of(Tool.function(tool.name(), tool.description(), tool.schema()));
+            }
+
+            @Override
+            public List<Tool> toWireTools(final Predicate<EmbeddedTool> filter) {
+                return List.of(Tool.function(tool.name(), tool.description(), tool.schema()));
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                return tool.name().equals(name) ? tool : null;
+            }
+        };
+        final var throwingExecutions = new ToolExecutionService() {
+            @Override
+            public ToolResult execute(
+                    final EmbeddedTool ignored, final Map<String, Object> args, final ToolContext context) {
+                throw new IllegalStateException("simulated tool crash");
+            }
+        };
+        final var replies =
+                new ArrayDeque<>(List.of(toolCallReply("t1", "crashy"), new ScriptedReply("done", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        final ChatClient client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                requests.add(List.copyOf(request.messages()));
+                final var next = replies.poll();
+                if (next.finishReason() != null) {
+                    onDelta.accept(new End(next.finishReason(), null));
+                }
+                return next.toMessage();
+            }
+        };
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        registry,
+                        throwingExecutions,
+                        EXECUTOR)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("done", result);
+        // the crashing tool must still be closed by exactly one ToolFinished (success=false) so no card is left running
+        final var finishes = events.stream()
+                .filter(AgentEvent.ToolFinished.class::isInstance)
+                .map(AgentEvent.ToolFinished.class::cast)
+                .toList();
+        assertEquals(1, finishes.size(), "a crashing tool must still emit exactly one ToolFinished: " + events);
+        assertFalse(finishes.get(0).success(), "the crashing finished event must not claim success");
+        assertTrue(
+                finishes.get(0).output().contains("crashed before returning a result"),
+                "the diagnostic must explain the crash: " + finishes.get(0).output());
+    }
+
     private EmbeddedTool testTool(final String name, final List<String> executed) {
         return new EmbeddedTool() {
             @Override

@@ -28,9 +28,13 @@ import io.yupiik.ia.agent.core.optimize.OutputProcessor;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 @ApplicationScoped
 public class ToolExecutionService {
+    private static final Logger LOGGER = Logger.getLogger(ToolExecutionService.class.getName());
+
     private final CodingAgentConfiguration configuration;
     private final Emitter emitter;
     private final List<OutputProcessor> processors;
@@ -79,8 +83,13 @@ public class ToolExecutionService {
         final var optimize = configuration.optimize();
         final var optimizeThis = optimize.enabled() && !optimize.isDisabled(List.of(tool.name()));
         if (optimizeThis) {
-            emitter.emit(new BeforeToolExecutionEvent(
-                    tool.name(), args, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
+            try {
+                emitter.emit(new BeforeToolExecutionEvent(
+                        tool.name(), args, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
+            } catch (final RuntimeException | Error e) {
+                // an optimization/observability observer must not abort the tool or leave a running card open
+                LOGGER.log(Level.WARNING, "before-tool execution event observer failed for '" + tool.name() + "'", e);
+            }
         }
         final var startNanos = System.nanoTime();
         ToolResult result;
@@ -99,11 +108,22 @@ public class ToolExecutionService {
             output = optimizeOutput(tool, args, output, ctx);
         }
         if (optimizeThis) {
-            emitter.emit(new AfterToolExecutionEvent(
-                    tool.name(), result.success(), output, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
+            try {
+                emitter.emit(new AfterToolExecutionEvent(
+                        tool.name(), result.success(), output, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
+            } catch (final RuntimeException | Error e) {
+                // a ToolUsePost hook (or any other after-tool observer) failing must never lose the tool result:
+                // the outcome is still returned to the caller so the card can close normally.
+                LOGGER.log(Level.WARNING, "after-tool execution event observer failed for '" + tool.name() + "'", e);
+            }
         }
-        emitter.emit(new AgentEvent.ToolTimingEvent(
-                tool.name(), durationMs, durationMs, false, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
+        try {
+            emitter.emit(new AgentEvent.ToolTimingEvent(
+                    tool.name(), durationMs, durationMs, false, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
+        } catch (final RuntimeException | Error e) {
+            // a timing/statistics observer failing is non-fatal for the tool itself (it already ran to completion)
+            LOGGER.log(Level.WARNING, "tool timing event observer failed for '" + tool.name() + "'", e);
+        }
         // preserve the tri-state (OK/PENDING/ERROR) so a PENDING result is not collapsed to ERROR:
         // use the status-preserving copy rather than the legacy boolean constructor.
         return new ToolResult(result.status(), output);

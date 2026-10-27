@@ -250,4 +250,34 @@ class ToolExecutionServiceTest {
         assertFalse(result.output().contains("NullPointerException"), result.output());
         assertFalse(result.output().contains("Tool edit_file failed"), result.output());
     }
+
+    @Test
+    void throwingEventObserverDoesNotAbortTheToolResult() {
+        // a misbehaving observer on the execution-bus events that AgentLoop depends on to close the tool card
+        // (a ToolUsePost hook, the code-graph refresh, a timing listener...) must never lose the tool result: a
+        // throw used to propagate out of execute() and skip the AgentLoop tool-finished emission, leaving the TUI
+        // card stuck "running" forever. Every one of those emissions is now shielded, so the tool's own outcome
+        // must come back intact even if all of them throw. ToolExecutionPrepare is intentionally NOT targeted: it
+        // sits inside execute()'s tool body try/catch and is by-design normalized into a failed ToolResult.
+        final var configuration = config("10");
+        final var service = new ToolExecutionService(
+                configuration,
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        if (event instanceof io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent
+                                || event instanceof io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent
+                                || event instanceof io.yupiik.ia.agent.core.agent.AgentEvent.ToolTimingEvent) {
+                            throw new IllegalStateException(
+                                    "observer boom: " + event.getClass().getSimpleName());
+                        }
+                    }
+                },
+                List.of(new GenericOutputProcessor(configuration)));
+        final var output = "some bash output";
+        final var reports = new ArrayList<String>();
+        final var result = service.execute(tool("bash", output), Map.of("command", "mvn test"), context(reports));
+        assertTrue(result.success(), result.output());
+        assertEquals(output, result.output(), "a throwing post-execution event observer must not lose the tool result");
+    }
 }
