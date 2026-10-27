@@ -183,6 +183,17 @@ class QuotaSnapshotStoreTest {
         assertFalse(blankView.supported(), "a blank key yields an unsupported/empty view, not an NPE");
     }
 
+    @Test
+    void nullOrBlankKeyDoesNotNpeOnSnapshotOrRefresh(final JsonMapper mapper) {
+        // regression: a provider switch (attach + pushUsageQuota) issued as the very first command,
+        // before the session ran a turn, read the quota with a null currentSessionId and NPE'd here.
+        final var store = store(mapper);
+        assertFalse(store.snapshot(null, false).supported(), "snapshot(null) must not NPE");
+        assertFalse(store.snapshot("   ", true).supported(), "snapshot(blank, forced) must not NPE");
+        assertFalse(store.refresh(null).supported(), "refresh(null) must not NPE");
+        assertFalse(store.refresh("   ").supported(), "refresh(blank) must not NPE");
+    }
+
     private static long farFuture() {
         return System.currentTimeMillis() + 3_600_000;
     }

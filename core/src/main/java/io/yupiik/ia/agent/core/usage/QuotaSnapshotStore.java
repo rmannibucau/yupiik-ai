@@ -106,6 +106,11 @@ public class QuotaSnapshotStore {
      * @return the snapshot view (never {@code null}).
      */
     public QuotaView snapshot(final String sessionId, final boolean force) {
+        if (sessionId == null || sessionId.isBlank()) {
+            // mirror cachedSnapshot: a null/blank key is simply "no quota yet" (a provider switch or
+            // /usage before a session has a live turn id), never a ConcurrentHashMap.get(null) NPE
+            return new QuotaView(false, false, CodexUsageSnapshot.empty());
+        }
         final SessionQuota quota = sessions.get(sessionId);
         if (quota == null) {
             return new QuotaView(false, false, CodexUsageSnapshot.empty());
@@ -138,10 +143,7 @@ public class QuotaSnapshotStore {
 
     /** Forces a refresh and returns the fresh view (used by the /usage command). */
     public QuotaView refresh(final String sessionId) {
-        final SessionQuota quota = sessions.get(sessionId);
-        if (quota == null) {
-            return new QuotaView(false, false, CodexUsageSnapshot.empty());
-        }
+        // snapshot already handles a null/blank key and a not-yet-attached session
         return snapshot(sessionId, true);
     }
 

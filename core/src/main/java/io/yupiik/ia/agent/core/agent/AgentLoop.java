@@ -719,7 +719,10 @@ public class AgentLoop {
         // switch reuses the already-attached snapshot and must not clobber the live context gauge.
         if (providerChanged(current, alt)) {
             if (quotaStore != null) {
-                quotaStore.attach(currentSessionId, alt);
+                // before the first turn currentSessionId is still null: key the quota on the loop's
+                // stable session id (the id doRun will set later), otherwise a switch issued as the
+                // very first command would leave the session unattached and the UIs without a gauge
+                quotaStore.attach(currentSessionId != null ? currentSessionId : this.sessionId, alt);
             }
             pushUsageQuota();
         }
@@ -4096,7 +4099,10 @@ public class AgentLoop {
         if (quotaStore == null) {
             return AgentEvent.UsageUpdated.Quota.NONE;
         }
-        final var view = quotaStore.snapshot(currentSessionId, false);
+        // currentSessionId is only set once a turn runs: a provider switch (or /usage) issued before
+        // the first turn must still read the quota attached under the loop's stable session id
+        final var id = currentSessionId != null ? currentSessionId : this.sessionId;
+        final var view = quotaStore.snapshot(id, false);
         return AgentEvent.UsageUpdated.Quota.of(view.enabled(), view.supported(), view.snapshot());
     }
 
