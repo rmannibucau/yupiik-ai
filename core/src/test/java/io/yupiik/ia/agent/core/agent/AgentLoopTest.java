@@ -6354,6 +6354,7 @@ class AgentLoopTest {
             final boolean continueOnTruncation, final Map<String, String> extra) {
         final var entries = new HashMap<String, String>();
         entries.put("yca.storageHome", storageHome.toString());
+        entries.put("yca.home", storageHome.resolve("home").toString());
         entries.put("yca.provider.providers.length", "1");
         entries.put("yca.provider.providers.0.id", "default");
         entries.put("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions");

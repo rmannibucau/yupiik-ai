@@ -297,6 +297,7 @@ class BtwAnswererTest {
     private Map<String, String> config(final Map<String, String> extra) {
         final var entries = new HashMap<String, String>();
         entries.put("yca.storageHome", storageHome.toString());
+        entries.put("yca.home", storageHome.resolve("home").toString());
         entries.put("yca.provider.providers.length", "1");
         entries.put("yca.provider.providers.0.id", "default");
         entries.put(

@@ -95,9 +95,10 @@ class SystemPromptBuilderTest {
 
     @Test
     void skillsLocatorIncludesAgentsGlobalDir() {
-        final var dirs = SkillLocator.skillDirectories(config(Map.of()));
+        final var cfg = config(Map.of());
+        final var dirs = SkillLocator.skillDirectories(cfg);
         assertTrue(
-                dirs.contains(Path.of(System.getProperty("user.home"), ".agents", "skills")),
+                dirs.contains(Path.of(cfg.resolveHome(), ".agents", "skills")),
                 "~/.agents/skills should be a global skill directory: " + dirs);
     }
 
@@ -824,11 +825,19 @@ class SystemPromptBuilderTest {
                 cfg, null, null, new PermissionService(cfg), new AgentProvider(cfg), manager, resolver, null, null);
     }
 
-    private static CodingAgentConfiguration config(final Map<String, String> overrides) {
+    /**
+     * Builds a configuration from {@code overrides} on top of hermetic defaults: the user home is
+     * pinned under the test temp dir so the global AGENTS.md/skills are never read from the real
+     * {@code user.home} - a machine with a large {@code ~/.config/opencode/AGENTS.md} used to blow
+     * the small-window system-prompt cap test ("small window must shrink the system prompt").
+     * Callers may still override {@code yca.home} explicitly (e.g. to test global-file resolution).
+     */
+    private CodingAgentConfiguration config(final Map<String, String> overrides) {
         final var map = new HashMap<String, String>();
         map.put("yca.storageHome", "~/.yupiik/coding-agent");
         map.put("yca.workingDir", ".");
         map.put("yca.skills.enabled", "true");
+        map.putIfAbsent("yca.home", storageHome.resolve("home").toString());
         map.putAll(overrides);
         return new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(map.get(key))).get();
     }
