@@ -66,4 +66,40 @@ class WebReplayTest {
         assertEquals(
                 List.of("text-delta"), events.stream().map(WebEventDto::type).toList());
     }
+
+    @Test
+    void legacyUnScrubbedPersistedThinkingIsPassedThroughVerbatim() {
+        // WebReplay is a faithful mirror: it does not scrub. A legacy persisted thinking that
+        // predates the AgentLoop persistence scrub is passed through as-is; the frontend render
+        // chokepoint (stripEchoedRefs in the Markdown component) is what hides any remnant.
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.user("hi"));
+        messages.add(
+                new Message("assistant", "the answer", null, null, null, Map.of("thinking", "reasoning @42@ here")));
+
+        final var events = WebReplay.replay("s1", messages);
+
+        final var types = events.stream().map(WebEventDto::type).toList();
+        assertEquals(List.of("user", "thinking-delta", "text-delta"), types);
+        assertEquals("reasoning @42@ here", events.get(1).message());
+        assertEquals("the answer", events.get(2).message());
+    }
+
+    @Test
+    void scrubbedPersistedThinkingReplaysWithoutAnySeam() {
+        // AgentLoop strips echoed "@N@" seams at persistence, so a clean stored message must
+        // replay without inventing a seam either.
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.user("hi"));
+        messages.add(new Message(
+                "assistant", "the answer", null, null, null, Map.of("thinking", "reasoning carefully here")));
+
+        final var events = WebReplay.replay("s1", messages);
+
+        final var types = events.stream().map(WebEventDto::type).toList();
+        assertEquals(List.of("user", "thinking-delta", "text-delta"), types);
+        assertTrue(events.stream()
+                .filter(e -> e.message() != null)
+                .noneMatch(e -> e.message().contains("@42@")));
+    }
 }

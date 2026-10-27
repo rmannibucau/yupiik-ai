@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.llm.Message;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -822,7 +823,12 @@ public class ConversationTranscript {
             sb.append(TOOL_END).append('\n');
         }
         final var md = sb.toString().strip();
-        final var result = md.isBlank() ? fallback : md;
+        // the persisted transcript is scrubbed by AgentLoop (stripEchoedRefs) but the live
+        // stream renders TextDelta chunks verbatim, so a flash-class model echoing the injected
+        // "@N@" seam would show it on screen while the stored message stays clean. This display
+        // surface applies the same deterministic scrub so what is rendered matches what persists.
+        final var scrubbed = ContextCompression.stripEchoedRefs(md);
+        final var result = scrubbed == null || scrubbed.isBlank() ? fallback : scrubbed;
         markdownVersion = contentVersion;
         markdownSpinner = spinner;
         markdownCache = result;

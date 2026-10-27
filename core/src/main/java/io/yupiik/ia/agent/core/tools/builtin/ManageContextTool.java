@@ -70,14 +70,18 @@ public class ManageContextTool implements EmbeddedTool {
     @Override
     public String description() {
         return "Manage the conversation context. action=compress (default) summarizes genuinely closed"
-                + " conversation ranges: each message sent to the provider ends with a stable [ref @N@] tag;"
-                + " pass topic plus content=[{startId,endId,summary}] with ranges that start on a user message"
-                + " and end at a turn boundary. Write the summary yourself (decisions, findings, file paths,"
-                + " next steps; be exhaustive), and use @bN@ placeholders to nest an already compressed block"
-                + " when its information must be preserved. Never compress work still in progress. The"
-                + " transcript is unchanged: only outgoing requests are rewritten. action=status reports the"
-                + " raw/effective token counts and active blocks; action=decompress restores a block;"
-                + " action=compact asks for a whole-context summary (optional focus hint and keep_last).";
+                + " conversation ranges: each message sent to the provider ends with a stable compact"
+                + " seam tag (an at-sign, the message number, an at-sign); pass topic plus"
+                + " content=[{startId,endId,summary}] with ranges that start on a user message"
+                + " and end at a turn boundary. The seam tags are environment-injected metadata and"
+                + " must never be echoed in output; treat them as reserved tokens (do not emit them"
+                + " except when naming a startId/endId). Write the summary yourself (decisions,"
+                + " findings, file paths, next steps; be exhaustive), and use @bN@ placeholders to"
+                + " nest an already compressed block when its information must be preserved. Never"
+                + " compress work still in progress. The transcript is unchanged: only outgoing"
+                + " requests are rewritten. action=status reports the raw/effective token counts and"
+                + " active blocks; action=decompress restores a block; action=compact asks for a"
+                + " whole-context summary (optional focus hint and keep_last).";
     }
 
     @Override

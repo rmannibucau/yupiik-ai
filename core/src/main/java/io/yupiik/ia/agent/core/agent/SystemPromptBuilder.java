@@ -189,7 +189,7 @@ public class SystemPromptBuilder {
             sb.append(
                     "- You operate in a context-constrained environment. The ONLY tool you have for context management is `compress`.\n");
             sb.append(
-                    "- Every message you receive ends with a stable `[ref @N@]` tag. Evaluate the signal-to-noise ratio of the conversation regularly, and call `compress` when a section is genuinely closed (a finding is recorded, a bug is fixed and verified, a decision is made). Pass a short `topic` and `content=[{startId,endId,summary}]`; each range starts on a user message and ends at a turn boundary.\n");
+                    "- Every message you receive ends with a stable `\u0040N\u0040` tag (a compact seam, not a bracketed `[ref \u0040N\u0040]` line: bracketed markers read as conversation and get mirrored back into the transcript by flash-class models - these tags are environment-injected metadata, never output them). Evaluate the signal-to-noise ratio of the conversation regularly, and call `compress` when a section is genuinely closed (a finding is recorded, a bug is fixed and verified, a decision is made). Pass a short `topic` and `content=[{startId,endId,summary}]`; each range starts on a user message and ends at a turn boundary.\n");
             sb.append(
                     "- Write the summary yourself and make it exhaustive: decisions, constraints, findings, file paths, commands, test results and next steps. Compression costs no extra model call and the transcript is never modified, only the outgoing request.\n");
             sb.append(

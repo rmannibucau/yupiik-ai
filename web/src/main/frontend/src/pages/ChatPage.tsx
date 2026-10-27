@@ -24,7 +24,7 @@ import {
   type Block,
 } from '../api/eventLog';
 import { useSlashCompletion, applySuggestion, type SlashSuggestion } from '../api/useSlashCompletion';
-import { normalizeMarkdown, hasOpenInlineSpan } from '../lib/markdown';
+import { normalizeMarkdown, hasOpenInlineSpan, stripEchoedRefs } from '../lib/markdown';
 import { guessToolLanguage, summarizeArgs } from '../lib/toolOutput';
 
 // register the language grammars the TUI highlights (java, ts/js, python, shell, sql, xml/json)
@@ -1975,7 +1975,10 @@ function useDebouncedMarkdown(content: string, writing: boolean): string {
  *  - fenced/inline code blocks get syntax highlighting via Prism - Issue #7.
  */
 function Markdown({ content, writing = false }: { content: string; writing?: boolean }) {
-  const src = normalizeMarkdown(useDebouncedMarkdown(content, writing) || '');
+  // strip echoed compact-seam ref tags ("@N@", "@bN@", "@blocked@") from the ACCUMULATED block
+  // content before rendering: a seam split across streamed deltas has already re-formed in the
+  // block, so the strip catches it exactly like the core ConversationTranscript.markdown scrub.
+  const src = normalizeMarkdown(stripEchoedRefs(useDebouncedMarkdown(content, writing) || ''));
   return (
     <div className="aui-md">
       <ReactMarkdown

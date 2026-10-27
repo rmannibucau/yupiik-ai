@@ -1774,6 +1774,62 @@ class AgentLoopTest {
     }
 
     /**
+     * A model echoing the injected compact seam ("@N@" ref tags) inside its reasoning must not
+     * persist that metadata under {@code THINKING_KEY}: the web replay rebuilds thinking-delta
+     * from that key, so an unclean value would leak straight into a fresh tab. The live
+     * ThinkingDelta events keep the raw stream (frontends scrub at their render chokepoint);
+     * the persisted copy is stripped exactly like the answer content is.
+     */
+    @Test
+    void echoedSeamInThinkingIsStrippedFromPersistedThinking() {
+        final var persisted = new ArrayList<SessionEntry>();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                onDelta.accept(new TextDelta("<think>let me check @42@"));
+                onDelta.accept(new TextDelta(" [high] carefully</think>answer"));
+                onDelta.accept(new End("stop", null));
+                return Message.assistant("answer", null);
+            }
+        };
+        final var sessionStore = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                persisted.add(entry);
+            }
+        };
+
+        final var result = loop(client, null, configuration(true), noContextManager(), sessionStore, null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("answer", result);
+        // the live ThinkingDelta events keep the raw seam: frontends scrub at their render
+        // chokepoint, exactly like the visible deltas
+        final var thinking = events.stream()
+                .filter(AgentEvent.ThinkingDelta.class::isInstance)
+                .map(AgentEvent.ThinkingDelta.class::cast)
+                .map(AgentEvent.ThinkingDelta::delta)
+                .reduce("", String::concat);
+        assertEquals("let me check @42@ [high] carefully", thinking);
+        final var assistant = persisted.stream()
+                .filter(e -> "assistant".equals(e.role()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(assistant, "an assistant entry must be persisted");
+        final var persistedThinking =
+                assistant.others() == null ? null : assistant.others().get("thinking");
+        assertEquals(
+                "let me check carefully",
+                persistedThinking,
+                "the persisted thinking must have the echoed seam stripped");
+    }
+
+    /**
      * P1: the doom-loop breaker is per signature and the arguments are normalized (JSON keys sorted)
      * so cosmetic spelling variants of the same call do not bypass it:
      * {@code {"path":"a","offset":1}} and {@code {"offset":1,"path":"a"}} are the same signature, so

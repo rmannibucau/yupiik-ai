@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.context;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -78,13 +79,25 @@ class ContextCompressionTest {
     void renderRefsTagsOnlySpeakableMessages() {
         final var compression = new ContextCompression(config());
         final var tagged = assignedRefs(compression, simpleConversation());
-        assertFalse(tagged.get(0).content().toString().contains("[ref @"), "the system prompt is never tagged");
+        assertFalse(tagged.get(0).content().toString().contains("@"), "the system prompt is never tagged");
         assertTrue(
-                tagged.get(1).content().toString().endsWith("[ref @1@]"),
+                tagged.get(1).content().toString().endsWith("\n@1@"),
                 tagged.get(1).content().toString());
         assertTrue(
-                tagged.get(2).content().toString().endsWith("[ref @2@]"),
+                tagged.get(2).content().toString().endsWith("\n@2@"),
                 tagged.get(2).content().toString());
+    }
+
+    @Test
+    void stripEchoedRefsRemovesCompactSeamsFromModelOutput() {
+        assertEquals("done\ncontinue", ContextCompression.stripEchoedRefs("done\n@90@\ncontinue"));
+        assertEquals("just a ref", ContextCompression.stripEchoedRefs("just a ref @7@"));
+        assertEquals("nested sum", ContextCompression.stripEchoedRefs("nested @b2@ sum"));
+        assertEquals("blocked turn", ContextCompression.stripEchoedRefs("blocked @blocked@ turn"));
+        assertEquals("prioritized", ContextCompression.stripEchoedRefs("prioritized @3@ [high]"));
+        assertEquals("no refs here", ContextCompression.stripEchoedRefs("no refs here"));
+        assertEquals("keeps at-word mention @user", ContextCompression.stripEchoedRefs("keeps at-word mention @user"));
+        assertNull(ContextCompression.stripEchoedRefs(null));
     }
 
     @Test

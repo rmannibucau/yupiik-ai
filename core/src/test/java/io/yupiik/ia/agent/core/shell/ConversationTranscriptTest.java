@@ -784,4 +784,48 @@ class ConversationTranscriptTest {
         t.onEvent(new AgentEvent.TextDelta("still streaming", "s1"));
         assertEquals("error: kaput", t.status(), "non-retryable errors stay until acknowledged");
     }
+
+    @Test
+    void echoedSeamTagIsStrippedFromLiveMarkdown() {
+        // a flash-class model may echo the injected "@N@" compact seam back into its answer:
+        // the persisted message is scrubbed by AgentLoop, so the live display must scrub too
+        // or the transcript would show the seam while the stored copy stays clean
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("Let me run the proper typecheck.\n\n", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("@535@", "s1"));
+
+        final var md = t.markdown("|", "welcome");
+        assertTrue(md.contains("Let me run the proper typecheck."), md);
+        assertFalse(md.contains("@535@"), "echoed seam must not render live: " + md);
+        assertFalse(md.contains("@b"), "block echoes must not render live: " + md);
+    }
+
+    @Test
+    void echoedSeamTagSplitAcrossDeltasIsStrippedFromLiveMarkdown() {
+        // the strip must run on the accumulated markdown, not per-delta, so a seam split
+        // by the streamer ("@5" + "35@") is still removed from what the user sees
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("answer @5", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("35@", "s1"));
+
+        final var md = t.markdown("|", "welcome");
+        assertTrue(md.contains("answer"), md);
+        assertFalse(md.contains("@535@"), "split echoed seam must not render live: " + md);
+    }
+
+    @Test
+    void echoedSeamTagIsStrippedFromFlushedTranscript() {
+        // the seam may arrive before a tool call flushes the pending tail into the
+        // durable transcript: markdown() must scrub the accumulated buffer either way
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("let me check @12@", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
+
+        final var md = t.markdown("|", "welcome");
+        assertTrue(md.contains("let me check"), md);
+        assertFalse(md.contains("@12@"), "flushed echoed seam must not render live: " + md);
+    }
 }

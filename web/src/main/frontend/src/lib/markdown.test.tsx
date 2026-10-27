@@ -3,7 +3,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { normalizeMarkdown, hasOpenInlineSpan } from './markdown';
+import { normalizeMarkdown, hasOpenInlineSpan, stripEchoedRefs } from './markdown';
 
 // render the normalized source through the same markdown pipeline ChatPage uses and return the
 // static HTML, so the assertions cover the user-visible outcome (not just the normalizer).
@@ -105,6 +105,31 @@ describe('normalizeMarkdown', () => {
     expect(html).not.toContain('<strong>before</strong>the');
     // inline code stays plain, not folded into any bogus span (three intended tokens)
     expect(html.match(/<code>/g)).toHaveLength(3);
+  });
+});
+
+describe('stripEchoedRefs', () => {
+  it('strips a whole echoed seam line with its trailing newline (the line pattern removes the tag line, surrounding blank lines survive)', () => {
+    expect(stripEchoedRefs('Let me run the proper typecheck.\n\n@535@\n')).toBe('Let me run the proper typecheck.\n\n');
+  });
+
+  it('strips an inline tag glued to prose (the pattern consumes the space before the tag)', () => {
+    expect(stripEchoedRefs('the answer @12@ is done')).toBe('the answer is done');
+  });
+
+  it('strips a seam split across streamed deltas once the block re-formed it', () => {
+    // the reducer appended the two deltas into one block content before the render chokepoint
+    expect(stripEchoedRefs('answer @5' + '35@')).toBe('answer');
+  });
+
+  it('strips b-prefixed and blocked tags and the optional priority suffix', () => {
+    expect(stripEchoedRefs('@b21@ [high]\nreal prose')).toBe('real prose');
+    // the leading space before the tag is consumed by the pattern, the trailing one survives
+    expect(stripEchoedRefs('x @blocked@ y')).toBe('x y');
+  });
+
+  it('keeps a lone @ and non-tag text untouched', () => {
+    expect(stripEchoedRefs('user@example.com and @ alone')).toBe('user@example.com and @ alone');
   });
 });
 

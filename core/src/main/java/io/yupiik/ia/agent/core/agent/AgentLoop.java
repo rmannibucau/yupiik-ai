@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
 import io.yupiik.ia.agent.core.context.CompactionResult;
+import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.TokenEstimator;
@@ -1757,6 +1758,21 @@ public class AgentLoop {
                             assistant.toolCallId(),
                             assistant.others());
                 }
+                // strip echoed compact ref seams ("@N@", "@bN@", "@blocked@") from the model reply
+                // before it reaches the transcript: even when the model violates the "this is
+                // injected metadata" instruction, its bracketed hallucination must not persist
+                if (assistant.content() instanceof String text) {
+                    final var stripped = ContextCompression.stripEchoedRefs(text);
+                    if (!stripped.equals(text)) {
+                        assistant = new Message(
+                                assistant.role(),
+                                stripped,
+                                assistant.name(),
+                                assistant.toolCalls(),
+                                assistant.toolCallId(),
+                                assistant.others());
+                    }
+                }
                 // throughput: time spent generating, idle time excluded. A request refused because the
                 // context window is too small contributes nothing (it is a preflight, not a generation).
                 recordThroughput(
@@ -2387,7 +2403,11 @@ public class AgentLoop {
             others.putAll(identity);
         }
         if (thinking != null && !thinking.isEmpty() && !thinking.isBlank()) {
-            others.put(THINKING_KEY, thinking);
+            // strip echoed compact ref seams from reasoning too, exactly like the answer content
+            // (AgentLoop persistence scrub above): a model echoing the injected "@N@" metadata in
+            // its reasoning must not persist it either - the web replay rebuilds thinking-delta
+            // from this key, so an unclean value would leak straight into a fresh tab.
+            others.put(THINKING_KEY, ContextCompression.stripEchoedRefs(thinking));
         }
         if (!reasoningItems.isEmpty()) {
             others.put(REASONING_ITEMS_KEY, reasoningItems);

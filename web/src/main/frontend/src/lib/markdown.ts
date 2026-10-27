@@ -110,3 +110,23 @@ export function normalizeMarkdown(src: string): string {
   if (!src) return src;
   return src.replace(SPACED_STRONG, (_m, lead, open, _lead, inner, _trail) => `${lead}${open}${inner}${open}`);
 }
+
+// Echoed compact-seam ref tags the model may reproduce verbatim in its stream ("@N@", "@bN@",
+// "@blocked@", optionally with an inline priority suffix like "@12@ [high]"). They are injected
+// metadata that must never be user-visible; the server strips them from persisted messages, and
+// the TUI/CLI scrub accumulated transcript text (ConversationTranscript.markdown), so the web
+// render chokepoint applies the same strip on the accumulated block content. Mirrors
+// io.yupiik.ia.agent.core.context.ContextCompression.ECHOED_REF_LINE / ECHOED_REF_INLINE.
+const ECHOED_REF_LINE = /^[ \t]*@(?:[1-9]\d*|b[1-9]\d*|blocked)@(?:[ \t]+\[(?:low|medium|high)\])?[ \t]*\r?\n/gm;
+const ECHOED_REF_INLINE = /[ \t]*@(?:[1-9]\d*|b[1-9]\d*|blocked)@(?:[ \t]+\[(?:low|medium|high)\])?/g;
+
+/**
+ * Removes echoed compact {@code @N@} ref tags from model-generated text (assistant or thought
+ * blocks). Whole echo lines first (the observed failure mode was a wall of consecutive tag lines),
+ * then any inline tags that survived (e.g. a tag glued to prose on one line). Only COMPLETE tags
+ * are stripped; a lone {@code @} is prose and stays. A no-op on null/empty input.
+ */
+export function stripEchoedRefs(src: string | null | undefined): string {
+  if (!src) return src ?? '';
+  return src.replace(ECHOED_REF_LINE, '').replace(ECHOED_REF_INLINE, '');
+}

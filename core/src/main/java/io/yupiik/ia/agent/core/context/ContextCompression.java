@@ -41,6 +41,12 @@ public final class ContextCompression {
     private static final Pattern BLOCK_REF = Pattern.compile("@b([1-9]\\d*)@");
     private static final Pattern MESSAGE_REF = Pattern.compile("@?(?:m)?(\\d+)@?");
     private static final Pattern PROTECT_TAG = Pattern.compile("<protect>(.*?)</protect>", Pattern.DOTALL);
+    /** Echoed compact ref tags to remove from model output (strip-on-ingest defense). */
+    private static final Pattern ECHOED_REF_LINE = Pattern.compile(
+            "(?m)^[ \t]*@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?[ \t]*\\r?\\n");
+
+    private static final Pattern ECHOED_REF_INLINE =
+            Pattern.compile("[ \t]*@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?");
 
     public enum Status {
         ACTIVE,
@@ -121,9 +127,15 @@ public final class ContextCompression {
     }
 
     /**
-     * Returns a copy of the wire messages with a small trailing {@code [ref @N@]} tag so the model
+     * Returns a copy of the wire messages with a small trailing {@code @N@} tag so the model
      * can name exact boundaries. System messages, synthetic compression blocks and markers are not
      * tagged; the tags are deterministic for a given message identity, so prompt prefixes stay stable.
+     *
+     * <p>The tag deliberately uses the compact {@code @N@} seam instead of a bracket-like
+     * {@code [ref @N@]} line: bracket-shaped markers read as conversational text that flash-class
+     * models tend to mirror into their own output (echoing them back into the transcript), while a
+     * bare {@code @N@} marker has no natural-language shape to imitate, which strongly reduces the
+     * echoed-refs failure mode (see {@link #stripEchoedRefs}).
      */
     public synchronized List<Message> renderRefs(final List<Message> messages) {
         if (!enabled() || messages == null) {
@@ -144,7 +156,8 @@ public final class ContextCompression {
                 continue;
             }
             final var content = message.content() instanceof String s ? s : String.valueOf(message.content());
-            final var tagged = content + "\n[ref @" + refOf(message) + "@]";
+            // compact seam: "@N@" rather than "[ref @N@]" - no bracket shape for the model to copy
+            final var tagged = content + "\n@" + refOf(message) + "@";
             out.add(new Message(
                     message.role(),
                     tagged,
@@ -699,5 +712,25 @@ public final class ContextCompression {
     /** @return true when {@code message} is one of the synthetic compressed blocks. */
     public static boolean isCompressedBlockMessage(final Message message) {
         return isCompressedBlock(message);
+    }
+
+    /**
+     * Removes echoed compact {@code @N@} ref tags from model-generated text (assistant replies or
+     * tool output). This is the strip-on-ingest defense: even a model that violates the "do not
+     * output the injected markers" instruction cannot leak them into the persisted transcript.
+     * Mirrors the compact-format scrub of the reference DCP implementation.
+     *
+     * @param text text to clean, may be null.
+     * @return the cleaned text, or null when the input was null.
+     */
+    public static String stripEchoedRefs(final String text) {
+        if (text == null) {
+            return null;
+        }
+        // whole echo lines first (the observed failure mode was a wall of consecutive tag lines),
+        // then any inline tags that survived (e.g. a tag glued to prose on one line)
+        return ECHOED_REF_INLINE
+                .matcher(ECHOED_REF_LINE.matcher(text).replaceAll(""))
+                .replaceAll("");
     }
 }

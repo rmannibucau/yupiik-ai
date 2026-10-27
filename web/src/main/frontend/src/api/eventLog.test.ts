@@ -18,6 +18,18 @@ describe('eventsToBlocks', () => {
     expect(blocks[1]).toMatchObject({ kind: 'text', content: 'Hello world' });
   });
 
+  it('re-forms a compact seam split across deltas into one block content (render-chokepoint scrub relies on it)', () => {
+    // the model echoed the injected "@N@" ref and the stream split it mid-tag; per-delta server
+    // scrubbing could never catch the halves, so the reducer must accumulate them back into a
+    // single "@535@" the Markdown component's stripEchoedRefs then removes at render time.
+    const blocks = eventsToBlocks([
+      ev({ type: 'user', sessionId: 's1', message: 'hi' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'answer @5' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: '35@ done' }),
+    ]);
+    expect(blocks[1]).toMatchObject({ kind: 'text', content: 'answer @535@ done' });
+  });
+
   it('ignores todo-updated frames (they only trigger a sidebar reload)', () => {
     const blocks = eventsToBlocks([
       ev({ type: 'user', sessionId: 's1', message: 'plan it' }),
