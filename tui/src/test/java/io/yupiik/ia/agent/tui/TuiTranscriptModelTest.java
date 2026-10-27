@@ -346,7 +346,8 @@ class TuiTranscriptModelTest {
     @Test
     void usageUpdatedTracksTokens() {
         final var usage = new io.yupiik.ia.agent.core.llm.Usage(4000, 1200, 5200, 1500, 0);
-        model.onEvent(new AgentEvent.UsageUpdated(usage, 42000, 55.44, 40000, 1.05, null, "s1", null, null));
+        model.onEvent(new AgentEvent.UsageUpdated(
+                usage, 42000, 55.44, 40000, 1.05, null, "s1", null, null, AgentEvent.UsageUpdated.Quota.NONE));
         assertEquals(4000, model.promptTokens());
         assertEquals(1200, model.completionTokens());
         assertEquals(1500, model.cacheReadTokens());

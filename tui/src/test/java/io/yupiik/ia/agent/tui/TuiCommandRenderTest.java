@@ -482,8 +482,17 @@ class TuiCommandRenderTest {
         awaitTextGone("last real");
 
         // anchored: the row appears with the provider-billed prompt tokens of the last request
-        frontend.onEvent(
-                new AgentEvent.UsageUpdated(new Usage(68432, 0, 0), 72000, 7.0, 68432, 0.95, null, "s1", null, null));
+        frontend.onEvent(new AgentEvent.UsageUpdated(
+                new Usage(68432, 0, 0),
+                72000,
+                7.0,
+                68432,
+                0.95,
+                null,
+                "s1",
+                null,
+                null,
+                AgentEvent.UsageUpdated.Quota.NONE));
         awaitText("last real  68k tok");
 
         quit();
