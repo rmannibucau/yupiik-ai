@@ -27,6 +27,8 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Serves {@code GET /api/stream?session=<id>} as a text/event-stream. The
@@ -51,6 +53,8 @@ import java.util.function.Function;
  * structural ones (tool started/finished, answers, turn boundaries, errors).</p>
  */
 public class SseExchangeHandler implements Endpoint {
+    private static final Logger LOGGER = Logger.getLogger(SseExchangeHandler.class.getName());
+
     private final SseBroker broker;
     private final Function<String, List<WebEventDto>> snapshotSource;
     private final int windowBlocks;
@@ -241,14 +245,27 @@ public class SseExchangeHandler implements Endpoint {
             // enqueueing the snapshot first guarantees it stays the first frame of the queue even with
             // the async writer - any agent frame broadcast after registration lands behind it, so the
             // frontend always seeds history before live events. Pushed directly to this subscription,
-            // never broadcast, so other tabs keep their live log.
+            // never broadcast, so other tabs keep their live log. snapshotPayload never throws: on any
+            // failure it logs loudly and returns an empty snapshot, so the exchange is always seeded and
+            // can never be left open-but-silent (which surfaced to the browser as an endless "Loading
+            // conversation…" when the snapshot generation threw after onSubscribe).
             subscription.push(broker.snapshotFrame(snapshotPayload(sessionId)));
             broker.subscribe(sessionId, subscription);
         }
 
         /** Builds the tail-first snapshot payload: the last {@code windowBlocks} events plus a cursor hint. */
         private Map<String, Object> snapshotPayload(final String sessionId) {
-            final var events = snapshotSource.apply(sessionId);
+            final List<WebEventDto> events;
+            try {
+                events = snapshotSource.apply(sessionId);
+            } catch (final RuntimeException | Error e) {
+                // Surface loudly instead of leaving the SSE exchange open-but-silent: a snapshot
+                // generator failure must never hang the client on "Loading conversation…". We still
+                // tell the browser a (empty) snapshot arrived - so its loader clears and chat unlocks -
+                // and tag the payload so the frontend can render an explicit error notice if it wants.
+                LOGGER.log(Level.SEVERE, "snapshot generation failed for session " + sessionId, e);
+                return Map.of("events", List.<WebEventDto>of(), "total", 0, "snapshotError", String.valueOf(e));
+            }
             final var size = events.size();
             final var from = Math.max(0, size - windowBlocks);
             final var tail = events.subList(from, size);

@@ -81,12 +81,13 @@ public class ConversationTranscript {
     // the last account quota carried by a usage event; kept as atomic scalars so readers stay cheap
     private volatile boolean quotaVisible;
     private volatile String quotaPlanType;
-    private volatile double quotaUsedPercent;
+    private volatile Double quotaUsedPercent;
     private volatile long quotaWindowSeconds;
     private volatile long quotaResetAtEpochSeconds;
     private volatile String quotaWindowLabel;
     private volatile String quotaCreditsBalance;
     private volatile boolean quotaCreditsUnlimited;
+    private volatile List<AgentEvent.UsageUpdated.Quota.Window> quotaWindows = List.of();
     private volatile long maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
 
     /**
@@ -484,12 +485,13 @@ public class ConversationTranscript {
             contextPercent = (int) Math.round(percent);
             quotaVisible = quota != null && quota.visible();
             quotaPlanType = quota == null ? null : quota.planType();
-            quotaUsedPercent = quota == null ? 0 : quota.usedPercent();
+            quotaUsedPercent = quota == null ? null : quota.usedPercent();
             quotaWindowSeconds = quota == null ? 0 : quota.windowSeconds();
             quotaResetAtEpochSeconds = quota == null ? 0 : quota.resetAtEpochSeconds();
             quotaWindowLabel = quota == null ? null : quota.windowLabel();
             quotaCreditsBalance = quota == null ? null : quota.creditsBalance();
             quotaCreditsUnlimited = quota != null && quota.creditsUnlimited();
+            quotaWindows = quota == null ? List.of() : quota.windows();
         } else if (event
                 instanceof
                 AgentEvent.Compacted(
@@ -1060,12 +1062,13 @@ public class ConversationTranscript {
         contextPercent = 0;
         quotaVisible = false;
         quotaPlanType = null;
-        quotaUsedPercent = 0;
+        quotaUsedPercent = null;
         quotaWindowSeconds = 0;
         quotaResetAtEpochSeconds = 0;
         quotaWindowLabel = null;
         quotaCreditsBalance = null;
         quotaCreditsUnlimited = false;
+        quotaWindows = List.of();
         maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
         turnLlmCalls = 0;
         turnThinkingMs = 0;
@@ -1211,6 +1214,10 @@ public class ConversationTranscript {
 
     /** The primary-window used percentage (0-100), {@code 0} when unsupported. */
     public double quotaUsedPercent() {
+        return quotaUsedPercent == null ? 0 : quotaUsedPercent;
+    }
+
+    public Double quotaUsedPercentValue() {
         return quotaUsedPercent;
     }
 
@@ -1233,6 +1240,10 @@ public class ConversationTranscript {
 
     public boolean quotaCreditsUnlimited() {
         return quotaCreditsUnlimited;
+    }
+
+    protected List<AgentEvent.UsageUpdated.Quota.Window> quotaWindows() {
+        return quotaWindows;
     }
 
     public int turnLlmCalls() {

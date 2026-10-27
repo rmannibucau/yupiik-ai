@@ -41,6 +41,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConf
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.MarkupToolCallScanner;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -102,6 +103,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Renders the TUI into a {@link HeadlessBackend} and asserts on the visible
@@ -129,17 +132,23 @@ class TuiCommandRenderTest {
     Path temp;
 
     private MockLlmServer llm;
+    private MockLlmServer llm2;
+    private java.util.function.Function<String, AgentLoop> sessionAgentLoopFactory;
     private HeadlessBackend backend;
     private final AtomicReference<TuiRunner> tuiRef = new AtomicReference<>();
     private Thread uiThread;
 
     private JsonMapper formatMapper;
+    /** The configuration wired into the {@link TuiCommand} under test; a test may override it to e.g. configure multi-provider scenarios. */
+    private CodingAgentConfiguration tuiConfig;
+
     private final List<String> sessionAppends = new ArrayList<>();
 
     @BeforeEach
     void start(final JsonMapper mapper) throws IOException {
         formatMapper = mapper;
         llm = new MockLlmServer();
+        tuiConfig = configuration();
         backend = new HeadlessBackend();
     }
 
@@ -153,6 +162,9 @@ class TuiCommandRenderTest {
             uiThread.join(TIMEOUT_MS);
         }
         llm.close();
+        if (llm2 != null) {
+            llm2.close();
+        }
     }
 
     @Test
@@ -462,6 +474,235 @@ class TuiCommandRenderTest {
         quit();
     }
 
+    @ParameterizedTest
+    @CsvSource({"120, 40", "90, 24", "90, 12"})
+    void sidebarUsageGaugeFitsAboveContext(final int width, final int height) throws Exception {
+        backend = new HeadlessBackend(width, height);
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-sidebar-usage-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("% context");
+        awaitTextGone("left");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        for (final var percent : new int[] {-12, 42, 125}) {
+            frontend.onEvent(new AgentEvent.UsageUpdated(
+                    new Usage(0, 0, 0),
+                    72000,
+                    18,
+                    0,
+                    -1,
+                    null,
+                    sessionId,
+                    null,
+                    null,
+                    new AgentEvent.UsageUpdated.Quota(
+                            true, true, "a-very-long-codex-plan-name", percent, 0, 0, null, null, false)));
+            final var remaining = 100 - Math.clamp(percent, 0, 100);
+            final var usageLabel = "quota " + remaining + "% left";
+            awaitText(usageLabel);
+            awaitText("18% context");
+            final var rows = backend.text().lines().toList();
+            final var usageRow = rows.stream()
+                    .filter(r -> r.contains(usageLabel))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("missing quota label: " + backend.text()));
+            assertTrue(usageRow.contains(usageLabel), backend.text());
+            assertTrue(rows.stream().anyMatch(r -> r.contains("18% context")), backend.text());
+            assertTrue(usageRow.endsWith("\u2502"), "usage must not overwrite the sidebar border:\n" + backend.text());
+            assertFalse(usageRow.contains("a-very-long-codex-plan-name"), backend.text());
+        }
+
+        // Unsupported providers hide the quota even if enabled and a plan was supplied.
+        frontend.onEvent(new AgentEvent.UsageUpdated(
+                new Usage(0, 0, 0),
+                72000,
+                18,
+                0,
+                -1,
+                null,
+                sessionId,
+                null,
+                null,
+                new AgentEvent.UsageUpdated.Quota(true, false, "plus", 42, 0, 0, null, null, false)));
+        awaitTextGone("left");
+        assertTrue(backend.text().lines().toList().stream().anyMatch(r -> r.contains("18% context")));
+
+        // Existing visibility is based on supported quota data, not the refresh toggle.
+        frontend.onEvent(new AgentEvent.UsageUpdated(
+                new Usage(0, 0, 0),
+                72000,
+                18,
+                0,
+                -1,
+                null,
+                sessionId,
+                null,
+                null,
+                new AgentEvent.UsageUpdated.Quota(false, true, "plus", 42, 0, 0, null, null, false)));
+        awaitText("quota 58% left");
+        frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72000, 18, sessionId));
+        awaitTextGone("left");
+        assertTrue(backend.text().lines().toList().stream().anyMatch(r -> r.contains("18% context")));
+        quit();
+    }
+
+    @Test
+    void sidebarRendersBothQuotaWindowsWithProportionalFill() throws Exception {
+        backend = new HeadlessBackend(120, 40);
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-sidebar-dual-quota-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("% context");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        // two rate-limit windows: a 5h window with heavy usage (5h 10% left) and a weekly window
+        // with light usage (weekly 90% left). The renderer sorts windows by duration ascending,
+        // so the 5h window must appear above the weekly one.
+        final var fiveHours = 5 * 3600L;
+        final var week = 7 * 86400L;
+        final var windows = List.of(
+                new AgentEvent.UsageUpdated.Quota.Window("PRIMARY", "primary", 90.0, fiveHours, 1_705_000_000L),
+                new AgentEvent.UsageUpdated.Quota.Window("SECONDARY", "secondary", 10.0, week, 1_710_000_000L));
+        frontend.onEvent(new AgentEvent.UsageUpdated(
+                new Usage(0, 0, 0),
+                72000,
+                18,
+                0,
+                -1,
+                null,
+                sessionId,
+                null,
+                null,
+                new AgentEvent.UsageUpdated.Quota(
+                        true, true, "plus", 90.0, fiveHours, 1_705_000_000L, "primary", null, false, windows)));
+
+        awaitText("5h 10% left");
+        awaitText("weekly 90% left");
+        awaitText("18% context");
+
+        final var rows = backend.text().lines().toList();
+        final var fiveHourRow =
+                rows.stream().filter(r -> r.contains("5h 10% left")).findFirst().orElseThrow();
+        final var weeklyRow = rows.stream()
+                .filter(r -> r.contains("weekly 90% left"))
+                .findFirst()
+                .orElseThrow();
+        // the 5h window has 10% left (thin fill on the left); the weekly has 90% left (near-full
+        // bar that reaches the right edge before the sidebar border). Verifying the fill extent at
+        // the two ends is robust even though the centered gauge label overlays the middle cells:
+        // the 10%-left bar must NOT place a fill block at the right edge, while the 90%-left bar must.
+        assertTrue(leftFilled(fiveHourRow), "5h gauge should be partially filled:\n" + fiveHourRow);
+        assertFalse(rightFilled(fiveHourRow), "10% left must not reach the right edge:\n" + fiveHourRow);
+        assertTrue(rightFilled(weeklyRow), "90% left must reach the right edge:\n" + weeklyRow);
+        assertTrue(
+                rightFilled(weeklyRow) && !rightFilled(fiveHourRow),
+                "fill extent must scale with remaining:\n" + backend.text());
+        // both windows are sorted by duration so 5h sits above weekly in the sidebar
+        assertTrue(rows.indexOf(fiveHourRow) < rows.indexOf(weeklyRow), backend.text());
+        assertTrue(
+                rows.indexOf(weeklyRow)
+                        < rows.indexOf(rows.stream()
+                                .filter(r -> r.contains("18% context"))
+                                .findFirst()
+                                .orElseThrow()),
+                backend.text());
+        quit();
+    }
+
+    /**
+     * A reached quota (usedPercent=100, nothing left) must stay visible in the sidebar and render
+     * "0% left", never being dropped or hidden - the whole point of surfacing usage at switch time.
+     */
+    @Test
+    void sidebarRendersReachedQuotaAsVisible() throws Exception {
+        backend = new HeadlessBackend(120, 40);
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-sidebar-reached-quota-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("% context");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        final var fiveHours = 5 * 3600L;
+        frontend.onEvent(new AgentEvent.UsageUpdated(
+                new Usage(0, 0, 0),
+                72000,
+                18,
+                0,
+                -1,
+                null,
+                sessionId,
+                null,
+                null,
+                new AgentEvent.UsageUpdated.Quota(
+                        true,
+                        true,
+                        "plus",
+                        100.0,
+                        fiveHours,
+                        1_705_000_000L,
+                        "primary",
+                        "0",
+                        false,
+                        List.of(new AgentEvent.UsageUpdated.Quota.Window(
+                                "PRIMARY", "primary", 100.0, fiveHours, 1_705_000_000L)))));
+        awaitText("5h 0% left");
+        awaitText("18% context");
+        final var rows = backend.text().lines().toList();
+        assertTrue(
+                rows.stream().anyMatch(r -> r.contains("5h 0% left")),
+                "a reached quota must render 0% left instead of being hidden:\n" + backend.text());
+        quit();
+    }
+
+    /** True when the row has a Gauge fill block at or before its last non-empty cell (bar reaches the right edge). */
+    private static boolean rightFilled(final String row) {
+        final var last = row.length() - 1;
+        for (int i = last; i >= 0; i--) {
+            final char c = row.charAt(i);
+            if (c == ' ' || c == '\u2502' || c == '\u2500' || c == ' ') {
+                continue;
+            }
+            return isGaugeBlock(c);
+        }
+        return false;
+    }
+
+    /** True when the row has a Gauge fill block in its leading cells (bar is at least partially filled). */
+    private static boolean leftFilled(final String row) {
+        for (int i = 0; i < row.length(); i++) {
+            final char c = row.charAt(i);
+            if (c == ' ' || c == '\u2502') {
+                continue;
+            }
+            return isGaugeBlock(c);
+        }
+        return false;
+    }
+
+    private static boolean isGaugeBlock(final char c) {
+        return c == '\u2588'
+                || c == '\u258f'
+                || c == '\u258e'
+                || c == '\u258d'
+                || c == '\u258c'
+                || c == '\u258b'
+                || c == '\u258a'
+                || c == '\u2589';
+    }
+
     @Test
     void sidebarLastRealRowAppearsOnlyWhenAnchored() throws Exception {
         final var shellRegistry = testRegistry();
@@ -732,6 +973,106 @@ class TuiCommandRenderTest {
         // Enter accepts the scrolled-to candidate
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("/model m09");
+
+        quit();
+    }
+
+    @Test
+    void tabSwitchLoadsModelsForTheActiveSessionProvider() throws Exception {
+        // Regression: model suggestions follow the active session's provider, even after a tab
+        // with a different provider has populated its own model list.
+        tuiConfig = twoProviderConfiguration();
+        sessionAgentLoopFactory = sessionId -> new AgentLoop() {
+            private volatile ChatSettings settings = ChatSettings.EMPTY;
+
+            @Override
+            public ChatSettings chatSettings() {
+                return settings;
+            }
+
+            @Override
+            public void updateChatSettings(final ChatSettings value) {
+                settings = value;
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                return "ok";
+            }
+        };
+        final var ids = new AtomicLong();
+        final var command = command(
+                testRegistry(),
+                stubAgentLoop(),
+                false,
+                newUsageTracker(),
+                new TodoStore(tuiConfig, formatMapper),
+                Clock.systemUTC(),
+                new SubagentRegistry(tuiConfig, new ProviderManager(tuiConfig, formatMapper)),
+                Executors.newVirtualThreadPerTaskExecutor(),
+                new SessionStore() {
+                    @Override
+                    public String create() {
+                        return "tab-" + ids.incrementAndGet();
+                    }
+
+                    @Override
+                    public void append(final String id, final SessionEntry entry) {
+                        sessionAppends.add(String.valueOf(entry));
+                    }
+
+                    @Override
+                    public List<Message> load(final String id) {
+                        return List.of();
+                    }
+
+                    @Override
+                    public void delete(final String id) {
+                        // no-op
+                    }
+                });
+        uiThread = new Thread(command, "tui-tab-provider-completion-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // tab 1 (active, tab-1) runs on prov0 (the default): /model completes with prov0's models (m01..)
+        for (final var c : "/model m".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitText("> m01"); // prov0's list
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+
+        // Create tab two, switch it to prov1, and prove its /model completion is isolated.
+        tuiRef.get().dispatch(KeyEvent.ofChar('n', KeyModifiers.CTRL));
+        awaitTextWithin("session tab-2", 2_000);
+        tuiRef.get().dispatch(new PasteEvent("/provider prov1"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE)); // dismiss live completion before submitting
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitTextWithin("provider prov1", 2_000);
+        tuiRef.get().dispatch(KeyEvent.ofChar('u', KeyModifiers.CTRL));
+        for (final var c : "/model b".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitTextWithin("> b01", 2_000);
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+
+        // Return to tab one. Model candidates must follow the active session's original provider.
+        tuiRef.get().dispatch(KeyEvent.ofChar('1', KeyModifiers.ALT));
+        awaitTextWithin("session tab-1", 2_000);
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        tuiRef.get().dispatch(KeyEvent.ofChar('u', KeyModifiers.CTRL));
+        for (final var c : "/model m".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitTextWithin("> m01", 2_000);
+        awaitNoText("> b01");
 
         quit();
     }
@@ -1206,7 +1547,7 @@ class TuiCommandRenderTest {
             final TodoStore todoStore,
             final Clock clock) {
         final var mapper = formatMapper;
-        final var configuration = configuration();
+        final var configuration = tuiConfig;
         return command(
                 shellRegistry,
                 agentLoop,
@@ -1288,7 +1629,7 @@ class TuiCommandRenderTest {
             final ExecutorService executor,
             final SessionStore sessionStore) {
         final var mapper = formatMapper;
-        final var configuration = configuration();
+        final var configuration = tuiConfig;
         final var conf = new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, showThinking, "dark");
         final var tuiConfiguration = new TuiConfiguration(
                 "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
@@ -1362,7 +1703,7 @@ class TuiCommandRenderTest {
                     @Override
                     public SessionRuntime create(final String sessionId) {
                         return new SessionRuntime(
-                                agentLoop,
+                                sessionAgentLoopFactory == null ? agentLoop : sessionAgentLoopFactory.apply(sessionId),
                                 permissionService,
                                 new UserFeedbackService(),
                                 usageTracker,
@@ -3521,6 +3862,28 @@ class TuiCommandRenderTest {
         map.put("yca.llm.maxConcurrent", "4");
         map.put("yca.subagents.enabled", "true");
         map.put("yca.subagents.maxConcurrent", "4");
+        return new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(map.get(key))).get();
+    }
+
+    /**
+     * A two-provider configuration: {@code prov0} on the primary mock server (models {@code a01..a05})
+     * and {@code prov1} on a second mock server (models {@code b01..b05}), defaulting to {@code prov0}.
+     * Used to verify that /model completion tracks the active tab's provider and not the most recently
+     * switched one. The secondary server is created here and closed by {@link #stop()}.
+     */
+    private CodingAgentConfiguration twoProviderConfiguration() throws IOException {
+        llm2 = new MockLlmServer(List.of("b01", "b02", "b03", "b04", "b05"));
+        final var map = new HashMap<String, String>();
+        map.put("yca.storageHome", temp.resolve("home").toString());
+        map.put("yca.provider.providers.length", "2");
+        map.put("yca.provider.providers.0.id", "prov0");
+        map.put("yca.provider.providers.0.baseUrl", llm.baseUrl());
+        map.put("yca.provider.providers.0.apiKey", "test-key");
+        map.put("yca.provider.providers.0.model", "test-model");
+        map.put("yca.provider.providers.1.id", "prov1");
+        map.put("yca.provider.providers.1.baseUrl", llm2.baseUrl());
+        map.put("yca.provider.providers.1.apiKey", "test-key");
+        map.put("yca.provider.providers.1.model", "test-model");
         return new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(map.get(key))).get();
     }
 

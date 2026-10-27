@@ -171,6 +171,18 @@ class QuotaSnapshotStoreTest {
         assertEquals(2, fetches.get(), "closing a session does not refetch the other");
     }
 
+    @Test
+    void nullOrBlankKeyDoesNotNpeOnCachedSnapshot(final JsonMapper mapper) {
+        // regression: session-store.cachedSnapshot(null) used to NPE inside ConcurrentHashMap.get(null)
+        // (surfacing on the web snapshot path as a silently-hung session restore when a session had not
+        // run its first turn yet). A null/blank key is simply "no quota yet".
+        final var store = store(mapper);
+        final var nullView = store.cachedSnapshot(null);
+        assertFalse(nullView.supported(), "a null key yields an unsupported/empty view, not an NPE");
+        final var blankView = store.cachedSnapshot("   ");
+        assertFalse(blankView.supported(), "a blank key yields an unsupported/empty view, not an NPE");
+    }
+
     private static long farFuture() {
         return System.currentTimeMillis() + 3_600_000;
     }

@@ -83,8 +83,8 @@ class WriteTodoToolTest {
                 "completed new item must be normalized to pending: " + store.render());
         assertTrue(store.render().contains("[ ] step 2"), store.render());
         assertTrue(
-                result.output().contains("normalized to pending"),
-                "the tool must report the normalization: " + result.output());
+                result.output().contains("kept as pending"),
+                "the tool must report the plan-mode normalization: " + result.output());
     }
 
     @Test
@@ -98,7 +98,7 @@ class WriteTodoToolTest {
         assertTrue(
                 store.render().contains("[ ] step 1"),
                 "in_progress new item must be normalized to pending: " + store.render());
-        assertTrue(result.output().contains("normalized to pending"), result.output());
+        assertTrue(result.output().contains("kept as pending"), result.output());
     }
 
     @Test
@@ -130,6 +130,47 @@ class WriteTodoToolTest {
                 context(store, permissions(AgentMode.PLAN)));
         assertTrue(result.success(), result.output());
         assertTrue(store.render().contains("[x] step 1"), store.render());
+    }
+
+    @Test
+    void planModeKeepsAdvancedItemWhenReemissionContentDrifts() {
+        // regression: a legitimately-advanced item must survive an otherwise-identical re-emission with
+        // cosmetic text drift (trailing whitespace, capitalisation), instead of being thrown back to pending
+        // and recreating the "progress then reverts" loop.
+        final var store = todoStore();
+        store.replace(List.of(new TodoItem("step 1", "completed")));
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of("todos", List.of(Map.of("content", "  Step 1 ", "status", "completed"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertTrue(result.success(), result.output());
+        assertTrue(
+                store.render().startsWith("[x] "),
+                "drifted re-emission must keep the advanced status marker: " + store.render());
+        assertTrue(
+                store.render().contains("Step 1"),
+                "the drifted content itself must be preserved verbatim: " + store.render());
+    }
+
+    @Test
+    void planModeRoundTripDoesNotFlipAnAlreadyAdvancedItemBackToPending() {
+        // the full loop: seed advanced as a build-mode carry-over, then re-emit the same state through a
+        // plan-mode write - the item must stay advanced and the tool must not report a re-normalization.
+        final var store = todoStore();
+        store.replace(List.of(new TodoItem("step 1", "completed"), new TodoItem("step 2", "pending")));
+        final var tool = new WriteTodoTool();
+        final var again = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "completed"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertTrue(again.success(), again.output());
+        assertTrue(store.render().contains("[x] step 1"), "round-trip must keep the advanced item: " + store.render());
+        assertFalse(
+                again.output().contains("kept as pending"),
+                "no re-normalization after a stable re-emission: " + again.output());
     }
 
     @Test

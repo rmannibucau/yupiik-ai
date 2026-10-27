@@ -77,7 +77,7 @@ public record ProviderConfiguration(
         @Property(
                 defaultValue = "java.util.List.of()",
                 documentation =
-                        "Per-model entries for this provider (display style and behavior). Each entry applies to a model id matched exactly or, when the configured id is a substring of the actual model name, by containment. The strongest override is an exact id match, then the first substring match, then the provider defaults (tuning, color, outputTokens and the implicit scheme). The list order also defines the implicit display scheme within this provider: the first two listed models are bold.")
+                        "Per-model entries for this provider (display style and behavior). Each entry applies to a model id matched exactly or, when the configured id is a substring of the actual model name, by containment. The strongest override is an exact id match, then the first substring match, then the provider defaults (tuning, color, outputTokens and the implicit value-based scheme). The list order defines the implicit bold rule within this provider: the first two listed models are bold.")
         List<ProviderModelConfiguration> models,
 
         @Property(
@@ -110,7 +110,7 @@ public record ProviderConfiguration(
         @Property(
                 defaultValue = "\"\"",
                 documentation =
-                        "Base display tone (hex, eg. #e0a458) for every model of this provider. When blank the provider keeps the position-based tone. Per-model styles in the models field may override this tone for individual models.")
+                        "Base display tone (hex, eg. #e0a458) for every model of this provider. When blank the provider keeps a tone derived from its id. Per-model styles in the models field may override this tone for individual models.")
         String color,
 
         @Property(documentation = "Provider-tunable system prompt sections (todo/plan guidance).")

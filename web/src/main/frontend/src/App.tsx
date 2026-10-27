@@ -52,6 +52,12 @@ export function App() {
   };
 
   const closeTab = (id: string) => {
+    // Align on the TUI's closeTab: interrupting the in-flight turn (stop stream, kill tools/sub-agents)
+    // and dropping its queued prompts, so a closed tab never leaves a turn running server-side to
+    // completion nor resurrects interrupted work via the queue. Fire-and-forget so the tab removal and
+    // navigation below never block on the RPC round-trip; the server-side cancelAll is idempotent for an
+    // idle session (the cancelled flag resets on the next submit).
+    call('session.cancelAll', { id }).catch(() => undefined);
     setTabs((prev) => prev.filter((t) => t.id !== id));
     // Compute the post-close destination OUTSIDE the state updater: setTabs updaters must be pure
     // (React may invoke them more than once / at unexpected times), so navigate/setActiveSession

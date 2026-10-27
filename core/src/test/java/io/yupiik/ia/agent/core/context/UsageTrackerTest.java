@@ -318,6 +318,72 @@ class UsageTrackerTest {
     }
 
     @Test
+    void usableWindowForModelUsesTheReferencedModelWindow() {
+        // a session on the 'main' provider: explicit main window 128k, no output cap configured
+        final var tracker = new UsageTracker(multiWindowProviderManager(), null, null, Clock.systemUTC());
+        // the session's own usable window is the main provider's 128k (minus the 20k fallback reserve)
+        assertEquals(108_000, tracker.usableWindow());
+        // a background compact reference routed to the 'cheap' provider with a smaller window is
+        // sized against that smaller window: 32k - min(20k, 32k/4)=8k -> 24k usable
+        assertEquals(24_000, tracker.usableWindowForModel("$cheap/compact-model"));
+    }
+
+    @Test
+    void usableWindowForModelBlankFallsBackToSessionWindow() {
+        final var tracker = new UsageTracker(multiWindowProviderManager(), null, null, Clock.systemUTC());
+        assertEquals(
+                tracker.usableWindow(),
+                tracker.usableWindowForModel(null),
+                "a blank/null compact reference must not change the window (summarizer on the conversation model)");
+        assertEquals(
+                tracker.usableWindow(),
+                tracker.usableWindowForModel("  "),
+                "a blank compact reference must fall back to the conversation model window");
+    }
+
+    @Test
+    void usableWindowForModelWithoutAnyEstablishedWindowFallsBackToConservative() {
+        // a provider configured with NO context window and NO /v1/models detection (client is null):
+        // no window can be established, so the caller must get the conservative MIN, never a phantom
+        final var entries = new HashMap<String, String>();
+        entries.put("yca.storageHome", storageHome.toString());
+        entries.put("yca.provider.providers.length", "1");
+        entries.put("yca.provider.providers.0.id", "nodata");
+        entries.put("yca.provider.providers.0.baseUrl", "https://nodata.example/v1/chat/completions");
+        entries.put("yca.provider.providers.0.apiKey", "");
+        entries.put("yca.provider.providers.0.model", "ghost");
+        entries.put("yca.provider.providers.0.api", "auto");
+        entries.put("yca.provider.providers.0.timeoutSeconds", "120");
+        final var tracker = new UsageTracker(
+                new ProviderManager(io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries), mapper),
+                null,
+                null,
+                Clock.systemUTC());
+        assertEquals(1_024, tracker.usableWindowForModel("$nodata/ghost"));
+    }
+
+    private ProviderManager multiWindowProviderManager() {
+        final var entries = new HashMap<String, String>();
+        entries.put("yca.storageHome", storageHome.toString());
+        entries.put("yca.provider.providers.length", "2");
+        entries.put("yca.provider.providers.0.id", "main");
+        entries.put("yca.provider.providers.0.baseUrl", "https://main.example/v1/chat/completions");
+        entries.put("yca.provider.providers.0.apiKey", "");
+        entries.put("yca.provider.providers.0.model", "main-model");
+        entries.put("yca.provider.providers.0.api", "auto");
+        entries.put("yca.provider.providers.0.contextWindow", "128000");
+        entries.put("yca.provider.providers.0.timeoutSeconds", "120");
+        entries.put("yca.provider.providers.1.id", "cheap");
+        entries.put("yca.provider.providers.1.baseUrl", "https://cheap.example/v1/chat/completions");
+        entries.put("yca.provider.providers.1.apiKey", "");
+        entries.put("yca.provider.providers.1.model", "compact-model");
+        entries.put("yca.provider.providers.1.api", "auto");
+        entries.put("yca.provider.providers.1.contextWindow", "32000");
+        entries.put("yca.provider.providers.1.timeoutSeconds", "120");
+        return new ProviderManager(io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries), mapper);
+    }
+
+    @Test
     void equalLiteLLMCapsAreNotATrustedPartition() {
         // the user's /v1/models payload: max_input_tokens == max_output_tokens per model
         modelsBody = """

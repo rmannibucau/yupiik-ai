@@ -115,7 +115,6 @@ import java.util.Deque;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -235,8 +234,7 @@ public class TuiCommand implements Runnable {
     private final CompletionEngine completionEngine;
     private final PromptHistory promptHistory;
     private volatile long completionGeneration;
-    private final CompletionCache completionCache = new CompletionCache();
-    private volatile String lastCompletionProviderId = "";
+    private final CompletionCache completionCache = new CompletionCache(this::recomputePendingCompletion);
     private volatile String cachedGitBranch;
     private volatile long cachedGitBranchAt;
     private final TuiSlashCommands slashCommands;
@@ -362,7 +360,9 @@ public class TuiCommand implements Runnable {
         this.completionEngine = new CompletionEngine(slashRegistry, new ArgCompletion.Env() {
             @Override
             public List<String> models() {
-                return completionCache.models();
+                ensureModelsLoaded();
+                final var current = active();
+                return completionCache.models(providerIdOf(current));
             }
 
             @Override
@@ -385,11 +385,13 @@ public class TuiCommand implements Runnable {
 
             @Override
             public List<String> sessions() {
+                ensureSessionsLoaded();
                 return completionCache.sessions();
             }
 
             @Override
             public List<String> tools() {
+                ensureToolsLoaded();
                 return completionCache.tools();
             }
 
@@ -404,25 +406,25 @@ public class TuiCommand implements Runnable {
 
             @Override
             public List<String> servers() {
-                return mcpManager == null
-                        ? List.of()
-                        : mcpManager.serverStatuses().stream()
-                                .map(status -> status.name())
-                                .toList();
+                ensureServersLoaded();
+                return completionCache.servers();
             }
 
             @Override
             public List<String> variants(final String model) {
-                return completionCache.variants(model);
+                ensureVariantsLoaded(model);
+                final var current = active();
+                return completionCache.variants(providerIdOf(current), model);
             }
 
             @Override
             public List<String> variants() {
                 final var current = active();
-                return current == null
-                        ? List.of()
-                        : completionCache.variants(
-                                chatClient == null ? null : chatClient.model(current.session.chatSettings()));
+                final var model = chatClient == null
+                        ? null
+                        : chatClient.model(current == null ? null : current.session.chatSettings());
+                ensureVariantsLoaded(model);
+                return current == null ? List.of() : completionCache.variants(providerIdOf(current), model);
             }
 
             @Override
@@ -432,9 +434,6 @@ public class TuiCommand implements Runnable {
         });
         this.promptHistory = new PromptHistory();
         applyTheme(persistedTheme() == null ? conf.theme() : persistedTheme());
-        // warm the completion cache off the render thread so TAB never blocks on the network
-        refreshCompletionCache();
-        this.lastCompletionProviderId = chatClient == null ? "" : chatClient.providerId();
     }
 
     @RootConfiguration("tui")
@@ -857,6 +856,8 @@ public class TuiCommand implements Runnable {
         state.model.status("ready");
         shellRegistry.register(env(tui, state));
         tabManager.add(state);
+        // a new tab changed the resume-candidate set: the sessions slice must be re-fetched lazily
+        completionCache.refreshSessions();
         return state;
     }
 
@@ -883,6 +884,8 @@ public class TuiCommand implements Runnable {
             sessionStore.delete(state.sessionId);
         }
         tabManager.remove(state);
+        // a closed tab changed the resume-candidate set: the sessions slice re-fetches lazily
+        completionCache.refreshSessions();
     }
 
     /**
@@ -2464,17 +2467,6 @@ public class TuiCommand implements Runnable {
             }
         }
         syncSession(state);
-        // /provider switched the active provider: the completion cache is provider-scoped
-        // (model ids differ per provider, e.g. glm-5.3 vs z-ai/glm-5.3), so the stale list
-        // must be dropped and re-fetched for the new provider
-        final var providerId = chatClient == null
-                ? ""
-                : chatClient.providerId(state.session == null ? null : state.session.chatSettings());
-        if (!providerId.equals(lastCompletionProviderId)) {
-            lastCompletionProviderId = providerId;
-            completionCache.invalidateModels();
-            refreshCompletionCache();
-        }
         // a queued initial prompt may be a slash command: unlike a turn it never emits TurnDone,
         // so the next entry is released here once the command outcome has been applied
         if (!(outcome instanceof ShellOutcome.Quit)
@@ -2866,120 +2858,159 @@ public class TuiCommand implements Runnable {
     }
 
     /** Asynchronously reloads the completion value cache so render/onKey never does network or IO. */
-    private void refreshCompletionCache() {
-        try {
-            executor.execute(() -> {
-                if (chatClient != null) {
-                    try {
-                        // provider-scoped guard: the models list is cached while an async refresh
-                        // runs; if the provider switches meanwhile (invalidateModels bumps the
-                        // generation) the stale result must not overwrite the new provider's list
-                        final var generation = completionCache.modelGeneration();
-                        // the warm-up can run before the first tab exists (constructor-time refresh):
-                        // without a tab there is no per-session override to honor, so fall back to the
-                        // process default provider like a pre-session models() call
-                        final var activeState = active();
-                        final var activeSettings = activeState == null || activeState.session == null
-                                ? null
-                                : activeState.session.chatSettings();
-                        final var ids = chatClient.models(activeSettings).ids();
-                        completionCache.updateModels(generation, ids == null ? List.of() : List.copyOf(ids));
-                    } catch (final Exception e) {
-                        LOG.log(Level.SEVERE, "model list refresh failed; keeping previous completion cache", e);
+    /**
+     * Resolves the provider id of the active tab (or the process default when there is no
+     * active tab yet). Every provider-scoped completion slice (models, variants) is keyed by
+     * this value, so each tab's provider gets its own lazily-fetched list.
+     */
+    private String providerIdOf(final UiState state) {
+        return chatClient == null
+                ? ""
+                : chatClient.providerId(state == null || state.session == null ? null : state.session.chatSettings());
+    }
+
+    /** Lazily loads the tools slice (application-scoped) on first need. */
+    private void ensureToolsLoaded() {
+        if (mcpManager == null || !completionCache.beginToolsLoad()) {
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                final var byServer = mcpManager.toolsByServer();
+                if (byServer == null || byServer.isEmpty()) {
+                    completionCache.tools(List.of());
+                } else {
+                    completionCache.tools(byServer.values().stream()
+                            .flatMap(List::stream)
+                            .map(EmbeddedTool::name)
+                            .distinct()
+                            .sorted()
+                            .toList());
+                }
+            } catch (final RuntimeException e) {
+                LOG.log(Level.SEVERE, "tools completion source failed; keeping previous cache", e);
+            } finally {
+                completionCache.endToolsLoad();
+            }
+        });
+    }
+
+    /** Lazily loads the MCP servers slice (application-scoped) on first need. */
+    private void ensureServersLoaded() {
+        if (mcpManager == null || !completionCache.beginServersLoad()) {
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                completionCache.servers(mcpManager.serverStatuses().stream()
+                        .map(status -> status.name())
+                        .toList());
+            } catch (final RuntimeException e) {
+                LOG.log(Level.SEVERE, "mcp servers completion source failed; keeping previous cache", e);
+            } finally {
+                completionCache.endServersLoad();
+            }
+        });
+    }
+
+    /** Lazily loads the sessions slice (application-scoped) on first need. */
+    private void ensureSessionsLoaded() {
+        if (sessionStore == null || !completionCache.beginSessionsLoad()) {
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                // most recent first regardless of the store implementation
+                final var sessions = sessionStore.list().stream()
+                        .sorted(Comparator.comparingLong(SessionStore.SessionInfo::modifiedAt)
+                                .reversed())
+                        .toList();
+                completionCache.sessions(
+                        sessions.stream().map(SessionStore.SessionInfo::id).toList());
+            } catch (final RuntimeException e) {
+                LOG.log(Level.SEVERE, "sessions completion source failed; keeping previous cache", e);
+            } finally {
+                completionCache.endSessionsLoad();
+            }
+        });
+    }
+
+    /** Lazily loads the models slice of the active tab's provider on first need. */
+    private void ensureModelsLoaded() {
+        final var activeState = active();
+        final var providerId = providerIdOf(activeState);
+        if (chatClient == null || !completionCache.beginModelsLoad(providerId)) {
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                final var settings =
+                        activeState == null || activeState.session == null ? null : activeState.session.chatSettings();
+                final var ids = chatClient.models(settings).ids();
+                completionCache.models(providerId, ids == null ? List.of() : List.copyOf(ids));
+            } catch (final Exception e) {
+                LOG.log(Level.SEVERE, "model list completion source failed; keeping previous cache", e);
+            } finally {
+                completionCache.endModelsLoad(providerId);
+            }
+        });
+    }
+
+    /** Lazily loads the variants slice for one model against the active tab's provider on first need. */
+    private void ensureVariantsLoaded(final String model) {
+        final var activeState = active();
+        final var providerId = providerIdOf(activeState);
+        if (chatClient == null || model == null || !completionCache.beginVariantsLoad(providerId, model)) {
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                final var settings =
+                        activeState == null || activeState.session == null ? null : activeState.session.chatSettings();
+                final var selected = new ArrayList<String>();
+                if (chatClient.implicitVariant(settings) != null) {
+                    selected.add("default");
+                }
+                final var raw = chatClient.variants(settings, model);
+                if (raw != null) {
+                    for (final var v : raw) {
+                        selected.add(v.name());
                     }
                 }
-                if (mcpManager != null) {
-                    try {
-                        final var byServer = mcpManager.toolsByServer();
-                        if (byServer == null || byServer.isEmpty()) {
-                            completionCache.tools(List.of());
-                        } else {
-                            completionCache.tools(byServer.values().stream()
-                                    .flatMap(List::stream)
-                                    .map(EmbeddedTool::name)
-                                    .distinct()
-                                    .sorted()
-                                    .toList());
-                        }
-                    } catch (final RuntimeException e) {
-                        LOG.log(Level.SEVERE, "tools refresh failed; keeping previous completion cache", e);
-                    }
-                }
-                if (sessionStore != null) {
-                    try {
-                        // most recent first regardless of the store implementation
-                        final var sessions = sessionStore.list().stream()
-                                .sorted(Comparator.comparingLong(SessionStore.SessionInfo::modifiedAt)
-                                        .reversed())
-                                .toList();
-                        if (sessions.isEmpty()) {
-                            completionCache.sessions(List.of());
-                        } else {
-                            completionCache.sessions(sessions.stream()
-                                    .map(SessionStore.SessionInfo::id)
-                                    .toList());
-                        }
-                    } catch (final RuntimeException e) {
-                        LOG.log(Level.SEVERE, "sessions refresh failed; keeping previous completion cache", e);
-                    }
-                }
-                if (chatClient != null) {
-                    final var variantGeneration = completionCache.modelGeneration();
-                    final var variants = new LinkedHashMap<String, List<String>>();
-                    final var activeState = active();
-                    final var activeSettings = activeState == null || activeState.session == null
-                            ? null
-                            : activeState.session.chatSettings();
-                    for (final var model : completionCache.models()) {
-                        final var selected = new ArrayList<String>();
-                        if (chatClient.implicitVariant(activeSettings) != null) {
-                            selected.add("default");
-                        }
-                        try {
-                            final var raw = chatClient.variants(activeSettings, model);
-                            if (raw != null) {
-                                for (final var v : raw) {
-                                    selected.add(v.name());
-                                }
-                            }
-                        } catch (final Exception e) {
-                            LOG.log(
-                                    Level.SEVERE,
-                                    "variants refresh failed for model " + model + "; using implicit defaults",
-                                    e);
-                        }
-                        if (!selected.isEmpty()) {
-                            variants.put(model, List.copyOf(selected));
-                        }
-                    }
-                    completionCache.updateVariants(variantGeneration, variants);
-                }
-                // If the input already warrants a live-completion popup but none is open (it was
-                // typed before the async candidate caches finished populating), recompute it now that
-                // the models/tools are cached - otherwise a user who typed "/model m" and paused would
-                // see no popup until they hit another key. Only reopen an *empty* popup so an explicit
-                // Esc dismissal or an in-progress arrow navigation is never disturbed.
-                final var activeState = active();
-                if (activeState != null) {
-                    final var line = activeState.input.getLine(activeState.input.cursorRow());
-                    final var cursor = activeState.input.cursorCol();
-                    if (!activeState.completionDismissed
-                            && (activeState.completion == null || activeState.completion.empty())
-                            && (line.startsWith("/") || tokenAt(line, cursor).startsWith("@"))) {
-                        // re-check the dismissal flag on the render thread: the user may have hit
-                        // Esc (or accepted a candidate) between this warm-up refresh completing
-                        // and this action running, and an explicit dismissal must never be undone
-                        runLater(activeState, () -> {
-                            if (!activeState.completionDismissed) {
-                                liveComplete(activeState);
-                            }
-                        });
-                    }
+                completionCache.variants(providerId, model, selected);
+            } catch (final Exception e) {
+                LOG.log(Level.SEVERE, "variants completion source failed for model " + model, e);
+            } finally {
+                completionCache.endVariantsLoad(providerId, model);
+            }
+        });
+    }
+
+    /**
+     * A lazy completion slice landed: if the input already warrants a live-completion popup
+     * but none is open (it was typed before the async candidate caches finished populating),
+     * recompute it now that the slice is cached - otherwise a user who typed "/model m" and
+     * paused would see no popup until they hit another key. Only reopen an *empty* popup so an
+     * explicit Esc dismissal or an in-progress arrow navigation is never disturbed.
+     */
+    private void recomputePendingCompletion() {
+        final var activeState = active();
+        if (activeState == null) {
+            return;
+        }
+        final var line = activeState.input.getLine(activeState.input.cursorRow());
+        final var cursor = activeState.input.cursorCol();
+        if (!activeState.completionDismissed
+                && (activeState.completion == null || activeState.completion.empty())
+                && (line.startsWith("/") || tokenAt(line, cursor).startsWith("@"))) {
+            // re-check the dismissal flag on the render thread: the user may have hit
+            // Esc (or accepted a candidate) between the warm-up completing and this running,
+            // and an explicit dismissal must never be undone
+            runLater(activeState, () -> {
+                if (!activeState.completionDismissed) {
+                    liveComplete(activeState);
                 }
             });
-        } catch (final RuntimeException e) {
-            // warm-up is best-effort: a closing executor or transient failure must not break construction
-            LOG.log(Level.SEVERE, "completion cache warm-up skipped", e);
         }
     }
 
@@ -3376,7 +3407,6 @@ public class TuiCommand implements Runnable {
                                 .withSampling(null);
                         state.session.runtime().updateChatSettings(updated);
                         notify(state, "model: " + selected);
-                        refreshCompletionCache();
                     } catch (final RuntimeException e) {
                         notify(state, "model failed: " + e.getMessage());
                     }
@@ -3866,8 +3896,15 @@ public class TuiCommand implements Runnable {
         final var label = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var value = Style.EMPTY.fg(Color.hex(palette.text()));
         final var branch = gitBranch();
+        final var quotaWindows = state.model.quotaWindows().stream()
+                .sorted(Comparator.comparingLong(
+                        window -> window.windowSeconds() == null ? 0L : window.windowSeconds()))
+                .limit(2)
+                .toList();
+        final var showQuota = state.model.quotaVisible() && !quotaWindows.isEmpty() && inner.height() > 2;
+        final var quotaRows = showQuota ? quotaWindows.size() : 0;
         final var rows = Layout.vertical()
-                .constraints(Constraint.fill(), Constraint.length(1))
+                .constraints(Constraint.fill(), Constraint.length(quotaRows + 1), Constraint.length(1))
                 .split(inner);
         final var text = new ArrayList<Line>();
         text.add(Line.from(
@@ -3941,17 +3978,6 @@ public class TuiCommand implements Runnable {
                 Span.styled(
                         formatTokens(state.model.estimatedContext()) + " tok (" + state.model.contextPercent() + "%)",
                         value)));
-        // account quota for codex-usage providers: a compact number + percent + builtin bar, hidden
-        // entirely when the current provider does not expose usage (per-session quota data)
-        if (state.model.quotaVisible()) {
-            final var used = (int) Math.clamp(Math.round(state.model.quotaUsedPercent()), 0, 100);
-            final var bar = quotaBar(used);
-            final var plan = state.model.quotaPlanType() == null ? "" : state.model.quotaPlanType();
-            text.add(Line.from(
-                    Span.styled("usage     ", label),
-                    Span.styled(plan + " " + used + "%", value),
-                    Span.raw(" " + bar)));
-        }
         // the provider-billed prompt tokens of the last anchored request: only shown when an anchor
         // exists (absent = raw heuristic estimate only), so the row doubles as the "is this real?"
         // indicator for the `context ~` estimate above it
@@ -3976,18 +4002,46 @@ public class TuiCommand implements Runnable {
         if (!appliances.isEmpty()) {
             final var app = appliances.getFirst();
             text.add(Line.from(
-                    Span.styled("ctx ", label),
+                    Span.styled("cleanup ", label),
                     Span.styled(
-                            ellipsize(
-                                    String.join(", ", app.kinds()) + " " + modeLabel(app.mode()),
-                                    Math.max(8, width - 4)),
+                            ellipsize(cleanupLabel(app.kinds(), app.mode()), Math.max(8, width - 8)),
                             Style.EMPTY.fg(Color.hex(palette.info())))));
         }
         final var lines = Text.from(text.toArray(Line[]::new));
         final var textRect = rows.getFirst();
         final var overflow = Math.max(0, lines.height() - textRect.height());
         frame.renderWidget(Paragraph.builder().text(lines).scroll(overflow).build(), textRect);
-        if (!rows.get(1).isEmpty()) {
+        // Account usage shares the sidebar width with context, rather than overflowing a text row.
+        if (showQuota && !rows.get(1).isEmpty()) {
+            for (var i = 0; i < quotaWindows.size() && i < rows.get(1).height(); i++) {
+                final var window = quotaWindows.get(i);
+                final Double used = window.usedPercent() == null ? null : Math.clamp(window.usedPercent(), 0, 100);
+                final var remaining = used == null ? 0 : (int) Math.round(100 - used);
+                final var kind = window.displayLabel();
+                final var reset = formatQuotaReset(window.resetAtEpochSeconds());
+                final var resetLabel = reset.isBlank() ? "" : " · " + reset;
+                final var fullLabel =
+                        (used == null ? kind + " unknown" : kind + " " + remaining + "% left") + resetLabel;
+                final var barPercent = Math.clamp(remaining, 0, 100);
+                final Color color = Color.hex(
+                        used == null
+                                ? "#777777"
+                                : remaining <= 10 ? "#ef4444" : remaining <= 25 ? "#f59e0b" : "#3b82f6");
+                frame.renderWidget(
+                        Gauge.builder()
+                                .percent(barPercent)
+                                .label(Span.raw(ellipsize(fullLabel, rows.get(1).width())))
+                                .gaugeColor(color)
+                                .build(),
+                        new Rect(
+                                rows.get(1).x(),
+                                rows.get(1).y() + i,
+                                rows.get(1).width(),
+                                1));
+            }
+        }
+
+        if (!rows.get(2).isEmpty()) {
             final var percent = Math.clamp(state.model.contextPercent(), 0, 100);
             final var compactionThreshold = compactionThreshold();
             final var pruningThreshold = pruningThreshold();
@@ -4001,8 +4055,47 @@ public class TuiCommand implements Runnable {
                             .label(Span.raw(percent + "% context"))
                             .gaugeColor(gaugeColor)
                             .build(),
-                    rows.get(1));
+                    rows.get(2));
         }
+    }
+
+    static String cleanupLabel(final List<String> kinds, final String mode) {
+        final var priorities =
+                List.of("summarized", "truncated", "trimmed", "deduplicated", "superseded", "errors purged");
+        final var labels = new ArrayList<>(kinds.stream()
+                .map(kind -> switch (kind) {
+                    case "round-compact", "compact", "compact-retry" -> "summarized";
+                    case "round-prune", "prune", "tool" -> "trimmed";
+                    case "dedup" -> "deduplicated";
+                    case "supersede" -> "superseded";
+                    case "purge-errors" -> "errors purged";
+                    default -> "context updated";
+                })
+                .toList());
+        if ("TRUNCATE".equalsIgnoreCase(mode)) {
+            labels.add("truncated");
+        }
+        return priorities.stream()
+                .filter(labels::contains)
+                .findFirst()
+                .orElse(labels.isEmpty() ? "context updated" : labels.getFirst());
+    }
+
+    private String formatQuotaReset(final Long resetAt) {
+        if (resetAt == null || resetAt <= 0) {
+            return "";
+        }
+        final var seconds = Math.max(0, resetAt - java.time.Instant.now().getEpochSecond());
+        if (seconds == 0) {
+            return "now";
+        }
+        if (seconds >= 86400) {
+            return "in " + (seconds / 86400) + "d " + (seconds % 86400 / 3600) + "h";
+        }
+        if (seconds >= 3600) {
+            return "in " + (seconds / 3600) + "h " + (seconds % 3600 / 60) + "m";
+        }
+        return "in " + Math.max(1, (seconds + 59) / 60) + "m";
     }
 
     private void renderTranscript(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
@@ -7731,17 +7824,6 @@ public class TuiCommand implements Runnable {
             return text == null ? "" : text;
         }
         return max <= 3 ? text.substring(text.length() - max) : "..." + text.substring(text.length() - max + 3);
-    }
-
-    /** A compact ASCII progress bar for the usage gauge, 10 cells wide (filled = used percent). */
-    private static String quotaBar(final int usedPercent) {
-        final var filled = (int) Math.clamp(Math.round(usedPercent / 10.0), 0, 10);
-        final var sb = new StringBuilder(12);
-        sb.append('[');
-        for (int i = 0; i < 10; i++) {
-            sb.append(i < filled ? '█' : '░');
-        }
-        return sb.append(']').toString();
     }
 
     private static String formatTokens(final long value) {

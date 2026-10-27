@@ -779,11 +779,6 @@ public class ChatClient implements AutoCloseable {
         return providerManager == null ? null : providerManager.current();
     }
 
-    /** Position of a provider for styling: 0 for the flat-scalar default, {@code 1 + index} within {@code providers}. */
-    public int providerPosition(final ProviderConfiguration provider) {
-        return providerManager == null ? 0 : providerManager.providerPosition(provider);
-    }
-
     /**
      * The resolved context window (tokens) for the current provider + model: an explicit per-model
      * {@code models[].contextWindow} wins, then the per-provider {@code contextWindow}, then the value

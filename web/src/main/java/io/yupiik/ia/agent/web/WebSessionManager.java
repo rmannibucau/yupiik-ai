@@ -46,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
@@ -412,6 +413,21 @@ public class WebSessionManager implements AutoCloseable {
         }
     }
 
+    /**
+     * Cancels the running turn of a session AND drops its queued prompts, keeping the session
+     * attached and resumable. This is the web's "close tab" equivalent of the TUI's closeTab, which
+     * interrupts the in-flight turn (stop stream, kill tools/sub-agents) and clears the pending
+     * queue so no absorbed follow-up resurrects the interrupted work. The cancelled flag is reset on
+     * the next {@link #submit}, so a later reopen + new prompt is not spuriously cancelled.
+     */
+    public void cancelAll(final String sessionId) {
+        cancel(sessionId);
+        final var session = sessions.get(sessionId);
+        if (session != null) {
+            session.clearPendingPrompts();
+        }
+    }
+
     /** Resumes the last turn of a session (no new prompt). */
     public CompletableFuture<Boolean> resume(final String sessionId) {
         return submit(sessionId, null, null);
@@ -467,39 +483,60 @@ public class WebSessionManager implements AutoCloseable {
         // carries no live busy state): prepend a synthetic status frame the frontend's foldStatus folds
         // in, so the status bar shows "working" and the Stop button appears without re-running the turn.
         final var webSession = sessions.get(sessionId);
-        if (webSession != null && webSession.env.session().busy()) {
-            replay.add(0, new WebEventDto("status", sessionId, null, null, "working", Map.of("busy", true)));
-        }
-        // re-seed any live /btw (pending or answered) so a reload/reconnect keeps the pill + modal,
-        // exactly like the synthetic busy status above carries the live turn state.
-        if (webSession != null) {
-            final var btw = webSession.btw;
-            if (btw != null) {
-                replay.add(btwEvent(sessionId, btw));
+        // The per-session enrich (busy status, /btw reseed, usage/quota reseed) is best-effort and must
+        // NEVER be allowed to throw into the SSE snapshot path: a failure here used to propagate out of
+        // SseExchangeHandler.subscribe(), left the exchange open-but-silent and made the browser show
+        // "Loading conversation…" forever. Surface any such failure loudly (SEVERE + session id + stack)
+        // but always return the persisted replay so the snapshot still reaches the browser.
+        try {
+            if (webSession != null && webSession.env.session().busy()) {
+                replay.add(0, new WebEventDto("status", sessionId, null, null, "working", Map.of("busy", true)));
             }
-            // Persisted history carries no usage telemetry (WebReplay replays only user/text/tool
-            // events), so a reloaded/reconnected tab would otherwise fold a log with NO token source
-            // and the metrics bar renders empty until the next live usage-updated frame. Re-seed the
-            // session's cumulative token totals as a synthetic usage-updated so the reloaded metrics
-            // show the exact "in N · out N" (and don't freeze) immediately. Only emitted while the
-            // session recorded any usage, so a genuinely fresh session shows nothing spurious.
-            final var usage = webSession.runtime.usage();
-            if (usage.completionTokens() > 0 || usage.promptTokens() > 0) {
-                final var effective = usage.effectiveContext(messages, 0);
-                replay.add(new WebEventDto(
-                        "usage-updated",
-                        sessionId,
-                        null,
-                        null,
-                        null,
-                        Map.of(
-                                "promptTokens", (int) usage.promptTokens(),
-                                "completionTokens", (int) usage.completionTokens(),
-                                "reasoningTokens", (int) usage.reasoningTokens(),
-                                "cacheReadTokens", (int) usage.cacheReadTokens(),
-                                "estimatedContextTokens", effective,
-                                "contextPercent", usage.contextPercent(effective))));
+            // re-seed any live /btw (pending or answered) so a reload/reconnect keeps the pill + modal,
+            // exactly like the synthetic busy status above carries the live turn state.
+            if (webSession != null) {
+                final var btw = webSession.btw;
+                if (btw != null) {
+                    replay.add(btwEvent(sessionId, btw));
+                }
+                // Persisted history carries no usage telemetry (WebReplay replays only user/text/tool
+                // events), so a reloaded/reconnected tab would otherwise fold a log with NO token source
+                // and the metrics bar renders empty until the next live usage-updated frame. Re-seed the
+                // session's cumulative token totals as a synthetic usage-updated so the reloaded metrics
+                // show the exact "in N · out N" (and don't freeze) immediately. Only emitted while the
+                // session recorded any usage, so a genuinely fresh session shows nothing spurious.
+                final var usage = webSession.runtime.usage();
+                final var quota = webSession.runtime.quotaSnapshot();
+                if (usage.completionTokens() > 0 || usage.promptTokens() > 0 || quota.visible()) {
+                    final var effective = usage.effectiveContext(messages, 0);
+                    final var usagePayload = WebEventDto.of(new io.yupiik.ia.agent.core.agent.AgentEvent.UsageUpdated(
+                            new io.yupiik.ia.agent.core.llm.Usage(
+                                    (int) usage.promptTokens(),
+                                    (int) usage.completionTokens(),
+                                    (int) (usage.promptTokens() + usage.completionTokens()),
+                                    usage.cacheReadTokens(),
+                                    0,
+                                    (int) usage.reasoningTokens(),
+                                    0),
+                            effective,
+                            usage.contextPercent(effective),
+                            0,
+                            -1,
+                            null,
+                            sessionId,
+                            null,
+                            null,
+                            quota));
+                    final var data = new LinkedHashMap<String, Object>(usagePayload.data());
+                    replay.add(new WebEventDto("usage-updated", sessionId, null, null, null, data));
+                }
             }
+        } catch (final RuntimeException | Error e) {
+            LOGGER.log(
+                    Level.SEVERE,
+                    "snapshot enrich failed for session " + sessionId
+                            + "; returning persisted replay only (the tab may miss live status/btw/usage)",
+                    e);
         }
         return replay;
     }
@@ -610,6 +647,13 @@ public class WebSessionManager implements AutoCloseable {
                 }
                 it.remove();
                 return true;
+            }
+        }
+
+        /** Drops every queued prompt (mirrors the TUI's interruptTurn clearing its pending queue). */
+        private void clearPendingPrompts() {
+            synchronized (pendingPrompts) {
+                pendingPrompts.clear();
             }
         }
 

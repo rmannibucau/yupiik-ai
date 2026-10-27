@@ -22,7 +22,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
@@ -36,6 +39,7 @@ import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.llm.CodexAuthTemplateHelper;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.MidStreamFailureException;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
@@ -59,11 +63,17 @@ import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.LlmHttpFailureException;
+import io.yupiik.llm.client.codex.CodexOAuthConfig;
+import io.yupiik.llm.client.codex.model.CodexTokenStore;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayDeque;
@@ -521,6 +531,134 @@ class AgentLoopTest {
                 List.of("other-model", "switched"),
                 capturedModels,
                 "the per-tab provider's model applies alone, then the model override wins");
+    }
+
+    /**
+     * Switching to a codec (usage-enabled) provider must push an immediate {@code UsageUpdated} with
+     * the new provider's quota so the TUI/web gauge shows it at switch time (then TTL-governed),
+     * rather than keeping the old provider's cached quota until the next turn. A model-only switch
+     * on the same provider must NOT emit a quota event (it would clobber the live context gauge).
+     */
+    @Test
+    void providerSwitchPushesQuotaAndModelOnlySwitchDoesNot() throws Exception {
+        final var fetches = new AtomicInteger();
+        final var server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        final var serverUrl = "http://localhost:" + server.getAddress().getPort();
+        server.createContext("/wham/usage", exchange -> {
+            fetches.incrementAndGet();
+            final var body = """
+                    {"plan_type":"plus",
+                     "rate_limit":{"primary_window":{"used_percent":100,"limit_window_seconds":18000,"reset_at":1700000000}},
+                     "credits":{"has_credits":true,"balance":"0"}}
+                    """;
+            final var bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            final var delegate = HttpClient.newBuilder().build();
+            final var httpClient = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
+            try {
+                final var cfg = configuration(
+                        true,
+                        Map.of(
+                                "yca.provider.providers.length", "2",
+                                "yca.provider.providers.1.id", "codex",
+                                "yca.provider.providers.1.baseUrl", serverUrl + "/codex",
+                                "yca.provider.providers.1.apiKey", "",
+                                "yca.provider.providers.1.api", "auto",
+                                "yca.provider.providers.1.capabilities.codex.enableUsage", "true"));
+                providerManagerOverride = new ProviderManager(cfg, mapper);
+                final var auth = new CodexAuthTemplateHelper(mapper, httpClient, cfg);
+                auth.setOAuthConfig(new CodexOAuthConfig(serverUrl, "test", "openid", serverUrl + "/device", 1455));
+                final var tokenFile = storageHome.resolve("providers/codex/codex.auth.json");
+                Files.createDirectories(tokenFile.getParent());
+                Files.write(
+                        tokenFile,
+                        mapper.toBytes(new CodexTokenStore("access", "refresh", "acc", Long.MAX_VALUE / 1000L, "id")));
+                final var quotaStore = new io.yupiik.ia.agent.core.usage.QuotaSnapshotStore(
+                        mapper, httpClient, auth, providerManagerOverride, Clock.systemUTC());
+
+                final var client = new ChatClient() {
+                    @Override
+                    public Message stream(
+                            final ChatCompletionRequest request,
+                            final Consumer<PauseEvent> pauseListener,
+                            final Consumer<LlmStreamEvent> onDelta,
+                            final BooleanSupplier cancelled) {
+                        onDelta.accept(new End("stop", null));
+                        return new Message("assistant", "ok", null, List.of(), null, null);
+                    }
+                };
+                final var loop = loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        quotaStore);
+                // establish this session's id (a live session) before testing the switch behavior;
+                // the first turn attaches the process-default (non-codex) provider with no fetch
+                loop.run("hello", null, "s1", null, () -> false);
+                events.clear();
+
+                // model-only switch on the process-default provider: no quota event, no clobbering
+                loop.updateChatSettings(ChatSettings.EMPTY.withModel("other-model"));
+                assertTrue(
+                        events.stream().noneMatch(AgentEvent.UsageUpdated.class::isInstance),
+                        "a model-only switch on the same provider must not emit a quota UsageUpdated: " + events);
+
+                // switch to the codec provider: an immediate UsageUpdated must carry its (reached) quota
+                events.clear();
+                loop.updateChatSettings(ChatSettings.EMPTY.withProviderId("codex"));
+                final var pushed = events.stream()
+                        .filter(AgentEvent.UsageUpdated.class::isInstance)
+                        .map(AgentEvent.UsageUpdated.class::cast)
+                        .toList();
+                assertEquals(1, pushed.size(), "provider switch must push exactly one quota UsageUpdated: " + events);
+                final var quota = pushed.get(0).quota();
+                assertNotNull(quota, "the pushed quota must be present");
+                assertTrue(quota.enabled(), "the codex provider enables usage");
+                assertTrue(quota.supported(), "the codex provider is supported");
+                assertEquals(100.0, quota.usedPercent(), "a reached quota stays visible at switch time");
+                assertEquals("primary", quota.windows().get(0).kind());
+                assertEquals(1, fetches.get(), "attach on switch must force one fetch");
+                // the push must preserve the live context gauge (cached after the first turn),
+                // never resetting it to zero just because no message list is at hand
+                assertTrue(
+                        pushed.get(0).estimatedContextTokens() > 0,
+                        "the pushed UsageUpdated must carry the cached context tokens: " + pushed.get(0));
+
+                // a direct push (the /usage path) emits the cached quota and respects the TTL (no refetch)
+                events.clear();
+                final var priorFetches = fetches.get();
+                loop.pushUsageQuota();
+                final var direct = events.stream()
+                        .filter(AgentEvent.UsageUpdated.class::isInstance)
+                        .map(AgentEvent.UsageUpdated.class::cast)
+                        .toList();
+                assertEquals(1, direct.size(), "pushUsageQuota must emit one UsageUpdated: " + events);
+                assertTrue(
+                        direct.get(0).quota().supported()
+                                && direct.get(0).quota().usedPercent() == 100.0,
+                        "the pushed quota must carry the cached (reached) quota");
+                assertEquals(
+                        priorFetches, fetches.get(), "a direct push within the TTL must not refetch the usage backend");
+            } finally {
+                httpClient.close();
+                delegate.shutdownNow();
+                delegate.close();
+            }
+        } finally {
+            server.stop(0);
+        }
     }
 
     /**
@@ -6441,6 +6579,32 @@ class AgentLoopTest {
             final ToolExecutionService executions,
             final ExecutorService executor,
             final SystemPromptBuilder promptBuilder) {
+        return loop(
+                client,
+                todoStore,
+                config,
+                contextManager,
+                sessionStore,
+                contextView,
+                registry,
+                executions,
+                executor,
+                promptBuilder,
+                null);
+    }
+
+    private AgentLoop loop(
+            final ChatClient client,
+            final TodoStore todoStore,
+            final CodingAgentConfiguration config,
+            final ContextManager contextManager,
+            final SessionStore sessionStore,
+            final ContextView contextView,
+            final ToolRegistry registry,
+            final ToolExecutionService executions,
+            final ExecutorService executor,
+            final SystemPromptBuilder promptBuilder,
+            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore) {
         events.clear();
         final var resolvedRegistry = registry == null
                 ? new ToolRegistry(null) {
@@ -6488,7 +6652,7 @@ class AgentLoopTest {
                         return 1000;
                     }
                 },
-                null, // quota store
+                quotaStore, // quota store
                 contextManager,
                 contextView,
                 sessionStore,

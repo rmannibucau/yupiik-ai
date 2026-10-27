@@ -35,9 +35,15 @@ public final class MockLlmServer implements AutoCloseable {
     private final List<String> requests = new CopyOnWriteArrayList<>();
     private final ExecutorService executor;
     private volatile String answer = "hello from mock";
+    private final List<String> models;
 
     public MockLlmServer() throws IOException {
+        this(List.of());
+    }
+
+    public MockLlmServer(final List<String> models) throws IOException {
         executor = Executors.newVirtualThreadPerTaskExecutor();
+        this.models = models;
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
         server.createContext("/v1/chat/completions", exchange -> {
@@ -69,17 +75,20 @@ public final class MockLlmServer implements AutoCloseable {
             }
         });
         server.createContext("/v1/models", exchange -> {
-            // 30 models so the /model picker overflows its window and scrolls
+            // 30 models by default so the /model picker overflows its window and scrolls;
+            // a custom id list (per-provider tests) is served verbatim instead.
+            final var defaultModels = models == null || models.isEmpty();
+            final var ids = defaultModels
+                    ? java.util.stream.IntStream.rangeClosed(1, 30)
+                            .mapToObj(i -> "m" + (i < 10 ? "0" + i : String.valueOf(i)))
+                            .toList()
+                    : models;
             final var sb = new StringBuilder("{\"data\":[");
-            for (int i = 1; i <= 30; i++) {
-                if (i > 1) {
+            for (int i = 0; i < ids.size(); i++) {
+                if (i > 0) {
                     sb.append(',');
                 }
-                sb.append("{\"id\":\"m");
-                if (i < 10) {
-                    sb.append('0');
-                }
-                sb.append(i).append("\",\"owned_by\":\"x\"}");
+                sb.append("{\"id\":\"").append(ids.get(i)).append("\",\"owned_by\":\"x\"}");
             }
             sb.append("]}");
             respond(exchange, 200, sb.toString(), "application/json");

@@ -236,6 +236,10 @@ describe('foldStatus - live per-turn out/reasoning tokens', () => {
           windowLabel: 'primary',
           creditsBalance: '10',
           creditsUnlimited: false,
+          windows: [
+            { kind: 'primary', label: 'primary', usedPercent: 37, windowSeconds: 18000, resetAtEpochSeconds: 1700000000 },
+            { kind: 'secondary', label: 'secondary', usedPercent: 6, windowSeconds: 604800, resetAtEpochSeconds: 1700600000 },
+          ],
         },
       }),
     ]);
@@ -243,6 +247,62 @@ describe('foldStatus - live per-turn out/reasoning tokens', () => {
     expect(s.quota?.planType).toBe('plus');
     expect(s.quota?.usedPercent).toBe(42.5);
     expect(s.quota?.creditsBalance).toBe('10');
+    expect(s.quota?.windows).toHaveLength(2);
+    expect(s.quota?.windows[1].windowSeconds).toBe(604800);
+  });
+
+  it('clears quota after an unsupported provider usage frame', () => {
+    const s = foldStatus([
+      usageEv({ quota: { enabled: true, supported: true, planType: 'plus', usedPercent: 22,
+        windows: [{ kind: 'secondary', label: 'weekly', usedPercent: 22, windowSeconds: 604800, resetAtEpochSeconds: 1 }] } }),
+      usageEv({ quota: { enabled: false, supported: false, planType: '', usedPercent: null, windows: [] } }),
+    ]);
+    expect(s.quota).toBeUndefined();
+  });
+
+  it('keeps a known-zero window distinct from a missing one', () => {
+    const s = foldStatus([
+      usageEv({
+        quota: {
+          enabled: true,
+          supported: true,
+          planType: 'plus',
+          usedPercent: 0,
+          windows: [
+            { kind: 'primary', label: 'primary', usedPercent: 100, windowSeconds: 18000, resetAtEpochSeconds: 1 },
+            { kind: 'secondary', label: 'weekly', usedPercent: 0, windowSeconds: 604800, resetAtEpochSeconds: 1 },
+            { kind: 'additional', label: 'code-review', usedPercent: null, windowSeconds: 18000, resetAtEpochSeconds: 1 },
+          ],
+        },
+      }),
+    ]);
+    // a known zero must stay 0 (a real, consumed window), never coerced to null
+    expect(s.quota?.windows).toHaveLength(3);
+    expect(s.quota?.windows[1].usedPercent).toBe(0);
+    // a missing percentage stays null (no fabricated value)
+    expect(s.quota?.windows[2].usedPercent).toBeNull();
+  });
+
+  it('restores quota from a synthetic snapshot-replay usage event', () => {
+    // Reconnect replays the persisted snapshot as a usage-updated event carrying the quota; the fold
+    // must surface both windows so a reloaded sidebar shows quota immediately.
+    const s = foldStatus([
+      usageEv({
+        quota: {
+          enabled: true,
+          supported: true,
+          planType: 'plus',
+          usedPercent: 60,
+          windows: [
+            { kind: 'primary', label: 'primary', usedPercent: 40, windowSeconds: 18000, resetAtEpochSeconds: 1 },
+            { kind: 'secondary', label: 'weekly', usedPercent: 10, windowSeconds: 604800, resetAtEpochSeconds: 1 },
+          ],
+        },
+      }),
+    ]);
+    expect(s.quota?.windows).toHaveLength(2);
+    expect(s.quota?.windows[1].windowSeconds).toBe(604800);
+    expect(s.quota?.windows[1].usedPercent).toBe(10);
   });
 
   it('leaves status.quota undefined when no usage quota is present', () => {
@@ -274,6 +334,13 @@ describe('bootstrapFromSnapshot - bootstrapped (history-loaded) transition', () 
 
   it('an EMPTY snapshot ({events:[]}) still bootstraps - a fresh/empty session must clear the loader, never spin forever', () => {
     expect(bootstrapFromSnapshot({ events: [] })).toBe(true);
+  });
+
+  it('a snapshot carrying snapshotError still bootstraps - error is surfaced, never a silent infinite loader', () => {
+    // SseExchangeHandler returns {events:[], snapshotError} when the server-side replay fails: the
+    // loader must clear (so the tab is usable) and the error is surfaced as a status notice instead of
+    // leaving the session stuck on "Loading conversation…".
+    expect(bootstrapFromSnapshot({ events: [], snapshotError: 'boom' })).toBe(true);
   });
 
   it('a snapshot frame missing the events key does NOT bootstrap (keeps the loader up)', () => {

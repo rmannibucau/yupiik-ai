@@ -19,12 +19,13 @@ export type SessionStatus = {
     enabled: boolean;
     supported: boolean;
     planType: string;
-    usedPercent: number;
-    windowSeconds: number;
-    resetAtEpochSeconds: number;
+    usedPercent: number | null;
+    windowSeconds: number | null;
+    resetAtEpochSeconds: number | null;
     windowLabel: string;
     creditsBalance: string;
     creditsUnlimited: boolean;
+    windows: Array<{ kind: string; label: string; usedPercent: number | null; windowSeconds: number | null; resetAtEpochSeconds: number | null }>;
   };
   promptTokens?: number;
   completionTokens?: number;
@@ -298,7 +299,22 @@ export function useSessionStream(sessionId: string | undefined) {
 
       es.addEventListener('snapshot', (ev) => {
         try {
-          const snap = JSON.parse((ev as MessageEvent).data) as { events?: WebEvent[]; total?: number };
+          const snap = JSON.parse((ev as MessageEvent).data) as {
+            events?: WebEvent[];
+            total?: number;
+            snapshotError?: string;
+          };
+          if (typeof snap.snapshotError === 'string' && snap.snapshotError) {
+            // the server failed to build the full snapshot but still delivered an (empty) one so the
+            // loader clears. Surface the failure in the status bar instead of hiding it - this turns a
+            // previously-silent "Loading conversation…" hang into a visible error the user can act on.
+            append({
+              type: 'notice',
+              sessionId,
+              data: { level: 'ERROR' },
+              message: `snapshot failed: ${snap.snapshotError}`,
+            });
+          }
           // merge history into the live log: NEVER replace, otherwise a reconnect during a
           // turn drops everything streamed in memory and the pane "refreshes" and loses content.
           mergeSnapshot(snap.events ?? []);
@@ -433,20 +449,32 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
       s.cacheReadTokens = num(d.cacheReadTokens, s.cacheReadTokens);
       completionTotal = num(d.completionTokens, completionTotal) ?? completionTotal;
       reasoningTotal = num(d.reasoningTokens, reasoningTotal) ?? reasoningTotal;
-      // account quota carried by the usage event; only set when the provider actually exposes usage
-      if (d.quota && typeof d.quota === 'object') {
+      // Every usage frame replaces quota state, including unsupported/empty values, so a provider
+      // switch or a window disappearing cannot leave stale gauges visible.
+      if (!d.quota || typeof d.quota !== 'object') {
+        s.quota = undefined;
+      } else {
         const q = d.quota as Record<string, unknown>;
-        s.quota = {
-          enabled: !!q.enabled,
-          supported: !!q.supported,
+        const quota = q.enabled && q.supported ? {
+          enabled: true,
+          supported: true,
           planType: String(q.planType ?? ''),
-          usedPercent: num(q.usedPercent, 0) ?? 0,
-          windowSeconds: num(q.windowSeconds, 0) ?? 0,
-          resetAtEpochSeconds: num(q.resetAtEpochSeconds, 0) ?? 0,
+          usedPercent: q.usedPercent == null ? null : num(q.usedPercent, 0) ?? 0,
+          windowSeconds: q.windowSeconds == null ? null : num(q.windowSeconds, 0) ?? 0,
+          resetAtEpochSeconds: q.resetAtEpochSeconds == null ? null : num(q.resetAtEpochSeconds, 0) ?? 0,
           windowLabel: String(q.windowLabel ?? ''),
           creditsBalance: String(q.creditsBalance ?? ''),
           creditsUnlimited: !!q.creditsUnlimited,
-        };
+          windows: Array.isArray(q.windows) ? q.windows.flatMap((raw) => {
+            if (!raw || typeof raw !== 'object') return [];
+            const w = raw as Record<string, unknown>;
+            return [{ kind: String(w.kind ?? ''), label: String(w.label ?? ''),
+              usedPercent: typeof w.usedPercent === 'number' ? w.usedPercent : null,
+              windowSeconds: typeof w.windowSeconds === 'number' ? w.windowSeconds : null,
+              resetAtEpochSeconds: typeof w.resetAtEpochSeconds === 'number' ? w.resetAtEpochSeconds : null }];
+          }) : [],
+        } : undefined;
+        s.quota = quota;
       }
       // session totals persist in the log tail; count LLM calls via turn-metrics below.
     } else if (ev.type === 'turn-metrics') {

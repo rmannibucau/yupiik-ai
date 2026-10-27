@@ -153,21 +153,64 @@ public sealed interface AgentEvent {
                 boolean enabled,
                 boolean supported,
                 String planType,
-                double usedPercent,
+                Double usedPercent,
                 long windowSeconds,
                 long resetAtEpochSeconds,
                 String windowLabel,
                 String creditsBalance,
-                boolean creditsUnlimited) {
+                boolean creditsUnlimited,
+                List<Window> windows) {
 
-            public static final Quota NONE = new Quota(false, false, null, 0, 0, 0, null, null, false);
+            public static final Quota NONE = new Quota(false, false, null, null, 0, 0, null, null, false, List.of());
+
+            public Quota(
+                    final boolean enabled,
+                    final boolean supported,
+                    final String planType,
+                    final double usedPercent,
+                    final long windowSeconds,
+                    final long resetAtEpochSeconds,
+                    final String windowLabel,
+                    final String creditsBalance,
+                    final boolean creditsUnlimited) {
+                this(
+                        enabled,
+                        supported,
+                        planType,
+                        usedPercent,
+                        windowSeconds,
+                        resetAtEpochSeconds,
+                        windowLabel,
+                        creditsBalance,
+                        creditsUnlimited,
+                        List.of(new Window("primary", windowLabel, usedPercent, windowSeconds, resetAtEpochSeconds)));
+            }
+
+            public record Window(
+                    String kind, String label, Double usedPercent, Long windowSeconds, Long resetAtEpochSeconds) {
+                public String displayLabel() {
+                    if (windowSeconds == null || windowSeconds <= 0) {
+                        return label == null || label.isBlank() ? "quota" : label;
+                    }
+                    if (windowSeconds == 604800) {
+                        return "weekly";
+                    }
+                    if (windowSeconds % 86400 == 0) {
+                        return windowSeconds / 86400 + "d";
+                    }
+                    if (windowSeconds % 3600 == 0) {
+                        return windowSeconds / 3600 + "h";
+                    }
+                    return windowSeconds % 60 == 0 ? windowSeconds / 60 + "m" : windowSeconds + "s";
+                }
+            }
 
             public static Quota of(
                     final boolean enabled,
                     final boolean supported,
                     final io.yupiik.ia.agent.core.usage.CodexUsageSnapshot snapshot) {
                 if (snapshot == null) {
-                    return new Quota(enabled, supported, null, 0, 0, 0, null, null, false);
+                    return new Quota(false, false, null, null, 0, 0, null, null, false, List.of());
                 }
                 final var primary = snapshot.rateLimits() == null
                         ? null
@@ -178,16 +221,27 @@ public sealed interface AgentEvent {
                                 .orElse(null);
                 final boolean unlimited = snapshot.credits() != null
                         && Boolean.TRUE.equals(snapshot.credits().unlimited());
+                final var windows = snapshot.rateLimits() == null
+                        ? List.<Window>of()
+                        : snapshot.rateLimits().stream()
+                                .map(limit -> new Window(
+                                        limit.kind(),
+                                        limit.label(),
+                                        limit.usedPercent(),
+                                        limit.limitWindowSeconds(),
+                                        limit.resetAt()))
+                                .toList();
                 return new Quota(
                         enabled,
                         supported,
                         snapshot.planType(),
-                        primary == null || primary.usedPercent() == null ? 0 : primary.usedPercent(),
+                        primary == null ? null : primary.usedPercent(),
                         primary == null || primary.limitWindowSeconds() == null ? 0 : primary.limitWindowSeconds(),
                         primary == null || primary.resetAt() == null ? 0 : primary.resetAt(),
                         primary == null ? null : primary.label(),
                         snapshot.credits() == null ? null : snapshot.credits().balance(),
-                        unlimited);
+                        unlimited,
+                        windows);
             }
 
             public boolean visible() {

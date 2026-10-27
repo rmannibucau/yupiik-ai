@@ -1,3 +1,4 @@
+import { ContextBar, formatQuotaReset, quotaWindowLabel } from '../components/UsageBar';
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router';
 import ReactMarkdown from 'react-markdown';
@@ -1274,16 +1275,6 @@ function StatusBar({
  * Thin context-usage bar (after the Context block): green under most of the window, warming to amber
  * approaching the compaction/prune threshold and red near the limit, mirroring the TUI.
  */
-function ContextBar({ percent }: { percent: number }) {
-  const color =
-    percent >= 90 ? '#ff5555' : percent >= 70 ? '#e5c07b' : 'var(--yca-accent)';
-  return (
-    <div className="mt-1 h-1 w-full overflow-hidden rounded-full" style={{ background: 'var(--yca-panel-2)' }}>
-      <div className="h-full rounded-full transition-all" style={{ width: `${percent}%`, background: color }} />
-    </div>
-  );
-}
-
 function Sidebar({
   sidebar,
   status,
@@ -1352,8 +1343,8 @@ function Sidebar({
               {status.contextPercent != null ? ` (${Math.round(status.contextPercent)}%)` : ''}
             </span>
           </div>
-          {status.contextPercent != null && status.contextPercent > 0 && (
-            <ContextBar percent={Math.min(100, status.contextPercent)} />
+          {status.contextPercent != null && (
+            <ContextBar percent={Math.min(100, Math.max(0, status.contextPercent))} />
           )}
         </div>
       </div>
@@ -1362,16 +1353,35 @@ function Sidebar({
         <div>
           <div className="mb-1 text-xs font-bold uppercase" style={{ color: 'var(--yca-muted)' }}>Usage</div>
           <div className="space-y-0.5 text-sm" style={{ color: 'var(--yca-text)' }}>
-            <div className="flex justify-between">
-              <span style={{ color: 'var(--yca-muted)' }}>
-                {status.quota.planType ? status.quota.planType : 'plan'}
-                {status.quota.windowLabel ? ` · ${status.quota.windowLabel}` : ''}
-              </span>
-              <span className="font-mono">{Math.round(status.quota.usedPercent)}%</span>
-            </div>
-            {status.quota.planType && (
-              <ContextBar percent={Math.min(100, status.quota.usedPercent)} />
-            )}
+          {status.quota.windows.slice(0, 2).map((window) => {
+            const label = quotaWindowLabel(window.windowSeconds, window.label);
+            const resetLabel = window.resetAtEpochSeconds != null && window.resetAtEpochSeconds > 0
+              ? `Resets ${formatQuotaReset(window.resetAtEpochSeconds)}` : '';
+            if (window.usedPercent == null) {
+              return (
+                <div key={`${window.kind}-${window.windowSeconds}-${window.resetAtEpochSeconds}`}>
+                  <div className="flex justify-between gap-2">
+                    <span style={{ color: 'var(--yca-muted)' }}>{label} remaining</span>
+                    <span className="font-mono">unknown</span>
+                  </div>
+                  <div className="mt-1 h-1 w-full rounded-full" style={{ background: 'var(--yca-panel-2)' }} />
+                  {resetLabel && <div className="text-right text-xs" style={{ color: 'var(--yca-muted)' }}>{resetLabel}</div>}
+                </div>
+              );
+            }
+            const used = Math.min(100, Math.max(0, window.usedPercent));
+            const remaining = Math.round(100 - used);
+            return (
+              <div key={`${window.kind}-${window.windowSeconds}-${window.resetAtEpochSeconds}`}>
+                <div className="flex justify-between gap-2">
+                  <span style={{ color: 'var(--yca-muted)' }}>{label} remaining</span>
+                  <span className="font-mono">{remaining}%</span>
+                </div>
+                <ContextBar percent={remaining} remaining />
+                {resetLabel && <div className="text-right text-xs" style={{ color: 'var(--yca-muted)' }}>{resetLabel}</div>}
+              </div>
+            );
+          })}
           </div>
         </div>
       )}

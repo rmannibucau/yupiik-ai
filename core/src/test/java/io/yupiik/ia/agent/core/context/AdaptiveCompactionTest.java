@@ -108,6 +108,32 @@ class AdaptiveCompactionTest {
                 .orElse("");
     }
 
+    /** A two-provider config: 'main' (large window) plus a cheaper 'compact' provider (smaller window). */
+    private static CodingAgentConfiguration twoProviderConfig(final int mainWindow, final int compactWindow) {
+        final var entries = new HashMap<String, String>();
+        entries.put("yca.storageHome", "x");
+        entries.put("yca.workingDir", ".");
+        entries.put("yca.provider.providers.length", "2");
+        entries.put("yca.provider.providers.0.id", "main");
+        entries.put("yca.provider.providers.0.baseUrl", "https://main.example/v1/chat/completions");
+        entries.put("yca.provider.providers.0.apiKey", "");
+        entries.put("yca.provider.providers.0.model", "main-model");
+        entries.put("yca.provider.providers.0.api", "auto");
+        entries.put("yca.provider.providers.0.contextWindow", String.valueOf(mainWindow));
+        entries.put("yca.provider.providers.0.timeoutSeconds", "120");
+        entries.put("yca.provider.providers.0.backgroundModelOverrides.compact.name", "$compact/mini");
+        entries.put("yca.provider.providers.1.id", "compact");
+        entries.put("yca.provider.providers.1.baseUrl", "https://compact.example/v1/chat/completions");
+        entries.put("yca.provider.providers.1.apiKey", "");
+        entries.put("yca.provider.providers.1.model", "mini");
+        entries.put("yca.provider.providers.1.api", "auto");
+        entries.put("yca.provider.providers.1.contextWindow", String.valueOf(compactWindow));
+        entries.put("yca.provider.providers.1.timeoutSeconds", "120");
+        entries.put("yca.compaction.tailBudgetTokens", "1");
+        entries.put("yca.pruning.keepRecent", "1");
+        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+    }
+
     // --- derivation -------------------------------------------------------
 
     @Test
@@ -304,5 +330,45 @@ class AdaptiveCompactionTest {
         assertTrue(
                 attempts.get() <= 3 && attempts.get() >= 2,
                 "halving must be bounded by log2(initial/floor): was " + attempts.get());
+    }
+
+    @Test
+    void halfWindowSummarizerSizesChunksAgainstItsOwnWindow() {
+        // the summarizer (compact provider, 16k window) is smaller than the conversation model
+        // (main, 128k): the derived chunk cap must be sized against the compact window, not the main
+        final var cfg = twoProviderConfig(128_000, 16_000);
+        final var coordinator = coordinator(cfg, null);
+        // main usable == 128k - min(20k,128k/4)=20k -> 108k; if the bug were present the cap would
+        // derive from 108k (~ 27k chars). The compact window 16k - min(20k,16k/4)=4k -> 12k usable,
+        // floored at the 12k minimum, derives ~12k chars.
+        assertEquals(
+                12_000,
+                coordinator.effectiveChunkCap("$compact/mini"),
+                "the cap must derive from the compact model window");
+        assertEquals(6_000, coordinator.effectiveDigestCap("$compact/mini"), "digest auto = half the chunk cap");
+    }
+
+    @Test
+    void halfWindowSummarizerCompactsSingleCallAgainstItsOwnWindow() {
+        // end-to-end: with the summarizer sized to its own (smaller) window, a history that fits one
+        // chunk completes in a single summarizer call with no halving retry (no ContextWindowExceededException)
+        final var calls = new AtomicInteger();
+        final var cfg = twoProviderConfig(128_000, 16_000);
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
+                calls.incrementAndGet();
+                return new ChatResult(Message.assistant("digest: single", null), Usage.EMPTY);
+            }
+        };
+        final var coordinator = coordinator(cfg, chat);
+        final var manager = new ContextManager(
+                cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()), coordinator);
+        final var result = manager.compact(oldHeavyHistory(6, 500), true);
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+        assertEquals(1, calls.get(), "a history fitting one compact-window chunk must not overflow/halve");
     }
 }

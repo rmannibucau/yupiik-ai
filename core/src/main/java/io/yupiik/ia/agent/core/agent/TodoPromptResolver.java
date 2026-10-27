@@ -59,7 +59,7 @@ public class TodoPromptResolver {
 
     private static final String OPENAI_PLAN = """
             Task Management (plan mode):
-            The todo list is the plan: record it with write_todo and keep every item 'pending' - statuses only advance in build mode. Whenever a follow-up changes the plan, update the list in the same turn so it always mirrors the plan you just agreed on. Completed and cancelled items recorded during build sessions are the progress history: keep them, never drop them. Consult the todo list in the <session-state> block at the start of each turn: it must match the plan you just agreed on.""";
+            The todo list is the plan: record it with write_todo and keep every item 'pending' - statuses only advance in build mode. Whenever a follow-up changes the plan, update the list in the same turn so it always mirrors the plan you just agreed on. Completed and cancelled items recorded during build sessions are the progress history: keep them, never drop them. In this plan-mode session you cannot advance a pending item: do not re-emit it as in_progress/completed, it will be kept pending until build mode. Consult the todo list in the <session-state> block at the start of each turn: it must match the plan you just agreed on.""";
 
     private static final String ANTHROPIC = """
             Task Management:
@@ -67,7 +67,7 @@ public class TodoPromptResolver {
 
     private static final String ANTHROPIC_PLAN = """
             Task Management (plan mode):
-            The todo list IS the plan: use write_todo EXTREMELY frequently to record it and keep it in sync with the discussion. Every item must stay 'pending' - statuses only advance in build mode. Update the list in the same turn whenever the plan changes (scope, steps, approach, trade-offs). Completed/cancelled items from build sessions are the progress history: keep them, never drop them. Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending one: it must match the plan you just agreed on.""";
+            The todo list IS the plan: use write_todo EXTREMELY frequently to record it and keep it in sync with the discussion. Every item must stay 'pending' - statuses only advance in build mode. Update the list in the same turn whenever the plan changes (scope, steps, approach, trade-offs). Completed/cancelled items from build sessions are the progress history: keep them, never drop them. In this plan-mode session you cannot advance a pending item: do not re-emit it as in_progress/completed, it will be kept pending until build mode. Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending one: it must match the plan you just agreed on.""";
 
     private static final String GEMINI = """
             Task Management:
@@ -75,7 +75,7 @@ public class TodoPromptResolver {
 
     private static final String GEMINI_PLAN = """
             Task Management (plan mode):
-            Keep the todo list as the structured plan: every item 'pending' - statuses advance only in build mode. Use write_todo to record the plan and update it in the same turn whenever a follow-up changes it (scope, steps, approach, trade-offs). Completed/cancelled items from build sessions are the history: keep them. Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending one: it must match the plan you just agreed on.""";
+            Keep the todo list as the structured plan: every item 'pending' - statuses advance only in build mode. Use write_todo to record the plan and update it in the same turn whenever a follow-up changes it (scope, steps, approach, trade-offs). Completed/cancelled items from build sessions are the history: keep them. In this plan-mode session you cannot advance a pending item: do not re-emit it as in_progress/completed, it will be kept pending until build mode. Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending one: it must match the plan you just agreed on.""";
 
     private static final List<Family> FAMILIES = List.of(
             new Family("anthropic", List.of("anthropic", "claude"), ANTHROPIC, ANTHROPIC_PLAN),

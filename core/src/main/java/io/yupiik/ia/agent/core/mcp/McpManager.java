@@ -212,12 +212,16 @@ public class McpManager {
                 future.complete(null);
             } catch (final Throwable t) {
                 future.completeExceptionally(t);
+            } finally {
+                // the handshake has settled: drop the in-flight marker so serverStatuses() reports
+                // ENABLED (client present) or FAILED (absent) instead of staying PENDING forever.
+                pending.remove(server.name(), future);
             }
         });
     }
 
     private void startServer(final McpServerConfiguration server) {
-        close(server.name());
+        closePreviousClient(server.name());
         toolsByServer.remove(server.name());
         try {
             final var client = buildClient(server);
@@ -267,6 +271,18 @@ public class McpManager {
 
     private void close(final String name) {
         pending.remove(name);
+        closePreviousClient(name);
+    }
+
+    /**
+     * Closes and removes any previously running client for a server, without touching the in-flight
+     * {@link #pending} marker. {@link #startServer} uses this instead of {@link #close(String)}: on the
+     * async path ({@link #startServerAsync}) the pending marker is what {@link #serverStatuses()} uses to
+     * report {@link ServerState#PENDING} while the handshake is still blocked, so removing it prematurely
+     * made a concurrent status read report FAILED instead of PENDING (a flaky
+     * startIsNonBlockingButFirstUseJoins). The marker is removed by the async task itself once it settles.
+     */
+    private void closePreviousClient(final String name) {
         final var previous = clients.remove(name);
         if (previous != null) {
             try {

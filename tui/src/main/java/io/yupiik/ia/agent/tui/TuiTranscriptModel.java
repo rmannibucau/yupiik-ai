@@ -28,7 +28,10 @@ import java.util.List;
  * state (transcript, streaming buffers, status, usage counters) is inherited.
  */
 public class TuiTranscriptModel extends ConversationTranscript {
-    /** Absolute transcript row shown at the top of the viewport, in {@code [0, maxViewOffset]}. */
+    public List<AgentEvent.UsageUpdated.Quota.Window> quotaWindows() {
+        return super.quotaWindows();
+    }
+
     private volatile int anchorRow;
 
     /** Last known max scroll offset (total rows - viewport height), set by the renderer each frame. */

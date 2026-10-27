@@ -31,16 +31,16 @@ import java.util.Locale;
  * prompt / banner and in the TUI sidebar / status bar.
  *
  * <p>Explicit configuration wins, then the provider tone, then an implicit
- * position-based palette so distinct (provider, model) pairs are visually
- * distinguishable:</p>
+ * value-based palette so distinct (provider, model) pairs are visually
+ * distinguishable independently of the provider list order:</p>
  * <ol>
  *   <li>an exact/contains entry of the provider {@code models} list provides {@code color} and/or {@code bold};</li>
  *   <li>else the provider {@code color} base tone is used as the family hue;</li>
- *   <li>else the hue is rotated by the provider position ({@code 0} for the flat
- *       default, {@code 1 + index} within {@code providers});</li>
- *   <li>the model shades that tone: the first two listed models are bold and
- *       brightest, later ones dim the same hue, unlisted models get a
- *       deterministic shade (and are bold).</li>
+ *   <li>else the hue is derived deterministically from the provider {@code id}
+ *       so a provider always keeps its color whatever its position;</li>
+ *   <li>the model shades that tone from the model name hash: every model gets a
+ *       stable, deterministic lightness within the provider family and the first
+ *       two listed models are bold.</li>
  * </ol>
  * <p>Every resolved color is contrast-adjusted against the effective terminal
  * background (dark/light, taken from the persisted {@code theme} file when
@@ -49,9 +49,6 @@ import java.util.Locale;
 @ApplicationScoped
 public class ModelStyleService {
     static final double CONTRAST_TARGET = 4.5;
-
-    // rotating family hues (degrees) by provider position; full saturation on every position.
-    private static final double[] HUES = {190, 130, 45, 285, 215};
 
     private final CodingAgentConfiguration configuration;
     private final ChatClient chatClient;
@@ -123,30 +120,25 @@ public class ModelStyleService {
 
         double hue;
         double chroma;
+        double lightness;
         if (style != null && style.color() != null && !style.color().isBlank()) {
+            // an explicit model color wins completely (hue, chroma and lightness)
             final var hsl = toHsl(parseHex(style.color()));
             hue = hsl[0];
             chroma = hsl[1];
+            lightness = hsl[2];
         } else if (provider.color() != null && !provider.color().isBlank()) {
             final var hsl = toHsl(parseHex(provider.color()));
             hue = hsl[0];
             chroma = hsl[1];
+            // the family tone carries the provider hue; each model shades it deterministically
+            lightness = modelLightness(model);
         } else {
-            final var position = position(provider);
-            hue = HUES[(position % HUES.length + HUES.length) % HUES.length];
+            hue = providerHue(provider);
             chroma = 0.72;
+            lightness = modelLightness(model);
         }
 
-        final double lightness;
-        if (index >= 0) {
-            // listed models: first two brightest, later ones step the same hue down
-            lightness = index < 2 ? 0.72 : Math.max(0.34, 0.58 - 0.06 * (index - 1));
-        } else {
-            // unlisted model: deterministic shade within the provider family hue, always bold
-            final var seed = model == null ? 0 : model.hashCode();
-            final var shade = (seed & 0x7FFFFFFF) % 7;
-            lightness = 0.34 + (shade / 6.0) * 0.38;
-        }
         final var hex = toHex(hslToRgb(hue, chroma, lightness));
         final var adjusted = adjustContrast(hex, dark);
         return new ModelStyle(adjusted, bold);
@@ -253,8 +245,18 @@ public class ModelStyleService {
         };
     }
 
-    private int position(final ProviderConfiguration provider) {
-        return chatClient.providerPosition(provider);
+    /** Deterministic hue (degrees) derived from the provider id, stable regardless of list position. */
+    private static double providerHue(final ProviderConfiguration provider) {
+        final var seed =
+                provider == null || provider.id() == null ? 0 : provider.id().hashCode();
+        return (seed & 0x7FFFFFFF) % 360;
+    }
+
+    /** Deterministic lightness from the model name so its shade never depends on the providers list order. */
+    private static double modelLightness(final String model) {
+        final var seed = model == null ? 0 : model.hashCode();
+        final var shade = (seed & 0x7FFFFFFF) % 9;
+        return 0.40 + (shade / 8.0) * 0.34;
     }
 
     private static int listedIndex(final List<ProviderModelConfiguration> models, final String model) {

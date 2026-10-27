@@ -280,7 +280,7 @@ public class CompactionCoordinator {
         }
         final var prior = previousSummary(messages);
         final var compactCfg = configuration.compaction();
-        var chunkCap = effectiveChunkCap();
+        var chunkCap = effectiveChunkCap(compactModelReference(settings));
         var halvings = 0;
         var lastSizeError = (String) null;
         Outcome outcome;
@@ -607,7 +607,7 @@ public class CompactionCoordinator {
             final int chunkCap,
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
-        final var digestCap = effectiveDigestCap();
+        final var digestCap = effectiveDigestCap(compactModelReference(settings));
         final var summary = new StringBuilder();
         var calls = 0;
         var sizeError = false;
@@ -862,8 +862,15 @@ public class CompactionCoordinator {
      * usable window (in chars, ~4 chars/token), floored at the configured minimum so small models
      * stay safe. No upper ceiling: the fraction itself is self-bounding (a quarter of the window can
      * never exceed the window), and a too-optimistic estimate is recovered by the halving retry.
+     *
+     * @param compactModel reference of the summarizer model ({@code null} falls back to the
+     *                     conversation model, the historical behavior when no background model)
      */
     int effectiveChunkCap() {
+        return effectiveChunkCap(null);
+    }
+
+    int effectiveChunkCap(final String compactModel) {
         final var explicit = summarizerChunkChars();
         if (explicit > 0) {
             return explicit;
@@ -872,7 +879,10 @@ public class CompactionCoordinator {
         if (usageTracker == null) {
             return floor;
         }
-        final var usable = usageTracker.usableWindow();
+        // size against the summarizer model's own usable window (a smaller background model than the
+        // conversation model must not drive a guaranteed summarizer overflow), falling back to the
+        // conversation model's window when no dedicated summarizer model is configured
+        final var usable = usageTracker.usableWindowForModel(compactModel);
         // ~4 chars per token: the classic code/JSON average; conservative (window is already
         // reduced by the output reserve), and a too-large cap is recovered by the halving retry
         final var derived = (usable / 4L) * 4L;
@@ -885,11 +895,15 @@ public class CompactionCoordinator {
      * inside the window for any chunk that fits).
      */
     int effectiveDigestCap() {
+        return effectiveDigestCap(null);
+    }
+
+    int effectiveDigestCap(final String compactModel) {
         final var explicit = summarizerDigestChars();
         if (explicit > 0) {
             return explicit;
         }
-        return Math.max(1, effectiveChunkCap() / 2);
+        return Math.max(1, effectiveChunkCap(compactModel) / 2);
     }
 
     /** The per-tool-output cap used when the history is serialized into the summarizer input. */

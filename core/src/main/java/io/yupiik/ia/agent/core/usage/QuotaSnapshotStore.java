@@ -83,6 +83,10 @@ public class QuotaSnapshotStore {
 
     /** Records the session's provider selection so quota follows the tab's own provider. */
     public void attach(final String sessionId, final ChatSettings settings) {
+        if (sessionId == null || sessionId.isBlank()) {
+            // no session id yet (eg. a provider switch before the first turn): nothing to track
+            return;
+        }
         final SessionQuota quota = sessions.computeIfAbsent(sessionId, s -> new SessionQuota());
         final ProviderConfiguration provider = resolveProvider(settings);
         quota.settings = settings;
@@ -112,6 +116,23 @@ public class QuotaSnapshotStore {
         if (supported && (force || quota.stale(clock.millis()))) {
             refreshIfStale(sessionId, quota, force);
         }
+        return new QuotaView(enabled, supported, quota.snapshot == null ? CodexUsageSnapshot.empty() : quota.snapshot);
+    }
+
+    /** Reads the current cached quota without checking or refreshing its TTL. */
+    public QuotaView cachedSnapshot(final String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            // a null/blank key would NPE inside ConcurrentHashMap.get(null); treat it as "no quota yet"
+            // instead of blowing up on a best-effort cached read (e.g. before a session's first turn).
+            return new QuotaView(false, false, CodexUsageSnapshot.empty());
+        }
+        final SessionQuota quota = sessions.get(sessionId);
+        if (quota == null) {
+            return new QuotaView(false, false, CodexUsageSnapshot.empty());
+        }
+        final var provider = quota.provider;
+        final boolean enabled = usageEnabled(provider);
+        final boolean supported = enabled && isCodexProvider(provider);
         return new QuotaView(enabled, supported, quota.snapshot == null ? CodexUsageSnapshot.empty() : quota.snapshot);
     }
 

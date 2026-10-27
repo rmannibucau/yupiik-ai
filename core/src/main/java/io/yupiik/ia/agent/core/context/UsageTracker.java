@@ -372,6 +372,107 @@ public class UsageTracker {
         return ContextBudget.usableWindow(window, output);
     }
 
+    /**
+     * Resolve a routable background model reference to its (provider, model) pair, or null when the
+     * reference is blank/null (no dedicated background model -> the session's conversation model)
+     * or names an unknown provider/model.
+     */
+    private ResolvedRef resolveModelRef(final String modelReference) {
+        if (providerManager == null || modelReference == null || modelReference.isBlank()) {
+            return null;
+        }
+        final var resolved = providerManager.resolve(modelReference);
+        if (resolved.provider() == null) {
+            return null;
+        }
+        final var model = resolved.model();
+        return model == null || model.isBlank() ? null : new ResolvedRef(resolved.provider(), model);
+    }
+
+    private record ResolvedRef(ProviderConfiguration provider, String model) {}
+
+    /**
+     * The usable window of an explicit background model reference (e.g. the compaction summarizer),
+     * mirroring {@link #usableWindow()} but keyed to the model the reference routes to rather than
+     * the session's conversation model. So a background summarizer smaller than the conversation
+     * model sizes its input chunks against its own window instead of the conversation model's.
+     *
+     * <p>When the reference is blank/null there is no dedicated background model (the summarizer runs
+     * on the conversation model), so the session's usual usable window applies. When the reference
+     * cannot be resolved or no window is established, the conservative {@link ContextBudget#MIN_USABLE_WINDOW}
+     * is returned so the caller never over-sizes against a phantom large window; the compaction halving
+     * retry stays the safety net for an underestimated window.
+     */
+    public int usableWindowForModel(final String modelReference) {
+        // a blank/null reference means no dedicated background model: the summarizer runs on the
+        // conversation model, so its window is the session's own
+        if (modelReference == null || modelReference.isBlank()) {
+            return usableWindow();
+        }
+        final var ref = resolveModelRef(modelReference);
+        if (ref == null) {
+            return ContextBudget.MIN_USABLE_WINDOW;
+        }
+        final var window = resolveContextWindow(ref.provider(), ref.model());
+        if (window == null) {
+            return ContextBudget.MIN_USABLE_WINDOW;
+        }
+        final var output = resolveDeclaredOutputTokens(ref.provider(), ref.model());
+        return ContextBudget.usableWindow(window, output);
+    }
+
+    /**
+     * The context window of an explicit (provider, model) pair, sharing the precedence chain of
+     * {@link #contextWindowTokenCount()} (per-model override, provider config, cached /v1/models,
+     * fresh detection) but without counting the resolution toward the session's auto/explicit gauge.
+     * {@code null} when no source establishes a window.
+     */
+    private ModelsResponse.TokenCount resolveContextWindow(final ProviderConfiguration provider, final String model) {
+        if (providerManager != null && model != null && !model.isBlank()) {
+            final var override = providerManager.contextWindowOverride(provider, model);
+            if (override > 0) {
+                return new ModelsResponse.TokenCount(
+                        override, true, ModelsResponse.SourceType.CONFIGURED, "model-config");
+            }
+        }
+        if (provider.contextWindow() > 0) {
+            return new ModelsResponse.TokenCount(
+                    provider.contextWindow(), true, ModelsResponse.SourceType.CONFIGURED, "provider-config");
+        }
+        if (chatClient == null || contextWindowCache == null || model == null || model.isBlank()) {
+            return null;
+        }
+        final var providerId = providerId(provider);
+        final var cached = contextWindowCache.get(providerId, model);
+        if (cached.isPresent()) {
+            return cached.get();
+        }
+        if (failedAutoDetectionRecently(providerId, model)) {
+            return null;
+        }
+        return detectTokenCount(providerId, model).orElse(null);
+    }
+
+    /**
+     * The declared output budget of an explicit (provider, model) pair, mirroring
+     * {@link #declaredOutputTokensTokenCount()}; {@code null} when unknown.
+     */
+    private ModelsResponse.TokenCount resolveDeclaredOutputTokens(
+            final ProviderConfiguration provider, final String model) {
+        final var override = providerManager == null ? 0 : providerManager.outputTokensOverride(provider, model);
+        if (override > 0) {
+            return new ModelsResponse.TokenCount(override, true, ModelsResponse.SourceType.CONFIGURED, "model-config");
+        }
+        if (provider.outputTokens() > 0) {
+            return new ModelsResponse.TokenCount(
+                    provider.outputTokens(), true, ModelsResponse.SourceType.CONFIGURED, "provider-config");
+        }
+        if (contextWindowCache == null || model == null || model.isBlank()) {
+            return null;
+        }
+        return contextWindowCache.getMaxTokens(providerId(provider), model).orElse(null);
+    }
+
     public long promptTokens() {
         return promptTokens.get();
     }

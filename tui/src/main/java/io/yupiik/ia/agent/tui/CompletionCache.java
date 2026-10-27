@@ -16,100 +16,209 @@
 package io.yupiik.ia.agent.tui;
 
 import java.util.List;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
- * Cached completion value sources. Populated asynchronously on the shared
- * executor so the render thread never blocks on a network/IO round-trip
- * while completing. Each field is replaced atomically with an immutable
- * list (or map); readers just call get.
+ * Lazy completion value store for the TUI prompt. Each slice is populated on
+ * first need by the shell (never by a blanket refresh), keyed by the scope its
+ * value depends on:
  *
- * <p>Model listings are provider-scoped: {@link #invalidateModels()} is called
- * when the provider switches so a stale list from the previous provider (whose
- * model ids may look alike, e.g. {@code glm-5.3} vs {@code z-ai/glm-5.3}) is
- * never offered for completion. The {@code modelGeneration} monotonically
- * grows with every models/variants update; a background refresh that started
- * before the invalidation has its result dropped when it lands afterwards,
- * so an old provider's refresh can never overwrite a newer list.</p>
+ * <ul>
+ *   <li>{@link #tools()}, {@link #servers()} and {@link #sessions()} are
+ *       <em>application-scoped</em> (MCP tools rarely change mid-run; a restart
+ *       is acceptable), so they are fetched once on first use and kept for the
+ *       process lifetime - only {@link #refreshSessions()} invalidates the
+ *       sessions slice because a new/closed tab changes the resume candidates.</li>
+ *   <li>{@link #models(String)} and {@link #variants(String, String)} are
+ *       <em>provider-scoped</em> (different providers expose different model
+ *       ids, e.g. {@code glm-5.3} vs {@code z-ai/glm-5.3}), so they are cached
+ *       in a per-provider map and fetched lazily the first time that provider
+ *       is completed against. Switching tabs/providers never needs an
+ *       invalidation: each provider's list lives under its own key, so a stale
+ *       list from another provider can never be offered.</li>
+ * </ul>
+ *
+ * <p>In-flight fetches are tracked per key so a burst of keystrokes against a
+ * not-yet-loaded slice schedules at most one warm-up. Every applied mutation
+ * fires {@code onChanged} so the shell can recompute a pending empty completion
+ * popup once the async value lands.</p>
  */
 public final class CompletionCache {
-    private volatile List<String> models = List.of();
-    private volatile List<String> sessions = List.of();
+    private final Runnable onChanged;
+
+    // application-scoped slices (loaded once on first need)
     private volatile List<String> tools = List.of();
-    private volatile Map<String, List<String>> variants = Map.of();
-    private volatile long modelGeneration;
+    private volatile boolean toolsLoaded;
+    private volatile List<String> servers = List.of();
+    private volatile boolean serversLoaded;
+    private volatile List<String> sessions = List.of();
+    private volatile boolean sessionsLoaded;
 
-    /** The generation of the models/variants cache; increases on every update and invalidation. */
-    public long modelGeneration() {
-        return modelGeneration;
+    // provider-scoped slices (lazy per provider)
+    private final ConcurrentMap<String, List<String>> models = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ConcurrentMap<String, List<String>>> variants = new ConcurrentHashMap<>();
+
+    // in-flight guards so concurrent completions do not schedule duplicate warm-ups
+    private final java.util.concurrent.atomic.AtomicBoolean toolsLoading =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicBoolean serversLoading =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicBoolean sessionsLoading =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.Set<String> modelsLoading = ConcurrentHashMap.newKeySet();
+    private final java.util.Set<String> variantsLoading = ConcurrentHashMap.newKeySet();
+
+    public CompletionCache(final Runnable onChanged) {
+        this.onChanged = onChanged == null ? () -> {} : onChanged;
     }
 
-    public List<String> models() {
-        return models;
+    private void changed() {
+        onChanged.run();
     }
 
-    public void models(final List<String> value) {
-        models = value == null ? List.of() : value;
-        modelGeneration++;
-    }
-
-    /**
-     * Applies a fresh model list only when the cache generation still matches {@code expectedGeneration}
-     * (captured before an asynchronous fetch). Returns {@code false} when the cache changed meanwhile -
-     * e.g. a provider switch invalidated it - so an old provider's refresh never overwrites a newer list.
-     */
-    public boolean updateModels(final long expectedGeneration, final List<String> value) {
-        if (modelGeneration != expectedGeneration) {
-            return false;
-        }
-        models = value == null ? List.of() : value;
-        modelGeneration++;
-        return true;
-    }
-
-    /** Clears the provider-scoped models and variants, bumping the generation so in-flight refreshes are dropped. */
-    public void invalidateModels() {
-        models = List.of();
-        variants = Map.of();
-        modelGeneration++;
-    }
-
-    public List<String> sessions() {
-        return sessions;
-    }
-
-    public void sessions(final List<String> value) {
-        sessions = value == null ? List.of() : value;
-    }
+    /* ---------------- application-scoped: tools ---------------- */
 
     public List<String> tools() {
         return tools;
     }
 
+    public boolean toolsLoaded() {
+        return toolsLoaded;
+    }
+
+    /** Starts an application-wide tools fetch; {@code false} when one is already in flight or done. */
+    public boolean beginToolsLoad() {
+        return !toolsLoaded && toolsLoading.compareAndSet(false, true);
+    }
+
+    public void endToolsLoad() {
+        toolsLoading.set(false);
+    }
+
     public void tools(final List<String> value) {
         tools = value == null ? List.of() : value;
+        toolsLoaded = true;
+        changed();
     }
 
-    public List<String> variants(final String model) {
-        final var map = variants;
-        return model == null ? List.of() : map.getOrDefault(model, List.of());
+    /* ---------------- application-scoped: servers ---------------- */
+
+    public List<String> servers() {
+        return servers;
     }
 
-    public void variants(final Map<String, List<String>> value) {
-        variants = value == null ? Map.of() : value;
-        modelGeneration++;
+    public boolean serversLoaded() {
+        return serversLoaded;
     }
 
-    /**
-     * Applies a fresh variants map only when the cache generation still matches {@code expectedGeneration}
-     * (captured before the asynchronous lookup). Returns {@code false} when the cache changed meanwhile.
-     */
-    public boolean updateVariants(final long expectedGeneration, final Map<String, List<String>> value) {
-        if (modelGeneration != expectedGeneration) {
-            return false;
+    public boolean beginServersLoad() {
+        return !serversLoaded && serversLoading.compareAndSet(false, true);
+    }
+
+    public void endServersLoad() {
+        serversLoading.set(false);
+    }
+
+    public void servers(final List<String> value) {
+        servers = value == null ? List.of() : value;
+        serversLoaded = true;
+        changed();
+    }
+
+    /* ---------------- application-scoped: sessions ---------------- */
+
+    public List<String> sessions() {
+        return sessions;
+    }
+
+    public boolean sessionsLoaded() {
+        return sessionsLoaded;
+    }
+
+    public boolean beginSessionsLoad() {
+        return !sessionsLoaded && sessionsLoading.compareAndSet(false, true);
+    }
+
+    public void endSessionsLoad() {
+        sessionsLoading.set(false);
+    }
+
+    public void sessions(final List<String> value) {
+        sessions = value == null ? List.of() : value;
+        sessionsLoaded = true;
+        changed();
+    }
+
+    /** Drops the loaded flag so the next completion re-fetches (a tab was created or closed). */
+    public void refreshSessions() {
+        sessionsLoaded = false;
+        sessions = List.of();
+    }
+
+    /* ---------------- provider-scoped: models ---------------- */
+
+    public List<String> models(final String providerId) {
+        return models.getOrDefault(providerId, List.of());
+    }
+
+    public boolean modelsLoaded(final String providerId) {
+        return models.containsKey(providerId);
+    }
+
+    /** Starts a models fetch for one provider; {@code false} when one is already in flight or done. */
+    public boolean beginModelsLoad(final String providerId) {
+        return !models.containsKey(providerId) && modelsLoading.add(providerId);
+    }
+
+    public void endModelsLoad(final String providerId) {
+        modelsLoading.remove(providerId);
+    }
+
+    public void models(final String providerId, final List<String> value) {
+        models.put(providerId, value == null ? List.of() : value);
+        changed();
+    }
+
+    /* ---------------- provider-scoped: variants ---------------- */
+
+    public List<String> variants(final String providerId, final String model) {
+        final var byProvider = variants.get(providerId);
+        return byProvider == null || model == null ? List.of() : byProvider.getOrDefault(model, List.of());
+    }
+
+    public boolean variantsLoaded(final String providerId, final String model) {
+        final var byProvider = variants.get(providerId);
+        return model != null && byProvider != null && byProvider.containsKey(model);
+    }
+
+    /** Starts a variants fetch for one provider+model; {@code false} when one is already in flight or done. */
+    public boolean beginVariantsLoad(final String providerId, final String model) {
+        return model != null
+                && !variantsLoaded(providerId, model)
+                && variantsLoading.add(providerId + "\u0000" + model);
+    }
+
+    public void endVariantsLoad(final String providerId, final String model) {
+        if (model != null) {
+            variantsLoading.remove(providerId + "\u0000" + model);
         }
-        variants = value == null ? Map.of() : value;
-        modelGeneration++;
-        return true;
+    }
+
+    public void variants(final String providerId, final String model, final List<String> value) {
+        variants.compute(providerId, (k, byProvider) -> {
+            final var next = byProvider == null
+                    ? new ConcurrentHashMap<String, List<String>>()
+                    : new ConcurrentHashMap<>(byProvider);
+            next.put(model, value == null ? List.of() : value);
+            return next;
+        });
+        changed();
+    }
+
+    /** Clears the provider-scoped models/variants (optionally for a single provider); used on explicit reload. */
+    public void clearProvider() {
+        models.clear();
+        variants.clear();
     }
 }

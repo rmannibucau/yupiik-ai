@@ -473,6 +473,19 @@ public class AgentLoop {
     private boolean doomLoopNudged;
 
     /**
+     * The last {@code estimatedContextTokens} a {@link AgentEvent.UsageUpdated} carried, so a
+     * quota-only push at provider switch or {@code /usage} preserves the live context gauge instead
+     * of resetting it to zero (the push has no message list to recompute context from).
+     */
+    private volatile int lastUsageContextTokens = -1;
+
+    /**
+     * The last {@code contextPercent} a {@link AgentEvent.UsageUpdated} carried (see
+     * {@link #lastUsageContextTokens}).
+     */
+    private volatile double lastUsageContextPercent = -1;
+
+    /**
      * Names of the tools the registry serves in build mode (the unfiltered {@code toWireTools()} list),
      * frozen once per {@code loop}. Plan mode hides EDIT tools from that list; a call to an EDIT tool that
      * IS served (present here) is plan-hidden and rejected at dispatch instead of reaching the approval gate.
@@ -699,6 +712,28 @@ public class AgentLoop {
                     alt.model(),
                     alt.variant()));
         }
+        // a provider switch must re-attach this session's quota snapshot immediately so the frontend
+        // gauge (freshly refreshed at switch, then TTL-governed) shows the *new* provider's usage at
+        // switch time instead of keeping the old provider's cached quota until the next turn, and a
+        // fully-reached quota is visible. Only a provider change pushes a quota event: a model-only
+        // switch reuses the already-attached snapshot and must not clobber the live context gauge.
+        if (providerChanged(current, alt)) {
+            if (quotaStore != null) {
+                quotaStore.attach(currentSessionId, alt);
+            }
+            pushUsageQuota();
+        }
+    }
+
+    /** True when the resolved provider id differs between two selections (blank = process default). */
+    private static boolean providerChanged(final ChatSettings before, final ChatSettings after) {
+        final var a = before == null ? "" : normalizeProvider(before.providerId());
+        final var b = after == null ? "" : normalizeProvider(after.providerId());
+        return !a.equals(b);
+    }
+
+    private static String normalizeProvider(final String id) {
+        return id == null || id.isBlank() ? "" : id.strip().toLowerCase(Locale.ROOT);
     }
 
     /** Sets optional profile-level model tuning for this loop (used by isolated subagent loops). */
@@ -3991,19 +4026,12 @@ public class AgentLoop {
 
     private void emitUsage(final List<Message> messages, final int toolsTokens) {
         final var effective = usageTracker.effectiveContext(messages, toolsTokens);
+        lastUsageContextTokens = effective;
+        lastUsageContextPercent = usageTracker.contextPercent(effective);
         emit(usageUpdated(
-                usageTracker.promptTokens() > 0
-                        ? new io.yupiik.ia.agent.core.llm.Usage(
-                                (int) usageTracker.promptTokens(),
-                                (int) usageTracker.completionTokens(),
-                                (int) (usageTracker.promptTokens() + usageTracker.completionTokens()),
-                                usageTracker.cacheReadTokens(),
-                                0,
-                                (int) usageTracker.reasoningTokens(),
-                                0)
-                        : io.yupiik.ia.agent.core.llm.Usage.EMPTY,
+                currentUsage(),
                 effective,
-                usageTracker.contextPercent(effective),
+                lastUsageContextPercent,
                 usageTracker.lastRealPromptTokens(),
                 usageTracker.calibrationRatio(),
                 requestModel(resolvedModel()),
@@ -4011,7 +4039,56 @@ public class AgentLoop {
     }
 
     /**
-     * The current account quota for this session, refreshed at most once per {@code QuotaSnapshotStore}
+     * Emits a quota-only {@link UsageUpdated} (the frontends' single source for the sidebar gauge)
+     * with the session's current token metrics. Used at provider/model switch so the TUI and web
+     * reflect the new provider's account usage immediately, and by {@code /usage} so a forced
+     * refresh reaches the sidebar instead of only the command's table. The context fields are the
+     * last values a real turn published (never recomputed from an empty list), so the push refreshes
+     * the quota without clobbering the live context gauge.
+     */
+    public void pushUsageQuota() {
+        if (emitter == null) {
+            return;
+        }
+        final var effective = lastUsageContextTokens >= 0 ? lastUsageContextTokens : 0;
+        emit(usageUpdated(
+                currentUsage(),
+                effective,
+                lastUsageContextPercent >= 0 ? lastUsageContextPercent : 0,
+                usageTracker == null ? 0 : usageTracker.lastRealPromptTokens(),
+                usageTracker == null ? -1 : usageTracker.calibrationRatio(),
+                requestModel(resolvedModel()),
+                currentQuota()));
+    }
+
+    private io.yupiik.ia.agent.core.llm.Usage currentUsage() {
+        if (usageTracker == null || usageTracker.promptTokens() <= 0) {
+            return io.yupiik.ia.agent.core.llm.Usage.EMPTY;
+        }
+        return new io.yupiik.ia.agent.core.llm.Usage(
+                (int) usageTracker.promptTokens(),
+                (int) usageTracker.completionTokens(),
+                (int) (usageTracker.promptTokens() + usageTracker.completionTokens()),
+                usageTracker.cacheReadTokens(),
+                0,
+                (int) usageTracker.reasoningTokens(),
+                0);
+    }
+
+    /** Reads the per-session cached account quota without causing a refresh. */
+    public AgentEvent.UsageUpdated.Quota cachedQuotaSnapshot() {
+        if (quotaStore == null) {
+            return AgentEvent.UsageUpdated.Quota.NONE;
+        }
+        // currentSessionId is only set once a turn actually runs; before the first turn it is null, and
+        // feeding a null key into the quota store's ConcurrentHashMap.get would NPE (surfacing on the
+        // web snapshot path as a silently-hung session restore). Prefer the live id, else the stable one.
+        final var id = currentSessionId != null ? currentSessionId : this.sessionId;
+        final var view = quotaStore.cachedSnapshot(id);
+        return AgentEvent.UsageUpdated.Quota.of(view.enabled(), view.supported(), view.snapshot());
+    }
+
+    /** The current account quota for this session, refreshed at most once per {@code QuotaSnapshotStore}
      * TTL. Returns {@link AgentEvent.UsageUpdated.Quota#NONE} when the current provider has no usage
      * capability (so UIs hide the gauge).
      */

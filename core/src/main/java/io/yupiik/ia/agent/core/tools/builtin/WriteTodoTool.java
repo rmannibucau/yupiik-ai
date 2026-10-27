@@ -30,6 +30,7 @@ import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
@@ -132,7 +133,8 @@ public class WriteTodoTool implements EmbeddedTool {
             final var note = normalized.isEmpty()
                     ? ""
                     : " (plan mode: '" + String.join("', '", normalized)
-                            + "' normalized to pending - statuses advance in build mode only)";
+                            + "' kept as pending - in plan mode you cannot hold an in_progress/completed status; "
+                            + "do not re-emit these as in_progress/completed, they stay pending until build mode)";
             return ToolResult.ok("Todo list updated" + note + ":\n" + store.render());
         }
         store.replace(todos);
@@ -151,7 +153,7 @@ public class WriteTodoTool implements EmbeddedTool {
      */
     private List<String> normalizePlanStatuses(final TodoStore store, final List<TodoItem> todos) {
         final var alreadyAdvanced = store.all().stream()
-                .map(t -> t.status() == null || "pending".equals(t.status()) ? null : t.content() + '|' + t.status())
+                .map(t -> t.status() == null || "pending".equals(t.status()) ? null : key(t.content(), t.status()))
                 .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
         final var normalized = new ArrayList<String>();
@@ -159,13 +161,23 @@ public class WriteTodoTool implements EmbeddedTool {
             final var t = todos.get(i);
             if ("pending".equals(t.status())
                     || "cancelled".equals(t.status())
-                    || alreadyAdvanced.contains(t.content() + '|' + t.status())) {
+                    || alreadyAdvanced.contains(key(t.content(), t.status()))) {
                 continue;
             }
             normalized.add(t.content());
             todos.set(i, new TodoItem(t.content(), "pending"));
         }
         return normalized;
+    }
+
+    /**
+     * Content-based identity for the plan-mode preserve guard. The content is trimmed and
+     * lower-cased so a legitimately-advanced item survives an otherwise-identical re-emission
+     * with cosmetic text drift (surrounding whitespace or capitalisation), which would otherwise
+     * be normalized back to 'pending' and recreate the very progress the list had recorded.
+     */
+    private static String key(final String content, final String status) {
+        return (content == null ? "" : content.trim().toLowerCase(Locale.ROOT)) + '|' + status;
     }
 
     private static String typeName(final Object o) {

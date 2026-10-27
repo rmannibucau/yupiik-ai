@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.web;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /** Flat, JSON-safe projection of an {@link AgentEvent} streamed to the browser over SSE. */
@@ -104,36 +105,42 @@ public record WebEventDto(
                         t.pending(),
                         "ordinal",
                         t.ordinal());
-            case AgentEvent.UsageUpdated t ->
-                Map.of(
-                        "promptTokens", t.usage() == null ? 0 : t.usage().promptTokens(),
-                        "completionTokens", t.usage() == null ? 0 : t.usage().completionTokens(),
-                        "reasoningTokens", t.usage() == null ? 0 : t.usage().reasoningTokens(),
-                        "cacheReadTokens", t.usage() == null ? 0 : t.usage().cacheReadTokens(),
-                        "estimatedContextTokens", t.estimatedContextTokens(),
-                        "contextPercent", t.contextPercent(),
-                        "quota",
-                                t.quota() == null
-                                        ? null
-                                        : Map.of(
-                                                "enabled", t.quota().enabled(),
-                                                "supported", t.quota().supported(),
-                                                "planType",
-                                                        t.quota().planType() == null
-                                                                ? ""
-                                                                : t.quota().planType(),
-                                                "usedPercent", t.quota().usedPercent(),
-                                                "windowSeconds", t.quota().windowSeconds(),
-                                                "resetAtEpochSeconds", t.quota().resetAtEpochSeconds(),
-                                                "windowLabel",
-                                                        t.quota().windowLabel() == null
-                                                                ? ""
-                                                                : t.quota().windowLabel(),
-                                                "creditsBalance",
-                                                        t.quota().creditsBalance() == null
-                                                                ? ""
-                                                                : t.quota().creditsBalance(),
-                                                "creditsUnlimited", t.quota().creditsUnlimited()));
+            case AgentEvent.UsageUpdated t -> {
+                final var data = new LinkedHashMap<String, Object>();
+                data.put("promptTokens", t.usage() == null ? 0 : t.usage().promptTokens());
+                data.put("completionTokens", t.usage() == null ? 0 : t.usage().completionTokens());
+                data.put("reasoningTokens", t.usage() == null ? 0 : t.usage().reasoningTokens());
+                data.put("cacheReadTokens", t.usage() == null ? 0 : t.usage().cacheReadTokens());
+                data.put("estimatedContextTokens", t.estimatedContextTokens());
+                data.put("contextPercent", t.contextPercent());
+                final var quota = new LinkedHashMap<String, Object>();
+                if (t.quota() != null) {
+                    quota.put("enabled", t.quota().enabled());
+                    quota.put("supported", t.quota().supported());
+                    quota.put("planType", t.quota().planType());
+                    quota.put("usedPercent", t.quota().usedPercent());
+                    quota.put("windowSeconds", t.quota().windowSeconds());
+                    quota.put("resetAtEpochSeconds", t.quota().resetAtEpochSeconds());
+                    quota.put("windowLabel", t.quota().windowLabel());
+                    quota.put("creditsBalance", t.quota().creditsBalance());
+                    quota.put("creditsUnlimited", t.quota().creditsUnlimited());
+                    quota.put(
+                            "windows",
+                            t.quota().windows().stream()
+                                    .map(w -> {
+                                        final var window = new LinkedHashMap<String, Object>();
+                                        window.put("kind", w.kind());
+                                        window.put("label", w.label());
+                                        window.put("usedPercent", w.usedPercent());
+                                        window.put("windowSeconds", w.windowSeconds());
+                                        window.put("resetAtEpochSeconds", w.resetAtEpochSeconds());
+                                        return window;
+                                    })
+                                    .toList());
+                }
+                data.put("quota", t.quota() == null ? null : quota);
+                yield data;
+            }
             case AgentEvent.Pause t ->
                 Map.of("durationMs", t.durationMs(), "kind", t.kind().name());
             case AgentEvent.Notice t ->

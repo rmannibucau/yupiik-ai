@@ -66,6 +66,14 @@ public class UsageCommands implements SlashCommandSet {
             quotaStore.attach(sessionId, env.session().chatSettings());
         }
         final var view = quotaStore.refresh(sessionId);
+        // push the freshly-refreshed snapshot to the TUI/web sidebar gauge (a /usage always
+        // reflects live usage, including a fully-reached quota), so it is not hidden behind the
+        // command's own table: re-emit a UsageUpdated exactly like a provider switch does.
+        final var loop =
+                env.session().runtime() == null ? null : env.session().runtime().loop();
+        if (loop != null) {
+            loop.pushUsageQuota();
+        }
         if (!view.supported()) {
             return ShellOutcome.status(
                     "usage not supported by the current provider (set capabilities.codex.enableUsage to turn it on)");

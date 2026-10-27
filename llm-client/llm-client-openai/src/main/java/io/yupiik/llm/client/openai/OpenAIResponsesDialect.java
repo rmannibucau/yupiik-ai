@@ -138,15 +138,18 @@ public class OpenAIResponsesDialect extends AbstractDialect {
 
     /**
      * The {@code reasoning} request config: the effort plus the summary mode (which is what makes the
-     * backend stream the displayable reasoning-summary deltas at all). When
-     * {@link #includeEncryptedReasoning()} is true, also requests the opaque replayable
-     * {@code encrypted_content} blob via {@code include}.
+     * backend stream the displayable reasoning-summary deltas at all). {@code detailed} is required here:
+     * several backends (notably the ChatGPT Codex {@code /responses} edge) emit an *empty* summary and no
+     * {@code response.reasoning_summary_text.delta} events when asked for {@code auto}, so gpt-6* would
+     * reason server-side while the client shows no thinking. {@code detailed} forces the backend to stream
+     * the displayable summary parts. When {@link #includeEncryptedReasoning()} is true, also requests the
+     * opaque replayable {@code encrypted_content} blob via {@code include}.
      */
     private Map<String, Object> reasoningConfig(final String effort, final boolean includeEncryptedReasoning) {
         if (!includeEncryptedReasoning) {
-            return Map.of("effort", effort, "summary", "auto");
+            return Map.of("effort", effort, "summary", "detailed");
         }
-        return Map.of("effort", effort, "summary", "auto", "include", List.of("reasoning.encrypted_content"));
+        return Map.of("effort", effort, "summary", "detailed", "include", List.of("reasoning.encrypted_content"));
     }
 
     /**
@@ -502,8 +505,9 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                         "function", tool.name(), tool.description(), tool.parameters(), tool.strict()));
             }
         }
-        // 'summary' is required by the official API to stream reasoning deltas at all
-        // (gateways often emit them unrequested); 'auto' keeps the payload small
+        // 'summary' is required by the official API to stream reasoning deltas at all; 'detailed' forces
+        // the backend to actually emit the displayable summary parts (with 'auto' the ChatGPT Codex edge
+        // returns an empty summary and no reasoning deltas, hiding gpt-6* thinking entirely)
         final var reasoning = request.reasoningEffort() == null
                 ? null
                 : reasoningConfig(request.reasoningEffort(), includeEncryptedReasoning);
@@ -775,10 +779,26 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                         }
                     }
                 }
-                case "response.completed", "response.incomplete" ->
+                case "response.completed" -> result.add(new LlmStreamEvent.End("stop", terminalUsage(root)));
+                case "response.incomplete" -> {
+                    // Only a genuine output-token exhaustion is a truncation. A response.incomplete
+                    // with any other reason (content_filter, max_messages, steered, ...) is NOT the
+                    // model being cut off by its output budget: surfacing it as finish_reason=length
+                    // would make the agent loop retry it as a truncation (continueOnTruncation) and
+                    // burn the truncation budget hiding a real problem. Map only max_output_tokens to
+                    // "length"; keep the upstream reason verbatim otherwise so isTruncation() leaves it
+                    // alone and the turn can end/route normally.
+                    final var incompleteReason = incompleteReason(root);
                     result.add(new LlmStreamEvent.End(
-                            "response.completed".equals(type) ? "stop" : "length", usage(root.get("usage"))));
-                case "response.failed", "response.error", "error" -> result.add(new LlmStreamEvent.End("length", null));
+                            "max_output_tokens".equals(incompleteReason) ? "length" : incompleteReason,
+                            terminalUsage(root)));
+                }
+                case "response.failed", "response.error", "error" ->
+                    // An HTTP-layer/backend failure is not output-token exhaustion: map it to "error"
+                    // (a never-truncating reason) so it is not retried through the truncation path.
+                    // The empty-completion retry is bounded separately (emptyCompletionRetriesMax) and
+                    // surfaces the real failure to the user instead of pretending it was truncation.
+                    result.add(new LlmStreamEvent.End("error", null));
                 default -> {
                     // ignore unknown event types
                 }
@@ -854,6 +874,43 @@ public class OpenAIResponsesDialect extends AbstractDialect {
             }
         }
         return out;
+    }
+
+    /**
+     * Resolves the usage of a terminal {@code response.completed}/{@code response.incomplete} event.
+     * The official Responses API and the Codex backend nest the usage under {@code response.usage},
+     * while some gateways and older clients emit it at the event root. Prefer the nested shape (the
+     * canonical one) and fall back to the top-level key.
+     *
+     * @param root the decoded event payload.
+     * @return the resolved usage, {@link Usage#EMPTY} when neither shape carries one.
+     */
+    private static Usage terminalUsage(final Map<String, Object> root) {
+        if (root.get("response") instanceof Map<?, ?> response && response.get("usage") instanceof Map<?, ?> nested) {
+            return usage(nested);
+        }
+        return usage(root.get("usage"));
+    }
+
+    /**
+     * Resolves the {@code incomplete_details.reason} of a terminal {@code response.incomplete} event.
+     * The official Responses API and the Codex backend nest it under {@code response.incomplete_details},
+     * while some gateways emit it at the event root. {@code null} when neither shape carries one (the
+     * absence of details is intentionally indistinguishable from an unknown reason: neither is a
+     * truncation).
+     *
+     * @param root the decoded event payload.
+     * @return the reason string, or {@code null} when unknown/absent.
+     */
+    private static String incompleteReason(final Map<String, Object> root) {
+        final Object details = root.get("response") instanceof Map<?, ?> response
+                ? response.get("incomplete_details")
+                : root.get("incomplete_details");
+        if (details instanceof Map<?, ?> map) {
+            final var reason = map.get("reason");
+            return reason == null ? null : str(reason);
+        }
+        return null;
     }
 
     private static Usage usage(final Object value) {

@@ -101,6 +101,11 @@ public final class SessionRuntime {
         return feedback;
     }
 
+    /** The session's own cached quota snapshot; does not trigger a provider refresh. */
+    public io.yupiik.ia.agent.core.agent.AgentEvent.UsageUpdated.Quota quotaSnapshot() {
+        return loop.cachedQuotaSnapshot();
+    }
+
     /** The session's usage accounting (context anchor, token counters). */
     public UsageTracker usage() {
         return usage;

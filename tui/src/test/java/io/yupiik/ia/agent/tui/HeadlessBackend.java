@@ -39,13 +39,23 @@ final class HeadlessBackend implements Backend {
     static final int HEIGHT = 40;
 
     private final ReentrantLock lock = new ReentrantLock();
-    private final Buffer buffer = Buffer.empty(new Rect(0, 0, WIDTH, HEIGHT));
+    private final Size size;
+    private final Buffer buffer;
     private final Semaphore drawn = new Semaphore(0);
     private final StringBuilder raw = new StringBuilder();
 
+    HeadlessBackend() {
+        this(WIDTH, HEIGHT);
+    }
+
+    HeadlessBackend(final int width, final int height) {
+        size = new Size(width, height);
+        buffer = Buffer.empty(new Rect(0, 0, width, height));
+    }
+
     @Override
     public Size size() {
-        return new Size(WIDTH, HEIGHT);
+        return size;
     }
 
     @Override

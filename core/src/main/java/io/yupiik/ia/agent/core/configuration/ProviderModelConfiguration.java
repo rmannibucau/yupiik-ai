@@ -22,7 +22,7 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  * A per-model configuration entry of a provider. The {@code model} id is matched exactly first,
  * then as a substring of the model name ({@code claude} matches {@code claude-sonnet-5}).
  * Everything is nullable so each facet falls back to the provider default then to the implicit
- * position-based scheme.
+ * value-based scheme.
  */
 @JsonModel
 public record ProviderModelConfiguration(

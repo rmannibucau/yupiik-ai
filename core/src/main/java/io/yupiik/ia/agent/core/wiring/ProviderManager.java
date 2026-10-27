@@ -108,16 +108,6 @@ public class ProviderManager {
         return p == null ? (providers().isEmpty() ? null : providers().get(0)) : p;
     }
 
-    /** Position of a provider for styling: 0 for the implicit flat-scalar default provider, {@code 1 + index} within the configured {@code providers} list. */
-    public int providerPosition(final ProviderConfiguration provider) {
-        final var configured = configuration.provider().providers();
-        if (configured == null || configured.isEmpty()) {
-            return 0;
-        }
-        final int idx = provider == null ? -1 : configured.indexOf(provider);
-        return idx < 0 ? 0 : 1 + idx;
-    }
-
     /** Look up a provider by id; falls back to the default provider when not found. */
     public ProviderConfiguration provider(final String id) {
         if (id == null || id.isBlank()) {

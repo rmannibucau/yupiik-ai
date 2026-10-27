@@ -589,8 +589,9 @@ class OpenAIDialectTest {
                 false,
                 Map.of());
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
-        // 'summary' is what makes official OpenAI stream reasoning deltas at all
-        assertTrue(reqBody.get().contains("\"summary\":\"auto\""), reqBody.get());
+        // 'summary' is what makes official OpenAI stream reasoning deltas at all; 'detailed' forces
+        // gpt-6*-class backends to actually emit the displayable summary parts
+        assertTrue(reqBody.get().contains("\"summary\":\"detailed\""), reqBody.get());
         assertTrue(reqBody.get().contains("\"effort\":\"low\""), reqBody.get());
         // every Responses dialect now requests the opaque encrypted_content blob, so stateless clients can
         // replay it across turns for reasoning continuity (advisory on backends that do not support it)
@@ -929,6 +930,133 @@ class OpenAIDialectTest {
     }
 
     @Test
+    void responsesDialectReadsNestedResponseUsage(final JsonMapper mapper) throws Exception {
+        // the official Responses API (and the Codex backend) nest usage under response.usage on the
+        // terminal event, not at the event root; the dialect must surface those counts instead of EMPTY
+        final var sse = String.join(
+                "\n",
+                "event: response.output_text.delta",
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"i\",\"output_index\":0,\"delta\":\"hi\"}",
+                "",
+                "event: response.completed",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"model\":\"m\",\"output\":[],"
+                        + "\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"total_tokens\":8,"
+                        + "\"input_tokens_details\":{\"cached_tokens\":2},"
+                        + "\"output_tokens_details\":{\"reasoning_tokens\":1}}}}",
+                "",
+                "");
+        server.createContext("/v1/responses", exchange -> respond(exchange, 200, "text/event-stream", sse));
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var events = collect(publisher);
+        final var end = events.stream()
+                .filter(LlmStreamEvent.End.class::isInstance)
+                .map(LlmStreamEvent.End.class::cast)
+                .findFirst()
+                .orElseThrow();
+        assertEquals("stop", end.finishReason());
+        final var usage = end.usage();
+        org.junit.jupiter.api.Assertions.assertNotNull(usage, "nested response.usage must reach the End event");
+        assertEquals(3L, usage.prompt(), "nested response.usage must reach the End event");
+        assertEquals(5L, usage.completion());
+        assertEquals(8L, usage.total());
+        assertEquals(2L, usage.cacheRead());
+        assertEquals(1L, usage.reasoning());
+    }
+
+    @Test
+    void responsesIncompleteWithMaxOutputTokensMapsToTruncation(final JsonMapper mapper) throws Exception {
+        // a genuine output-token exhaustion (response.incomplete + incomplete_details.reason=max_output_tokens)
+        // must still surface as the truncation finish reason so the agent loop retries it via continueOnTruncation
+        final var sse = String.join(
+                "\n",
+                "event: response.output_text.delta",
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"i\",\"output_index\":0,\"delta\":\"par\"}",
+                "",
+                "event: response.incomplete",
+                "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"r1\",\"model\":\"m\",\"output\":[],"
+                        + "\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}",
+                "",
+                "");
+        server.createContext("/v1/responses", exchange -> respond(exchange, 200, "text/event-stream", sse));
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var events = collect(publisher);
+        final var end = events.stream()
+                .filter(LlmStreamEvent.End.class::isInstance)
+                .map(LlmStreamEvent.End.class::cast)
+                .findFirst()
+                .orElseThrow();
+        assertEquals("length", end.finishReason());
+    }
+
+    @Test
+    void responsesIncompleteWithContentFilterIsNotTruncation(final JsonMapper mapper) throws Exception {
+        // a safety-filter cutoff is NOT output-token exhaustion: it must surface verbatim (content_filter),
+        // not as finish_reason=length, so the loop does not burn the truncation budget retrying it
+        final var sse = String.join(
+                "\n",
+                "event: response.incomplete",
+                "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"r1\",\"model\":\"m\",\"output\":[],"
+                        + "\"incomplete_details\":{\"reason\":\"content_filter\"}}}",
+                "",
+                "");
+        server.createContext("/v1/responses", exchange -> respond(exchange, 200, "text/event-stream", sse));
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var events = collect(publisher);
+        final var end = events.stream()
+                .filter(LlmStreamEvent.End.class::isInstance)
+                .map(LlmStreamEvent.End.class::cast)
+                .findFirst()
+                .orElseThrow();
+        assertEquals("content_filter", end.finishReason());
+    }
+
+    @Test
+    void responsesFailedIsNotMappedToTruncation(final JsonMapper mapper) throws Exception {
+        // a backend/API failure (response.failed / response.error / error) is NOT output-token exhaustion:
+        // it must surface as "error" so the loop does not retry it as a truncation continuation
+        final var sse = String.join(
+                "\n",
+                "event: response.failed",
+                "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r1\",\"model\":\"m\",\"output\":[],"
+                        + "\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}",
+                "",
+                "");
+        server.createContext("/v1/responses", exchange -> respond(exchange, 200, "text/event-stream", sse));
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var events = collect(publisher);
+        final var end = events.stream()
+                .filter(LlmStreamEvent.End.class::isInstance)
+                .map(LlmStreamEvent.End.class::cast)
+                .findFirst()
+                .orElseThrow();
+        assertEquals("error", end.finishReason());
+    }
+
+    @Test
     void responsesDialectEmitsReasoningItemForEncryptedBlob(final JsonMapper mapper) throws Exception {
         // the Codex backend mints an opaque encrypted_content blob on the reasoning item; the dialect
         // surfaces it as a ReasoningItem so the loop can persist and replay it (never displayed)
@@ -988,10 +1116,18 @@ class OpenAIDialectTest {
                                 null,
                                 Map.of(
                                         "reasoningItems",
-                                        List.of(Map.of(
-                                                "id", "rs_1",
-                                                "encrypted_content", "gAAAAReplay",
-                                                "summary", List.of(Map.of("type", "summary_text", "text", "s"))))))),
+                                        List.of(
+                                                Map.of("id", "rs_missing", "encrypted_content", "gAAAA missing"),
+                                                Map.of(
+                                                        "id", "rs_empty",
+                                                        "encrypted_content", "gAAAA empty",
+                                                        "summary", List.of()),
+                                                Map.of(
+                                                        "id", "rs_populated",
+                                                        "encrypted_content", "gAAAA populated",
+                                                        "summary",
+                                                                List.of(Map.of(
+                                                                        "type", "summary_text", "text", "s"))))))),
                 null,
                 null,
                 64,
@@ -1005,10 +1141,25 @@ class OpenAIDialectTest {
                 Map.of());
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
-        // the reasoning item is replayed as a type:reasoning input item, in sequence before the assistant message
-        assertTrue(body.contains("\"type\":\"reasoning\""), body);
-        assertTrue(body.contains("\"encrypted_content\":\"gAAAAReplay\""), body);
-        assertTrue(body.contains("\"type\":\"message\""), body);
+        final var wire = mapper.fromBytes(Map.class, body.getBytes(StandardCharsets.UTF_8));
+        final var input = new String(mapper.toBytes(wire.get("input")), StandardCharsets.UTF_8);
+        assertTrue(
+                input.contains(
+                        "\"id\":\"rs_missing\",\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"gAAAA missing\""),
+                input);
+        assertTrue(
+                input.contains(
+                        "\"id\":\"rs_empty\",\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"gAAAA empty\""),
+                input);
+        assertTrue(input.contains("\"id\":\"rs_populated\""), input);
+        assertTrue(input.contains("\"summary\":[{"), input);
+        assertTrue(input.contains("\"text\":\"s\""), input);
+        assertTrue(input.contains("\"type\":\"summary_text\""), input);
+        assertTrue(
+                input.indexOf("rs_missing") < input.indexOf("rs_empty")
+                        && input.indexOf("rs_empty") < input.indexOf("rs_populated"),
+                input);
+        assertTrue(input.contains("\"type\":\"message\""), input);
     }
 
     @Test

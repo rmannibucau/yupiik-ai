@@ -20,14 +20,14 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
 /**
  * Display style of a model. When {@code color} and/or {@code bold} are unset the value falls back
- * to the provider tone / the implicit position-based scheme.
+ * to the provider tone / the implicit value-based scheme.
  */
 @JsonModel
 public record ModelStyleConfiguration(
         @Property(
                 defaultValue = "\"\"",
                 documentation =
-                        "Optional model display color (hex, eg. #e0a458). When blank the provider base tone is used, then the implicit position-based tone.")
+                        "Optional model display color (hex, eg. #e0a458). When blank the provider base tone is used, then a tone derived from the provider id.")
         String color,
 
         @Property(

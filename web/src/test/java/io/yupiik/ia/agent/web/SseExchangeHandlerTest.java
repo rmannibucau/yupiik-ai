@@ -158,6 +158,27 @@ class SseExchangeHandlerTest {
     }
 
     @Test
+    void aThrowingSnapshotSourceStillDeliversASnapshotFrame(final JsonMapper mapper) throws Exception {
+        // regression: when the snapshot generator throws, the connection used to be left open-but-silent
+        // (the exception escaped SseBody.subscribe before any frame was pushed), which the browser saw as
+        // an endless "Loading conversation…". It must instead deliver a valid empty snapshot so the client's
+        // loader clears, and tag the payload so the frontend can surface the error.
+        final var broker = new SseBroker(mapper);
+        final var s = start(broker, 1024, id -> {
+            throw new IllegalStateException("boom: cannot replay " + id);
+        });
+        final var frames = stream(url(s, "/api/stream?session=s1"));
+
+        await(() -> framesPeek(frames).contains("event: snapshot"), 3, TimeUnit.SECONDS);
+        final var data = framesPeek(frames).stream()
+                .filter(l -> l.startsWith("data:"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no snapshot data line, got: " + framesPeek(frames)));
+        assertTrue(data.contains("\"events\""), "empty snapshot must still carry an events array, got: " + data);
+        assertTrue(data.contains("\"snapshotError\""), "failure must be tagged for the frontend, got: " + data);
+    }
+
+    @Test
     void snapshotIsTailSlicedAndCarriesTheTotal(final JsonMapper mapper) throws Exception {
         final var broker = new SseBroker(mapper);
         // a 5-event history with a 2-event window must seed only the last 2 events but report total=5 so

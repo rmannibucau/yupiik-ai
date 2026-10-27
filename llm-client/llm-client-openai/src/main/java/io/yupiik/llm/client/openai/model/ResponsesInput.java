@@ -124,7 +124,7 @@ public record ResponsesInput(
      * replays it verbatim.
      *
      * @param id the reasoning item id to replay.
-     * @param summary the displayable summary parts ({@code {type:summary_text,text}} shapes), may be empty.
+     * @param summary the displayable summary parts ({@code {type:summary_text,text}} shapes), defaults to an empty array when null.
      * @param encryptedContent the opaque encrypted blob to replay.
      * @param extras any further wire fields to carry (none expected today).
      * @return the reasoning input item.
@@ -132,9 +132,7 @@ public record ResponsesInput(
     public static ResponsesInput reasoning(
             final String id, final Object summary, final String encryptedContent, final Map<String, Object> extras) {
         final var others = new java.util.LinkedHashMap<String, Object>();
-        if (summary != null) {
-            others.put("summary", summary);
-        }
+        others.put("summary", summary == null ? java.util.List.of() : summary);
         if (encryptedContent != null && !encryptedContent.isEmpty()) {
             others.put("encrypted_content", encryptedContent);
         }

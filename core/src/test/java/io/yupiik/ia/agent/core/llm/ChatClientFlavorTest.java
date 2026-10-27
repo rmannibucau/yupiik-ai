@@ -1026,7 +1026,7 @@ class ChatClientFlavorTest {
         // codex must actually ask for reasoning so the backend streams a thought block
         assertTrue(
                 body.contains("\"effort\":\"medium\""), "codex must default the reasoning effort to medium: " + body);
-        assertTrue(body.contains("\"summary\":\"auto\""), "codex must request the reasoning summary: " + body);
+        assertTrue(body.contains("\"summary\":\"detailed\""), "codex must request the reasoning summary: " + body);
     }
 
     @Test

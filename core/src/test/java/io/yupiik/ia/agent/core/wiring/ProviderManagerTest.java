@@ -83,17 +83,6 @@ class ProviderManagerTest {
     }
 
     @Test
-    void providerPositionIsZeroForFlatDefaultAndOnePlusIndexOtherwise() {
-        final var flat = manager(Map.of("yca.provider.model", "m"));
-        assertEquals(0, flat.providerPosition(flat.providers().get(0)));
-
-        final var manager = twoProviders();
-        assertEquals(1, manager.providerPosition(manager.providers().get(0)));
-        assertEquals(2, manager.providerPosition(manager.providers().get(1)));
-        assertEquals(0, manager.providerPosition(null));
-    }
-
-    @Test
     void outputTokensExactWinsOverContainsAndInvalidIsIgnored() {
         final var manager = twoProviders();
         final var provider = manager.providers().get(0);

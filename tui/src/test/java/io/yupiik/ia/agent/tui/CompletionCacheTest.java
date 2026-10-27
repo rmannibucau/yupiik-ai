@@ -15,74 +15,120 @@
  */
 package io.yupiik.ia.agent.tui;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * Generation-guarded completion cache: a slow background refresh of an old
- * provider must never overwrite the model list of the provider that was
- * selected while the refresh was in flight (e.g. {@code glm-5.3} vs
- * {@code z-ai/glm-5.3}).
+ * Lazy, keyed completion cache: provider-scoped slices (models, variants) are
+ * isolated per provider so switching tabs/providers never shows a stale list, and
+ * application-scoped slices (tools, servers, sessions) load once and only refresh
+ * sessions when a tab is created or closed.
  */
 class CompletionCacheTest {
 
     @Test
-    void updateModelsAppliesWhenGenerationIsCurrent() {
-        final var cache = new CompletionCache();
-        final var generation = cache.modelGeneration();
-        assertTrue(cache.updateModels(generation, List.of("z-ai/glm-5.3-flash")));
-        assertEquals(List.of("z-ai/glm-5.3-flash"), cache.models());
+    void modelsAreKeyedByProvider() {
+        final var cache = new CompletionCache(null);
+        assertFalse(cache.modelsLoaded("prov-a"));
+        assertFalse(cache.modelsLoaded("prov-b"));
+
+        cache.models("prov-a", List.of("z-ai/glm-5.3-flash"));
+        assertTrue(cache.modelsLoaded("prov-a"));
+        assertFalse(cache.modelsLoaded("prov-b"), "another provider's list must stay empty");
+        assertTrue(cache.models("prov-a").contains("z-ai/glm-5.3-flash"));
+        assertTrue(cache.models("prov-b").isEmpty());
+
+        // a different provider lands independently; the first is untouched
+        cache.models("prov-b", List.of("glm-5.3"));
+        assertTrue(cache.models("prov-a").contains("z-ai/glm-5.3-flash"));
+        assertTrue(cache.models("prov-b").contains("glm-5.3"));
     }
 
     @Test
-    void updateModelsIsDroppedWhenCacheWasInvalidatedMeanwhile() {
-        final var cache = new CompletionCache();
-        final var generation = cache.modelGeneration();
-        cache.invalidateModels(); // e.g. the user switched provider while the fetch was in flight
-        assertFalse(cache.updateModels(generation, List.of("glm-5.3")));
-        assertTrue(cache.models().isEmpty(), "the stale list must not be applied");
+    void beginModelsLoadGuardsDuplicateFetches() {
+        final var cache = new CompletionCache(null);
+        assertTrue(cache.beginModelsLoad("p"));
+        assertFalse(cache.beginModelsLoad("p"), "an in-flight fetch must not be duplicated");
+        cache.endModelsLoad("p");
+        assertTrue(cache.beginModelsLoad("p"), "after end (and before landing) a new fetch is allowed");
+        cache.models("p", List.of("m"));
+        assertFalse(cache.beginModelsLoad("p"), "a loaded provider must not be fetched again");
     }
 
     @Test
-    void updateModelsIsDroppedWhenANewerListAlreadyLanded() {
-        final var cache = new CompletionCache();
-        final var staleGeneration = cache.modelGeneration();
-        cache.models(List.of("nvidia/current"));
-        assertFalse(cache.updateModels(staleGeneration, List.of("old-provider/stale")));
-        assertEquals(List.of("nvidia/current"), cache.models());
+    void variantsAreKeyedByProviderAndModel() {
+        final var cache = new CompletionCache(null);
+        cache.variants("p-a", "m1", List.of("default", "fast"));
+        assertTrue(cache.variantsLoaded("p-a", "m1"));
+        assertFalse(cache.variantsLoaded("p-a", "m2"));
+        assertFalse(cache.variantsLoaded("p-b", "m1"));
+        assertTrue(cache.variants("p-a", "m1").contains("fast"));
+        assertTrue(cache.variants("p-a", "m2").isEmpty());
     }
 
     @Test
-    void invalidateClearsModelsAndVariantsAndAdvancesGeneration() {
-        final var cache = new CompletionCache();
-        cache.models(List.of("a", "b"));
-        cache.variants(Map.of("a", List.of("default")));
-        final var before = cache.modelGeneration();
-        cache.invalidateModels();
-        assertTrue(cache.models().isEmpty());
-        assertTrue(cache.variants("a").isEmpty());
-        assertTrue(cache.modelGeneration() > before);
+    void beginVariantsLoadGuardsDuplicateFetches() {
+        final var cache = new CompletionCache(null);
+        assertTrue(cache.beginVariantsLoad("p", "m"));
+        assertFalse(cache.beginVariantsLoad("p", "m"));
+        cache.endVariantsLoad("p", "m");
+        cache.variants("p", "m", List.of("default"));
+        assertFalse(cache.beginVariantsLoad("p", "m"), "a loaded model's variants are not re-fetched");
     }
 
     @Test
-    void updateVariantsIsDroppedWhenCacheWasInvalidatedMeanwhile() {
-        final var cache = new CompletionCache();
-        final var generation = cache.modelGeneration();
-        cache.invalidateModels();
-        assertFalse(cache.updateVariants(generation, Map.of("m", List.of("default"))));
-        assertTrue(cache.variants("m").isEmpty());
+    void applicationScopedSlicesLoadOnceUntilRefreshed() {
+        final var cache = new CompletionCache(null);
+        assertTrue(cache.beginToolsLoad());
+        assertFalse(cache.beginToolsLoad());
+        cache.tools(List.of("a", "b"));
+        assertTrue(cache.toolsLoaded());
+        assertFalse(cache.beginToolsLoad(), "tools are application-scoped and only load once");
+
+        assertTrue(cache.beginServersLoad());
+        cache.servers(List.of("srv"));
+        assertFalse(cache.beginServersLoad());
+
+        assertTrue(cache.beginSessionsLoad());
+        cache.sessions(List.of("s1"));
+        cache.endSessionsLoad();
+        assertTrue(cache.sessionsLoaded());
+        assertFalse(cache.beginSessionsLoad(), "sessions are loaded once until a tab changes");
+        cache.refreshSessions();
+        assertFalse(cache.sessionsLoaded(), "refreshing sessions drops the loaded flag for a re-fetch");
+        assertTrue(cache.beginSessionsLoad());
     }
 
     @Test
-    void updateVariantsAppliesWhenGenerationIsCurrent() {
-        final var cache = new CompletionCache();
-        final var generation = cache.modelGeneration();
-        assertTrue(cache.updateVariants(generation, Map.of("m", List.of("default", "fast"))));
-        assertEquals(List.of("default", "fast"), cache.variants("m"));
+    void mutationsFireTheChangeCallback() {
+        final var changed = new boolean[] {false};
+        final var cache = new CompletionCache(() -> changed[0] = true);
+        cache.models("p", List.of("m"));
+        assertTrue(changed[0], "a landed models list must notify the shell to re-complete");
+        changed[0] = false;
+        cache.servers(List.of("s"));
+        assertTrue(changed[0]);
+    }
+
+    @Test
+    void refreshSessionsClearsTheCachedList() {
+        final var cache = new CompletionCache(null);
+        cache.sessions(List.of("s1", "s2"));
+        cache.refreshSessions();
+        assertTrue(cache.sessions().isEmpty());
+        assertFalse(cache.sessionsLoaded());
+    }
+
+    @Test
+    void clearProviderDropsAllProviderSlices() {
+        final var cache = new CompletionCache(null);
+        cache.models("p", List.of("m"));
+        cache.variants("p", "m", List.of("default"));
+        cache.clearProvider();
+        assertFalse(cache.modelsLoaded("p"));
+        assertFalse(cache.variantsLoaded("p", "m"));
     }
 }

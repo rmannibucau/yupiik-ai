@@ -265,6 +265,16 @@ public class WebJsonRpc {
     }
 
     @JsonRpc(
+            value = "session.cancelAll",
+            documentation = "Cancels the running turn of a session and drops its queued prompts (the web's"
+                    + " \"close tab\" equivalent of the TUI's closeTab). The session stays attached and resumable.")
+    public Map<String, Boolean> cancelAllSession(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        sessions.cancelAll(id);
+        return Map.of("cancelled", true);
+    }
+
+    @JsonRpc(
             value = "session.slash",
             documentation = "Dispatches a slash command (e.g. /model, /permissions yolo, /mode build) without"
                     + " starting a turn; interactive commands open a picker modal the browser answers. Blocks"
@@ -433,13 +443,15 @@ public class WebJsonRpc {
                 mcpManager.serverStatuses().stream()
                         .map(s -> new SessionMetadataDto.McpStateDto(s.name(), String.valueOf(s.state())))
                         .toList(),
-                modelsOf(chatClient),
+                modelsOf(chatClient, chatSettings),
                 providersOf(providerManager));
     }
 
     @JsonRpc(value = "model.list", documentation = "Lists the models available from the current provider.")
     public List<String> modelList(@JsonRpcParam(required = true, documentation = "Session id.") final String id) {
-        return modelsOf(chatClient);
+        // model candidates must follow the session's effective provider (which may be a per-session
+        // override), matching how session.metadata builds the picker - not the process-default provider.
+        return modelsOf(chatClient, sessions.runtime(id).chatSettings());
     }
 
     @JsonRpc(value = "model.set", documentation = "Changes the model of a session; returns the effective model name.")
@@ -645,11 +657,23 @@ public class WebJsonRpc {
     // ---- slash completion value sources (mirror the TUI SlashCommandCompleter) ----
 
     private static List<String> modelsOf(final ChatClient chatClient) {
+        return modelsOf(chatClient, null);
+    }
+
+    /**
+     * Models for the <em>session's</em> effective provider. Passing the session's {@code chatSettings}
+     * (rather than none) makes {@link ChatClient#models} resolve and cache the model list against the
+     * per-session provider override, so the sidebar's candidates follow a {@code /provider} switch
+     * instead of always reflecting the process-default provider.
+     */
+    private static List<String> modelsOf(
+            final ChatClient chatClient, final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
         if (chatClient == null) {
             return List.of();
         }
         try {
-            final var ids = chatClient.models().ids();
+            final var res = settings == null ? chatClient.models() : chatClient.models(settings);
+            final var ids = res.ids();
             return ids == null ? List.of() : ids;
         } catch (final Exception e) {
             return List.of();

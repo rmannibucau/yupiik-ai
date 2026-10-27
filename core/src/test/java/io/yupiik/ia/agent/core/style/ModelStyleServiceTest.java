@@ -154,6 +154,94 @@ class ModelStyleServiceTest {
         assertFalse(plainStyle.ansiPrefix().contains("\u001b[1m"));
     }
 
+    private void initValueBased() {
+        final CodingAgentConfiguration cfg = TestConfigs.codingAgent(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "2"),
+                Map.entry("yca.provider.providers.0.id", "alpha"),
+                Map.entry("yca.provider.providers.0.model", "model-a"),
+                Map.entry("yca.provider.providers.0.models.length", "2"),
+                Map.entry("yca.provider.providers.0.models.0.model", "model-a"),
+                Map.entry("yca.provider.providers.0.models.1.model", "model-b"),
+                Map.entry("yca.provider.providers.1.id", "beta"),
+                Map.entry("yca.provider.providers.1.model", "model-a"),
+                Map.entry("yca.provider.providers.1.models.length", "1"),
+                Map.entry("yca.provider.providers.1.models.0.model", "model-a")));
+        providerManager = new ProviderManager(cfg, mapper);
+        chatClient = new ChatClient(cfg, mapper, providerManager, Clock.systemUTC());
+        service = new ModelStyleService(cfg, chatClient);
+    }
+
+    @Test
+    void idDerivedColorIsDeterministicAcrossCalls() {
+        initValueBased();
+        final var provider = providerManager.providers().get(0);
+        assertEquals(
+                service.resolve(provider, "model-a", true).hex(),
+                service.resolve(provider, "model-a", true).hex(),
+                "same (provider, model) must resolve to the same color");
+    }
+
+    @Test
+    void differentProviderIdsProduceDifferentFamilyHues() {
+        initValueBased();
+        final var alpha = providerManager.providers().get(0);
+        final var beta = providerManager.providers().get(1);
+        assertNotEquals(
+                service.resolve(alpha, "model-a", true).hex(),
+                service.resolve(beta, "model-a", true).hex(),
+                "two providers sharing a model name should not collide on the family hue");
+    }
+
+    @Test
+    void differentModelsUnderOneProviderProduceDistinctShades() {
+        initValueBased();
+        final var provider = providerManager.providers().get(0);
+        assertNotEquals(
+                service.resolve(provider, "model-a", true).hex(),
+                service.resolve(provider, "model-b", true).hex(),
+                "distinct model names under one provider should get distinguishable shades");
+    }
+
+    @Test
+    void listedModelColorIsInvariantToListPosition() {
+        final CodingAgentConfiguration first = TestConfigs.codingAgent(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "alpha"),
+                Map.entry("yca.provider.providers.0.model", "model-a"),
+                Map.entry("yca.provider.providers.0.models.length", "3"),
+                Map.entry("yca.provider.providers.0.models.0.model", "model-a"),
+                Map.entry("yca.provider.providers.0.models.1.model", "model-b"),
+                Map.entry("yca.provider.providers.0.models.2.model", "model-c")));
+        final var firstManager = new ProviderManager(first, mapper);
+        final var firstClient = new ChatClient(first, mapper, firstManager, Clock.systemUTC());
+        final var firstService = new ModelStyleService(first, firstClient);
+        final var ax = firstService
+                .resolve(firstManager.providers().get(0), "model-c", true)
+                .hex();
+
+        final CodingAgentConfiguration reordered = TestConfigs.codingAgent(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "alpha"),
+                Map.entry("yca.provider.providers.0.model", "model-a"),
+                Map.entry("yca.provider.providers.0.models.length", "3"),
+                Map.entry("yca.provider.providers.0.models.0.model", "model-c"),
+                Map.entry("yca.provider.providers.0.models.1.model", "model-b"),
+                Map.entry("yca.provider.providers.0.models.2.model", "model-a")));
+        final var reorderedManager = new ProviderManager(reordered, mapper);
+        final var reorderedClient = new ChatClient(reordered, mapper, reorderedManager, Clock.systemUTC());
+        final var reorderedService = new ModelStyleService(reordered, reorderedClient);
+        final var cx = reorderedService
+                .resolve(reorderedManager.providers().get(0), "model-c", true)
+                .hex();
+
+        assertEquals(ax, cx, "reordering the models list must not change a model's color");
+        firstClient.close();
+        reorderedClient.close();
+    }
+
     private static int channel(final String hex, final int offset) {
         return Integer.parseInt(hex.substring(1 + offset * 2, 3 + offset * 2), 16);
     }

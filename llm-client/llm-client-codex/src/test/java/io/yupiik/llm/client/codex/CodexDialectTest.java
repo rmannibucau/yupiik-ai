@@ -202,6 +202,116 @@ class CodexDialectTest {
     }
 
     @Test
+    void replaysReasoningItemsWithRequiredSummaryForChatAndStream(final JsonMapper mapper) throws Exception {
+        final var bodies = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        final var calls = new AtomicInteger();
+        server.createContext("/codex/responses", exchange -> {
+            final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            bodies.add(body);
+            calls.incrementAndGet();
+            if (body.contains("\"id\":\"rs_missing\",\"type\":\"reasoning\",\"encrypted_content\"")) {
+                respond(exchange, 400, "{\"error\":{\"message\":\"Missing required parameter: 'input[0].summary'.\"}}");
+                return;
+            }
+            final var sse =
+                    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n";
+            final var bytes = sse.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+
+        final var nullSummary = new java.util.LinkedHashMap<String, Object>();
+        nullSummary.put("id", "rs_null");
+        nullSummary.put("summary", null);
+        nullSummary.put("encrypted_content", "blob-null");
+        final var items = List.of(
+                java.util.Map.of("id", "rs_missing", "encrypted_content", "blob-missing"),
+                nullSummary,
+                java.util.Map.of("id", "rs_empty", "summary", List.of(), "encrypted_content", "blob-empty"),
+                java.util.Map.of(
+                        "id", "rs_populated",
+                        "summary", List.of(java.util.Map.of("type", "summary_text", "text", "summary")),
+                        "encrypted_content", "blob-populated"));
+        final var request = new io.yupiik.llm.client.model.LlmRequest(
+                "gpt-6-luna",
+                List.of(
+                        new io.yupiik.llm.client.model.LlmMessage(
+                                "assistant",
+                                "previous answer",
+                                null,
+                                null,
+                                null,
+                                java.util.Map.of("reasoningItems", items)),
+                        new io.yupiik.llm.client.model.LlmMessage("user", "next", null, null, null, null)),
+                null,
+                null,
+                null,
+                null,
+                List.of(),
+                null,
+                null,
+                null,
+                true,
+                java.util.Map.of());
+        final var dialect = new CodexDialect(
+                mapper,
+                client,
+                new ProviderSpec(
+                        base + "/codex/responses", "key", null, null, b -> b.setHeader("authorization", "Bearer t")));
+
+        dialect.chat(request, () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var streamDone = new java.util.concurrent.CountDownLatch(1);
+        final var streamError = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        dialect.stream(request, () -> false)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS)
+                .subscribe(new java.util.concurrent.Flow.Subscriber<>() {
+                    @Override
+                    public void onSubscribe(final java.util.concurrent.Flow.Subscription subscription) {
+                        subscription.request(Long.MAX_VALUE);
+                    }
+
+                    @Override
+                    public void onNext(final io.yupiik.llm.client.model.LlmStreamEvent event) {}
+
+                    @Override
+                    public void onError(final Throwable error) {
+                        streamError.set(error);
+                        streamDone.countDown();
+                    }
+
+                    @Override
+                    public void onComplete() {
+                        streamDone.countDown();
+                    }
+                });
+        org.junit.jupiter.api.Assertions.assertTrue(streamDone.await(5, TimeUnit.SECONDS), "stream did not complete");
+        org.junit.jupiter.api.Assertions.assertNull(
+                streamError.get(), "valid reasoning replay should stream successfully");
+
+        assertEquals(2, calls.get(), "both chat and stream should succeed on the first valid request");
+        for (final var body : bodies) {
+            assertTrue(body.contains("\"id\":\"rs_missing\""), body);
+            assertTrue(body.contains("\"summary\":[]"), body);
+            assertTrue(body.contains("\"encrypted_content\":\"blob-missing\""), body);
+            assertTrue(body.contains("\"id\":\"rs_null\""), body);
+            assertTrue(body.contains("\"encrypted_content\":\"blob-null\""), body);
+            assertTrue(body.contains("\"id\":\"rs_empty\""), body);
+            assertTrue(body.contains("\"encrypted_content\":\"blob-empty\""), body);
+            assertTrue(body.contains("\"id\":\"rs_populated\""), body);
+            assertTrue(body.contains("\"text\":\"summary\""), body);
+            assertTrue(body.contains("\"type\":\"summary_text\""), body);
+            assertTrue(body.contains("\"summary\":[{"), body);
+            assertTrue(
+                    body.indexOf("rs_missing") < body.indexOf("rs_null")
+                            && body.indexOf("rs_null") < body.indexOf("rs_empty")
+                            && body.indexOf("rs_empty") < body.indexOf("rs_populated"),
+                    body);
+        }
+    }
+
+    @Test
     void reasoningDoesNotRequestEncryptedContentBlobByDefault(final JsonMapper mapper) throws Exception {
         // the Codex flavor defaults includeEncryptedReasoning() to false: the ChatGPT backend and
         // stricter Codex/gov edges reject the reasoning.include directive with an unknown-parameter 400,
@@ -235,7 +345,7 @@ class CodexDialectTest {
         final var body = reqBody.get();
         org.junit.jupiter.api.Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
         assertTrue(body.contains("\"effort\":\"medium\""), body);
-        assertTrue(body.contains("\"summary\":\"auto\""), body);
+        assertTrue(body.contains("\"summary\":\"detailed\""), body);
         org.junit.jupiter.api.Assertions.assertFalse(
                 body.contains("reasoning.encrypted_content"),
                 "codex must NOT request the encrypted reasoning blob by default: " + body);
@@ -281,7 +391,7 @@ class CodexDialectTest {
         final var body = reqBody.get();
         org.junit.jupiter.api.Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
         assertTrue(body.contains("\"effort\":\"medium\""), body);
-        assertTrue(body.contains("\"summary\":\"auto\""), body);
+        assertTrue(body.contains("\"summary\":\"detailed\""), body);
         assertTrue(
                 body.contains("\"include\":[\"reasoning.encrypted_content\"]"),
                 "codex must request the replayable encrypted reasoning blob when opted in: " + body);
@@ -305,8 +415,8 @@ class CodexDialectTest {
                             + "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,"
                             + "\"item_id\":\"call_1\",\"delta\":\"{\\\"command\\\":\\\"ls\\\"}\"}\n\n"
                             + "event: response.completed\n"
-                            + "data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":3,"
-                            + "\"output_tokens\":5,\"total_tokens\":8}}\n\n")
+                            + "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\","
+                            + "\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"total_tokens\":8}}}\n\n")
                     .getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(200, sse.length);
             exchange.getResponseBody().write(sse);
@@ -331,6 +441,8 @@ class CodexDialectTest {
         assertEquals("{\"command\":\"ls\"}", call.function().arguments());
         org.junit.jupiter.api.Assertions.assertNotNull(response.usage(), "usage from the completed event must be kept");
         assertEquals(8L, response.usage().total());
+        assertEquals(3L, response.usage().prompt(), "nested response.usage.input_tokens must reach the response");
+        assertEquals(5L, response.usage().completion(), "nested response.usage.output_tokens must reach the response");
     }
 
     @Test
