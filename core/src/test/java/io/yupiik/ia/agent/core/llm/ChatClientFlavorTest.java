@@ -529,38 +529,42 @@ class ChatClientFlavorTest {
     }
 
     @Test
-    void codexClientVersionIsConsumedNotSentOnTheWire() throws Exception {
-        // codex_client_version is an internal consumer option (model gating for the Codex backend),
-        // so it must not leak as a wire field while unrelated options still flow through
+    void codexInternalOptionsNoLongerReservedInProviderSpecificOptions() throws Exception {
+        // after the migration these internal options live in capabilities.codex; a codex_client_version
+        // or reasoning_include key placed in providerSpecificOptions is now an ordinary wire option
+        // (no longer silently dropped), while unrelated options still flow through
         final var cfg = configuration(Map.of(
                 "yca.provider.providers.0.providerSpecificOptions",
-                "{\"codex_client_version\":210,\"temperature\":0.5}"));
+                "{\"codex_client_version\":210,\"reasoning_include\":true,\"temperature\":0.5}"));
         client.close();
         client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         final var result = client.chat(request());
         assertEquals("hello there", result.message().content());
         final var body = bodies.get(bodies.size() - 1);
-        assertEquals(0, occurrences(body, "codex_client_version"), "the internal option must be dropped: " + body);
+        assertEquals(1, occurrences(body, "codex_client_version"), "now a plain wire option: " + body);
+        assertTrue(body.contains("\"codex_client_version\":210"), body);
+        assertTrue(body.contains("\"reasoning_include\":true"), body);
         assertTrue(body.contains("\"temperature\":0.5"), "unrelated options still flow through: " + body);
     }
 
     @Test
-    void codexReasoningIncludeIsConsumedNotSentOnTheWire() throws Exception {
-        // reasoning_include is an internal consumer option (it drives the dialect's encrypted-reasoning
-        // include flag), so it must not leak as a wire field while unrelated options still flow through
+    void codexCapabilitiesNeverLeakToTheWire() throws Exception {
+        // capabilities.codex.clientVersion and includeReasoning are consumed for model gating and the
+        // encrypted-reasoning include; they are internal and must never be emitted as wire fields
         final var cfg = configuration(Map.of(
-                "yca.provider.providers.0.providerSpecificOptions",
-                "{\"reasoning_include\":true,\"temperature\":0.7}"));
+                "yca.provider.providers.0.capabilities.codex.clientVersion", "210",
+                "yca.provider.providers.0.capabilities.codex.includeReasoning", "true"));
         client.close();
         client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         final var result = client.chat(request());
         assertEquals("hello there", result.message().content());
         final var body = bodies.get(bodies.size() - 1);
-        assertEquals(0, occurrences(body, "reasoning_include"), "the internal option must be dropped: " + body);
-        assertEquals(0, occurrences(body, "reasoning.include"), "no encrypted-reasoning include on the wire: " + body);
-        assertTrue(body.contains("\"temperature\":0.7"), "unrelated options still flow through: " + body);
+        assertEquals(0, occurrences(body, "codex_client_version"), "capabilities never leak to the wire: " + body);
+        assertEquals(0, occurrences(body, "capabilities"), "capabilities config never leaks to the wire: " + body);
+        assertEquals(0, occurrences(body, "codex"), "no codex-only option leaks on a plain completion: " + body);
+        assertTrue(body.contains("\"model\":\"test-model\""), "the plain request body is preserved: " + body);
     }
 
     @Test

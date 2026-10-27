@@ -3941,6 +3941,17 @@ public class TuiCommand implements Runnable {
                 Span.styled(
                         formatTokens(state.model.estimatedContext()) + " tok (" + state.model.contextPercent() + "%)",
                         value)));
+        // account quota for codex-usage providers: a compact number + percent + builtin bar, hidden
+        // entirely when the current provider does not expose usage (per-session quota data)
+        if (state.model.quotaVisible()) {
+            final var used = (int) Math.clamp(Math.round(state.model.quotaUsedPercent()), 0, 100);
+            final var bar = quotaBar(used);
+            final var plan = state.model.quotaPlanType() == null ? "" : state.model.quotaPlanType();
+            text.add(Line.from(
+                    Span.styled("usage     ", label),
+                    Span.styled(plan + " " + used + "%", value),
+                    Span.raw(" " + bar)));
+        }
         // the provider-billed prompt tokens of the last anchored request: only shown when an anchor
         // exists (absent = raw heuristic estimate only), so the row doubles as the "is this real?"
         // indicator for the `context ~` estimate above it
@@ -7720,6 +7731,17 @@ public class TuiCommand implements Runnable {
             return text == null ? "" : text;
         }
         return max <= 3 ? text.substring(text.length() - max) : "..." + text.substring(text.length() - max + 3);
+    }
+
+    /** A compact ASCII progress bar for the usage gauge, 10 cells wide (filled = used percent). */
+    private static String quotaBar(final int usedPercent) {
+        final var filled = (int) Math.clamp(Math.round(usedPercent / 10.0), 0, 10);
+        final var sb = new StringBuilder(12);
+        sb.append('[');
+        for (int i = 0; i < 10; i++) {
+            sb.append(i < filled ? '█' : '░');
+        }
+        return sb.append(']').toString();
     }
 
     private static String formatTokens(final long value) {

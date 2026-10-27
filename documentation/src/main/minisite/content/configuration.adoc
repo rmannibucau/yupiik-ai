@@ -175,7 +175,9 @@ from the `.../codex/models` catalog):
         "api": "auto",
         "model": "gpt-6-luna",
         "contextWindow": 400000,
-        "providerSpecificOptions": "{\"codex_client_version\": 160}",
+        "capabilities": {
+          "codex": { "clientVersion": 160, "includeReasoning": false, "enableUsage": true }
+        },
         "dynamicHeaders": "authorization: Bearer {{codexAuth \"codex\"}}",
         "headers": "ChatGPT-Account-Id: xxxx-yyyy-zzzzz\nOpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream"
       }
@@ -287,11 +289,18 @@ skipped), so FedRAMP accounts send the routing header automatically.
 For FedRAMP accounts the enrollment also stamps `X-OpenAI-Fedramp: true` and
 every signed request carries the matching account id.
 
-`providerSpecificOptions` may carry `codex_client_version`, the whole part of
-the Codex CLI version this provider advertises for model gating in the Codex
-backend catalog (eg. `160` for `0.160.x`, or `200` for `0.200.x`). It is an
-internal option: it is consumed by the dialect when listing models and is never
-sent on the wire. Omit it for the default of `160`.
+`capabilities.codex.clientVersion` holds the whole part of the Codex CLI version this
+provider advertises for model gating in the Codex backend catalog (eg. `160` for
+`0.160.x`, or `200` for `0.200.x`). It is an internal capability: it is consumed by the
+dialect when listing models and is never sent on the wire. Omit it for the default of
+`160`. Setting `capabilities.codex.includeReasoning` to `true` opts the provider into
+the encrypted-reasoning `include` directive (see the Codex dialect notes); it defaults
+to `false` because the ChatGPT/Codex and stricter Codex/gov edges reject it.
+
+Set `capabilities.codex.enableUsage: true` to let yca query this provider's account
+usage/rate-limit quota (the `/usage` slash command and the sidebar quota gauge). The
+quota is fetched from the Codex usage backend with the OAuth session, refreshed at
+most every 5 minutes and on each `/usage` call, and is scoped per session/tab.
 
 === Interactive login is optional
 

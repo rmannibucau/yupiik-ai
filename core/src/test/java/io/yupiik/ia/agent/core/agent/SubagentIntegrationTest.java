@@ -466,7 +466,8 @@ class SubagentIntegrationTest {
                     delegate.executor,
                     delegate.subagentRegistry,
                     delegate.precisionDurationMarker,
-                    null);
+                    null,
+                    delegate.quotaStore);
         }
 
         @Override
@@ -598,6 +599,7 @@ class SubagentIntegrationTest {
                 executor,
                 reg,
                 new PrecisionDurationMarkerProvider(),
+                null, // quota store
                 null);
         return new TestSubagentRunner(baseRunner);
     }

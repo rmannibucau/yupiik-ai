@@ -109,7 +109,16 @@ class MetricsFormatTest {
     void fullModeSurfacesCachedTokensInTheTurnLine() {
         final var transcript = transcriptWithReasoningTurn();
         transcript.onEvent(new AgentEvent.UsageUpdated(
-                new Usage(4_000, 953, 4_953, 1_200, 0), 42_000, 55.0, 4_000, 1.05, "m", "s1", null, null));
+                new Usage(4_000, 953, 4_953, 1_200, 0),
+                42_000,
+                55.0,
+                4_000,
+                1.05,
+                "m",
+                "s1",
+                null,
+                null,
+                AgentEvent.UsageUpdated.Quota.NONE));
         final var report =
                 MetricsFormat.report(new MetricsConfiguration(true, true, MetricsDisplayMode.FULL), transcript, null);
         final var lines = report.split("\n");

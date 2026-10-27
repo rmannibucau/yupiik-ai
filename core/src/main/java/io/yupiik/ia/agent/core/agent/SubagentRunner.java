@@ -70,6 +70,7 @@ public class SubagentRunner {
     protected final ExecutorService executor;
     protected final SubagentRegistry subagentRegistry;
     protected final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
+    protected final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore;
 
     public SubagentRunner(
             final ChatClient chatClient,
@@ -89,7 +90,8 @@ public class SubagentRunner {
             final ExecutorService executor,
             final SubagentRegistry subagentRegistry,
             final PrecisionDurationMarkerProvider precisionDurationMarker,
-            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
+            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor,
+            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -108,6 +110,7 @@ public class SubagentRunner {
         this.subagentRegistry = subagentRegistry;
         this.precisionDurationMarker = precisionDurationMarker;
         this.secretRedactor = secretRedactor;
+        this.quotaStore = quotaStore;
     }
 
     protected SubagentRunner() {
@@ -129,6 +132,7 @@ public class SubagentRunner {
         this.subagentRegistry = null;
         this.precisionDurationMarker = null;
         this.secretRedactor = null;
+        this.quotaStore = null;
     }
 
     public void runAsync(
@@ -283,6 +287,7 @@ public class SubagentRunner {
                 configuration,
                 subagentPermissions,
                 subagentUsageTracker,
+                quotaStore,
                 subagentContextManager,
                 subagentContextView,
                 subagentSessionStore,

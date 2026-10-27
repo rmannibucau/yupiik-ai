@@ -14,6 +14,18 @@ export type SessionStatus = {
   model?: string;
   contextPercent?: number;
   estimatedContext?: number;
+  // account quota (codex-usage providers): present only when the current provider exposes usage
+  quota?: {
+    enabled: boolean;
+    supported: boolean;
+    planType: string;
+    usedPercent: number;
+    windowSeconds: number;
+    resetAtEpochSeconds: number;
+    windowLabel: string;
+    creditsBalance: string;
+    creditsUnlimited: boolean;
+  };
   promptTokens?: number;
   completionTokens?: number;
   // provider-served prompt tokens read from the cache (subset of promptTokens when the provider
@@ -421,6 +433,21 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
       s.cacheReadTokens = num(d.cacheReadTokens, s.cacheReadTokens);
       completionTotal = num(d.completionTokens, completionTotal) ?? completionTotal;
       reasoningTotal = num(d.reasoningTokens, reasoningTotal) ?? reasoningTotal;
+      // account quota carried by the usage event; only set when the provider actually exposes usage
+      if (d.quota && typeof d.quota === 'object') {
+        const q = d.quota as Record<string, unknown>;
+        s.quota = {
+          enabled: !!q.enabled,
+          supported: !!q.supported,
+          planType: String(q.planType ?? ''),
+          usedPercent: num(q.usedPercent, 0) ?? 0,
+          windowSeconds: num(q.windowSeconds, 0) ?? 0,
+          resetAtEpochSeconds: num(q.resetAtEpochSeconds, 0) ?? 0,
+          windowLabel: String(q.windowLabel ?? ''),
+          creditsBalance: String(q.creditsBalance ?? ''),
+          creditsUnlimited: !!q.creditsUnlimited,
+        };
+      }
       // session totals persist in the log tail; count LLM calls via turn-metrics below.
     } else if (ev.type === 'turn-metrics') {
       const d = ev.data ?? {};

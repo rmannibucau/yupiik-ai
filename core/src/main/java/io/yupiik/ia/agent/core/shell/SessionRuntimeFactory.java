@@ -78,6 +78,7 @@ public class SessionRuntimeFactory {
     private final ExecutorService executor;
     private final BashRulesRegistry bashRulesRegistry;
     private final MemoryProductionPolicy memoryProductionPolicy;
+    private final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore;
     private volatile io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
 
     public SessionRuntimeFactory(
@@ -101,6 +102,7 @@ public class SessionRuntimeFactory {
             final ExecutorService executor,
             final BashRulesRegistry bashRulesRegistry,
             final MemoryProductionPolicy memoryProductionPolicy,
+            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore,
             final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
@@ -122,6 +124,7 @@ public class SessionRuntimeFactory {
         this.executor = executor;
         this.bashRulesRegistry = bashRulesRegistry;
         this.memoryProductionPolicy = memoryProductionPolicy;
+        this.quotaStore = quotaStore;
         this.secretRedactor = secretRedactor;
     }
 
@@ -174,6 +177,7 @@ public class SessionRuntimeFactory {
                 configuration,
                 permissions,
                 usage,
+                quotaStore,
                 contextManager,
                 contextView,
                 sessionStore,
@@ -278,6 +282,7 @@ public class SessionRuntimeFactory {
         this.precisionDurationMarker = null;
         this.bashRulesRegistry = null;
         this.memoryProductionPolicy = null;
+        this.quotaStore = null;
         this.secretRedactor = null;
     }
 }

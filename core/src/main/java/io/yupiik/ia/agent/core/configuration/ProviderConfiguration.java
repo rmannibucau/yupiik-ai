@@ -130,9 +130,16 @@ public record ProviderConfiguration(
                                 + "a $provider/model reference keeps its explicit routing; the \"inherit\" keyword resolves the global "
                                 + "yca.model.* chain (including its compact fallbacks); a blank value (the default) means this provider's "
                                 + "own default model, ie. no dedicated background model for this provider.")
-        ModelConfiguration backgroundModelOverrides) {
+        ModelConfiguration backgroundModelOverrides,
 
-    /** Constructor accepting the fields before {@code defaultSubagentModel} (both it and {@code backgroundModelOverrides} default to null). */
+        @Property(
+                documentation =
+                        "Declarative capability knobs of this provider (codex client version, encrypted-reasoning include, usage-quota enablement). "
+                                + "These are typed internal options that drive yca behaviour and, unlike providerSpecificOptions, are never merged "
+                                + "into the wire request payload.")
+        ProviderCapabilities capabilities) {
+
+    /** Constructor accepting the fields before {@code defaultSubagentModel} (both it and {@code backgroundModelOverrides} and {@code capabilities} default to null). */
     public ProviderConfiguration(
             final String id,
             final String baseUrl,
@@ -170,7 +177,22 @@ public record ProviderConfiguration(
                 color,
                 prompt,
                 null,
+                null,
                 null);
+    }
+
+    /** The effective codex capabilities: the configured record, or empty defaults when absent. */
+    public CodexCapabilities codexCapabilities() {
+        final var caps = capabilities;
+        if (caps == null || caps.codex() == null) {
+            return new CodexCapabilities(160, false, false);
+        }
+        return caps.codex();
+    }
+
+    /** Whether this provider enables the Codex account usage quota (the /usage command and sidebar gauge). */
+    public boolean usageEnabled() {
+        return codexCapabilities().enableUsage();
     }
 
     /** True when the value is the reserved "inherit" keyword (resolves the global yca.model.* chain). */

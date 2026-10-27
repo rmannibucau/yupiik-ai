@@ -20,6 +20,20 @@ For automation, the xref:../cli/run.adoc[`run`] command executes a single
 headless prompt and prints the result on stdout. It exits non-zero on failure,
 making it easy to call from scripts and CI.
 
+== Account usage quota
+
+When the current provider advertises the Codex usage capability
+(`capabilities.codex.enableUsage`, see xref:../configuration.adoc[Configuration]),
+the TUI and web sidebars show a *Usage* section under the context gauge: the plan
+type, the used percentage of the primary rate-limit window and a progress bar
+(number + %, refreshed at most every 5 minutes, hidden entirely when the current
+provider does not expose usage). The data comes from the provider's Codex usage
+endpoint, fetched in yca (the token never leaves the process); the web frontend
+only consumes the broadcast usage event.
+
+The `/usage` slash command forces a refresh and prints the full quota (plan,
+rate-limit windows with their reset times, credits) as a table.
+
 == Speaker labels
 
 The transcript headers (the `▌` line opening every user and assistant turn) are

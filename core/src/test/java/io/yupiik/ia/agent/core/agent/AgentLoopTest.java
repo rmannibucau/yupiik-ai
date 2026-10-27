@@ -6488,6 +6488,7 @@ class AgentLoopTest {
                         return 1000;
                     }
                 },
+                null, // quota store
                 contextManager,
                 contextView,
                 sessionStore,

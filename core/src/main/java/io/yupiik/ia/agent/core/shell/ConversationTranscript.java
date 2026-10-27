@@ -78,6 +78,15 @@ public class ConversationTranscript {
     private volatile int lastRealPromptTokens;
     private volatile double calibrationRatio;
     private volatile int contextPercent;
+    // the last account quota carried by a usage event; kept as atomic scalars so readers stay cheap
+    private volatile boolean quotaVisible;
+    private volatile String quotaPlanType;
+    private volatile double quotaUsedPercent;
+    private volatile long quotaWindowSeconds;
+    private volatile long quotaResetAtEpochSeconds;
+    private volatile String quotaWindowLabel;
+    private volatile String quotaCreditsBalance;
+    private volatile boolean quotaCreditsUnlimited;
     private volatile long maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
 
     /**
@@ -464,7 +473,8 @@ public class ConversationTranscript {
                         String model,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        AgentEvent.UsageUpdated.Quota quota)) {
             promptTokens = usage == null ? 0 : usage.promptTokens();
             completionTokens = usage == null ? 0 : usage.completionTokens();
             cacheReadTokens = usage == null ? 0 : usage.cacheReadTokens();
@@ -472,6 +482,14 @@ public class ConversationTranscript {
             this.lastRealPromptTokens = lastRealPromptTokens;
             this.calibrationRatio = calibrationRatio;
             contextPercent = (int) Math.round(percent);
+            quotaVisible = quota != null && quota.visible();
+            quotaPlanType = quota == null ? null : quota.planType();
+            quotaUsedPercent = quota == null ? 0 : quota.usedPercent();
+            quotaWindowSeconds = quota == null ? 0 : quota.windowSeconds();
+            quotaResetAtEpochSeconds = quota == null ? 0 : quota.resetAtEpochSeconds();
+            quotaWindowLabel = quota == null ? null : quota.windowLabel();
+            quotaCreditsBalance = quota == null ? null : quota.creditsBalance();
+            quotaCreditsUnlimited = quota != null && quota.creditsUnlimited();
         } else if (event
                 instanceof
                 AgentEvent.Compacted(
@@ -1040,6 +1058,14 @@ public class ConversationTranscript {
         lastRealPromptTokens = 0;
         calibrationRatio = -1;
         contextPercent = 0;
+        quotaVisible = false;
+        quotaPlanType = null;
+        quotaUsedPercent = 0;
+        quotaWindowSeconds = 0;
+        quotaResetAtEpochSeconds = 0;
+        quotaWindowLabel = null;
+        quotaCreditsBalance = null;
+        quotaCreditsUnlimited = false;
         maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
         turnLlmCalls = 0;
         turnThinkingMs = 0;
@@ -1172,6 +1198,41 @@ public class ConversationTranscript {
 
     public int contextPercent() {
         return contextPercent;
+    }
+
+    /** Whether the current provider exposes a visible account quota (plan + primary window). */
+    public boolean quotaVisible() {
+        return quotaVisible;
+    }
+
+    public String quotaPlanType() {
+        return quotaPlanType;
+    }
+
+    /** The primary-window used percentage (0-100), {@code 0} when unsupported. */
+    public double quotaUsedPercent() {
+        return quotaUsedPercent;
+    }
+
+    public long quotaWindowSeconds() {
+        return quotaWindowSeconds;
+    }
+
+    /** Epoch seconds of the next quota reset, {@code 0} when unknown. */
+    public long quotaResetAtEpochSeconds() {
+        return quotaResetAtEpochSeconds;
+    }
+
+    public String quotaWindowLabel() {
+        return quotaWindowLabel;
+    }
+
+    public String quotaCreditsBalance() {
+        return quotaCreditsBalance;
+    }
+
+    public boolean quotaCreditsUnlimited() {
+        return quotaCreditsUnlimited;
     }
 
     public int turnLlmCalls() {

@@ -452,7 +452,8 @@ class ConversationTranscriptTest {
         t.onEvent(new AgentEvent.Status("working", "s1"));
         assertEquals("working", t.status());
 
-        t.onEvent(new AgentEvent.UsageUpdated(null, 42, 12.4, 40, 1.25, null, "s1", null, null));
+        t.onEvent(new AgentEvent.UsageUpdated(
+                null, 42, 12.4, 40, 1.25, null, "s1", null, null, AgentEvent.UsageUpdated.Quota.NONE));
         assertEquals(42, t.estimatedContext());
         assertEquals(12, t.contextPercent());
         assertEquals(40, t.lastRealPromptTokens());
@@ -468,8 +469,31 @@ class ConversationTranscriptTest {
                 null,
                 "s1",
                 null,
-                null));
+                null,
+                AgentEvent.UsageUpdated.Quota.NONE));
         assertEquals(1500, t.cacheReadTokens(), "usage cache-read must be captured");
+    }
+
+    @Test
+    void quotaIsPersistedAndHiddenWhenNone() {
+        final var t = new ConversationTranscript();
+        // no quota -> not visible
+        t.onEvent(new AgentEvent.UsageUpdated(
+                null, 42, 12.4, 40, 1.25, null, "s1", null, null, AgentEvent.UsageUpdated.Quota.NONE));
+        assertEquals(false, t.quotaVisible());
+
+        // a real quota -> persisted fields
+        final var quota =
+                new AgentEvent.UsageUpdated.Quota(true, true, "plus", 42.5, 18000, 1700000000L, "primary", "10", false);
+        t.onEvent(new AgentEvent.UsageUpdated(null, 42, 12.4, 40, 1.25, null, "s1", null, null, quota));
+        assertEquals(true, t.quotaVisible());
+        assertEquals("plus", t.quotaPlanType());
+        assertEquals(42.5, t.quotaUsedPercent(), 0.0001);
+        assertEquals(18000, t.quotaWindowSeconds());
+        assertEquals(1700000000L, t.quotaResetAtEpochSeconds());
+        assertEquals("primary", t.quotaWindowLabel());
+        assertEquals("10", t.quotaCreditsBalance());
+        assertEquals(false, t.quotaCreditsUnlimited());
     }
 
     @Test

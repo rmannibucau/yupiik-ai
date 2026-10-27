@@ -208,6 +208,7 @@ public class AgentLoop {
     private final CodingAgentConfiguration configuration;
     private final PermissionService permissionService;
     private final UsageTracker usageTracker;
+    private final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore;
     private final ContextManager contextManager;
     private final ContextView contextView;
     private final SessionStore sessionStore;
@@ -486,6 +487,7 @@ public class AgentLoop {
             final CodingAgentConfiguration configuration,
             final PermissionService permissionService,
             final UsageTracker usageTracker,
+            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore,
             final ContextManager contextManager,
             final ContextView contextView,
             final SessionStore sessionStore,
@@ -508,6 +510,7 @@ public class AgentLoop {
                 configuration,
                 permissionService,
                 usageTracker,
+                quotaStore,
                 contextManager,
                 contextView,
                 sessionStore,
@@ -537,6 +540,7 @@ public class AgentLoop {
             final CodingAgentConfiguration configuration,
             final PermissionService permissionService,
             final UsageTracker usageTracker,
+            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore,
             final ContextManager contextManager,
             final ContextView contextView,
             final SessionStore sessionStore,
@@ -561,6 +565,7 @@ public class AgentLoop {
                 configuration,
                 permissionService,
                 usageTracker,
+                quotaStore,
                 contextManager,
                 contextView,
                 sessionStore,
@@ -586,7 +591,7 @@ public class AgentLoop {
     protected AgentLoop() {
         this(
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null);
     }
 
     /**
@@ -603,6 +608,7 @@ public class AgentLoop {
             final CodingAgentConfiguration configuration,
             final PermissionService permissionService,
             final UsageTracker usageTracker,
+            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore,
             final ContextManager contextManager,
             final ContextView contextView,
             final SessionStore sessionStore,
@@ -631,6 +637,7 @@ public class AgentLoop {
         this.configuration = configuration;
         this.permissionService = permissionService;
         this.usageTracker = usageTracker;
+        this.quotaStore = quotaStore;
         this.contextManager = contextManager;
         this.contextView = contextView;
         this.sessionStore = sessionStore;
@@ -889,6 +896,9 @@ public class AgentLoop {
     private void attachSessionSettings(final ChatSettings settings) {
         if (usageTracker != null) {
             usageTracker.attach(settings);
+        }
+        if (quotaStore != null) {
+            quotaStore.attach(currentSessionId, settings);
         }
     }
 
@@ -1288,7 +1298,8 @@ public class AgentLoop {
             final double contextPercent,
             final int lastRealPromptTokens,
             final double calibrationRatio,
-            final String model) {
+            final String model,
+            final AgentEvent.UsageUpdated.Quota quota) {
         return new AgentEvent.UsageUpdated(
                 usage,
                 estimatedContextTokens,
@@ -1298,7 +1309,8 @@ public class AgentLoop {
                 model,
                 currentSessionId,
                 subagentId,
-                subagentName);
+                subagentName,
+                quota);
     }
 
     private AgentEvent.Compacted compacted(final String kind, final String mode) {
@@ -3994,7 +4006,21 @@ public class AgentLoop {
                 usageTracker.contextPercent(effective),
                 usageTracker.lastRealPromptTokens(),
                 usageTracker.calibrationRatio(),
-                requestModel(resolvedModel())));
+                requestModel(resolvedModel()),
+                currentQuota()));
+    }
+
+    /**
+     * The current account quota for this session, refreshed at most once per {@code QuotaSnapshotStore}
+     * TTL. Returns {@link AgentEvent.UsageUpdated.Quota#NONE} when the current provider has no usage
+     * capability (so UIs hide the gauge).
+     */
+    private AgentEvent.UsageUpdated.Quota currentQuota() {
+        if (quotaStore == null) {
+            return AgentEvent.UsageUpdated.Quota.NONE;
+        }
+        final var view = quotaStore.snapshot(currentSessionId, false);
+        return AgentEvent.UsageUpdated.Quota.of(view.enabled(), view.supported(), view.snapshot());
     }
 
     /**

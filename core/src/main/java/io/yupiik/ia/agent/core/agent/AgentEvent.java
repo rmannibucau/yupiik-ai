@@ -141,10 +141,58 @@ public sealed interface AgentEvent {
             String model,
             String sessionId,
             String subagentId,
-            String subagentName)
+            String subagentName,
+            Quota quota)
             implements AgentEvent {
         public UsageUpdated(Usage usage, int estimatedContextTokens, double contextPercent, String sessionId) {
-            this(usage, estimatedContextTokens, contextPercent, 0, -1, null, sessionId, null, null);
+            this(usage, estimatedContextTokens, contextPercent, 0, -1, null, sessionId, null, null, Quota.NONE);
+        }
+
+        /** The account quota carried by a usage event, {@link #NONE} when the provider does not expose usage. */
+        public record Quota(
+                boolean enabled,
+                boolean supported,
+                String planType,
+                double usedPercent,
+                long windowSeconds,
+                long resetAtEpochSeconds,
+                String windowLabel,
+                String creditsBalance,
+                boolean creditsUnlimited) {
+
+            public static final Quota NONE = new Quota(false, false, null, 0, 0, 0, null, null, false);
+
+            public static Quota of(
+                    final boolean enabled,
+                    final boolean supported,
+                    final io.yupiik.ia.agent.core.usage.CodexUsageSnapshot snapshot) {
+                if (snapshot == null) {
+                    return new Quota(enabled, supported, null, 0, 0, 0, null, null, false);
+                }
+                final var primary = snapshot.rateLimits() == null
+                        ? null
+                        : snapshot.rateLimits().stream()
+                                .filter(l -> io.yupiik.ia.agent.core.usage.CodexUsageSnapshot.RateLimit.PRIMARY.equals(
+                                        l.kind()))
+                                .findFirst()
+                                .orElse(null);
+                final boolean unlimited = snapshot.credits() != null
+                        && Boolean.TRUE.equals(snapshot.credits().unlimited());
+                return new Quota(
+                        enabled,
+                        supported,
+                        snapshot.planType(),
+                        primary == null || primary.usedPercent() == null ? 0 : primary.usedPercent(),
+                        primary == null || primary.limitWindowSeconds() == null ? 0 : primary.limitWindowSeconds(),
+                        primary == null || primary.resetAt() == null ? 0 : primary.resetAt(),
+                        primary == null ? null : primary.label(),
+                        snapshot.credits() == null ? null : snapshot.credits().balance(),
+                        unlimited);
+            }
+
+            public boolean visible() {
+                return supported && planType != null;
+            }
         }
     }
 

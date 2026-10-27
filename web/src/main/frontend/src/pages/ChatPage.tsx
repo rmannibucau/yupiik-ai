@@ -1357,6 +1357,24 @@ function Sidebar({
           )}
         </div>
       </div>
+      {/* account usage / quota (only when the current provider exposes usage; hidden otherwise) */}
+      {status.quota?.supported && (
+        <div>
+          <div className="mb-1 text-xs font-bold uppercase" style={{ color: 'var(--yca-muted)' }}>Usage</div>
+          <div className="space-y-0.5 text-sm" style={{ color: 'var(--yca-text)' }}>
+            <div className="flex justify-between">
+              <span style={{ color: 'var(--yca-muted)' }}>
+                {status.quota.planType ? status.quota.planType : 'plan'}
+                {status.quota.windowLabel ? ` · ${status.quota.windowLabel}` : ''}
+              </span>
+              <span className="font-mono">{Math.round(status.quota.usedPercent)}%</span>
+            </div>
+            {status.quota.planType && (
+              <ContextBar percent={Math.min(100, status.quota.usedPercent)} />
+            )}
+          </div>
+        </div>
+      )}
       <div>
         <div className="mb-1 text-xs font-bold uppercase" style={{ color: 'var(--yca-muted)' }}>Working dir</div>
         <div className="flex gap-1">

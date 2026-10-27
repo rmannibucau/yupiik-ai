@@ -109,6 +109,7 @@ class SpawnSubagentToolTest {
                 null,
                 registry,
                 new PrecisionDurationMarkerProvider(),
+                null, // quota store
                 null) {
             @Override
             public void runAsync(
@@ -245,6 +246,7 @@ class SpawnSubagentToolTest {
                         null,
                         reg,
                         new PrecisionDurationMarkerProvider(),
+                        null, // quota store
                         null) {
                     @Override
                     public void runAsync(
@@ -310,6 +312,7 @@ class SpawnSubagentToolTest {
                         null,
                         reg,
                         new PrecisionDurationMarkerProvider(),
+                        null, // quota store
                         null) {
                     @Override
                     public void runAsync(
@@ -380,6 +383,7 @@ class SpawnSubagentToolTest {
                         null,
                         reg,
                         new PrecisionDurationMarkerProvider(),
+                        null, // quota store
                         null) {
                     @Override
                     public void runAsync(

@@ -122,7 +122,16 @@ class ConfigCommandsTest {
         final var transcript = new ConversationTranscript();
         transcript.onEvent(new AgentEvent.TurnMetrics(2, 120, 300, 500, 3, 1500, "session-1"));
         transcript.onEvent(new AgentEvent.UsageUpdated(
-                new Usage(4000, 800, 4800, 1200, 0), 42000, 55.0, 4000, 1.05, "m", "s1", null, null));
+                new Usage(4000, 800, 4800, 1200, 0),
+                42000,
+                55.0,
+                4000,
+                1.05,
+                "m",
+                "s1",
+                null,
+                null,
+                AgentEvent.UsageUpdated.Quota.NONE));
         final var outcome = run("", session(), transcript);
         assertEquals(
                 "metrics: showPerTurn=true showSessionTotals=true displayMode=COMPACT\n"

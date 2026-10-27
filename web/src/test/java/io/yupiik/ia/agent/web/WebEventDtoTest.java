@@ -64,7 +64,16 @@ class WebEventDtoTest {
     @Test
     void usageUpdatedExposesLiveCompletionAndReasoningTokens() {
         final var dto = WebEventDto.of(new AgentEvent.UsageUpdated(
-                new Usage(10, 120, 130, 0, 0, 40, 0), 50, 2.0, 0, -1, "model-x", "s1", null, null));
+                new Usage(10, 120, 130, 0, 0, 40, 0),
+                50,
+                2.0,
+                0,
+                -1,
+                "model-x",
+                "s1",
+                null,
+                null,
+                AgentEvent.UsageUpdated.Quota.NONE));
         assertEquals("usage-updated", dto.type());
         assertEquals("model-x", dto.message());
         assertEquals(120, dto.data().get("completionTokens"));

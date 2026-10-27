@@ -239,6 +239,30 @@ public class CodexAuthTemplateHelper {
     }
 
     /**
+     * Resolves the live OAuth credentials (access token + account id) for {@code providerName},
+     * refreshing the access token lazily when expired. This is the programmatic counterpart of the
+     * {@code codexAuth}/{@code codexAccountId} helpers, used by the usage-quota client to authenticate
+     * against the Codex account usage endpoint. Throws {@link CodexNotAuthenticatedException} when no
+     * session exists.
+     *
+     * @param providerName the provider id.
+     * @return the resolved credentials.
+     */
+    public CodexCredentials resolveCredentials(final String providerName) {
+        final CodexTokenStore store = resolveSession(providerName, /*refreshWhenIdle*/ true);
+        return new CodexCredentials(
+                store.accessToken(),
+                store.agentIdentity() != null
+                                && store.agentIdentity().accountId() != null
+                                && !store.agentIdentity().accountId().isBlank()
+                        ? store.agentIdentity().accountId()
+                        : store.accountId());
+    }
+
+    /** The live OAuth credentials of a codex provider: the access token and the account id. */
+    public record CodexCredentials(String accessToken, String accountId) {}
+
+    /**
      * The {@code codexFedramp} helper: resolves the {@code X-OpenAI-Fedramp} header value for
      * {@code providerName} - {@code true} when the enrolled Agent Identity is a FedRAMP account,
      * otherwise an empty string (blank renders are skipped by the headers customizer). Use it so

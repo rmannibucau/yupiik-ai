@@ -83,6 +83,7 @@ class SessionRuntimeTest {
                 null,
                 null,
                 null, // memory production policy
+                null, // quota store
                 null);
     }
 

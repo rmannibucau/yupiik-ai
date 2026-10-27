@@ -89,6 +89,7 @@ class WebSessionManagerPromptTest {
                 null,
                 null,
                 null, // memory production policy
+                null, // quota store
                 null); // SecretRedactor
         this.manager = new WebSessionManager(
                 runtimeFactory,

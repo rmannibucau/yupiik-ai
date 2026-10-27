@@ -222,6 +222,39 @@ describe('foldStatus - live per-turn out/reasoning tokens', () => {
     expect(s.cacheReadTokens).toBeUndefined();
   });
 
+  it('folds the account quota carried by a usage event', () => {
+    const s = foldStatus([
+      usageEv({
+        promptTokens: 4000,
+        quota: {
+          enabled: true,
+          supported: true,
+          planType: 'plus',
+          usedPercent: 42.5,
+          windowSeconds: 18000,
+          resetAtEpochSeconds: 1700000000,
+          windowLabel: 'primary',
+          creditsBalance: '10',
+          creditsUnlimited: false,
+        },
+      }),
+    ]);
+    expect(s.quota?.supported).toBe(true);
+    expect(s.quota?.planType).toBe('plus');
+    expect(s.quota?.usedPercent).toBe(42.5);
+    expect(s.quota?.creditsBalance).toBe('10');
+  });
+
+  it('leaves status.quota undefined when no usage quota is present', () => {
+    const s = foldStatus([
+      usageEv({
+        promptTokens: 4000,
+        contextPercent: 12,
+      }),
+    ]);
+    expect(s.quota).toBeUndefined();
+  });
+
   it('log-derived out chars start fresh at each new user turn', () => {
     const s = foldStatus([
       ev('user', 'first turn'),

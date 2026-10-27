@@ -111,7 +111,29 @@ public record WebEventDto(
                         "reasoningTokens", t.usage() == null ? 0 : t.usage().reasoningTokens(),
                         "cacheReadTokens", t.usage() == null ? 0 : t.usage().cacheReadTokens(),
                         "estimatedContextTokens", t.estimatedContextTokens(),
-                        "contextPercent", t.contextPercent());
+                        "contextPercent", t.contextPercent(),
+                        "quota",
+                                t.quota() == null
+                                        ? null
+                                        : Map.of(
+                                                "enabled", t.quota().enabled(),
+                                                "supported", t.quota().supported(),
+                                                "planType",
+                                                        t.quota().planType() == null
+                                                                ? ""
+                                                                : t.quota().planType(),
+                                                "usedPercent", t.quota().usedPercent(),
+                                                "windowSeconds", t.quota().windowSeconds(),
+                                                "resetAtEpochSeconds", t.quota().resetAtEpochSeconds(),
+                                                "windowLabel",
+                                                        t.quota().windowLabel() == null
+                                                                ? ""
+                                                                : t.quota().windowLabel(),
+                                                "creditsBalance",
+                                                        t.quota().creditsBalance() == null
+                                                                ? ""
+                                                                : t.quota().creditsBalance(),
+                                                "creditsUnlimited", t.quota().creditsUnlimited()));
             case AgentEvent.Pause t ->
                 Map.of("durationMs", t.durationMs(), "kind", t.kind().name());
             case AgentEvent.Notice t ->
