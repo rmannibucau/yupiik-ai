@@ -850,4 +850,22 @@ class ConversationTranscriptTest {
         assertTrue(md.contains("let me check"), md);
         assertFalse(md.contains("@12@"), "flushed echoed seam must not render live: " + md);
     }
+
+    @Test
+    void echoedSeamTagIsStrippedFromLiveThinkingText() {
+        // the live (not yet flushed) reasoning tail is rendered directly off thinkingText(),
+        // bypassing markdown(): a flash-class model echoing the injected "@N@" seam into its
+        // live reasoning must not show it on the thought panel while the stored copy stays clean
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.ThinkingDelta("reasoning about @12@", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta(" then @b", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("21@ [high] step", "s1"));
+
+        assertTrue(t.thinkingText().contains("reasoning about"), t.thinkingText());
+        assertTrue(t.thinkingText().contains("then"), t.thinkingText());
+        assertTrue(t.thinkingText().contains("step"), t.thinkingText());
+        assertFalse(t.thinkingText().contains("@12@"), "live thinking seam must not render: " + t.thinkingText());
+        assertFalse(t.thinkingText().contains("@b21@"), "split block seam must not render: " + t.thinkingText());
+    }
 }

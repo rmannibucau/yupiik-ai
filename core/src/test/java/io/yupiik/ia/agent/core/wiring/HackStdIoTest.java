@@ -39,6 +39,7 @@ import org.junit.jupiter.api.parallel.Resources;
 
 @ResourceLock(Resources.SYSTEM_OUT)
 @ResourceLock(Resources.SYSTEM_ERR)
+@ResourceLock("java.util.logging")
 class HackStdIoTest {
     private PrintStream originalOut;
     private PrintStream originalErr;
@@ -100,6 +101,11 @@ class HackStdIoTest {
         try {
             hack.install();
             hack.streamTarget(target);
+            // The pristine buffers are JVM-global under a parallel fork: a background log from a test that does not
+            // share our @ResourceLock could have landed in the moment between System capture and the routed section
+            // below. Reset them so the assertions only constrain what THIS test routed, never unrelated output.
+            out.reset();
+            err.reset();
             System.out.print("a\nb\n"); // byte[] path: split on each newline
             System.out.print("tail"); // unterminated: forwarded as is
             System.out.flush();

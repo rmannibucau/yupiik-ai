@@ -1154,9 +1154,15 @@ public class ConversationTranscript {
         return thinking.length();
     }
 
-    /** Thread-safe snapshot of the live (not yet flushed) thinking buffer, for renderers. */
+    /**
+     * Thread-safe snapshot of the live (not yet flushed) thinking buffer, for renderers. The buffer
+     * is scrubbed of echoed compact seams (see {@link ContextCompression#stripEchoedRefs}) because
+     * this surface bypasses {@link #markdown(String, String)} (which scrubs flushed thoughts): a
+     * flash-class model echoing the injected {@code @N@} seam in its live reasoning would otherwise
+     * render verbatim while the stored message stays clean.
+     */
     public synchronized String thinkingText() {
-        return thinking.toString();
+        return ContextCompression.stripEchoedRefs(thinking.toString());
     }
 
     public String runningTool() {

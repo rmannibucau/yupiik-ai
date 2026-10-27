@@ -49,8 +49,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 @ExtendWith(TestJsonMapper.class)
+@ResourceLock("java.util.logging")
 class StructuralCodeGraphTest {
     private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
 

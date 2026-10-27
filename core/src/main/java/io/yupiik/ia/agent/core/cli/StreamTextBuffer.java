@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.cli;
 
+import io.yupiik.ia.agent.core.context.ContextCompression;
 import java.util.function.UnaryOperator;
 
 /**
@@ -23,6 +24,12 @@ import java.util.function.UnaryOperator;
  * fenced-code and inline state consistent across chunk boundaries. The
  * trailing partial line is held until more text arrives or {@link #flush()}
  * is called at the end of the turn.
+ *
+ * <p>Each completed line is scrubbed of echoed compact "{@code @N@}" seams
+ * (see {@link ContextCompression#stripEchoedRefs}) before being rendered. A
+ * seam tag can legally split across two incoming chunks, so the scrub runs on
+ * the drained line (after fragments are joined) instead of per-chunk, which is
+ * the only place the fragments are guaranteed to be contiguous.
  */
 public class StreamTextBuffer {
     private final StringBuilder pending = new StringBuilder();
@@ -59,12 +66,13 @@ public class StreamTextBuffer {
         final var out = new StringBuilder();
         var newline = pending.indexOf("\n");
         while (newline >= 0) {
-            out.append(lineRenderer.apply(pending.substring(0, newline))).append('\n');
+            out.append(lineRenderer.apply(ContextCompression.stripEchoedRefs(pending.substring(0, newline))))
+                    .append('\n');
             pending.delete(0, newline + 1);
             newline = pending.indexOf("\n");
         }
         if (flush && !pending.isEmpty()) {
-            out.append(lineRenderer.apply(pending.toString()));
+            out.append(lineRenderer.apply(ContextCompression.stripEchoedRefs(pending.toString())));
             if (out.charAt(out.length() - 1) != '\n') {
                 out.append('\n');
             }

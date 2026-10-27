@@ -68,4 +68,24 @@ class StreamTextBufferTest {
         assertEquals("\n\n", buffer.append("\n\n"));
         assertEquals("", buffer.flush());
     }
+
+    @Test
+    void echoedSeamSplitAcrossChunksIsStrippedFromDrainedLine() {
+        // a seam tag can split across two incoming chunks ("@5" + "35@"); the scrub runs on
+        // the drained complete line after fragments are joined, so it must still be removed
+        final var buffer = new StreamTextBuffer(line -> line);
+        assertEquals("", buffer.append("answer @5"));
+        assertEquals("answer\n", buffer.append("35@\ndone"));
+        assertEquals("done\n", buffer.flush());
+    }
+
+    @Test
+    void echoedWholeLineAnalogInSeamIsStripped() {
+        // whole-line and inline echoes, plus the block and priority-suffix variants, are scrubbed
+        final var buffer = new StreamTextBuffer(line -> line);
+        // the whole-line seam strips to an empty line, which still drains as a newline
+        assertEquals("\nreal prose\n", buffer.append("@b21@ [high]\nreal prose\n"));
+        assertEquals("x y\n", buffer.append("x @blocked@ y\n"));
+        assertEquals("kept @user\n", buffer.append("kept @user\n"));
+    }
 }
