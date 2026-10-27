@@ -229,6 +229,25 @@ sequenceDiagram
     Note over Y: the next request replaces @12@..@40@ with b3
 ....
 
+=== Batching several ranges
+
+A single `compress` call accepts an array of small, disjoint ranges, each with
+its own `{startId, endId, summary}`.
+To batch well, send two to four small ranges that do not overlap, ordered
+roughly by start ref; this saves a round-trip without asking the model to
+summarize a huge contiguous span.
+
+Each range is validated independently.
+A recoverable defect in one range - a missing or invalid ref, a reversed or
+unreachable span, a range touching the system prompt or the live session-state
+tail, an overlap with a protected turn or an existing active block - skips only
+that range and folds a corrective nudge into the result.
+The rest of the batch is still applied, and the result enumerates the skipped
+ranges so the model can retry them next turn.
+A route is rejected as a whole only when it is strictly unusable: compression
+disabled, an empty `content` array, ranges that overlap each other in the same
+call, or malformed entries.
+
 === Nudges
 
 The model is nudged to compress when the context grows, but it is never forced

@@ -234,35 +234,36 @@ public final class ContextCompression {
         }
         final var resolved = new ArrayList<ResolvedRange>(ranges.size());
         final var nudges = new ArrayList<String>();
+        final var skipped = new ArrayList<String>();
         for (final var range : ranges) {
             if (range == null || range.startId() == null || range.endId() == null) {
-                return new Result(false, "Each range needs startId and endId (message refs like @12@).", null);
+                skipped.add("range without both startId and endId (message refs like @12@)");
+                continue;
             }
             final var startRef = parseRef(range.startId());
             final var endRef = parseRef(range.endId());
             if (startRef <= 0 || endRef <= 0) {
-                return new Result(
-                        false, "Invalid message ref in " + range.startId() + ".." + range.endId() + ".", null);
+                skipped.add("range " + range.startId() + ".." + range.endId() + ": invalid message ref");
+                continue;
             }
             final var start = indexOf(published, startRef, 0);
             final var end = indexOf(published, endRef, start);
             if (start < 0 || end < 0 || end < start) {
-                return new Result(
-                        false,
-                        "Range " + range.startId() + ".." + range.endId()
-                                + " is not in the live conversation or is reversed.",
-                        null);
+                skipped.add("range " + range.startId() + ".." + range.endId()
+                        + ": not in the live conversation or is reversed");
+                continue;
             }
             if (start == 0
                     || (published.get(start) != null
                             && "system".equals(published.get(start).role()))) {
-                return new Result(false, "The system prompt cannot be compressed.", null);
+                skipped.add(
+                        "range " + range.startId() + ".." + range.endId() + ": the system prompt cannot be compressed");
+                continue;
             }
-            if (isVolatileTail(published.get(start))) {
-                return new Result(false, "The live session-state tail cannot be compressed.", null);
-            }
-            if (isVolatileTail(published.get(end))) {
-                return new Result(false, "The live session-state tail cannot be compressed.", null);
+            if (isVolatileTail(published.get(start)) || isVolatileTail(published.get(end))) {
+                skipped.add(
+                        "range " + range.startId() + ".." + range.endId() + ": touches the live session-state tail");
+                continue;
             }
             // Snap the requested boundaries onto valid, safe ones instead of hard-rejecting a
             // sloppy flash-class boundary choice. A non-user START moves forward to the nearest
@@ -294,10 +295,9 @@ public final class ContextCompression {
                     || !turnBoundary(effectiveEnd)
                     || effectiveStart >= effectiveEnd;
             if (drop) {
-                nudges.add("range " + range.startId() + ".." + range.endId()
-                        + " was skipped: it cannot be bounded to a user-message start and a"
-                        + " turn-boundary end (the requested span collapses). Choose a wider range"
-                        + " starting on a user message.");
+                skipped.add("range " + range.startId() + ".." + range.endId()
+                        + " cannot be bounded to a user-message start and a turn-boundary end"
+                        + " (the requested span collapses)");
                 continue;
             }
             final var effectiveStartRef = refOf(published.get(effectiveStart));
@@ -305,21 +305,21 @@ public final class ContextCompression {
             if (effectiveStartRef != startRef) {
                 nudges.add("range " + range.startId() + ".." + range.endId() + " adjusted: start ref "
                         + range.startId() + " is " + startRole + "; compressed from @" + effectiveStartRef
-                        + "@ instead - always start ranges on a user-message ref.");
+                        + "@ instead - always start ranges on a user-message ref; if unsure, split"
+                        + " into small disjoint ranges.");
             }
             if (effectiveEndRef != endRef) {
                 nudges.add("range " + range.startId() + ".." + range.endId() + " adjusted: end ref "
                         + range.endId() + " was not at a turn boundary; compressed up to @" + effectiveEndRef
-                        + "@ instead.");
+                        + "@ instead. End ranges just before the next user message (a turn boundary).");
             }
             if (configuration.turnProtection() && configuration.turnProtectionTurns() > 0) {
                 final var protectedFrom = protectedTurnStart(configuration.turnProtectionTurns());
                 if (protectedFrom >= 0 && effectiveEnd >= protectedFrom) {
-                    return new Result(
-                            false,
-                            "The last " + configuration.turnProtectionTurns()
-                                    + " user turn(s) are protected from compression (turnProtection).",
-                            null);
+                    skipped.add("range " + range.startId() + ".." + range.endId()
+                            + " touches the last " + configuration.turnProtectionTurns()
+                            + " protected user turn(s) (turnProtection)");
+                    continue;
                 }
             }
             if (overlapsActive(effectiveStartRef, effectiveEndRef)) {
@@ -336,17 +336,29 @@ public final class ContextCompression {
                                 .findFirst()
                                 .orElse(null));
                 if (rejected != null) {
-                    return new Result(
-                            false,
-                            "The range overlaps active block @b" + rejected.id()
-                                    + "@ which must be fully contained by the new range and referenced through its @bN@ placeholder in the summary.",
-                            null);
+                    skipped.add("range " + range.startId() + ".." + range.endId()
+                            + " overlaps active block @b" + rejected.id()
+                            + "@ which must be fully contained by the new range and referenced"
+                            + " through its @bN@ placeholder in the summary");
+                    continue;
                 }
             }
             if (resolved.stream()
                     .anyMatch(
                             previous -> effectiveStartRef <= previous.endRef && effectiveEndRef >= previous.startRef)) {
-                return new Result(false, "The ranges in one compress call must not overlap.", null);
+                final var previousFirst = resolved.stream()
+                        .filter(previous ->
+                                effectiveStartRef <= previous.endRef && effectiveEndRef >= previous.startRef)
+                        .findFirst()
+                        .orElseThrow();
+                return new Result(
+                        false,
+                        "Ranges @" + range.startId() + "@..@" + range.endId() + "@ and @"
+                                + previousFirst.startRef() + "@..@" + previousFirst.endRef()
+                                + "@ overlap, and overlapping ranges cannot be applied deterministically."
+                                + " Send disjoint small ranges as one array instead, or drop the smaller"
+                                + " overlap; nothing was compressed.",
+                        null);
             }
             resolved.add(new ResolvedRange(
                     effectiveStartRef, effectiveEndRef, range.summary() == null ? "" : range.summary()));
@@ -376,7 +388,17 @@ public final class ContextCompression {
                 ? "No ranges were compressed."
                 : "Compressed " + created.size() + " range(s): " + String.join(", ", created)
                         + ". The transcript is unchanged; these blocks are now applied to outgoing requests.";
-        final var message = nudges.isEmpty() ? base : base + "\n" + String.join("\n", nudges);
+        final var parts = new ArrayList<String>(2);
+        parts.add(base);
+        if (!skipped.isEmpty()) {
+            parts.add("skipped: " + String.join("; ", skipped)
+                    + ". To free more closed history, send several small disjoint ranges as one array,"
+                    + " each starting on a user-message ref and ending just before the next user message.");
+        }
+        if (!nudges.isEmpty()) {
+            parts.add(String.join("\n", nudges));
+        }
+        final var message = parts.size() == 1 ? parts.get(0) : String.join("\n", parts);
         return new Result(
                 true, message, created.isEmpty() ? null : created.get(0).replace("@", ""));
     }

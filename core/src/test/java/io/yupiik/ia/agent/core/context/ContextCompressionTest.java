@@ -23,7 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.CompressConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class ContextCompressionTest {
@@ -207,11 +209,13 @@ class ContextCompressionTest {
                         new ContextCompression.Range("1", "4", "whole"),
                         new ContextCompression.Range("3", "4", "tail")));
         assertFalse(result.success());
-        assertTrue(result.message().contains("must not overlap"), result.message());
+        assertTrue(result.message().contains("overlap"), result.message());
+        assertTrue(result.message().contains("Send disjoint small ranges"), result.message());
+        assertTrue(compression.blocks().isEmpty(), "nothing is compressed when ranges overlap");
     }
 
     @Test
-    void overlappingActiveBlockRequiresItsPlaceholder() {
+    void overlappingActiveBlockIsSkippedWithNudge() {
         final var compression = new ContextCompression(config());
         final var messages = simpleConversation();
         assignedRefs(compression, messages);
@@ -220,8 +224,9 @@ class ContextCompressionTest {
                 .success());
         final var withoutRef =
                 compression.compress("greedy", List.of(new ContextCompression.Range("1", "4", "no placeholder")));
-        assertFalse(withoutRef.success());
+        assertTrue(withoutRef.success(), withoutRef.message());
         assertTrue(withoutRef.message().contains("overlaps active block"), withoutRef.message());
+        assertEquals(1, compression.blocks().size(), "the skipped overlapped range must not create a block");
     }
 
     @Test
@@ -303,15 +308,74 @@ class ContextCompressionTest {
     }
 
     @Test
-    void turnProtectionRefusesToCompressActiveWork() {
+    void turnProtectionSkipsTouchingRangeButAppliesOthers() {
         final var compression = new ContextCompression(protectedConfig()); // turnProtection=true, turns=1
         final var messages = simpleConversation();
         assignedRefs(compression, messages);
         final var oldTurn = compression.compress("old", List.of(new ContextCompression.Range("1", "2", "old turn")));
         assertTrue(oldTurn.success(), oldTurn.message());
+        // range 3..4 touches the last protected user turn -> per-item skip, not a batch hard-fail
         final var active = compression.compress("active", List.of(new ContextCompression.Range("3", "4", "no")));
-        assertFalse(active.success());
-        assertTrue(active.message().contains("protected from compression"), active.message());
+        assertTrue(active.success(), active.message());
+        assertTrue(active.message().contains("protected"), active.message());
+        assertTrue(active.message().contains("skipped"), active.message());
+        assertEquals(1, compression.blocks().size(), "the protected range must not create a block");
+    }
+
+    @Test
+    void mixedBatchAppliesGoodRangesAndSkipsBadOnes() {
+        final var compression = new ContextCompression(config());
+        final var messages = simpleConversation(); // refs: 1 user, 2 assistant, 3 user, 4 assistant
+        assignedRefs(compression, messages);
+        // range 1..2 is valid (assistant ref 2 ends at a turn boundary before user ref 3); the second
+        // range 2..2 (assistant, no later user before its end) cannot snap -> skipped, and the good
+        // range must still be applied so a single bad range never rejects the batch
+        final var result = compression.compress(
+                "t",
+                List.of(
+                        new ContextCompression.Range("1", "2", "t1 done"),
+                        new ContextCompression.Range("2", "2", "bad")));
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("skipped"), result.message());
+        assertEquals("b1", result.blockId());
+        assertEquals(1, compression.blocks().size(), "only the good range is compressed");
+    }
+
+    @Test
+    void volatileTailRangeIsSkippedNotRejectingBatch() {
+        final var compression = new ContextCompression(config());
+        // the live session-state tail is a user message flagged volatileTail and is never ref'd by
+        // renderRefs, so a range citing it resolves to "not in the live conversation" and must be
+        // skipped without rejecting the rest of the batch
+        final var messages = List.of(
+                Message.system("system"),
+                Message.user("task one"),
+                Message.assistant("done", List.of()),
+                new Message("user", "live session-state tail", null, null, null, Map.of("volatileTail", true)));
+        assignedRefs(compression, messages);
+        final var result = compression.compress(
+                "t",
+                List.of(
+                        new ContextCompression.Range("1", "2", "task one done"),
+                        new ContextCompression.Range("3", "3", "tail")));
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("skipped"), result.message());
+        assertEquals(1, compression.blocks().size(), "only the non-volatile range is compressed");
+    }
+
+    @Test
+    void malformedContentStillHardFails() {
+        final var compression = new ContextCompression(config());
+        final var messages = simpleConversation();
+        assignedRefs(compression, messages);
+        // top-level absent/empty range list stays a hard failure (nothing to take)
+        assertFalse(compression.compress("t", List.of()).success());
+        assertFalse(compression.compress("t", null).success());
+        // a null element is a per-item skip (success) matching the non-null-skip behavior
+        assertTrue(compression
+                .compress("t", Arrays.asList((ContextCompression.Range) null))
+                .success());
+        assertTrue(compression.blocks().isEmpty());
     }
 
     @Test

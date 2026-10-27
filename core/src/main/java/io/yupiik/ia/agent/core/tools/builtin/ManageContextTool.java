@@ -73,15 +73,18 @@ public class ManageContextTool implements EmbeddedTool {
                 + " conversation ranges: each message sent to the provider ends with a stable compact"
                 + " seam tag (an at-sign, the message number, an at-sign); pass topic plus"
                 + " content=[{startId,endId,summary}] with ranges that start on a user message"
-                + " and end at a turn boundary. The seam tags are environment-injected metadata and"
-                + " must never be echoed in output; treat them as reserved tokens (do not emit them"
-                + " except when naming a startId/endId). Write the summary yourself (decisions,"
-                + " findings, file paths, next steps; be exhaustive), and use @bN@ placeholders to"
-                + " nest an already compressed block when its information must be preserved. Never"
-                + " compress work still in progress. The transcript is unchanged: only outgoing"
-                + " requests are rewritten. action=status reports the raw/effective token counts and"
-                + " active blocks; action=decompress restores a block; action=compact asks for a"
-                + " whole-context summary (optional focus hint and keep_last).";
+                + " and end at a turn boundary. When there is a large amount of genuinely closed"
+                + " history, send 2-4 small disjoint ranges as a single content array, each starting"
+                + " on a user-message ref and ending just before the next user message; the tool applies"
+                + " each independently and reports any range it had to skip. The seam tags are"
+                + " environment-injected metadata and must never be echoed in output; treat them as"
+                + " reserved tokens (do not emit them except when naming a startId/endId). Write the"
+                + " summary yourself (decisions, findings, file paths, next steps; be exhaustive), and"
+                + " use @bN@ placeholders to nest an already compressed block when its information must"
+                + " be preserved. Never compress work still in progress. The transcript is unchanged:"
+                + " only outgoing requests are rewritten. action=status reports the raw/effective token"
+                + " counts and active blocks; action=decompress restores a block; action=compact asks"
+                + " for a whole-context summary (optional focus hint and keep_last).";
     }
 
     @Override
@@ -102,7 +105,11 @@ public class ManageContextTool implements EmbeddedTool {
                         Schemas.str("Short topic label for the compressed block (compress only)."),
                         "content",
                         Schemas.arrayOf(
-                                "Closed ranges to compress. Ranges must not overlap.",
+                                "Closed ranges to compress. Ranges must not overlap. When there is a lot of closed"
+                                        + " history, send several small disjoint ranges as one array. Each startId must"
+                                        + " be a user-message ref and each endId must end at a turn boundary (just"
+                                        + " before the next user message); the tool snaps or skips ranges it cannot"
+                                        + " bound.",
                                 Schemas.object(
                                         Map.of(
                                                 "startId",
