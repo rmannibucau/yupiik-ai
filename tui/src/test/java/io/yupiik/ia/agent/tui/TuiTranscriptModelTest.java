@@ -173,6 +173,24 @@ class TuiTranscriptModelTest {
     }
 
     @Test
+    void splitTurnsAttributedContinuedAssistantOutputAfterIntegratedPrompt() {
+        // shape produced by ConversationTranscript after a queued prompt is integrated
+        // mid-turn and the model keeps streaming: the resumed answer opens a fresh
+        // **Assistant** segment so it renders with the output (accent) rail, not the
+        // open **You** block's user rail
+        final var md = "**Assistant**\n\nbefore\n\n---\n\n**You**\n\nqueued prompt\n\n**Assistant**\n\ncontinued";
+        final var turns = TuiTranscriptModel.splitTurns(md);
+        assertEquals(3, turns.size());
+        assertFalse(turns.get(0).user());
+        assertTrue(turns.get(1).user());
+        assertTrue(turns.get(1).text().contains("queued prompt"));
+        // the continued model output must not be glued onto the **You** segment
+        assertFalse(turns.get(2).user());
+        assertTrue(turns.get(2).labelled());
+        assertEquals("**Assistant**\n\ncontinued", turns.get(2).text());
+    }
+
+    @Test
     void splitTurnsLabelsOnlyMarkerOpenedTurns() {
         // the leading welcome block carries no marker: it must not draw a speaker header,
         // while every turn opened by a real **You**/**Assistant** marker must

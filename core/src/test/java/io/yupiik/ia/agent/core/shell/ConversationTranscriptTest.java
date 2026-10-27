@@ -352,6 +352,28 @@ class ConversationTranscriptTest {
     }
 
     @Test
+    void resumedStreamAfterIntegratedPromptOpensAFreshAssistantBlock() {
+        // a queued prompt picked up mid-turn cuts the assistant answer off with a **You** block;
+        // when the turn then keeps streaming, the continued output must open a new **Assistant**
+        // segment instead of gluing onto the **You** block and inheriting the user rail colour
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("I was saying something", "s1"));
+        t.onEvent(new AgentEvent.PromptIntegrated("actually, do this instead", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("continued output", "s1"));
+
+        final var md = t.markdown("|", "welcome");
+        assertOrdered(
+                md,
+                "I was saying something",
+                "**You**\n\nactually, do this instead",
+                "**Assistant**\n\ncontinued output");
+        assertTrue(
+                md.indexOf("**You**\n\nactually, do this instead") < md.indexOf("**Assistant**\n\ncontinued output"),
+                "the resumed assistant output must follow the integrated **You** block as its own turn: " + md);
+    }
+
+    @Test
     void errorKeepsTheStreamedAnswerAboveTheErrorLine() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");

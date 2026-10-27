@@ -562,6 +562,11 @@ public class ConversationTranscript {
             flushThinking();
             // the in-progress answer belongs above the prompt that just cut it off
             flushPending();
+            // the queued prompt opens a **You** block that cuts the assistant answer off;
+            // once the turn resumes streaming, the continued model output must open a fresh
+            // **Assistant** block (markdown() re-emits the marker when this is false) instead
+            // of gluing onto the **You** segment and inheriting the user rail colour
+            answerHeaderWritten = false;
             thinking.setLength(0);
             inlineThink.reset();
             transcript
