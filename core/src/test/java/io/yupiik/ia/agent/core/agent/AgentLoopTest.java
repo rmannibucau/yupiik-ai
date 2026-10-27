@@ -748,6 +748,10 @@ class AgentLoopTest {
                 assertTrue(quota.enabled(), "the codex provider enables usage");
                 assertTrue(quota.supported(), "the codex provider is supported");
                 assertEquals(42.0, quota.usedPercent(), "the switch-time fetch carries the live usage");
+                assertEquals(
+                        "s1",
+                        pushed.get(0).sessionId(),
+                        "the pre-turn push must be tagged with the loop's stable session id so ShellRegistry routes it");
                 assertEquals(1, fetches.get(), "attach on switch must force one fetch");
                 assertTrue(
                         quotaStore.cachedSnapshot("s1").supported(),

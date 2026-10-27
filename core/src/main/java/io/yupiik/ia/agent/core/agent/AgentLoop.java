@@ -1345,7 +1345,9 @@ public class AgentLoop {
                 lastRealPromptTokens,
                 calibrationRatio,
                 model,
-                currentSessionId,
+                // pre-first-turn pushes (provider/model switch, /usage) must carry the loop's stable
+                // id: ShellRegistry routes strictly by event sessionId and drops untagged events.
+                currentSessionId != null ? currentSessionId : this.sessionId,
                 subagentId,
                 subagentName,
                 quota);
