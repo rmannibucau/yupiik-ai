@@ -111,17 +111,63 @@ class ContextCompressionTest {
     }
 
     @Test
-    void rangesMustStartOnAUserMessage() {
+    void rangeWithUnreachableUserStartIsSkippedWithNudge() {
+        // a range that cannot reach a user start (here an assistant ref with no later user before end)
+        // is dropped and the model is nudged, never hard-rejected
         final var compression = new ContextCompression(config());
         final var messages = simpleConversation();
         assignedRefs(compression, messages);
         final var result = compression.compress("bad", List.of(new ContextCompression.Range("2", "2", "nope")));
-        assertFalse(result.success());
-        assertTrue(result.message().contains("must start on a user message"), result.message());
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("skipped"), result.message());
+        assertTrue(compression.blocks().isEmpty(), "the folded range must not create a block");
     }
 
     @Test
-    void rangesMustEndAtATurnBoundary() {
+    void startSnapsForwardToNextUser() {
+        final var compression = new ContextCompression(config());
+        final var messages = toolConversation(); // refs: 1=user t1, 2=assistant, 3=tool, 4=user t2, 5=assistant
+        assignedRefs(compression, messages);
+        final var result = compression.compress("t", List.of(new ContextCompression.Range("2", "5", "t2 chap")));
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("adjusted"), result.message());
+        assertTrue(result.message().contains("start ref"), result.message());
+        assertEquals(1, compression.blocks().size());
+        assertEquals(4, compression.blocks().get(0).startRef());
+        assertEquals(5, compression.blocks().get(0).endRef());
+    }
+
+    @Test
+    void endSnapsBackwardToTurnBoundary() {
+        final var compression = new ContextCompression(config());
+        final var messages = toolConversation();
+        assignedRefs(compression, messages);
+        // end ref 4 (user t2) is not a turn boundary (an assistant reply follows) - snap it back to the
+        // preceding tool result so the tool is never separated from its caller
+        final var result = compression.compress("t", List.of(new ContextCompression.Range("1", "4", "t1 chap")));
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("adjusted"), result.message());
+        assertTrue(result.message().contains("turn boundary"), result.message());
+        assertEquals(1, compression.blocks().size());
+        assertEquals(1, compression.blocks().get(0).startRef());
+        assertEquals(3, compression.blocks().get(0).endRef());
+    }
+
+    @Test
+    void collapsingRangeIsSkippedWithNudge() {
+        final var compression = new ContextCompression(config());
+        final var messages = toolConversation();
+        assignedRefs(compression, messages);
+        // start 2 (assistant) snaps forward to ref 4 (user) and end 4 snaps backward to the same ref:
+        // start >= end after snapping, so the range collapses and is skipped
+        final var result = compression.compress("t", List.of(new ContextCompression.Range("2", "4", "nope")));
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("skipped"), result.message());
+        assertTrue(compression.blocks().isEmpty(), "the collapsing range must not create a block");
+    }
+
+    @Test
+    void rangeWithNoReachableTurnBoundaryIsSkippedWithNudge() {
         final var compression = new ContextCompression(config());
         final var messages = List.of(
                 Message.system("system"),
@@ -129,9 +175,12 @@ class ContextCompressionTest {
                 Message.assistant("calling", List.of()),
                 Message.toolResult("call-1", "OK", "my_tool"));
         assignedRefs(compression, messages);
+        // end ref 2 (assistant, followed by a tool result) cannot be snapped back to any turn boundary
+        // within the range, so the whole entry is dropped with a nudge
         final var result = compression.compress("bad", List.of(new ContextCompression.Range("1", "2", "nope")));
-        assertFalse(result.success());
-        assertTrue(result.message().contains("turn boundary"), result.message());
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("skipped"), result.message());
+        assertTrue(compression.blocks().isEmpty());
     }
 
     @Test

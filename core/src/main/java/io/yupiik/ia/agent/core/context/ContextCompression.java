@@ -206,8 +206,11 @@ public final class ContextCompression {
     }
 
     /**
-     * Compresses one or more non-overlapping closed ranges. Ranges must start on a user message and
-     * end at a turn boundary so a tool call is never separated from its results.
+     * Compresses one or more non-overlapping closed ranges. A range that does not already start on a
+     * user message is snapped forward to the nearest following user ref, and an end that is not at a
+     * turn boundary is snapped backward to the nearest preceding boundary; a range the snaps cannot
+     * rescue (start/end collide) is dropped, always returning a success with a corrective nudge to
+     * the model rather than a hard rejection.
      */
     public synchronized Result compress(final String topic, final List<Range> ranges) {
         if (!enabled()) {
@@ -217,6 +220,7 @@ public final class ContextCompression {
             return new Result(false, "content must contain at least one {startId, endId, summary} range.", null);
         }
         final var resolved = new ArrayList<ResolvedRange>(ranges.size());
+        final var nudges = new ArrayList<String>();
         for (final var range : ranges) {
             if (range == null || range.startId() == null || range.endId() == null) {
                 return new Result(false, "Each range needs startId and endId (message refs like @12@).", null);
@@ -244,29 +248,60 @@ public final class ContextCompression {
             if (isVolatileTail(published.get(start))) {
                 return new Result(false, "The live session-state tail cannot be compressed.", null);
             }
-            if (!"user".equals(published.get(start).role())) {
-                return new Result(
-                        false,
-                        "A compression range must start on a user message (ref " + range.startId() + " is "
-                                + published.get(start).role() + ").",
-                        null);
-            }
             if (isVolatileTail(published.get(end))) {
                 return new Result(false, "The live session-state tail cannot be compressed.", null);
             }
-            if (end + 1 < published.size()
-                    && !isVolatileTail(published.get(end + 1))
-                    && !"user".equals(published.get(end + 1).role())) {
-                return new Result(
-                        false,
-                        "A compression range must end at a turn boundary (before the next user message); ref "
-                                + range.endId() + " is followed by a "
-                                + published.get(end + 1).role() + " message.",
-                        null);
+            // Snap the requested boundaries onto valid, safe ones instead of hard-rejecting a
+            // sloppy flash-class boundary choice. A non-user START moves forward to the nearest
+            // following user ref (the leading assistant/tool span is left verbatim - never user
+            // content, and never detaching a tool result from its assistant caller); an END that is
+            // not a turn boundary moves backward to the nearest preceding one. If the two snaps
+            // collide (start >= end) or leave no valid range, the entry is dropped and the model is
+            // nudged - never a hard failure.
+            int effectiveStart = start;
+            int effectiveEnd = end;
+            final var startRole = published.get(start).role();
+            if (!"user".equals(startRole)) {
+                for (var i = start + 1; i <= end; i++) {
+                    if ("user".equals(published.get(i).role())) {
+                        effectiveStart = i;
+                        break;
+                    }
+                }
+            }
+            if (!turnBoundary(end)) {
+                for (var i = end - 1; i >= effectiveStart; i--) {
+                    if (turnBoundary(i)) {
+                        effectiveEnd = i;
+                        break;
+                    }
+                }
+            }
+            final var drop = !"user".equals(published.get(effectiveStart).role())
+                    || !turnBoundary(effectiveEnd)
+                    || effectiveStart >= effectiveEnd;
+            if (drop) {
+                nudges.add("range " + range.startId() + ".." + range.endId()
+                        + " was skipped: it cannot be bounded to a user-message start and a"
+                        + " turn-boundary end (the requested span collapses). Choose a wider range"
+                        + " starting on a user message.");
+                continue;
+            }
+            final var effectiveStartRef = refOf(published.get(effectiveStart));
+            final var effectiveEndRef = refOf(published.get(effectiveEnd));
+            if (effectiveStartRef != startRef) {
+                nudges.add("range " + range.startId() + ".." + range.endId() + " adjusted: start ref "
+                        + range.startId() + " is " + startRole + "; compressed from @" + effectiveStartRef
+                        + "@ instead - always start ranges on a user-message ref.");
+            }
+            if (effectiveEndRef != endRef) {
+                nudges.add("range " + range.startId() + ".." + range.endId() + " adjusted: end ref "
+                        + range.endId() + " was not at a turn boundary; compressed up to @" + effectiveEndRef
+                        + "@ instead.");
             }
             if (configuration.turnProtection() && configuration.turnProtectionTurns() > 0) {
                 final var protectedFrom = protectedTurnStart(configuration.turnProtectionTurns());
-                if (protectedFrom >= 0 && end >= protectedFrom) {
+                if (protectedFrom >= 0 && effectiveEnd >= protectedFrom) {
                     return new Result(
                             false,
                             "The last " + configuration.turnProtectionTurns()
@@ -274,14 +309,14 @@ public final class ContextCompression {
                             null);
                 }
             }
-            if (overlapsActive(startRef, endRef)) {
+            if (overlapsActive(effectiveStartRef, effectiveEndRef)) {
                 // a new range may cover an existing ACTIVE block only when it fully contains it AND
                 // the summary summons it through its @bN@ placeholder - the block is then consumed
                 // (superseded) instead of being applied twice by rewrite()
-                final var overlapped = activeOverlappingBlocks(startRef, endRef);
+                final var overlapped = activeOverlappingBlocks(effectiveStartRef, effectiveEndRef);
                 final var referenced = blockRefsIn(range.summary());
                 final var rejected = overlapped.stream()
-                        .filter(block -> block.startRef() < startRef || block.endRef() > endRef)
+                        .filter(block -> block.startRef() < effectiveStartRef || block.endRef() > effectiveEndRef)
                         .findFirst()
                         .orElse(overlapped.stream()
                                 .filter(block -> !referenced.contains(block.id()))
@@ -295,10 +330,13 @@ public final class ContextCompression {
                             null);
                 }
             }
-            if (resolved.stream().anyMatch(previous -> startRef <= previous.endRef && endRef >= previous.startRef)) {
+            if (resolved.stream()
+                    .anyMatch(
+                            previous -> effectiveStartRef <= previous.endRef && effectiveEndRef >= previous.startRef)) {
                 return new Result(false, "The ranges in one compress call must not overlap.", null);
             }
-            resolved.add(new ResolvedRange(startRef, endRef, range.summary() == null ? "" : range.summary()));
+            resolved.add(new ResolvedRange(
+                    effectiveStartRef, effectiveEndRef, range.summary() == null ? "" : range.summary()));
         }
 
         final var created = new ArrayList<String>();
@@ -321,11 +359,13 @@ public final class ContextCompression {
             blocks.add(block);
             created.add("@" + blockId + "@");
         }
+        final var base = created.isEmpty()
+                ? "No ranges were compressed."
+                : "Compressed " + created.size() + " range(s): " + String.join(", ", created)
+                        + ". The transcript is unchanged; these blocks are now applied to outgoing requests.";
+        final var message = nudges.isEmpty() ? base : base + "\n" + String.join("\n", nudges);
         return new Result(
-                true,
-                "Compressed " + created.size() + " range(s): " + String.join(", ", created)
-                        + ". The transcript is unchanged; these blocks are now applied to outgoing requests.",
-                created.isEmpty() ? null : created.get(0).replace("@", ""));
+                true, message, created.isEmpty() ? null : created.get(0).replace("@", ""));
     }
 
     /** Re-enables a block (only while it is still active; superseded/absorbed blocks are gone). */
@@ -617,6 +657,23 @@ public final class ContextCompression {
         return message != null
                 && message.others() != null
                 && Boolean.TRUE.equals(message.others().get("volatileTail"));
+    }
+
+    /**
+     * True when the message at {@code index} is a clean end-of-turn boundary: there is nothing after
+     * it, the follower is the start of the next user turn, or the follower is a synthetic tail. A
+     * volatile-tail message itself is never a boundary (it cannot be compressed).
+     */
+    private boolean turnBoundary(final int index) {
+        if (index < 0 || index >= published.size()) {
+            return false;
+        }
+        if (isVolatileTail(published.get(index))) {
+            return false;
+        }
+        return index + 1 >= published.size()
+                || isVolatileTail(published.get(index + 1))
+                || "user".equals(published.get(index + 1).role());
     }
 
     private static boolean isCompressedBlock(final Message message) {
