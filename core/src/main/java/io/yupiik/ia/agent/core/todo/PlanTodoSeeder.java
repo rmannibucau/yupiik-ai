@@ -67,7 +67,7 @@ public class PlanTodoSeeder {
         if (plan == null || plan.isBlank()) {
             return SeedResult.NO_PLAN;
         }
-        final var items = extract(plan);
+        final var items = extract(plan, sessionId);
         if (items == null) {
             return SeedResult.DERIVATION_FAILED;
         }
@@ -97,25 +97,26 @@ public class PlanTodoSeeder {
      * actionable steps, or {@code null} when the derivation failed (LLM or
      * parse error).
      */
-    private List<TodoItem> extract(final String plan) {
+    private List<TodoItem> extract(final String plan, final String sessionId) {
         try {
             final var request = new ChatCompletionRequest(
-                    null,
-                    List.of(
-                            Message.system(
-                                    "Convert this implementation plan into a todo list. The response is constrained to a "
-                                            + "JSON object {\"steps\":[{\"content\": string, \"status\": \"pending\"} ...]} by the output schema, "
-                                            + "one concrete implementation step in execution order, max 10 items. Use an empty steps array when the "
-                                            + "text contains no implementation plan."),
-                            Message.user(plan)),
-                    null,
-                    null,
-                    false,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null);
+                            null,
+                            List.of(
+                                    Message.system(
+                                            "Convert this implementation plan into a todo list. The response is constrained to a "
+                                                    + "JSON object {\"steps\":[{\"content\": string, \"status\": \"pending\"} ...]} by the output schema, "
+                                                    + "one concrete implementation step in execution order, max 10 items. Use an empty steps array when the "
+                                                    + "text contains no implementation plan."),
+                                    Message.user(plan)),
+                            null,
+                            null,
+                            false,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null)
+                    .withSessionId(sessionId);
             final var res = chatClient.chatStructured(request, "todo_steps", stepsSchema());
             final var content =
                     res.result().message() == null || res.result().message().content() == null

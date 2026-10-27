@@ -193,4 +193,82 @@ class LlmWireTest {
                 () -> LlmWire.pump(publisher, event -> seen.incrementAndGet(), () -> false));
         org.junit.jupiter.api.Assertions.assertEquals(1, seen.get(), "the null-text delta must still be forwarded");
     }
+
+    /**
+     * The streaming {@code onError} after partial content must emit a
+     * {@link io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord} carrying the session id the pump
+     * was given (the turn's session), so the TUI routes the failure to the owning tab instead of the
+     * active one. The record travels with the request data - the callback may run on the HTTP
+     * client's thread, never on the turn thread.
+     */
+    @Test
+    void midStreamFailureLogsWithTheSessionAttribution() {
+        final Flow.Publisher<io.yupiik.llm.client.model.LlmStreamEvent> failing =
+                subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+                    @Override
+                    public void request(final long n) {
+                        subscriber.onNext(new io.yupiik.llm.client.model.LlmStreamEvent.TextDelta("partial answer"));
+                        subscriber.onError(new NullPointerException("boom"));
+                    }
+
+                    @Override
+                    public void cancel() {
+                        // nothing to release
+                    }
+                });
+        final var logger = java.util.logging.Logger.getLogger("io.yupiik.ia.agent.core.llm.LlmWire");
+        final var captured = new java.util.concurrent.atomic.AtomicReference<java.util.logging.LogRecord>();
+        final var previousUseParentHandlers = logger.getUseParentHandlers();
+        final var handler = new java.util.logging.Handler() {
+            {
+                setLevel(java.util.logging.Level.ALL);
+            }
+
+            @Override
+            public void publish(final java.util.logging.LogRecord record) {
+                captured.set(record);
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+        };
+        logger.setUseParentHandlers(false);
+        logger.addHandler(handler);
+        try {
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    MidStreamFailureException.class,
+                    () -> LlmWire.pump(failing, event -> {}, () -> false, "session-42"));
+        } finally {
+            logger.removeHandler(handler);
+            logger.setUseParentHandlers(previousUseParentHandlers);
+        }
+        final var record = captured.get();
+        org.junit.jupiter.api.Assertions.assertNotNull(record, "the streaming failure must be logged");
+        org.junit.jupiter.api.Assertions.assertInstanceOf(
+                io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord.class,
+                record,
+                "the record must carry the session attribution");
+        org.junit.jupiter.api.Assertions.assertEquals(
+                "session-42", ((io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord) record).sessionId());
+    }
+
+    /**
+     * The {@code sessionId} carrier must never reach the wire: {@link LlmWire#toLlmRequest} maps the
+     * core request field by field and skips the internal attribution exactly like {@code settings}.
+     */
+    @Test
+    void wireRequestNeverContainsTheSessionId() {
+        final var request = new ChatCompletionRequest(
+                        "m", List.of(Message.user("hi")), null, null, false, null, null, null, null, null)
+                .withSessionId("session-42");
+        final var wire = LlmWire.toLlmRequest(request);
+        assertTrue(wire.extensions().isEmpty(), "no extras may leak: " + wire.extensions());
+        // there is no sessionId field on the wire type at all - the mapping is field-by-field,
+        // so the only risk is it leaking through others(); nothing else to assert here besides
+        // that the call above builds a request (no NPE on the null-to-null mapping).
+        org.junit.jupiter.api.Assertions.assertEquals("m", wire.model());
+    }
 }

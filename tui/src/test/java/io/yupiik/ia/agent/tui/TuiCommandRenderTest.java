@@ -65,6 +65,7 @@ import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
@@ -91,6 +92,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -1234,6 +1236,48 @@ class TuiCommandRenderTest {
             final Clock clock,
             final SubagentRegistry subagentRegistry,
             final ExecutorService executor) {
+        return command(
+                shellRegistry,
+                agentLoop,
+                showThinking,
+                usageTracker,
+                todoStore,
+                clock,
+                subagentRegistry,
+                executor,
+                new SessionStore() {
+                    @Override
+                    public String create() {
+                        return "s-render";
+                    }
+
+                    @Override
+                    public void append(final String id, final SessionEntry entry) {
+                        sessionAppends.add(String.valueOf(entry));
+                    }
+
+                    @Override
+                    public List<Message> load(final String id) {
+                        return List.of();
+                    }
+
+                    @Override
+                    public void delete(final String id) {
+                        // no-op: render tests never delete a real session
+                    }
+                });
+    }
+
+    private TuiCommand command(
+            final ShellRegistry shellRegistry,
+            final AgentLoop agentLoop,
+            final boolean showThinking,
+            final UsageTracker usageTracker,
+            final TodoStore todoStore,
+            final Clock clock,
+            final SubagentRegistry subagentRegistry,
+            final ExecutorService executor,
+            final SessionStore sessionStore) {
         final var mapper = formatMapper;
         final var configuration = configuration();
         final var conf = new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, showThinking, "dark");
@@ -1241,27 +1285,6 @@ class TuiCommandRenderTest {
                 "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
                 0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, true, "unicode", "auto",
                 "auto", List.of(), null, null, true, 3, 10, "", "#ff5555", null);
-        final var sessionStore = new SessionStore() {
-            @Override
-            public String create() {
-                return "s-render";
-            }
-
-            @Override
-            public void append(final String id, final SessionEntry entry) {
-                sessionAppends.add(String.valueOf(entry));
-            }
-
-            @Override
-            public List<Message> load(final String id) {
-                return List.of();
-            }
-
-            @Override
-            public void delete(final String id) {
-                // no-op: render tests never delete a real session
-            }
-        };
         final var chatClient = new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), clock);
         final var mcpManager = new McpManager(
                 configuration,
@@ -3693,6 +3716,78 @@ class TuiCommandRenderTest {
                 // no-op: events are dispatched through ShellRegistry.onEvent in tests
             }
         });
+    }
+
+    /**
+     * A session-aware log record for a background tab must land in that tab's content, not in the
+     * active one; an untagged record keeps the historical active-tab fallback. Regression for the
+     * multi-session TUI: JUL records are JVM-wide and carry no session id, so without the
+     * attribution a background tab's stream failure / compaction warning was rendered into whatever
+     * tab was focused.
+     */
+    @Test
+    void sessionAttributedLogLandsInItsOwnTabNotTheActiveOne() throws Exception {
+        final var ids = new AtomicLong();
+        final var shellRegistry = testRegistry();
+        final var command = command(
+                shellRegistry,
+                stubAgentLoop(),
+                false,
+                new UsageTracker(null, null, null, Clock.systemUTC()),
+                new TodoStore(configuration(), formatMapper),
+                Clock.systemUTC(),
+                new SubagentRegistry(configuration(), new ProviderManager(configuration(), formatMapper)),
+                Executors.newVirtualThreadPerTaskExecutor(),
+                new SessionStore() {
+                    @Override
+                    public String create() {
+                        return "tab-" + ids.incrementAndGet();
+                    }
+
+                    @Override
+                    public void append(final String id, final SessionEntry entry) {
+                        sessionAppends.add(String.valueOf(entry));
+                    }
+
+                    @Override
+                    public List<Message> load(final String id) {
+                        return List.of();
+                    }
+
+                    @Override
+                    public void delete(final String id) {
+                        // no-op
+                    }
+                });
+        uiThread = new Thread(command, "tui-session-log-routing-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // tab 1 = "tab-1" (created on boot), tab 2 = "tab-2" (Ctrl+N); focus switches to tab 2
+        tuiRef.get().dispatch(KeyEvent.ofChar('n', KeyModifiers.CTRL));
+        awaitText(Glyphs.of("unicode").cross() + " "); // the tab bar shows both tabs
+
+        // a WARNING attributed to tab 1 (the background tab) while tab 2 is active
+        final var logger = Logger.getLogger("io.yupiik.ia.agent.core.llm.ChatClient");
+        logger.log(SessionAwareLogRecord.of(logger, "tab-1", Level.WARNING, "background stream failed for tab-1"));
+        // it must NOT appear on the active tab (tab 2)
+        Thread.sleep(300); // give the runLater + render a chance to paint the wrong way
+        assertFalse(
+                backend.text().contains("background stream failed for tab-1"),
+                "a background tab's log must not render on the active tab:\n" + backend.text());
+
+        // switch back to tab 1 (Ctrl+Tab cycles to the previous tab): the log must be there
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB, KeyModifiers.CTRL));
+        awaitText("background stream failed for tab-1");
+        awaitText("WARNING"); // the log region header carries the level (appendLogRegion)
+
+        // an untagged record keeps the historical active-tab fallback: emit it while tab 1 is active
+        logger.log(Level.INFO, "global infra log");
+        awaitText("global infra log");
+
+        quit();
     }
 
     /** Clock the test controls explicitly so elapsed-time rendering is deterministic. */

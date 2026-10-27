@@ -100,6 +100,7 @@ import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.util.OpenBrowser;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -953,8 +954,14 @@ public class TuiCommand implements Runnable {
                     return;
                 }
                 final var message = MESSAGE_FORMATTER.formatMessage(record);
+                // a session-attributed record (emitted by the turn path with the session id in scope)
+                // must reach the owning tab even when it is not the active one - a background tab's
+                // stream failure or compaction warning must never land in the focused tab's content.
+                // Records without a session (infrastructure loggers: code graph, MCP, HTTP client)
+                // keep the historical active-tab fallback.
+                final var sessionId = record instanceof SessionAwareLogRecord s ? s.sessionId() : null;
                 tui.runLater(() -> {
-                    final var target = active();
+                    final var target = resolveLogTarget(sessionId);
                     if (target == null) {
                         return;
                     }
@@ -984,6 +991,25 @@ public class TuiCommand implements Runnable {
 
     /** Formats records captured by {@link #redirectLoggerToUi} (JUL placeholder substitution). */
     private static final SimpleFormatter MESSAGE_FORMATTER = new SimpleFormatter();
+
+    /**
+     * The tab a captured log record must be rendered into: the tab owning
+     * {@code sessionId} when the record is session-attributed, else the active
+     * tab (historical global-log fallback). Unknown/vanished sessions also fall
+     * back to the active tab so a stale attribution can never drop a message.
+     * Render-thread only; {@link TabManager#list()} is a snapshot read.
+     */
+    private UiState resolveLogTarget(final String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return active();
+        }
+        for (final var state : tabManager.list()) {
+            if (sessionId.equals(state.sessionId)) {
+                return state;
+            }
+        }
+        return active();
+    }
 
     private static final String AGENT_LOGGER_PREFIX = "io.yupiik.ia.agent.";
 

@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.ia.agent.core.configuration.ReasoningFormat;
+import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmModels;
@@ -199,10 +200,20 @@ public final class LlmWire {
                 usage.generationTime());
     }
 
+    /** {@link #pump(Flow.Publisher, Consumer, BooleanSupplier, String)} with no session attribution (global). */
     static Message pump(
             final Flow.Publisher<LlmStreamEvent> publisher,
             final Consumer<LlmStreamEvent> onDelta,
             final BooleanSupplier cancelled)
+            throws IOException, InterruptedException {
+        return pump(publisher, onDelta, cancelled, null);
+    }
+
+    static Message pump(
+            final Flow.Publisher<LlmStreamEvent> publisher,
+            final Consumer<LlmStreamEvent> onDelta,
+            final BooleanSupplier cancelled,
+            final String sessionId)
             throws IOException, InterruptedException {
         Objects.requireNonNull(cancelled, "cancelled");
         final var done = new CompletableFuture<Message>();
@@ -292,7 +303,12 @@ public final class LlmWire {
                         // mid-stream category includes both transport drops and runtime faults that
                         // escaped the caller's onDelta consumer (reactive publishers forward an
                         // onNext exception to this onError).
-                        LOGGER.log(Level.WARNING, "Streaming failed after partial content was delivered", throwable);
+                        LOGGER.log(SessionAwareLogRecord.of(
+                                LOGGER,
+                                sessionId,
+                                Level.WARNING,
+                                "Streaming failed after partial content was delivered",
+                                throwable));
                         done.completeExceptionally(new MidStreamFailureException(
                                 "stream interrupted after " + text.length() + " chars of partial content: "
                                         + throwable.getClass().getSimpleName()

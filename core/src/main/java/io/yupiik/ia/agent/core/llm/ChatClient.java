@@ -31,6 +31,7 @@ import io.yupiik.ia.agent.core.configuration.ReasoningFormatMode;
 import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.llm.client.DialectLlmClient;
 import io.yupiik.llm.client.DialectNotSupportedException;
 import io.yupiik.llm.client.LlmClientResilienceWrapper;
@@ -1013,6 +1014,7 @@ public class ChatClient implements AutoCloseable {
                 maxTokens,
                 reasoningEffort,
                 others,
+                request_.sessionId(),
                 request_.settings());
     }
 
@@ -1454,6 +1456,7 @@ public class ChatClient implements AutoCloseable {
                 maxTokens,
                 request.reasoningEffort(),
                 stripped,
+                request.sessionId(),
                 request.settings());
     }
 
@@ -1507,6 +1510,7 @@ public class ChatClient implements AutoCloseable {
                 request.maxTokens(),
                 request.reasoningEffort(),
                 others,
+                request.sessionId(),
                 request.settings());
     }
 
@@ -1539,7 +1543,7 @@ public class ChatClient implements AutoCloseable {
         // the Anthropic API caps max_tokens per model family; only auto-resolved budgets (fallback or
         // detected /v1/models value) are clamped, an explicit request/configured value always wins
         final var budget = flavor == ApiFlavor.ANTHROPIC ? anthropicCeiling(model, decision) : decision.budget();
-        logBudgetOnce(flavor, providerId, model, decision);
+        logBudgetOnce(flavor, providerId, model, decision, request.sessionId());
         final var maxTokens = request.maxTokens();
         if (maxTokens != null && budget == maxTokens) {
             return request;
@@ -1555,6 +1559,7 @@ public class ChatClient implements AutoCloseable {
                 budget,
                 request.reasoningEffort(),
                 request.others(),
+                request.sessionId(),
                 request.settings());
     }
 
@@ -1611,11 +1616,16 @@ public class ChatClient implements AutoCloseable {
             final ApiFlavor flavor,
             final String providerId,
             final String model,
-            final OutputBudgetResolver.Decision decision) {
+            final OutputBudgetResolver.Decision decision,
+            final String sessionId) {
         if (budgetLogged.add(flavor.name() + '|' + providerId + '|' + model)) {
-            LOGGER.info(() -> "Output budget for " + providerId + '/' + model + " ["
-                    + flavor.name().toLowerCase(Locale.ROOT) + "]: " + decision.budget()
-                    + " tokens (source: " + decision.source() + ")");
+            LOGGER.log(SessionAwareLogRecord.of(
+                    LOGGER,
+                    sessionId,
+                    Level.INFO,
+                    "Output budget for " + providerId + '/' + model + " ["
+                            + flavor.name().toLowerCase(Locale.ROOT) + "]: " + decision.budget()
+                            + " tokens (source: " + decision.source() + ")"));
         }
     }
 
@@ -1673,6 +1683,7 @@ public class ChatClient implements AutoCloseable {
                 request.maxTokens(),
                 request.reasoningEffort(),
                 base,
+                request.sessionId(),
                 routedReq.settings());
         final var structuredReq = new ChatCompletionRequest(
                 model,
@@ -1685,6 +1696,7 @@ public class ChatClient implements AutoCloseable {
                 request.maxTokens(),
                 request.reasoningEffort(),
                 withStructuredField(base, flavor, schemaName, schema),
+                request.sessionId(),
                 request.settings());
         final var providerId = providerIdFor(request);
         final var rejectionKey = providerId + ":" + model + ":" + schemaName;
@@ -2214,6 +2226,7 @@ public class ChatClient implements AutoCloseable {
                 request.maxTokens(),
                 request.reasoningEffort(),
                 request.others(),
+                request.sessionId(),
                 routed.request().settings()));
         return doWithFallback(withPromotedExtras(effective), pauseListener, cancelled, true, onDelta);
     }
@@ -2249,7 +2262,8 @@ public class ChatClient implements AutoCloseable {
             if (stream) {
                 final var publisher =
                         LlmWire.join(dialect.stream(LlmWire.toLlmRequest(effective), cancelled, libraryListener));
-                return (A) repairToolCalls(LlmWire.pump(publisher, onDeltaSafe, cancelled), effective, provider);
+                return (A) repairToolCalls(
+                        LlmWire.pump(publisher, onDeltaSafe, cancelled, effective.sessionId()), effective, provider);
             }
             return (A) repairToolCalls(
                     LlmWire.toChatResult(
@@ -2332,6 +2346,7 @@ public class ChatClient implements AutoCloseable {
                         request.maxTokens(),
                         request.reasoningEffort(),
                         request.others(),
+                        request.sessionId(),
                         request.settings())
                 : request;
     }

@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.llm.client.ContextWindowExceededException;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -34,6 +35,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -338,7 +340,11 @@ public class CompactionCoordinator {
                         ? (lastSizeError != null ? lastSizeError : "Summary failed")
                         : outcome.error())
                 + (halvings > 0 ? " after " + halvings + " chunk-size reduction(s)" : "");
-        LOGGER.warning(failureMessage.isBlank() ? "compaction failed; truncated locally" : failureMessage);
+        LOGGER.log(SessionAwareLogRecord.of(
+                LOGGER,
+                sessionId,
+                Level.WARNING,
+                failureMessage.isBlank() ? "compaction failed; truncated locally" : failureMessage));
         emit(new AgentEvent.Notice(
                 AgentEvent.Notice.Level.WARN,
                 failureMessage.isBlank() ? "Summary failed; context truncated locally." : failureMessage,
@@ -635,6 +641,7 @@ public class CompactionCoordinator {
                                             null,
                                             null,
                                             null)
+                                    .withSessionId(sessionId)
                                     .withSettings(routedSettings)
                                     .withTuning(
                                             providerManager == null

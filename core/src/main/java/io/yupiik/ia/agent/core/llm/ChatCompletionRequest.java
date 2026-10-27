@@ -32,11 +32,16 @@ import java.util.Map;
  * fusion JSON model (no {@code @JsonModel}/{@code @JsonProperty}), so the
  * fusion works records-only and the selection can never leak to the wire.</p>
  *
- * @param model    explicit model reference (plain name, or {@code $provider/model}); when blank the
- *                 settings model applies, then the effective provider's configured model. An
- *                 explicit value always wins over the settings selection.
- * @param settings the sender's session selection; {@link ChatSettings#EMPTY} (the default) means
- *                 the process default provider and model apply
+ * @param model     explicit model reference (plain name, or {@code $provider/model}); when blank the
+ *                  settings model applies, then the effective provider's configured model. An
+ *                  explicit value always wins over the settings selection.
+ * @param sessionId session attribution for log routing ({@link io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord});
+ *                  like {@code settings} it is core-internal state that never crosses into
+ *                  {@code llm-client} and is never serialized to the wire - {@code LlmWire} maps this
+ *                  type field by field and deliberately skips it. {@code null} means the call is not
+ *                  owned by a session (background/global work).
+ * @param settings  the sender's session selection; {@link ChatSettings#EMPTY} (the default) means
+ *                  the process default provider and model apply
  */
 public record ChatCompletionRequest(
         String model,
@@ -49,6 +54,7 @@ public record ChatCompletionRequest(
         Integer maxTokens,
         String reasoningEffort,
         Map<String, Object> others,
+        String sessionId,
         ChatSettings settings) {
 
     /** Process-default selection ({@link ChatSettings#EMPTY}). */
@@ -74,6 +80,7 @@ public record ChatCompletionRequest(
                 maxTokens,
                 reasoningEffort,
                 others,
+                null,
                 ChatSettings.EMPTY);
     }
 
@@ -99,10 +106,11 @@ public record ChatCompletionRequest(
                 maxTokens,
                 reasoningEffort,
                 others,
+                null,
                 ChatSettings.EMPTY);
     }
 
-    /** A copy carrying this sender's session selection (replacing the previous one). */
+    /** A copy carrying this sender's session selection (replacing the previous one); keeps the session id. */
     public ChatCompletionRequest withSettings(final ChatSettings value) {
         return new ChatCompletionRequest(
                 model,
@@ -115,7 +123,25 @@ public record ChatCompletionRequest(
                 maxTokens,
                 reasoningEffort,
                 others,
+                sessionId,
                 value);
+    }
+
+    /** A copy carrying the given session attribution (replacing the previous one); keeps the settings. */
+    public ChatCompletionRequest withSessionId(final String value) {
+        return new ChatCompletionRequest(
+                model,
+                messages,
+                temperature,
+                topP,
+                stream,
+                tools,
+                toolChoice,
+                maxTokens,
+                reasoningEffort,
+                others,
+                value,
+                settings);
     }
 
     /**
@@ -159,6 +185,7 @@ public record ChatCompletionRequest(
                 maxTokens == null ? maxTokensFromTuning : maxTokens,
                 (reasoningEffort == null || reasoningEffort.isBlank()) ? tuning.reasoningEffort() : reasoningEffort,
                 otherMap,
+                sessionId,
                 settings);
     }
 

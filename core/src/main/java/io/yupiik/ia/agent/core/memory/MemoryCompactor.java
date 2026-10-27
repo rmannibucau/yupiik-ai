@@ -252,6 +252,7 @@ public class MemoryCompactor {
                             null,
                             null,
                             null)
+                    .withSessionId(sessionId)
                     .withSettings(settings)
                     .withTuning(
                             providerManager == null

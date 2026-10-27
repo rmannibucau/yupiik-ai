@@ -347,6 +347,7 @@ public class MemoryExtractor {
                             null,
                             null,
                             null)
+                    .withSessionId(sessionId)
                     .withSettings(settings)
                     .withTuning(
                             providerManager == null
@@ -723,6 +724,7 @@ public class MemoryExtractor {
                         null,
                         null,
                         null)
+                .withSessionId(sessionId)
                 .withSettings(settings));
         if (usageTracker != null) {
             usageTracker.recordAuxiliary(res.usage());

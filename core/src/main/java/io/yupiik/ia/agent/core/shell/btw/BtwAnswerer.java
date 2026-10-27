@@ -277,6 +277,7 @@ public class BtwAnswerer {
                                                 conf.maxTokens() > 0 ? conf.maxTokens() : null,
                                                 null,
                                                 null)
+                                        .withSessionId(sessionId)
                                         .withSettings(requestSettings),
                                 cancelled);
                 if (usage != null) {
@@ -348,6 +349,7 @@ public class BtwAnswerer {
                                             conf.maxTokens() > 0 ? conf.maxTokens() : null,
                                             null,
                                             null)
+                                    .withSessionId(sessionId)
                                     .withSettings(requestSettings),
                             cancelled);
             if (usage != null) {

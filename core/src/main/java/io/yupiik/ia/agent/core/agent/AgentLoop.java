@@ -58,6 +58,7 @@ import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.llm.client.ContextWindowExceededException;
 import io.yupiik.llm.client.LlmHttpFailureException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
@@ -1058,7 +1059,7 @@ public class AgentLoop {
             emit(error("Interrupted"));
             return null;
         } catch (final RuntimeException e) {
-            LOGGER.log(Level.SEVERE, "agent turn failed", e);
+            LOGGER.log(SessionAwareLogRecord.of(LOGGER, currentSessionId, Level.SEVERE, "agent turn failed", e));
             emit(error("unexpected failure: " + e));
             return null;
         } finally {
@@ -1562,6 +1563,7 @@ public class AgentLoop {
                         sessionId, model, List.copyOf(wireMessages), List.copyOf(tools), "auto", toolsTokens);
                 final var request = new ChatCompletionRequest(
                                 model, wireMessages, null, null, null, tools, "auto", null, null, null)
+                        .withSessionId(sessionId)
                         .withSettings(requestSettings)
                         .withTuning(runTuning);
                 final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
@@ -2362,7 +2364,8 @@ public class AgentLoop {
                     (messages.get(0).role().equals("system") ? messages.subList(1, messages.size()) : messages)
                             .stream().filter(m -> !isVolatileTail(m)).toList());
         } catch (final RuntimeException e) {
-            LOGGER.log(Level.WARNING, e, () -> "Could not persist the compacted session " + sessionId);
+            LOGGER.log(SessionAwareLogRecord.of(
+                    LOGGER, sessionId, Level.WARNING, "Could not persist the compacted session " + sessionId, e));
             emit(notice(AgentEvent.Notice.Level.WARN, "Compacted context could not be persisted: " + e.getMessage()));
         }
     }
