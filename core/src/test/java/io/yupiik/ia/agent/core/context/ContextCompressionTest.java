@@ -24,9 +24,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.ia.agent.core.configuration.CompressConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
 class ContextCompressionTest {
@@ -106,27 +108,79 @@ class ContextCompressionTest {
 
     @Test
     void withholdDanglingPrefixHidesOnlyPartialPrefixesOfLiveRefs() {
-        final var compression = new ContextCompression(null);
-        // the live wire carries @42@; a trailing '@24' is NOT a live ref so it is real content
-        compression.publish(List.of(new Message("user", "instruction\n@42@\n", null, null, null, Map.of())));
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(Message.system("system"), Message.user("instruction"));
+        compression.publish(messages);
+        // refs are assigned by the wire builder, not scraped from message content: the user is @1@
+        compression.renderRefs(messages);
         // a trailing '@24' (not a live ref) must be kept: it is plain content
         assertEquals("done\n@24", compression.withholdDanglingPrefix("done\n@24"));
-        // '@4' is a strict prefix of the live '@42@', so the half-arrived fragment is withheld
-        assertEquals("reasoning about step ", compression.withholdDanglingPrefix("reasoning about step @4"));
+        // '@1' is a strict prefix of the live '@1@', so the half-arrived fragment is withheld
+        assertEquals("reasoning about step ", compression.withholdDanglingPrefix("reasoning about step @1"));
         // a complete live ref is removed entirely
-        assertEquals("answer used it", compression.withholdDanglingPrefix("answer @42@ used it"));
+        assertEquals("answer used it", compression.withholdDanglingPrefix("answer @1@ used it"));
         assertNull(compression.withholdDanglingPrefix(null));
     }
 
     @Test
     void compactedMessageRefLeavesTheWithholdWhitelist() {
-        final var compression = new ContextCompression(null);
-        compression.publish(List.of(new Message("user", "old turn\n@9@\n", null, null, null, Map.of())));
-        // @9@ is live now -> its strict prefix '@9' is withheld
-        assertEquals("tail ", compression.withholdDanglingPrefix("tail @9"));
-        // after compaction the message leaves the wire -> @9@ no longer live -> '@9' stays as content
-        compression.publish(List.of(new Message("assistant", "new answer", null, null, null, Map.of())));
-        assertEquals("tail @9", compression.withholdDanglingPrefix("tail @9"));
+        final var compression = new ContextCompression(config());
+        final var system = Message.system("system");
+        final var old = Message.user("old turn");
+        compression.publish(List.of(system, old));
+        compression.renderRefs(List.of(system, old));
+        // @1@ is live now -> its strict prefix '@1' is withheld
+        assertEquals("tail ", compression.withholdDanglingPrefix("tail @1"));
+        // after compaction the message leaves the wire -> @1@ no longer live -> '@1' stays as content
+        final var fresh = Message.assistant("new answer", List.of());
+        compression.publish(List.of(system, fresh));
+        compression.renderRefs(List.of(system, fresh));
+        assertEquals("tail @1", compression.withholdDanglingPrefix("tail @1"));
+        // the newly rendered message gets its own live seam
+        assertEquals("tail ", compression.withholdDanglingPrefix("tail @2"));
+    }
+
+    @Test
+    void seamWhitelistDoesNotFollowTheLiveWorkingList() {
+        final var compression = new ContextCompression(config());
+        final var live = new ArrayList<>(List.of(Message.system("system"), Message.user("instruction")));
+        compression.publish(live);
+        compression.renderRefs(List.copyOf(live));
+        assertEquals("tail ", compression.withholdDanglingPrefix("tail @1"));
+        // the agent keeps mutating the published list in place between rounds; the render whitelist
+        // must stay on the wire snapshot instead of walking that list
+        live.add(Message.assistant("late answer", List.of()));
+        live.clear();
+        live.add(Message.system("system"));
+        assertEquals("tail ", compression.withholdDanglingPrefix("tail @1"));
+    }
+
+    @Test
+    void withholdDanglingPrefixIsSafeWhileTheLiveListIsMutated() throws InterruptedException {
+        final var compression = new ContextCompression(config());
+        final var live = new ArrayList<Message>();
+        live.add(Message.system("system"));
+        for (var i = 0; i < 64; i++) {
+            live.add(Message.user("turn " + i));
+        }
+        compression.publish(live);
+        compression.renderRefs(List.copyOf(live));
+        final var stop = new AtomicBoolean();
+        final var writer = new Thread(() -> {
+            while (!stop.get()) {
+                live.add(Message.assistant("streamed", List.of()));
+                live.remove(live.size() - 1);
+            }
+        });
+        writer.start();
+        try {
+            for (var i = 0; i < 10_000; i++) {
+                compression.withholdDanglingPrefix("tail @1");
+            }
+        } finally {
+            stop.set(true);
+            writer.join(1_000);
+        }
     }
 
     @Test

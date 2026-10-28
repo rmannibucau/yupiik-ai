@@ -26,6 +26,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 
 /**
@@ -37,6 +39,11 @@ import java.util.regex.Pattern;
  * <p>Compression is deliberately separate from automatic compaction: it is a view over the
  * conversation that keeps the prompt small in steady state, while compaction still guards the
  * hard model window (see {@link ContextManager}).
+ *
+ * <p>Concurrency: stateful operations are guarded by a {@link Lock}. The render-path scrubbing
+ * ({@link #stripEchoedRefs}, {@link #withholdDanglingPrefix}) is lock-free so a UI thread never
+ * blocks on an agent turn; it only reads the immutable values published through volatile fields,
+ * never the working list the agent thread keeps mutating in place.
  */
 public final class ContextCompression {
     public static final String BLOCK_MARKER = "compressedBlock";
@@ -49,9 +56,6 @@ public final class ContextCompression {
 
     private static final Pattern ECHOED_REF_INLINE =
             Pattern.compile("[ \t]*@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?");
-
-    /** Complete seam tokens as rendered in the wire messages (for the live-ref whitelist). */
-    private static final Pattern SEAM_REF = Pattern.compile("@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@");
 
     public enum Status {
         ACTIVE,
@@ -88,7 +92,19 @@ public final class ContextCompression {
     private final Map<Message, Integer> refsByMessage = new IdentityHashMap<>();
     private final Map<Integer, Message> messagesByRef = new LinkedHashMap<>();
     private final List<Block> blocks = new ArrayList<>();
+    /** Guards all mutable state below; reentrant because locked entry points call each other. */
+    private final Lock lock = new ReentrantLock();
+    /**
+     * Live working list, owned by the agent thread. Kept by reference on purpose: the loop appends
+     * to it in place between publishes, so it must never be iterated from another thread.
+     */
     private volatile List<Message> published = List.of();
+    /**
+     * Complete seam tokens ({@code @N@}, {@code @bN@}, {@code @blocked@}) carried by the wire built
+     * by the last {@link #renderRefs} call. Immutable and replaced wholesale, so render surfaces can
+     * read it from any thread without touching {@link #published}.
+     */
+    private volatile Set<String> renderedRefs = Set.of("");
 
     public ContextCompression(final CompressConfiguration configuration) {
         this.configuration = configuration;
@@ -102,50 +118,77 @@ public final class ContextCompression {
         return configuration;
     }
 
-    /** Publishes the live working list so the tool can resolve the references it rendered. */
-    public synchronized void publish(final List<Message> messages) {
-        this.published = messages == null ? List.of() : messages;
-        // memory bound: refs are assigned once and never reused, so pruning a map entry whose
-        // Message left the wire only frees the retained object - it never renumbers anything
-        // (see refOf). This mirrors ConversationTranscript.trim()'s history head-truncation.
-        final var keep = java.util.Collections.newSetFromMap(new IdentityHashMap<Message, Boolean>());
-        for (final var message : published) {
-            if (message != null) {
-                keep.add(message);
+    /**
+     * Publishes the live working list so the tool can resolve the references it rendered. The list
+     * is kept by reference: the agent thread owns it and keeps appending in place, so cross-thread
+     * readers must use {@link #renderedRefs} (refreshed by the next {@link #renderRefs}) instead.
+     */
+    public void publish(final List<Message> messages) {
+        lock.lock();
+        try {
+            this.published = messages == null ? List.of() : messages;
+            // the wire - hence the live seam set - is rebuilt by the next renderRefs; drop the
+            // previous tags now so a ref that left the conversation can never be withheld
+            this.renderedRefs = Set.of("");
+            // memory bound: refs are assigned once and never reused, so pruning a map entry whose
+            // Message left the wire only frees the retained object - it never renumbers anything
+            // (see refOf). This mirrors ConversationTranscript.trim()'s history head-truncation.
+            final var keep = java.util.Collections.newSetFromMap(new IdentityHashMap<Message, Boolean>());
+            for (final var message : published) {
+                if (message != null) {
+                    keep.add(message);
+                }
             }
+            refsByMessage.keySet().retainAll(keep);
+            messagesByRef.clear();
+            for (final var entry : refsByMessage.entrySet()) {
+                messagesByRef.put(entry.getValue(), entry.getKey());
+            }
+            // drop definitively-absorbed blocks so the blocks list stays bounded; ACTIVE/SUPERSEDED/
+            // DECOMPRESSED blocks are still referenced by tools and stay.
+            blocks.removeIf(b -> b.status() == Status.ABSORBED);
+        } finally {
+            lock.unlock();
         }
-        refsByMessage.keySet().retainAll(keep);
-        messagesByRef.clear();
-        for (final var entry : refsByMessage.entrySet()) {
-            messagesByRef.put(entry.getValue(), entry.getKey());
-        }
-        // drop definitively-absorbed blocks so the blocks list stays bounded; ACTIVE/SUPERSEDED/
-        // DECOMPRESSED blocks are still referenced by tools and stay.
-        blocks.removeIf(b -> b.status() == Status.ABSORBED);
     }
 
-    public synchronized List<Message> published() {
-        return published;
+    public List<Message> published() {
+        lock.lock();
+        try {
+            return published;
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
      * Stable reference of a message ({@code @1@}, {@code @2@}, ...), assigned once per message
      * identity and never reused. References start at 1; the leading system prompt is never tagged.
      */
-    public synchronized int refOf(final Message message) {
-        final var existing = refsByMessage.get(message);
-        if (existing != null) {
-            return existing;
+    public int refOf(final Message message) {
+        lock.lock();
+        try {
+            final var existing = refsByMessage.get(message);
+            if (existing != null) {
+                return existing;
+            }
+            final var ref = nextRef.getAndIncrement();
+            refsByMessage.put(message, ref);
+            messagesByRef.put(ref, message);
+            return ref;
+        } finally {
+            lock.unlock();
         }
-        final var ref = nextRef.getAndIncrement();
-        refsByMessage.put(message, ref);
-        messagesByRef.put(ref, message);
-        return ref;
     }
 
     /** The message a reference points to, or null when unknown. */
-    public synchronized Message messageOf(final int ref) {
-        return messagesByRef.get(ref);
+    public Message messageOf(final int ref) {
+        lock.lock();
+        try {
+            return messagesByRef.get(ref);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -158,86 +201,105 @@ public final class ContextCompression {
      * models tend to mirror into their own output (echoing them back into the transcript), while a
      * bare {@code @N@} marker has no natural-language shape to imitate, which strongly reduces the
      * echoed-refs failure mode (see {@link #stripEchoedRefs}).
+     *
+     * <p>Also publishes the exact seam tokens carried by the returned wire into
+     * {@link #renderedRefs}, so render-time scrubbing keys off real refs without walking the live
+     * working list.
      */
-    public synchronized List<Message> renderRefs(final List<Message> messages) {
-        if (!enabled() || messages == null) {
-            return messages;
-        }
-        final var out = new ArrayList<Message>(messages.size());
-        for (var i = 0; i < messages.size(); i++) {
-            final var message = messages.get(i);
-            if (i == 0
-                    || "system".equals(message.role())
-                    || isCompressedBlock(message)
-                    || isVolatileTail(message)
-                    || message.content() == null
-                    || !("user".equals(message.role())
-                            || "assistant".equals(message.role())
-                            || "tool".equals(message.role()))) {
-                out.add(message);
-                continue;
+    public List<Message> renderRefs(final List<Message> messages) {
+        lock.lock();
+        try {
+            if (!enabled() || messages == null) {
+                return messages;
             }
-            final var content = message.content() instanceof String s ? s : String.valueOf(message.content());
-            // compact seam: "@N@" rather than "[ref @N@]" - no bracket shape for the model to copy
-            final var tagged = content + "\n@" + refOf(message) + "@";
-            out.add(new Message(
-                    message.role(),
-                    tagged,
-                    message.name(),
-                    message.toolCalls(),
-                    message.toolCallId(),
-                    message.others()));
+            final var out = new ArrayList<Message>(messages.size());
+            final var refs = new HashSet<String>();
+            refs.add("");
+            for (var i = 0; i < messages.size(); i++) {
+                final var message = messages.get(i);
+                if (i == 0
+                        || "system".equals(message.role())
+                        || isCompressedBlock(message)
+                        || isVolatileTail(message)
+                        || message.content() == null
+                        || !("user".equals(message.role())
+                                || "assistant".equals(message.role())
+                                || "tool".equals(message.role()))) {
+                    out.add(message);
+                    continue;
+                }
+                final var content = message.content() instanceof String s ? s : String.valueOf(message.content());
+                // compact seam: "@N@" rather than "[ref @N@]" - no bracket shape for the model to copy
+                final var ref = refOf(message);
+                refs.add("@" + ref + "@");
+                final var tagged = content + "\n@" + ref + "@";
+                out.add(new Message(
+                        message.role(),
+                        tagged,
+                        message.name(),
+                        message.toolCalls(),
+                        message.toolCallId(),
+                        message.others()));
+            }
+            renderedRefs = Set.copyOf(refs);
+            return out;
+        } finally {
+            lock.unlock();
         }
-        return out;
     }
 
     /**
      * Applies every active block to {@code messages}: each covered span becomes one synthetic user
      * message carrying the model's summary. The original list is never mutated.
      */
-    public synchronized List<Message> rewrite(final List<Message> messages) {
-        if (!enabled() || blocks.isEmpty()) {
-            return messages;
-        }
-        final var active = new ArrayList<Block>();
-        for (final var block : blocks) {
-            if (block.status() == Status.ACTIVE) {
-                active.add(block);
+    public List<Message> rewrite(final List<Message> messages) {
+        lock.lock();
+        try {
+            if (!enabled() || blocks.isEmpty()) {
+                return messages;
             }
-        }
-        if (active.isEmpty()) {
-            return messages;
-        }
-        active.sort(Comparator.comparingInt(Block::startRef));
-        final var out = new ArrayList<Message>(messages.size());
-        var index = 0;
-        for (final var block : active) {
-            final var start = indexOf(messages, block.startRef(), index);
-            final var end = indexOf(messages, block.endRef(), start);
-            if (start < 0 || end < 0 || end < start) {
-                // the block boundaries are no longer in this list (e.g. a core compaction rewrote it)
-                markAbsorbed(block);
-                continue;
+            final var active = new ArrayList<Block>();
+            for (final var block : blocks) {
+                if (block.status() == Status.ACTIVE) {
+                    active.add(block);
+                }
             }
-            if (start < index) {
-                // overlapping active block: keep the earliest one, mark this one absorbed
-                markAbsorbed(block);
-                continue;
+            if (active.isEmpty()) {
+                return messages;
             }
-            out.addAll(messages.subList(index, start));
-            out.add(new Message(
-                    "user",
-                    "[Compressed conversation section @" + block.id() + "@]\n" + block.summary(),
-                    null,
-                    null,
-                    null,
-                    Map.of(BLOCK_MARKER, block.id())));
-            index = end + 1;
+            active.sort(Comparator.comparingInt(Block::startRef));
+            final var out = new ArrayList<Message>(messages.size());
+            var index = 0;
+            for (final var block : active) {
+                final var start = indexOf(messages, block.startRef(), index);
+                final var end = indexOf(messages, block.endRef(), start);
+                if (start < 0 || end < 0 || end < start) {
+                    // the block boundaries are no longer in this list (e.g. a core compaction rewrote it)
+                    markAbsorbed(block);
+                    continue;
+                }
+                if (start < index) {
+                    // overlapping active block: keep the earliest one, mark this one absorbed
+                    markAbsorbed(block);
+                    continue;
+                }
+                out.addAll(messages.subList(index, start));
+                out.add(new Message(
+                        "user",
+                        "[Compressed conversation section @" + block.id() + "@]\n" + block.summary(),
+                        null,
+                        null,
+                        null,
+                        Map.of(BLOCK_MARKER, block.id())));
+                index = end + 1;
+            }
+            if (index < messages.size()) {
+                out.addAll(messages.subList(index, messages.size()));
+            }
+            return out;
+        } finally {
+            lock.unlock();
         }
-        if (index < messages.size()) {
-            out.addAll(messages.subList(index, messages.size()));
-        }
-        return out;
     }
 
     /**
@@ -247,7 +309,17 @@ public final class ContextCompression {
      * rescue (start/end collide) is dropped, always returning a success with a corrective nudge to
      * the model rather than a hard rejection.
      */
-    public synchronized Result compress(final String topic, final List<Range> ranges) {
+    public Result compress(final String topic, final List<Range> ranges) {
+        lock.lock();
+        try {
+            return compressLocked(topic, ranges);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Runs one compression request while {@link #lock} is held. */
+    private Result compressLocked(final String topic, final List<Range> ranges) {
         if (!enabled()) {
             return new Result(false, "Compression is disabled (yca.compression.enabled=false).", null);
         }
@@ -426,101 +498,131 @@ public final class ContextCompression {
     }
 
     /** Re-enables a block (only while it is still active; superseded/absorbed blocks are gone). */
-    public synchronized Result decompress(final String blockId) {
-        if (!enabled()) {
-            return new Result(false, "Compression is disabled (yca.compression.enabled=false).", null);
+    public Result decompress(final String blockId) {
+        lock.lock();
+        try {
+            if (!enabled()) {
+                return new Result(false, "Compression is disabled (yca.compression.enabled=false).", null);
+            }
+            final var id = normalizeBlockId(blockId);
+            final var block =
+                    blocks.stream().filter(b -> b.id().equals(id)).findFirst().orElse(null);
+            if (block == null) {
+                return new Result(false, "Unknown compressed block @" + id + "@.", null);
+            }
+            if (block.status() != Status.ACTIVE) {
+                return new Result(
+                        false,
+                        "Block @" + id + "@ is " + block.status().name().toLowerCase() + " and cannot be decompressed.",
+                        null);
+            }
+            replaceBlock(
+                    block,
+                    new Block(
+                            block.id(),
+                            block.topic(),
+                            block.startRef(),
+                            block.endRef(),
+                            block.summary(),
+                            block.summaryTokens(),
+                            block.consumedBlockIds(),
+                            Status.DECOMPRESSED,
+                            null,
+                            block.createdAt()));
+            return new Result(true, "Decompressed @" + id + "@: its original messages are sent again.", id);
+        } finally {
+            lock.unlock();
         }
-        final var id = normalizeBlockId(blockId);
-        final var block =
-                blocks.stream().filter(b -> b.id().equals(id)).findFirst().orElse(null);
-        if (block == null) {
-            return new Result(false, "Unknown compressed block @" + id + "@.", null);
-        }
-        if (block.status() != Status.ACTIVE) {
-            return new Result(
-                    false,
-                    "Block @" + id + "@ is " + block.status().name().toLowerCase() + " and cannot be decompressed.",
-                    null);
-        }
-        replaceBlock(
-                block,
-                new Block(
-                        block.id(),
-                        block.topic(),
-                        block.startRef(),
-                        block.endRef(),
-                        block.summary(),
-                        block.summaryTokens(),
-                        block.consumedBlockIds(),
-                        Status.DECOMPRESSED,
-                        null,
-                        block.createdAt()));
-        return new Result(true, "Decompressed @" + id + "@: its original messages are sent again.", id);
     }
 
     /** Marks every active block as absorbed, e.g. after a core compaction replaced the history. */
-    public synchronized void absorbAll() {
-        if (blocks.isEmpty()) {
-            return;
-        }
-        for (var i = 0; i < blocks.size(); i++) {
-            final var block = blocks.get(i);
-            if (block.status() == Status.ACTIVE) {
-                blocks.set(
-                        i,
-                        new Block(
-                                block.id(),
-                                block.topic(),
-                                block.startRef(),
-                                block.endRef(),
-                                block.summary(),
-                                block.summaryTokens(),
-                                block.consumedBlockIds(),
-                                Status.ABSORBED,
-                                null,
-                                block.createdAt()));
+    public void absorbAll() {
+        lock.lock();
+        try {
+            if (blocks.isEmpty()) {
+                return;
             }
+            for (var i = 0; i < blocks.size(); i++) {
+                final var block = blocks.get(i);
+                if (block.status() == Status.ACTIVE) {
+                    blocks.set(
+                            i,
+                            new Block(
+                                    block.id(),
+                                    block.topic(),
+                                    block.startRef(),
+                                    block.endRef(),
+                                    block.summary(),
+                                    block.summaryTokens(),
+                                    block.consumedBlockIds(),
+                                    Status.ABSORBED,
+                                    null,
+                                    block.createdAt()));
+                }
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
     /** Estimated tokens the active blocks remove from the live conversation. */
-    public synchronized int savedTokens(final List<Message> messages) {
-        if (!enabled() || blocks.isEmpty() || messages == null) {
-            return 0;
+    public int savedTokens(final List<Message> messages) {
+        lock.lock();
+        try {
+            if (!enabled() || blocks.isEmpty() || messages == null) {
+                return 0;
+            }
+            var saved = 0;
+            for (final var block : blocks) {
+                if (block.status() != Status.ACTIVE) {
+                    continue;
+                }
+                final var start = indexOf(messages, block.startRef(), 0);
+                final var end = indexOf(messages, block.endRef(), start);
+                if (start < 0 || end < start) {
+                    continue;
+                }
+                var covered = 0;
+                for (var i = start; i <= end; i++) {
+                    covered += estimate(messages.get(i));
+                }
+                saved += Math.max(0, covered - block.summaryTokens());
+            }
+            return saved;
+        } finally {
+            lock.unlock();
         }
-        var saved = 0;
-        for (final var block : blocks) {
-            if (block.status() != Status.ACTIVE) {
-                continue;
-            }
-            final var start = indexOf(messages, block.startRef(), 0);
-            final var end = indexOf(messages, block.endRef(), start);
-            if (start < 0 || end < start) {
-                continue;
-            }
-            var covered = 0;
-            for (var i = start; i <= end; i++) {
-                covered += estimate(messages.get(i));
-            }
-            saved += Math.max(0, covered - block.summaryTokens());
-        }
-        return saved;
     }
 
     /** Effective prompt size after active compression: the raw estimate minus {@link #savedTokens}. */
-    public synchronized int effectiveTokens(final List<Message> messages, final int rawTokens) {
-        return Math.max(0, rawTokens - savedTokens(messages));
+    public int effectiveTokens(final List<Message> messages, final int rawTokens) {
+        lock.lock();
+        try {
+            return Math.max(0, rawTokens - savedTokens(messages));
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized List<Block> blocks() {
-        return List.copyOf(blocks);
+    public List<Block> blocks() {
+        lock.lock();
+        try {
+            return List.copyOf(blocks);
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized int summaryTokens() {
-        return blocks.stream()
-                .filter(b -> b.status() == Status.ACTIVE)
-                .mapToInt(Block::summaryTokens)
-                .sum();
+    public int summaryTokens() {
+        lock.lock();
+        try {
+            return blocks.stream()
+                    .filter(b -> b.status() == Status.ACTIVE)
+                    .mapToInt(Block::summaryTokens)
+                    .sum();
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -533,14 +635,21 @@ public final class ContextCompression {
      * toward real context usage and the compaction guard is untouched, so capacity accounting
      * never weakens.
      */
-    public synchronized Targets targets(final int window) {
-        final var summary = summaryTokens();
-        final var baseMin =
-                configuration == null ? 0 : configuration.resolveLimit(configuration.minContextLimit(), window, 50000);
-        final var baseMax =
-                configuration == null ? 0 : configuration.resolveLimit(configuration.maxContextLimit(), window, 100000);
-        final var buffered = configuration != null && configuration.summaryBuffer() && summary > 0;
-        return new Targets(window, baseMin, baseMax, buffered ? baseMax + summary : baseMax, summary, buffered);
+    public Targets targets(final int window) {
+        lock.lock();
+        try {
+            final var summary = summaryTokens();
+            final var baseMin = configuration == null
+                    ? 0
+                    : configuration.resolveLimit(configuration.minContextLimit(), window, 50000);
+            final var baseMax = configuration == null
+                    ? 0
+                    : configuration.resolveLimit(configuration.maxContextLimit(), window, 100000);
+            final var buffered = configuration != null && configuration.summaryBuffer() && summary > 0;
+            return new Targets(window, baseMin, baseMax, buffered ? baseMax + summary : baseMax, summary, buffered);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Resolved compression guidance targets (see {@link #targets(int)}). */
@@ -794,7 +903,7 @@ public final class ContextCompression {
      * @param text text to clean, may be null.
      * @return the cleaned text, or null when the input was null.
      */
-    public synchronized String stripEchoedRefs(final String text) {
+    public String stripEchoedRefs(final String text) {
         if (text == null) {
             return null;
         }
@@ -803,27 +912,6 @@ public final class ContextCompression {
         return ECHOED_REF_INLINE
                 .matcher(ECHOED_REF_LINE.matcher(text).replaceAll(""))
                 .replaceAll("");
-    }
-
-    /**
-     * The complete seam tokens ({@code @N@}, {@code @bN@}, {@code @blocked@}) actually rendered in the
-     * current wire messages. Derived from {@link #published} - not from the accumulating ref maps - so a
-     * message compacted out of the wire drops its ref from this set automatically and a stale {@code @N}
-     * can never be mistaken for a live seam (no leak across compaction/compression).
-     */
-    private Set<String> liveRefs() {
-        final var set = new HashSet<String>();
-        set.add("");
-        for (final var message : published) {
-            final var content = message == null ? null : message.content();
-            if (content instanceof final String s && s != null) {
-                final var m = SEAM_REF.matcher(s);
-                while (m.find()) {
-                    set.add(m.group());
-                }
-            }
-        }
-        return set;
     }
 
     /**
@@ -836,16 +924,16 @@ public final class ContextCompression {
      * <p>This is evidence-gated to stay safe: the withheld tail must be a strict prefix of a ref the live
      * conversation actually renders. An arbitrary trailing {@code @123} whose full {@code @123@} is not a
      * live ref is left untouched, so real content is never removed.
+     *
+     * <p>Lock-free on purpose: the refs come from the immutable {@link #renderedRefs} snapshot, so a
+     * render thread never waits on, or iterates, the agent-owned {@link #published} list.
      */
-    public synchronized String withholdDanglingPrefix(final String text) {
+    public String withholdDanglingPrefix(final String text) {
         if (text == null) {
             return null;
         }
         final var stripped = stripEchoedRefs(text);
-        final var refs = liveRefs();
-        if (refs.isEmpty()) {
-            return stripped;
-        }
+        final var refs = renderedRefs;
         // take the trailing contiguous run of seam-token characters ([@A-Za-z0-9]); if it is a strict
         // prefix of a live ref it is the half-arrived part of that seam, so withhold it from the copy
         var i = stripped.length();
