@@ -47,6 +47,16 @@ public class MavenOutputProcessor implements OutputProcessor {
             Pattern.compile("^\\[INFO] ?(Scanning for projects|Detecting the operating system|Using the .* encoding|"
                     + "Downloading from|Downloaded from|Progress \\(|--- [\\w-]+:[\\w.-]+:[\\w.-]+|"
                     + "<<<|>>>|Caching disabled|Remote snapshots).*|^\\[INFO] ?$");
+    /**
+     * Actionable Spotless formatting failure diagnostic, e.g.
+     * {@code [INFO] Spotless.Java is keeping 2 files clean - 1 needs changes to be clean, ...}.
+     * Matched only when at least one file needs changes (leading count in {@code 1-9...}) so the
+     * successful "0 need changes to be clean" chatter is left to be dropped as routine INFO noise.
+     */
+    private static final Pattern SPOTLESS =
+            Pattern.compile("^\\[INFO] Spotless\\.\\S+.*\\b[1-9]\\d*\\s+needs? changes? to be clean\\b.*");
+    /** Execution-wrapper status metadata appended to the command output, not emitted by Maven. */
+    private static final Pattern EXIT_CODE = Pattern.compile("^Exit code: [0-9]+$");
 
     @Override
     public boolean supports(final String command) {
@@ -67,16 +77,28 @@ public class MavenOutputProcessor implements OutputProcessor {
     public Stream<String> process(final String command, final Stream<String> lines) {
         final var errors = new ArrayList<String>();
         final var warns = new ArrayList<String>();
+        final var spotlessDirty = new ArrayList<String>();
         final var failingTests = new ArrayList<String>();
         final var passingTests = new ArrayList<String>();
         final var reactor = new ArrayList<String>();
         String buildLine = null;
+        String exitCode = null;
         String currentTest = null;
         var inReactor = false;
 
         for (final var raw : lines.toArray(String[]::new)) {
             final var line = Optimizers.stripAnsi(raw);
             if (logNoise.drop(line) || NOISE.matcher(line).matches()) {
+                continue;
+            }
+            final var sm = SPOTLESS.matcher(line);
+            if (sm.matches()) {
+                spotlessDirty.add(line.strip());
+                continue;
+            }
+            final var ec = EXIT_CODE.matcher(line);
+            if (ec.matches()) {
+                exitCode = line.strip();
                 continue;
             }
             final var m = RUNNING.matcher(line);
@@ -140,6 +162,10 @@ public class MavenOutputProcessor implements OutputProcessor {
                 out.add("... +" + (errors.size() - cap) + " more errors");
             }
         }
+        if (!spotlessDirty.isEmpty()) {
+            out.add("Formatting:");
+            spotlessDirty.forEach(d -> out.add("  " + d));
+        }
         if (!failingTests.isEmpty()) {
             out.add("Failing tests:");
             failingTests.forEach(t -> out.add("  " + t));
@@ -168,6 +194,9 @@ public class MavenOutputProcessor implements OutputProcessor {
             if (current.length() > 2) {
                 out.add(current.toString());
             }
+        }
+        if (exitCode != null) {
+            out.add(exitCode);
         }
         // enrich a quiet run with the fresh surefire/failsafe report summaries
         return enrichFromSurefire(command, out).stream();

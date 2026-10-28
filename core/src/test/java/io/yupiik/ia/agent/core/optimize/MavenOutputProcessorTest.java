@@ -139,6 +139,83 @@ class MavenOutputProcessorTest {
     }
 
     @Test
+    void preservesSpotlessDiagnosticAndExitCodeOnFailure() {
+        final var spotlessLine = "[INFO] Spotless.Java is keeping 4 files clean - 2 need changes to be clean, "
+                + "2 were already clean, 0 were skipped because caching determined they "
+                + "were already clean";
+        final var out = processor
+                .process(
+                        "mvn verify",
+                        List.of(
+                                "[INFO] Scanning for projects...",
+                                "[INFO] Loaded .mvn/maven.config",
+                                "[INFO] Building core 1.0.0-SNAPSHOT",
+                                "[INFO] --- maven-resources-plugin:3.2.0:resources (default-resources) @ core ---",
+                                "[INFO] --- maven-compiler-plugin:3.8.1:compile (default-compile) @ core ---",
+                                "[INFO] Compiling 12 source files to .../target/classes",
+                                "[INFO] --- spotless-maven-plugin:2.39.0:check (check) @ core ---",
+                                spotlessLine,
+                                "[ERROR] BUILD FAILURE",
+                                "[INFO] Total time:  42.127 s",
+                                "[INFO] ------------------------------------------------------------",
+                                "Exit code: 1")
+                                .stream())
+                .toList();
+
+        // the failure itself
+        assertTrue(out.contains("[ERROR] BUILD FAILURE"));
+        // the actionable Spotless reason survives (not treated as noise) with the full trailing detail
+        assertTrue(out.stream().map(String::strip).anyMatch(spotlessLine::equals));
+        // Wrapper-added execution status survives alongside the Maven diagnostics.
+        assertTrue(out.contains("Exit code: 1"));
+        // routine noise is dropped
+        assertFalse(out.stream().anyMatch(l -> l.contains("Scanning for projects")));
+        assertFalse(out.stream().anyMatch(l -> l.contains("Loaded .mvn/maven.config")));
+        assertFalse(out.stream().anyMatch(l -> l.contains("Building core")));
+        assertFalse(out.stream().anyMatch(l -> l.contains("resources-plugin")));
+        assertFalse(out.stream().anyMatch(l -> l.contains("compiler-plugin")));
+        assertFalse(out.stream().anyMatch(l -> l.contains("Total time")));
+        assertFalse(out.stream().anyMatch(l -> l.startsWith("[INFO] ---")));
+    }
+
+    @Test
+    void dropsSuccessfulSpotlessChatter() {
+        final var out = processor
+                .process(
+                        "mvn verify",
+                        List.of(
+                                "[INFO] --- spotless-maven-plugin:2.39.0:check (check) @ core ---",
+                                "[INFO] Spotless.Java is keeping 12 files clean - 0 need changes to be clean, "
+                                        + "0 were already clean, 12 were skipped because caching determined they "
+                                        + "were already clean",
+                                "[INFO] BUILD SUCCESS")
+                                .stream())
+                .toList();
+
+        assertEquals("[INFO] BUILD SUCCESS", out.get(0));
+        assertEquals(1, out.size());
+    }
+
+    @Test
+    void preservesSuccessfulExitCode() {
+        final var out = processor
+                .process(
+                        "mvn clean install",
+                        List.of(
+                                "[INFO] Scanning for projects...",
+                                "[INFO] BUILD SUCCESS",
+                                "[INFO] Total time:  5.213 s",
+                                "Exit code: 0")
+                                .stream())
+                .toList();
+
+        assertTrue(out.contains("[INFO] BUILD SUCCESS"));
+        assertTrue(out.contains("Exit code: 0"));
+        assertFalse(out.stream().anyMatch(l -> l.contains("Scanning for projects")));
+        assertFalse(out.stream().anyMatch(l -> l.contains("Total time")));
+    }
+
+    @Test
     void enrichFromSurefireSkipsWhenAlreadyVerbose() {
         final var out = MavenOutputProcessor.enrichFromSurefire(
                 "-q install", List.of("Tests run: 1, Failures: 0, Errors: 0, Skipped: 0", "BUILD SUCCESS"));

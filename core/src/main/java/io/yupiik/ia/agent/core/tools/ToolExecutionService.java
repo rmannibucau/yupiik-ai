@@ -163,7 +163,7 @@ public class ToolExecutionService {
                         }
                         return processed;
                     }
-                    return output;
+                    // Try the next processor when this reduction is below the threshold.
                 }
             } catch (final RuntimeException e) {
                 // this processor failed: fall through to the next candidate

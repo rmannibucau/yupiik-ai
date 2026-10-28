@@ -96,6 +96,7 @@ public class LogNoiseOutputProcessor implements OutputProcessor {
 
     @Override
     public int order() {
-        return 2; // before the maven(10)/gradle(11) specific processors
+        // After command-specific processors, before the generic truncation fallback.
+        return 100;
     }
 }

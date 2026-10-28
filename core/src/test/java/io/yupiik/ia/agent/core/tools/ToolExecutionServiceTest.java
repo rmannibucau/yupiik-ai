@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.optimize.GenericOutputProcessor;
+import io.yupiik.ia.agent.core.optimize.LogNoiseOutputProcessor;
 import io.yupiik.ia.agent.core.optimize.MavenOutputProcessor;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -214,6 +215,102 @@ class ToolExecutionServiceTest {
         assertTrue(result.output().contains("Scanning for projects..."));
     }
 
+    @Test
+    void mavenSummarizesWhenStandaloneLogNoiseReductionIsZero() {
+        // no framework log-noise lines, so a standalone LogNoise pass reduces nothing; Maven (order 10)
+        // must still run first and emit its summary
+        final var configuration = config("10");
+        final var sb = new StringBuilder();
+        sb.append("[INFO] Scanning for projects...\n");
+        sb.append("[INFO] Building yca-core 1.0.0-SNAPSHOT\n");
+        for (var i = 1; i <= 60; i++) {
+            sb.append("[INFO] Running com.example.Test").append(i).append('\n');
+            sb.append("[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0\n");
+        }
+        sb.append("[INFO] BUILD SUCCESS");
+        final var reports = new ArrayList<String>();
+        final var result = serviceWithScrambled(configuration)
+                .execute(tool("bash", sb.toString()), Map.of("command", "mvn test"), context(reports));
+        assertTrue(result.output().contains("[INFO] BUILD SUCCESS"), result.output());
+        assertTrue(result.output().contains("Passing tests (60)"), result.output());
+        assertFalse(result.output().contains("Scanning for projects..."), result.output());
+        // only the maven processor reports an optimization, proving it was the accepted first candidate
+        assertEquals(1, reports.size(), reports.toString());
+        assertTrue(reports.get(0).contains("MavenOutputProcessor"), reports.toString());
+    }
+
+    @Test
+    void mavenSummarizesEvenWithAboveThresholdFrameworkNoise() {
+        // the maven run is interleaved with a mass of framework log lines that a standalone LogNoise pass
+        // would drop above minReduction; Maven (order 10) still runs first and filters them itself
+        final var configuration = config("10");
+        final var sb = new StringBuilder();
+        sb.append("[INFO] Scanning for projects...\n");
+        sb.append("[INFO] Building yca-core 1.0.0-SNAPSHOT\n");
+        for (var i = 1; i <= 60; i++) {
+            sb.append("2026-10-28T10:00:0")
+                    .append(i % 10)
+                    .append(" [main] DEBUG o.e.c.CacheManager - warming ")
+                    .append(i)
+                    .append('\n');
+            sb.append("[INFO] Running com.example.Test").append(i).append('\n');
+            sb.append("2026-10-28T10:00:0")
+                    .append(i % 10)
+                    .append(" [main] INFO  o.e.c.Engine - hydrated ")
+                    .append(i)
+                    .append('\n');
+            sb.append("[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0\n");
+        }
+        sb.append("[INFO] BUILD SUCCESS");
+        final var reports = new ArrayList<String>();
+        final var result = serviceWithScrambled(configuration)
+                .execute(tool("bash", sb.toString()), Map.of("command", "mvn test"), context(reports));
+        assertTrue(result.output().contains("[INFO] BUILD SUCCESS"), result.output());
+        assertTrue(result.output().contains("Passing tests (60)"), result.output());
+        assertFalse(result.output().contains("Scanning for projects..."), result.output());
+        // the framework log noise is gone, and only maven reports the accepted optimization
+        assertFalse(result.output().contains("DEBUG"), result.output());
+        assertFalse(result.output().contains("o.e.c.Engine"), result.output());
+        assertEquals(1, reports.size(), reports.toString());
+        assertTrue(reports.get(0).contains("MavenOutputProcessor"), reports.toString());
+    }
+
+    @Test
+    void allCandidatesBelowThresholdReturnExactOriginal() {
+        // no candidate reaches minReduction, so the EXACT original comes back unchanged
+        final var configuration = config("10");
+        final var output = "[INFO] BUILD SUCCESS";
+        final var reports = new ArrayList<String>();
+        final var result = serviceWithScrambled(configuration)
+                .execute(tool("bash", output), Map.of("command", "mvn test"), context(reports));
+        assertEquals(output, result.output(), "sub-threshold candidates must preserve the exact original");
+        assertTrue(reports.isEmpty(), reports.toString());
+    }
+
+    @Test
+    void genericWinsWhenMavenReductionIsBelowThreshold() {
+        // maven keeps the actionable ERROR lines, so its reduction is below the 10% floor and it is
+        // rejected; the later generic truncation (10 lines) then accepts the original.
+        final var configuration = config("10");
+        final var sb = new StringBuilder();
+        sb.append("[INFO] Scanning for projects...\n");
+        sb.append("[INFO] BUILD FAILURE\n");
+        for (var i = 1; i <= 20; i++) {
+            sb.append("[ERROR] Failed to execute goal for module demo-")
+                    .append(i)
+                    .append(": cannot resolve dependency artifact-")
+                    .append(i)
+                    .append('\n');
+        }
+        sb.append("Exit code: 1");
+        final var reports = new ArrayList<String>();
+        final var result = serviceWithScrambled(configuration)
+                .execute(tool("bash", sb.toString()), Map.of("command", "mvn package"), context(reports));
+        assertEquals(1, reports.size(), reports.toString());
+        assertTrue(reports.get(0).contains("Generic"), reports.toString());
+        assertTrue(result.output().lines().count() <= 11, result.output());
+    }
+
     private ToolExecutionService serviceWith(
             final CodingAgentConfiguration configuration,
             final List<io.yupiik.ia.agent.core.optimize.OutputProcessor> processors) {
@@ -226,6 +323,19 @@ class ToolExecutionServiceTest {
                     }
                 },
                 processors);
+    }
+
+    /**
+     * Injects the real maven/logNoise/generic processors in a SCRAMBLED order that the dispatch must
+     * re-sort back to maven(10) -> logNoise(100) -> generic(1000) via {@code order()}.
+     */
+    private ToolExecutionService serviceWithScrambled(final CodingAgentConfiguration configuration) {
+        return serviceWith(
+                configuration,
+                List.of(
+                        new GenericOutputProcessor(configuration),
+                        new LogNoiseOutputProcessor(configuration),
+                        new MavenOutputProcessor()));
     }
 
     @Test
