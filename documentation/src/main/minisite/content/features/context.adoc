@@ -190,6 +190,15 @@ and reports the fallback honestly instead of a fake success. Old tail
 messages that still overflow after compaction are spliced to their head and
 tail (`yca.compaction.overflowSpliceChars`, default `500`).
 
+Automatic compaction uses a trigger and a separate provider input limit. The
+normal compaction keeps its configured recent tail; if the resulting prompt is
+still above the trigger, the agent makes at most one tighter forced-compaction
+pass during that turn. Tool-schema tokens are included in this trigger check.
+If the prompt remains above the trigger but is still within the provider input
+limit, the agent warns once and continues rather than ending the turn after a
+fixed number of compactions. A provider-reported context overflow still uses
+the separate bounded overflow-retry path.
+
 [#outcome-labels]
 Every in-loop prune/compact records _how_ the context was reduced as an
 outcome label (the `mode` field of the `AgentEvent.Compacted` event and of

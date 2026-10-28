@@ -133,4 +133,14 @@ class ContextBudgetTest {
         assertEquals(85_000, ContextBudget.compactionTrigger(100_000, 15, 0));
         assertEquals(80_000, ContextBudget.compactionTrigger(100_000, 20, 0));
     }
+
+    @Test
+    void usableWindowCanBeAboveTheCompactionTrigger() {
+        final var usable = ContextBudget.usableWindow(window(128_000), output(16_384, true));
+        final var trigger = ContextBudget.compactionTrigger(128_000, 15, 16_000);
+
+        assertEquals(111_616, usable);
+        assertEquals(108_800, trigger);
+        assertEquals(2_816, usable - trigger);
+    }
 }

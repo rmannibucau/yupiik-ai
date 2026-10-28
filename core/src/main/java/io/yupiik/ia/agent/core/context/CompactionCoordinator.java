@@ -349,6 +349,9 @@ public class CompactionCoordinator {
                 AgentEvent.Notice.Level.WARN,
                 failureMessage.isBlank() ? "Summary failed; context truncated locally." : failureMessage,
                 sessionId));
+        if (keptTruncated.equals(messages)) {
+            return new CompactionResult(messages, Mode.NONE, failureMessage);
+        }
         return new CompactionResult(keptTruncated, Mode.TRUNCATE, failureMessage);
     }
 

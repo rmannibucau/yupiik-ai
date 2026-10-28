@@ -101,9 +101,6 @@ import java.util.regex.Pattern;
 public class AgentLoop {
     private static final Logger LOGGER = Logger.getLogger(AgentLoop.class.getName());
 
-    /** Anti-thrash: stop auto-compacting when the context refills right after compaction this many turns in a row. */
-    private static final int MAX_CONSECUTIVE_COMPACTIONS = 5;
-
     /** P2: after this many consecutive tool rounds with no new information, the turn is stopped. */
     private static final int NO_PROGRESS_ROUNDS_LIMIT = 5;
 
@@ -1496,7 +1493,6 @@ public class AgentLoop {
         final var turnContinuesOnTextEnd = resolved == null || providerManager == null
                 ? false
                 : providerManager.turnContinuesOnTextEnd(resolved.provider(), resolved.model());
-        final var maxConsecutiveCompactions = MAX_CONSECUTIVE_COMPACTIONS;
         final var tools = wireTools();
         final var toolsTokens = toolTokens(tools);
         // snapshot which tools the registry actually serves (unfiltered by mode): plan mode may hide an EDIT
@@ -1510,7 +1506,8 @@ public class AgentLoop {
         // tool-pairing 400 (Azure/litellm "tool_calls must be followed by tool messages") can be repaired
         // and retried once without risking an endless retry loop on a non-tool 400.
         var toolPairingRepaired = false;
-        var consecutiveCompactions = 0;
+        var compactionPressureWarningEmitted = false;
+        var forcedCompactionRecoveryAttempted = false;
         var autoNoticeEmitted = false;
         var truncationContinues = 0;
         var emptyCompletionRetries = 0;
@@ -1604,24 +1601,49 @@ public class AgentLoop {
                         compactedThisTurn = true;
                     }
                 }
+                // The normal tail floor is optimized for retaining recent history. If it leaves the
+                // prompt above the trigger, make one bounded forced pass with the coordinator's
+                // tighter tail budget before sending the request. This is deliberately separate
+                // from the provider hard-overflow retry: the trigger can be below the usable window.
+                if (compactedThisTurn
+                        && !forcedCompactionRecoveryAttempted
+                        && usageTracker.effectiveContext(messages, toolsTokens)
+                                >= contextManager.compactionTriggerTokens()) {
+                    forcedCompactionRecoveryAttempted = true;
+                    final var recovery = contextManager.compactForRecovery(messages, cancelled, runSettings);
+                    if (recovery.changed()) {
+                        messages.clear();
+                        messages.addAll(recovery.messages());
+                        appliedKinds.add("compact-recovery");
+                        appliedModes.add(recovery.mode());
+                        if (contextView != null) {
+                            contextView.compression().absorbAll();
+                        }
+                        persistContext(sessionId, messages);
+                        compactedThisTurn = true;
+                    }
+                }
                 if (!appliedKinds.isEmpty()) {
                     emit(compacted(appliedKinds, bestMode(appliedModes)));
                 }
-                if (compactedThisTurn) {
-                    consecutiveCompactions++;
-                    if (consecutiveCompactions >= maxConsecutiveCompactions
-                            && usageTracker.effectiveContext(messages, toolsTokens)
-                                    >= contextManager.compactionTriggerTokens()) {
-                        emit(
-                                notice(
-                                        AgentEvent.Notice.Level.ERROR,
-                                        "Context keeps filling up right after compaction after "
-                                                + consecutiveCompactions
-                                                + " attempts. Consider /compact manually, a larger model, or splitting the task."));
-                        break;
-                    }
-                } else {
-                    consecutiveCompactions = 0;
+                if (compactedThisTurn
+                        && !compactionPressureWarningEmitted
+                        && usageTracker.effectiveContext(messages, toolsTokens)
+                                >= contextManager.compactionTriggerTokens()) {
+                    // A compaction checkpoint is not a failed turn: long tool-heavy tasks can
+                    // legitimately keep growing beyond the trigger. The old five-attempt ERROR+break
+                    // made productive reductions terminate the user's task. Keep the turn running
+                    // and let the existing hard-window overflow recovery decide if a request truly
+                    // cannot be sent. Warn once instead of repeating the same warning each round.
+                    compactionPressureWarningEmitted = true;
+                    final var effectiveAfterCompaction = usageTracker.effectiveContext(messages, toolsTokens);
+                    final var trigger = contextManager.compactionTriggerTokens();
+                    final var hardLimit = contextManager.usableWindowTokens();
+                    emit(notice(
+                            AgentEvent.Notice.Level.WARN,
+                            "Context remains above the compaction trigger after reduction (about "
+                                    + effectiveAfterCompaction + " tokens; trigger " + trigger + ", hard limit "
+                                    + hardLimit + "); continuing the turn and monitoring the provider context limit."));
                 }
 
                 // append-only volatile session state: the tail is its own trailing user message in the

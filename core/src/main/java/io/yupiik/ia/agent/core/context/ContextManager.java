@@ -82,6 +82,9 @@ public class ContextManager {
      * @return the trigger in estimated prompt tokens, or {@link Integer#MAX_VALUE} when compaction is disabled.
      */
     public int compactionTriggerTokens() {
+        if (configuration == null || usageTracker == null) {
+            return Integer.MAX_VALUE;
+        }
         final var c = configuration.compaction();
         if (!c.enabled()) {
             return Integer.MAX_VALUE;
@@ -91,6 +94,11 @@ public class ContextManager {
         }
         return ContextBudget.compactionTrigger(
                 usageTracker.contextWindowTokenCount().value(), c.bufferPercent(), c.bufferMinTokens());
+    }
+
+    /** Hard prompt-input limit, excluding output headroom and including external tool-schema tokens at call sites. */
+    public int usableWindowTokens() {
+        return usageTracker == null ? Integer.MAX_VALUE : usageTracker.usableWindow();
     }
 
     public CompactionResult prune(final List<Message> messages) {
@@ -145,6 +153,12 @@ public class ContextManager {
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
         return coordinator.compact(messages, force, focus, keepLastOverride, cancelled, settings);
+    }
+
+    /** One tighter, bounded retry after automatic compaction leaves usage above its trigger. */
+    public CompactionResult compactForRecovery(
+            final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
+        return compact(messages, true, null, 0, cancelled, settings);
     }
 
     public CompactionResult compactForOverflow(final List<Message> messages) {

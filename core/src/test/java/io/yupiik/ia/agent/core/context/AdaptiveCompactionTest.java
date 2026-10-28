@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.context;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
@@ -280,6 +281,36 @@ class AdaptiveCompactionTest {
         assertTrue(
                 result.error() != null && result.error().contains("upstream 500"),
                 "the truncation fallback must report the real cause");
+    }
+
+    @Test
+    void failedSummaryWithNoOpLocalTruncationReportsNoChange() {
+        final var cfg = config(
+                128_000,
+                Map.of(
+                        "yca.compaction.summarizerChunkChars", "4000",
+                        "yca.compaction.tailBudgetTokens", "1",
+                        "yca.pruning.toolOutputMaxChars", "20000"));
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                throw new IOException("upstream unavailable");
+            }
+        };
+        final var manager = new ContextManager(
+                cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()), coordinator(cfg, chat));
+        final var messages = oldHeavyHistory(6, 100);
+
+        final var result = manager.compact(messages, true);
+
+        assertEquals(CompactionResult.Mode.NONE, result.mode());
+        assertFalse(result.changed(), "a fallback that leaves all messages unchanged must not claim progress");
+        assertEquals(messages, result.messages());
+        assertTrue(result.error().contains("upstream unavailable"), "retain the original summary failure");
     }
 
     @Test

@@ -4112,6 +4112,111 @@ class AgentLoopTest {
     }
 
     @Test
+    void repeatedProductiveCompactionsDoNotEndTheTurn() {
+        final var compactRuns = new AtomicInteger();
+        final var forcedCompactRuns = new AtomicInteger();
+        final var manager = new ContextManager() {
+            @Override
+            public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
+                return false;
+            }
+
+            @Override
+            public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                return true;
+            }
+
+            @Override
+            public int usableWindowTokens() {
+                return 10_000;
+            }
+
+            @Override
+            public CompactionResult compactForRecovery(
+                    final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
+                forcedCompactRuns.incrementAndGet();
+                return new CompactionResult(messages, CompactionResult.Mode.NONE, "no further reduction");
+            }
+
+            @Override
+            public int compactionTriggerTokens() {
+                return 1;
+            }
+
+            @Override
+            public CompactionResult compact(
+                    final List<Message> messages,
+                    final boolean force,
+                    final String focus,
+                    final int keepLastOverride,
+                    final BooleanSupplier cancelled,
+                    final ChatSettings settings) {
+                compactRuns.incrementAndGet();
+                final var reduced = new ArrayList<>(messages);
+                reduced.add(Message.user("<compacted-context>digest</compacted-context>"));
+                return new CompactionResult(reduced, CompactionResult.Mode.SUMMARY, "");
+            }
+        };
+        final var requests = new ArrayList<List<Message>>();
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var round = 0; round < 6; round++) {
+            replies.add(toolCallReply("compact-tick-" + round, "tick", "{\"round\":" + round + "}"));
+        }
+        replies.add(new ScriptedReply("all done", "stop", false));
+        final var tick = new EmbeddedTool() {
+            private final AtomicInteger calls = new AtomicInteger();
+
+            @Override
+            public String name() {
+                return "tick";
+            }
+
+            @Override
+            public String description() {
+                return "returns a distinct result on every call";
+            }
+
+            @Override
+            public ToolCategory category() {
+                return ToolCategory.READ;
+            }
+
+            @Override
+            public Map<String, Object> schema() {
+                return Map.of();
+            }
+
+            @Override
+            public ToolResult execute(final Map<String, Object> args) {
+                return ToolResult.ok("tick " + calls.incrementAndGet());
+            }
+        };
+
+        final var result = loop(
+                        chatClient(replies, requests),
+                        null,
+                        configuration(true),
+                        manager,
+                        noSessionStore(),
+                        null,
+                        registryOf(tick),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("all done", result, "events: " + events);
+        assertEquals(7, requests.size(), "all six tool rounds and the final answer must run");
+        assertEquals(13, compactRuns.get(), "normal compaction runs at both checkpoints");
+        assertEquals(1, forcedCompactRuns.get(), "forced recovery is attempted at most once per turn");
+        assertTrue(
+                events.stream()
+                        .noneMatch(e -> e instanceof AgentEvent.Notice notice
+                                && notice.level() == AgentEvent.Notice.Level.ERROR
+                                && notice.message().contains("Context keeps filling up")),
+                "productive compaction must not terminate the turn");
+    }
+
+    @Test
     void usageIsNotClobberedWhenUsageAndFinishShareTheFinalStreamLine() {
         // a single SSE line carrying both usage and a finish reason is decoded by the dialect into a
         // usage End followed by a finish-reason-only End; the trailing End must not reset the
