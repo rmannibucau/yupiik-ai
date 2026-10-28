@@ -37,7 +37,11 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
 
+@ResourceLock(Resources.SYSTEM_OUT)
+@ResourceLock(Resources.SYSTEM_ERR)
 class CodeGraphIndexCommandTest {
 
     static {

@@ -92,14 +92,54 @@ class ContextCompressionTest {
 
     @Test
     void stripEchoedRefsRemovesCompactSeamsFromModelOutput() {
-        assertEquals("done\ncontinue", ContextCompression.stripEchoedRefs("done\n@90@\ncontinue"));
-        assertEquals("just a ref", ContextCompression.stripEchoedRefs("just a ref @7@"));
-        assertEquals("nested sum", ContextCompression.stripEchoedRefs("nested @b2@ sum"));
-        assertEquals("blocked turn", ContextCompression.stripEchoedRefs("blocked @blocked@ turn"));
-        assertEquals("prioritized", ContextCompression.stripEchoedRefs("prioritized @3@ [high]"));
-        assertEquals("no refs here", ContextCompression.stripEchoedRefs("no refs here"));
-        assertEquals("keeps at-word mention @user", ContextCompression.stripEchoedRefs("keeps at-word mention @user"));
-        assertNull(ContextCompression.stripEchoedRefs(null));
+        final var compression = new ContextCompression(null);
+        assertEquals("done\ncontinue", compression.stripEchoedRefs("done\n@90@\ncontinue"));
+        assertEquals("just a ref", compression.stripEchoedRefs("just a ref @7@"));
+        assertEquals("nested sum", compression.stripEchoedRefs("nested @b2@ sum"));
+        assertEquals("blocked turn", compression.stripEchoedRefs("blocked @blocked@ turn"));
+        assertEquals("prioritized", compression.stripEchoedRefs("prioritized @3@ [high]"));
+        assertEquals("no refs here", compression.stripEchoedRefs("no refs here"));
+        assertEquals("keeps at-word mention @user", compression.stripEchoedRefs("keeps at-word mention @user"));
+        assertNull(compression.stripEchoedRefs(null));
+    }
+
+    @Test
+    void withholdDanglingPrefixHidesOnlyPartialPrefixesOfLiveRefs() {
+        final var compression = new ContextCompression(null);
+        // the live wire carries @42@; a trailing '@24' is NOT a live ref so it is real content
+        compression.publish(List.of(new Message("user", "instruction\n@42@\n", null, null, null, Map.of())));
+        // a trailing '@24' (not a live ref) must be kept: it is plain content
+        assertEquals("done\n@24", compression.withholdDanglingPrefix("done\n@24"));
+        // '@4' is a strict prefix of the live '@42@', so the half-arrived fragment is withheld
+        assertEquals("reasoning about step ", compression.withholdDanglingPrefix("reasoning about step @4"));
+        // a complete live ref is removed entirely
+        assertEquals("answer used it", compression.withholdDanglingPrefix("answer @42@ used it"));
+        assertNull(compression.withholdDanglingPrefix(null));
+    }
+
+    @Test
+    void compactedMessageRefLeavesTheWithholdWhitelist() {
+        final var compression = new ContextCompression(null);
+        compression.publish(List.of(new Message("user", "old turn\n@9@\n", null, null, null, Map.of())));
+        // @9@ is live now -> its strict prefix '@9' is withheld
+        assertEquals("tail ", compression.withholdDanglingPrefix("tail @9"));
+        // after compaction the message leaves the wire -> @9@ no longer live -> '@9' stays as content
+        compression.publish(List.of(new Message("assistant", "new answer", null, null, null, Map.of())));
+        assertEquals("tail @9", compression.withholdDanglingPrefix("tail @9"));
+    }
+
+    @Test
+    void publishPrunesMessagesThatLeftTheWire() {
+        final var compression = new ContextCompression(null);
+        final var first = new Message("user", "one", null, null, null, Map.of());
+        final var second = new Message("user", "two", null, null, null, Map.of());
+        compression.publish(List.of(first, second));
+        final var ref1 = compression.refOf(first);
+        final var ref2 = compression.refOf(second);
+        // second stays on the wire, first is pruned
+        compression.publish(List.of(second));
+        assertSame(second, compression.messageOf(ref2));
+        assertEquals(null, compression.messageOf(ref1));
     }
 
     @Test

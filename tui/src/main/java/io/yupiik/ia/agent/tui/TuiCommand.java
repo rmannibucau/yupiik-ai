@@ -837,6 +837,7 @@ public class TuiCommand implements Runnable {
         final var runtime = sessionRuntimeFactory.create(state.sessionId);
         state.runtime(runtime);
         state.session.runtime(runtime);
+        state.model.bindCompression(runtime.compression());
         final var transcriptConf = tuiConfiguration.transcript();
         state.model.reset();
         state.model.maxHistoryCharacters(
@@ -917,6 +918,7 @@ public class TuiCommand implements Runnable {
         final var runtime = sessionRuntimeFactory.create(state.sessionId);
         state.runtime(runtime);
         state.session.runtime(runtime);
+        state.model.bindCompression(runtime.compression());
         if (tui != null) {
             runtime.permissions().setGate(gate(tui, state));
             runtime.feedback().setGate(feedbackGate(tui, state));
@@ -6569,7 +6571,11 @@ public class TuiCommand implements Runnable {
         } else if (btw.error() != null) {
             lines.add(Line.from(Span.styled("failed: " + btw.error(), Style.EMPTY.fg(Color.hex(palette.error())))));
         } else {
-            lines.addAll(transcriptRenderer.renderRegion(btw.answer(), inner.width(), Style.EMPTY, markdownStyles));
+            lines.addAll(transcriptRenderer.renderRegion(
+                    state.model.compression().stripEchoedRefs(btw.answer()),
+                    inner.width(),
+                    Style.EMPTY,
+                    markdownStyles));
         }
         final var splits = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(1))

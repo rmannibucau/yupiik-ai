@@ -1762,7 +1762,7 @@ public class AgentLoop {
                 // before it reaches the transcript: even when the model violates the "this is
                 // injected metadata" instruction, its bracketed hallucination must not persist
                 if (assistant.content() instanceof String text) {
-                    final var stripped = ContextCompression.stripEchoedRefs(text);
+                    final var stripped = scrub(text);
                     if (!stripped.equals(text)) {
                         assistant = new Message(
                                 assistant.role(),
@@ -2256,6 +2256,18 @@ public class AgentLoop {
         return "length".equalsIgnoreCase(finishReason) || "max_tokens".equalsIgnoreCase(finishReason);
     }
 
+    /** The session's shared context-compression ref source (its live refs are published by the loop);
+     * null when no {@link ContextView} is wired. */
+    public ContextCompression compression() {
+        return contextView == null ? null : contextView.compression();
+    }
+
+    /** Scrub via the shared compression when wired, else a disposable scrubber. */
+    private String scrub(final String text) {
+        final var c = compression();
+        return c == null ? new ContextCompression(null).stripEchoedRefs(text) : c.stripEchoedRefs(text);
+    }
+
     /** Live usage snapshot published to {@link ContextView} consumers (eg. the manage_context tool). */
     private ContextView.Snapshot snapshot(final List<Message> messages, final int toolsTokens) {
         final var effective = usageTracker.effectiveContext(messages, toolsTokens);
@@ -2407,7 +2419,7 @@ public class AgentLoop {
             // (AgentLoop persistence scrub above): a model echoing the injected "@N@" metadata in
             // its reasoning must not persist it either - the web replay rebuilds thinking-delta
             // from this key, so an unclean value would leak straight into a fresh tab.
-            others.put(THINKING_KEY, ContextCompression.stripEchoedRefs(thinking));
+            others.put(THINKING_KEY, scrub(thinking));
         }
         if (!reasoningItems.isEmpty()) {
             others.put(REASONING_ITEMS_KEY, reasoningItems);

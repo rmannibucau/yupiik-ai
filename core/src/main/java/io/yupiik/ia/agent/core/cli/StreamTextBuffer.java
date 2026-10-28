@@ -34,6 +34,7 @@ import java.util.function.UnaryOperator;
 public class StreamTextBuffer {
     private final StringBuilder pending = new StringBuilder();
     private final UnaryOperator<String> lineRenderer;
+    private final ContextCompression compression = new ContextCompression(null);
 
     public StreamTextBuffer(final UnaryOperator<String> lineRenderer) {
         this.lineRenderer = lineRenderer;
@@ -66,13 +67,13 @@ public class StreamTextBuffer {
         final var out = new StringBuilder();
         var newline = pending.indexOf("\n");
         while (newline >= 0) {
-            out.append(lineRenderer.apply(ContextCompression.stripEchoedRefs(pending.substring(0, newline))))
+            out.append(lineRenderer.apply(compression.withholdDanglingPrefix(pending.substring(0, newline))))
                     .append('\n');
             pending.delete(0, newline + 1);
             newline = pending.indexOf("\n");
         }
         if (flush && !pending.isEmpty()) {
-            out.append(lineRenderer.apply(ContextCompression.stripEchoedRefs(pending.toString())));
+            out.append(lineRenderer.apply(compression.withholdDanglingPrefix(pending.toString())));
             if (out.charAt(out.length() - 1) != '\n') {
                 out.append('\n');
             }

@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.cli.StreamTextBuffer;
 import io.yupiik.ia.agent.core.cli.Symbols;
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
+import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.util.OpenBrowser;
 import java.util.ArrayDeque;
@@ -49,6 +50,7 @@ public class AnsiShellFrontend implements ShellFrontend {
     private final boolean tty;
     private final StreamTextBuffer textBuffer;
     private final TurnStats stats = new TurnStats();
+    private volatile ContextCompression compression = new ContextCompression(null);
 
     private volatile boolean showThinking;
     private volatile ToolOutputVisibility showToolOutput;
@@ -162,6 +164,11 @@ public class AnsiShellFrontend implements ShellFrontend {
 
     public TurnStats stats() {
         return stats;
+    }
+
+    /** Rebinds the seam-scrub source once the owning session runtime is available (live refs). */
+    public void bindCompression(final ContextCompression value) {
+        this.compression = value != null ? value : new ContextCompression(null);
     }
 
     public MarkdownColorizer colorizer() {
@@ -444,7 +451,7 @@ public class AnsiShellFrontend implements ShellFrontend {
                     printlnErr(MarkdownColorizer.thinking(prefix + "thinking..."));
                 }
                 stopSpinner();
-                printErr(MarkdownColorizer.thinking(prefix + delta));
+                printErr(MarkdownColorizer.thinking(compression.withholdDanglingPrefix(prefix + delta)));
                 stderrNeedsNewline = !delta.endsWith("\n");
                 stderrLineOwner = subagentId;
             } else {

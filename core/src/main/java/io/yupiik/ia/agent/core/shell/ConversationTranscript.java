@@ -242,6 +242,14 @@ public class ConversationTranscript {
      */
     private final boolean captureSubagentEvents;
 
+    /**
+     * Source of the seam-scrub ref whitelist for live render surfaces ({@link #markdown} /
+     * {@link #thinkingText}). Defaults to a dedicated instance; callers that share a real
+     * {@code ContextCompression} (e.g. the one owned by {@code ContextView}) should inject it so the
+     * dangling-withhold keys off the refs actually rendered in that conversation.
+     */
+    private ContextCompression compression;
+
     public ConversationTranscript() {
         this(new ThinkTagSplitter());
     }
@@ -256,10 +264,19 @@ public class ConversationTranscript {
     }
 
     protected ConversationTranscript(final ThinkTagSplitter thinkTags, final boolean captureSubagentEvents) {
+        this(thinkTags, captureSubagentEvents, null);
+    }
+
+    /** Injects a shared {@link ContextCompression} whose live refs drive the dangling-seam withhold. */
+    public ConversationTranscript(
+            final ThinkTagSplitter thinkTags,
+            final boolean captureSubagentEvents,
+            final ContextCompression compression) {
         // defensive: hand-built instances (tests, generated subclasses) may pass null
         this.thinkTags = thinkTags != null ? thinkTags : new ThinkTagSplitter();
         this.inlineThink = this.thinkTags.create();
         this.captureSubagentEvents = captureSubagentEvents;
+        this.compression = compression != null ? compression : new ContextCompression(null);
     }
 
     // Per-turn metrics
@@ -831,8 +848,9 @@ public class ConversationTranscript {
         // the persisted transcript is scrubbed by AgentLoop (stripEchoedRefs) but the live
         // stream renders TextDelta chunks verbatim, so a flash-class model echoing the injected
         // "@N@" seam would show it on screen while the stored message stays clean. This display
-        // surface applies the same deterministic scrub so what is rendered matches what persists.
-        final var scrubbed = ContextCompression.stripEchoedRefs(md);
+        // surface applies the same deterministic scrub so what is rendered matches what persists,
+        // plus the dangling-fragment withhold so a partially-arrived seam never renders.
+        final var scrubbed = compression.withholdDanglingPrefix(md);
         final var result = scrubbed == null || scrubbed.isBlank() ? fallback : scrubbed;
         markdownVersion = contentVersion;
         markdownSpinner = spinner;
@@ -1162,7 +1180,21 @@ public class ConversationTranscript {
      * render verbatim while the stored message stays clean.
      */
     public synchronized String thinkingText() {
-        return ContextCompression.stripEchoedRefs(thinking.toString());
+        return compression.withholdDanglingPrefix(thinking.toString());
+    }
+
+    /** The seam-scrub source used for live render surfaces (see {@link #compression}). */
+    public ContextCompression compression() {
+        return compression;
+    }
+
+    /**
+     * Rebinds the transcript to the shared {@link ContextCompression} once its owning session runtime
+     * is created (so the dangling-seam withhold keys off the refs the agent loop actually renders).
+     * A null argument resets to a fresh instance; the previous instance is discarded, never mutated.
+     */
+    public synchronized void bindCompression(final ContextCompression value) {
+        this.compression = value != null ? value : new ContextCompression(null);
     }
 
     public String runningTool() {

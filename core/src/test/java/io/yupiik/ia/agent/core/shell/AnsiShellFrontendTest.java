@@ -449,6 +449,20 @@ class AnsiShellFrontendTest {
     }
 
     @Test
+    void shownThinkingScrubsEchoedSeamsFromStderr() {
+        final var frontend = frontend(true, true, true);
+        frontend.beginTurn();
+        frontend.onEvent(new AgentEvent.ThinkingDelta("pondering @535@ reasoning @24", "s1"));
+        frontend.endTurn();
+        final var rendered = err.toString();
+        assertTrue(rendered.contains("pondering"), rendered);
+        assertTrue(rendered.contains("reasoning @24"), "non-live/plain '@24' is real content and stays: " + rendered);
+        assertFalse(
+                rendered.contains("@535@"),
+                "complete echoed seam must be scrubbed from the thinking dump: " + rendered);
+    }
+
+    @Test
     void hiddenThinkingSpinsDuringTurn() {
         final var frontend = frontend(true, false, true);
         frontend.beginTurn();

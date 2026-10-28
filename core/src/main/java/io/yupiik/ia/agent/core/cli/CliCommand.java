@@ -356,6 +356,7 @@ public class CliCommand implements Runnable {
         // the banner reads the session runtime (permission mode), wire it before printing
         final var runtime = sessionRuntimeFactory.create(sessionId);
         session.runtime(runtime);
+        frontend.bindCompression(runtime.compression());
         printBanner();
         if (conf.agent() != null && !conf.agent().isBlank()) {
             if (agentProvider.byName(conf.agent()) == null) {

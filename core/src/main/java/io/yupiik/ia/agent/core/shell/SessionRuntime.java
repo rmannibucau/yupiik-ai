@@ -126,6 +126,11 @@ public final class SessionRuntime {
         return contextManager;
     }
 
+    /** The session's shared context-compression ref source (live refs) for seam-scrub render surfaces. */
+    public io.yupiik.ia.agent.core.context.ContextCompression compression() {
+        return loop.compression();
+    }
+
     /** The session's system prompt builder (reflects this session's mode and todos). */
     public SystemPromptBuilder systemPromptBuilder() {
         return systemPromptBuilder;

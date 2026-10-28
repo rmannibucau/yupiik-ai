@@ -19,10 +19,12 @@ import io.yupiik.ia.agent.core.configuration.CompressConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
@@ -47,6 +49,9 @@ public final class ContextCompression {
 
     private static final Pattern ECHOED_REF_INLINE =
             Pattern.compile("[ \t]*@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?");
+
+    /** Complete seam tokens as rendered in the wire messages (for the live-ref whitelist). */
+    private static final Pattern SEAM_REF = Pattern.compile("@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@");
 
     public enum Status {
         ACTIVE,
@@ -100,6 +105,23 @@ public final class ContextCompression {
     /** Publishes the live working list so the tool can resolve the references it rendered. */
     public synchronized void publish(final List<Message> messages) {
         this.published = messages == null ? List.of() : messages;
+        // memory bound: refs are assigned once and never reused, so pruning a map entry whose
+        // Message left the wire only frees the retained object - it never renumbers anything
+        // (see refOf). This mirrors ConversationTranscript.trim()'s history head-truncation.
+        final var keep = java.util.Collections.newSetFromMap(new IdentityHashMap<Message, Boolean>());
+        for (final var message : published) {
+            if (message != null) {
+                keep.add(message);
+            }
+        }
+        refsByMessage.keySet().retainAll(keep);
+        messagesByRef.clear();
+        for (final var entry : refsByMessage.entrySet()) {
+            messagesByRef.put(entry.getValue(), entry.getKey());
+        }
+        // drop definitively-absorbed blocks so the blocks list stays bounded; ACTIVE/SUPERSEDED/
+        // DECOMPRESSED blocks are still referenced by tools and stay.
+        blocks.removeIf(b -> b.status() == Status.ABSORBED);
     }
 
     public synchronized List<Message> published() {
@@ -745,7 +767,7 @@ public final class ContextCompression {
      * @param text text to clean, may be null.
      * @return the cleaned text, or null when the input was null.
      */
-    public static String stripEchoedRefs(final String text) {
+    public synchronized String stripEchoedRefs(final String text) {
         if (text == null) {
             return null;
         }
@@ -754,5 +776,69 @@ public final class ContextCompression {
         return ECHOED_REF_INLINE
                 .matcher(ECHOED_REF_LINE.matcher(text).replaceAll(""))
                 .replaceAll("");
+    }
+
+    /**
+     * The complete seam tokens ({@code @N@}, {@code @bN@}, {@code @blocked@}) actually rendered in the
+     * current wire messages. Derived from {@link #published} - not from the accumulating ref maps - so a
+     * message compacted out of the wire drops its ref from this set automatically and a stale {@code @N}
+     * can never be mistaken for a live seam (no leak across compaction/compression).
+     */
+    private Set<String> liveRefs() {
+        final var set = new HashSet<String>();
+        set.add("");
+        for (final var message : published) {
+            final var content = message == null ? null : message.content();
+            if (content instanceof final String s && s != null) {
+                final var m = SEAM_REF.matcher(s);
+                while (m.find()) {
+                    set.add(m.group());
+                }
+            }
+        }
+        return set;
+    }
+
+    /**
+     * Render-time view of {@code text} that, in addition to stripping complete echoed seams, also hides
+     * a trailing fragment that is a strict prefix of a live seam ref (e.g. a {@code @2} waiting for the
+     * closing {@code @} that streams in a later chunk). Runs on a copy only - the underlying buffer stays
+     * raw, so {@code flushThinking()}/{@code flushPending()} still assemble the full text and a completed
+     * tag is stripped normally.
+     *
+     * <p>This is evidence-gated to stay safe: the withheld tail must be a strict prefix of a ref the live
+     * conversation actually renders. An arbitrary trailing {@code @123} whose full {@code @123@} is not a
+     * live ref is left untouched, so real content is never removed.
+     */
+    public synchronized String withholdDanglingPrefix(final String text) {
+        if (text == null) {
+            return null;
+        }
+        final var stripped = stripEchoedRefs(text);
+        final var refs = liveRefs();
+        if (refs.isEmpty()) {
+            return stripped;
+        }
+        // take the trailing contiguous run of seam-token characters ([@A-Za-z0-9]); if it is a strict
+        // prefix of a live ref it is the half-arrived part of that seam, so withhold it from the copy
+        var i = stripped.length();
+        while (i > 0) {
+            final var c = stripped.charAt(i - 1);
+            if (Character.isLetterOrDigit(c) || c == '@') {
+                i--;
+            } else {
+                break;
+            }
+        }
+        if (i == stripped.length()) {
+            return stripped;
+        }
+        final var tail = stripped.substring(i);
+        for (final var ref : refs) {
+            if (tail.length() < ref.length() && ref.startsWith(tail)) {
+                return stripped.substring(0, i);
+            }
+        }
+        return stripped;
     }
 }
