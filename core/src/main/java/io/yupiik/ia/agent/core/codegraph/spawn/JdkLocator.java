@@ -21,11 +21,13 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
@@ -77,6 +79,9 @@ public class JdkLocator {
      * class, rather than re-reading the system property on each call.
      */
     private final String osName;
+
+    private final Properties probeCache = new Properties();
+    private boolean probeCacheLoaded;
 
     /**
      * Injectable settings for the locator. {@code projectDir} anchors the {@code .sdkmanrc}/{@code .java-version} scan;
@@ -163,7 +168,7 @@ public class JdkLocator {
 
         final var probed = new ArrayList<Candidate>();
         for (final var launcher : launchers) {
-            final var candidate = probe(launcher);
+            final var candidate = cachedProbe(launcher);
             if (candidate != null) {
                 probed.add(candidate);
             }
@@ -180,6 +185,89 @@ public class JdkLocator {
                             + " against the parser bytecode floor "
                             + v1 + "); the native structural code graph is disabled for this session. Parse output "
                             + "will be empty until a compatible JDK or a 'yca.structuralCodeGraph.javac.jdkHome' is provided.");
+        }
+    }
+
+    private Candidate cachedProbe(final Path launcher) {
+        final var normalized = launcher.toAbsolutePath().normalize();
+        final var release = normalized.getParent() == null
+                ? null
+                : normalized.getParent().getParent().resolve("release");
+        final var stamp = fileStamp(normalized) + ":" + fileStamp(release);
+        lock.lock();
+        try {
+            if (!probeCacheLoaded) {
+                probeCacheLoaded = true;
+                final var cache = settings.projectDir() == null
+                        ? null
+                        : settings.projectDir().resolve(".yca/generated/jvm.probe.cache");
+                if (cache != null && Files.isRegularFile(cache)) {
+                    try (final var in = Files.newInputStream(cache)) {
+                        probeCache.load(in);
+                    } catch (final IOException ignored) {
+                        probeCache.clear();
+                    }
+                }
+                if (!"1".equals(probeCache.getProperty("_format"))) {
+                    probeCache.clear();
+                    probeCache.setProperty("_format", "1");
+                }
+            }
+            final var key = normalized.toString();
+            final var value = probeCache.getProperty(key);
+            if (value != null && value.startsWith(stamp + ":")) {
+                try {
+                    return new Candidate(normalized, Integer.parseInt(value.substring(stamp.length() + 1)));
+                } catch (final NumberFormatException ignored) {
+                    probeCache.remove(key);
+                }
+            }
+        } finally {
+            lock.unlock();
+        }
+        final var candidate = probe(normalized);
+        if (candidate != null && candidate.classFileMajor() > 0) {
+            lock.lock();
+            try {
+                probeCache.setProperty(normalized.toString(), stamp + ":" + candidate.classFileMajor());
+                probeCache.setProperty("_format", "1");
+                final var cache = settings.projectDir() == null
+                        ? null
+                        : settings.projectDir().resolve(".yca/generated/jvm.probe.cache");
+                if (cache != null) {
+                    try {
+                        Files.createDirectories(cache.getParent());
+                        final var tmp = Files.createTempFile(cache.getParent(), "jvm-probe-", ".tmp");
+                        try (final var out = Files.newOutputStream(tmp)) {
+                            probeCache.store(out, "JDK probe cache");
+                        }
+                        try {
+                            Files.move(tmp, cache, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                        } catch (final IOException e) {
+                            Files.move(tmp, cache, StandardCopyOption.REPLACE_EXISTING);
+                        }
+                    } catch (final IOException e) {
+                        LOGGER.fine("Cannot write JDK probe cache: " + e.getMessage());
+                    }
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+        return candidate;
+    }
+
+    private static String fileStamp(final Path file) {
+        if (file == null) return "missing";
+        try {
+            final var metadata =
+                    Files.size(file) + "-" + Files.getLastModifiedTime(file).toMillis();
+            return file.getFileName().toString().equals("release")
+                    ? metadata + "-"
+                            + Integer.toHexString(Files.readString(file).hashCode())
+                    : metadata;
+        } catch (final IOException e) {
+            return "missing";
         }
     }
 

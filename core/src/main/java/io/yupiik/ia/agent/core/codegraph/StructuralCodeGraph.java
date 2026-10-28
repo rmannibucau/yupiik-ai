@@ -105,10 +105,11 @@ public class StructuralCodeGraph implements AutoCloseable {
             ".yca");
 
     private final CodingAgentConfiguration configuration;
-    private final List<GraphParser> parsers;
+    private final List<GraphParser> registeredParsers;
+    private volatile List<GraphParser> parsers;
     /** Extension (lowercased, no dot, e.g. {@code java}) to the parser that owns it; built once from the available
      * parsers so {@link #parserFor} is an O(1) lookup instead of scanning the parser list on every refresh. */
-    private final Map<String, GraphParser> byExtension;
+    private volatile Map<String, GraphParser> byExtension;
 
     private final JsonMapper mapper;
     /** Background re-index notices have no session sink and are dropped when no turn is running. */
@@ -131,13 +132,14 @@ public class StructuralCodeGraph implements AutoCloseable {
     private final boolean ownsScheduler;
     private final AtomicLong refreshPending = new AtomicLong();
     private volatile long latestRefreshJob;
-    private final Object batchRefreshMonitor = new Object();
+    private final ReentrantLock batchRefreshMonitor = new ReentrantLock();
     private final Set<Path> pendingBatchRefresh = new LinkedHashSet<>();
     private volatile boolean batchFlushScheduled;
     private volatile GraphStore graph;
     private volatile CodeGraphIndex index;
     private volatile List<String> pendingRefreshPaths = List.of();
     private final AtomicBoolean readyStarted = new AtomicBoolean();
+    private final ReentrantLock readinessLock = new ReentrantLock();
     private volatile CompletableFuture<Void> readyFuture;
     /**
      * Bounded, refresh-aware query indexes for non-default (per-session) roots, keyed by absolute root. Each entry
@@ -167,14 +169,9 @@ public class StructuralCodeGraph implements AutoCloseable {
             final Clock clock,
             final ScheduledExecutorService scheduler) {
         this.configuration = configuration;
-        this.parsers = parsers.stream().filter(GraphParser::available).toList();
-        final var byExt = new HashMap<String, GraphParser>();
-        for (final var parser : this.parsers) {
-            for (final var ext : parser.extensions()) {
-                byExt.put(ext.toLowerCase(Locale.ROOT), parser);
-            }
-        }
-        this.byExtension = Map.copyOf(byExt);
+        this.registeredParsers = List.copyOf(parsers);
+        this.parsers = List.of();
+        this.byExtension = Map.of();
         this.mapper = mapper;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
@@ -202,6 +199,7 @@ public class StructuralCodeGraph implements AutoCloseable {
     protected StructuralCodeGraph() {
         this.configuration = null;
         this.parsers = null;
+        this.registeredParsers = null;
         this.byExtension = null;
         this.mapper = null;
         this.chatClient = null;
@@ -228,7 +226,7 @@ public class StructuralCodeGraph implements AutoCloseable {
     private record PersistJob(GraphStore store, Map<String, Long> mtimes) {}
 
     public boolean enabled() {
-        return configuration != null && configuration.structuralCodeGraph().enabled() && !parsers.isEmpty();
+        return configuration != null && configuration.structuralCodeGraph().enabled() && !registeredParsers.isEmpty();
     }
 
     public Path storeRoot() {
@@ -359,7 +357,9 @@ public class StructuralCodeGraph implements AutoCloseable {
         // Still nothing to serve (both graph and index null): the build is in flight - keep awaiting it up to a
         // generous ceiling instead of handing an empty store to the caller (the first, short bound used to expire
         // under a cold start or heavy parallel load and graph()/queryIndex() then served an empty graph).
-        awaitReady(future, refreshAwaitMs * 10L);
+        if (!awaitReady(future, refreshAwaitMs * 10L)) {
+            throw new IllegalStateException("Timed out waiting for structural code graph readiness");
+        }
     }
 
     /**
@@ -377,7 +377,7 @@ public class StructuralCodeGraph implements AutoCloseable {
             return true;
         } catch (final ExecutionException e) {
             LOGGER.log(Level.WARNING, e.getCause(), () -> "Code graph index preparation failed: " + e.getMessage());
-            return true;
+            throw new IllegalStateException("Code graph preparation failed", e.getCause());
         }
     }
 
@@ -387,13 +387,35 @@ public class StructuralCodeGraph implements AutoCloseable {
      * schedules the work, and the scheduled job no-ops once an index is already present. Never blocks.
      */
     public void ensureReadyAsync() {
-        if (!enabled() || index != null || indexFile == null || projectDir == null) {
-            return;
+        readinessLock.lock();
+        try {
+            if (!enabled() || index != null || indexFile == null || projectDir == null || readyStarted.get()) return;
+            final var future = new CompletableFuture<Void>();
+            readyFuture = future;
+            readyStarted.set(true);
+            scheduler.execute(() -> {
+                try {
+                    final var available = registeredParsers.stream()
+                            .filter(GraphParser::available)
+                            .toList();
+                    if (available.isEmpty()) {
+                        throw new IllegalStateException("No structural graph parser is available in this runtime");
+                    }
+                    final var byExt = new HashMap<String, GraphParser>();
+                    for (final var parser : available) {
+                        for (final var ext : parser.extensions()) byExt.put(ext.toLowerCase(Locale.ROOT), parser);
+                    }
+                    parsers = available;
+                    byExtension = Map.copyOf(byExt);
+                    ensureReadyNow();
+                    future.complete(null);
+                } catch (final Throwable error) {
+                    future.completeExceptionally(error);
+                }
+            });
+        } finally {
+            readinessLock.unlock();
         }
-        if (!readyStarted.compareAndSet(false, true)) {
-            return;
-        }
-        readyFuture = CompletableFuture.runAsync(this::ensureReadyNow, scheduler);
     }
 
     /**
@@ -524,6 +546,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (root == null || root.equals(projectDir)) {
             return queryIndex();
         }
+        ensureReady();
         final var normalized = root.toAbsolutePath().normalize();
         if (!Files.isDirectory(normalized)) {
             return queryIndex();
@@ -789,6 +812,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (!enabled()) {
             return "disabled (enable yca.structural-code-graph.enabled)";
         }
+        ensureReady();
         final var loaded = load();
         final GraphStore rebuilt;
         if (loaded != null) {
@@ -934,12 +958,15 @@ public class StructuralCodeGraph implements AutoCloseable {
     /** Accumulates a changed file for the debounced batch; a single flush is (re)scheduled after the quiet window. */
     private void refreshBatchAdd(final Path absolute) {
         refreshPending.incrementAndGet();
-        synchronized (batchRefreshMonitor) {
+        batchRefreshMonitor.lock();
+        try {
             pendingBatchRefresh.add(absolute);
             if (!batchFlushScheduled) {
                 batchFlushScheduled = true;
                 scheduler.schedule(this::flushBatchRefresh, batchRefreshDebounceMs, TimeUnit.MILLISECONDS);
             }
+        } finally {
+            batchRefreshMonitor.unlock();
         }
     }
 
@@ -951,10 +978,13 @@ public class StructuralCodeGraph implements AutoCloseable {
      */
     private void flushBatchRefresh() {
         final List<Path> files = new ArrayList<>();
-        synchronized (batchRefreshMonitor) {
+        batchRefreshMonitor.lock();
+        try {
             files.addAll(pendingBatchRefresh);
             pendingBatchRefresh.clear();
             batchFlushScheduled = false;
+        } finally {
+            batchRefreshMonitor.unlock();
         }
         if (files.isEmpty()) {
             return;
@@ -1745,32 +1775,48 @@ public class StructuralCodeGraph implements AutoCloseable {
      * A small bounded, access-ordered cache of per-root code graph indexes. Reads refresh LRU recency; the oldest
      * entry (by last access) is evicted once the size exceeds the bound, so a web server switching many sessions
      * across distinct project roots never accumulates an unbounded set of in-memory indexes. Lookups/builds that
-     * read the disk are done by the caller outside the lock; only the map get/put is synchronized (contention is a
+     * read the disk are done by the caller outside the lock; only the map get/put is locked (contention is a
      * single cache slot touch per tool call, negligible compared with the index builds themselves).
      */
     static final class RootIndexCache {
         private final int max;
         private final LinkedHashMap<Path, RootCacheEntry> map;
+        private final ReentrantLock lock = new ReentrantLock();
 
         RootIndexCache(final int max) {
             this.max = Math.max(1, max);
             this.map = new LinkedHashMap<>(16, 0.75f, true);
         }
 
-        synchronized RootCacheEntry get(final Path root) {
-            return map.get(root);
-        }
-
-        synchronized void put(final Path root, final RootCacheEntry entry) {
-            map.put(root, entry);
-            while (map.size() > max) {
-                final var eldest = map.keySet().iterator().next();
-                map.remove(eldest);
+        RootCacheEntry get(final Path root) {
+            lock.lock();
+            try {
+                return map.get(root);
+            } finally {
+                lock.unlock();
             }
         }
 
-        synchronized int size() {
-            return map.size();
+        void put(final Path root, final RootCacheEntry entry) {
+            lock.lock();
+            try {
+                map.put(root, entry);
+                while (map.size() > max) {
+                    final var eldest = map.keySet().iterator().next();
+                    map.remove(eldest);
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        int size() {
+            lock.lock();
+            try {
+                return map.size();
+            } finally {
+                lock.unlock();
+            }
         }
     }
 }

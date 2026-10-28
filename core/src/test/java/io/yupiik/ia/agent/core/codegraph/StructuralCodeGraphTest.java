@@ -40,7 +40,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -133,6 +135,60 @@ class StructuralCodeGraphTest {
         final var client = new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC());
         chatClients.add(client);
         return client;
+    }
+
+    @Test
+    void readinessStartsInBackgroundAndGraphQueryWaitsForParserAvailability() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("blocked-parser"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        Files.writeString(project.resolve("Foo.java"), "package demo; public class Foo {}\n");
+        final var entered = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        final var delegate = new JavaGraphParser();
+        final GraphParser blocked = new GraphParser() {
+            @Override
+            public Set<String> extensions() {
+                return delegate.extensions();
+            }
+
+            @Override
+            public boolean available() {
+                entered.countDown();
+                try {
+                    return release.await(10, TimeUnit.SECONDS) && delegate.available();
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+
+            @Override
+            public GraphModel parse(final Path file) {
+                return delegate.parse(file);
+            }
+
+            @Override
+            public Map<Path, GraphModel> parseBatch(final List<Path> files) {
+                return delegate.parseBatch(files);
+            }
+        };
+        final var graph = newGraph(config(project, Map.of()), mapper, List.of(blocked));
+        final var started = System.nanoTime();
+        graph.ensureReadyAsync();
+        assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 500, "readiness must not probe inline");
+        assertTrue(entered.await(2, TimeUnit.SECONDS), "background availability check did not start");
+        final var query = Executors.newSingleThreadExecutor();
+        try {
+            final Future<GraphStore> result = query.submit(graph::graph);
+            Thread.sleep(100);
+            assertTrue(!result.isDone(), "graph query must wait for readiness");
+            release.countDown();
+            assertTrue(result.get(15, TimeUnit.SECONDS).symbols().stream()
+                    .anyMatch(s -> s.fqn().equals("demo.Foo")));
+        } finally {
+            release.countDown();
+            query.shutdownNow();
+        }
     }
 
     @Test

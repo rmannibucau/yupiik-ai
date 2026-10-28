@@ -73,6 +73,43 @@ class JdkLocatorTest {
         return new JdkLocator.Settings(null, pinned, Path.of(""));
     }
 
+    @Test
+    void cachesSuccessfulProbeAndInvalidatesWhenJdkReleaseChanges() throws Exception {
+        final var project = Files.createDirectory(tempDir.resolve("cache-project"));
+        final var roots = Files.createDirectory(tempDir.resolve("cache-jdks"));
+        final var home = Files.createDirectory(roots.resolve("jdk-25"));
+        final var launcherPath = launcher(home, 25);
+        Files.writeString(home.resolve("release"), "JAVA_VERSION=\"25\"\n");
+        final var probes = new AtomicInteger();
+        final var settings = new JdkLocator.Settings(null, null, project);
+        final java.util.function.Supplier<JdkLocator> factory =
+                () -> new JdkLocator(ParserClassSet::resourceStream, settings) {
+                    @Override
+                    protected Candidate probe(final Path java) {
+                        if (java.toAbsolutePath()
+                                .normalize()
+                                .equals(launcherPath.toAbsolutePath().normalize())) {
+                            probes.incrementAndGet();
+                            return new Candidate(java, 69);
+                        }
+                        return null;
+                    }
+
+                    @Override
+                    protected List<Path> commonRoots() {
+                        return List.of(roots);
+                    }
+                };
+
+        assertNotNull(factory.get().locateJarJdk());
+        assertNotNull(factory.get().locateJarJdk());
+        assertEquals(1, probes.get(), "second locator should reuse the persisted probe");
+
+        Files.writeString(home.resolve("release"), "JAVA_VERSION=\"25.0.1\"\n");
+        assertNotNull(factory.get().locateJarJdk());
+        assertEquals(2, probes.get(), "changed JDK release metadata must invalidate the cached probe");
+    }
+
     // --- two-role selection ------------------------------------------------------
 
     @Test
