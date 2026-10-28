@@ -1253,6 +1253,14 @@ public class AgentLoop {
         emitter.emit(event);
     }
 
+    /** Emits a task-solving phase marker for the benchmark timeline. */
+    private void emitPhase(final String name) {
+        if (emitter != null) {
+            emitter.emit(new AgentEvent.Phase(
+                    name, currentSessionId != null ? currentSessionId : this.sessionId, subagentId, subagentName));
+        }
+    }
+
     /**
      * The context handed to every tool of this turn: it carries this session's
      * own feedback gate, todo list and status reporter so a tool asking a
@@ -1662,6 +1670,7 @@ public class AgentLoop {
                 final long pausedBeforeMs = turnState.llmPausedMs;
                 try {
                     llmStartNanos = precisionDurationMarker.now();
+                    emitPhase(AgentEvent.Phase.REQUEST_SENT);
                     assistant = modelRoundProcessor.stream(
                             request,
                             usage,
@@ -1766,6 +1775,7 @@ public class AgentLoop {
                     throw e;
                 }
                 usageTracker.record(usage[0]);
+                emitPhase(AgentEvent.Phase.STREAM_COMPLETE);
                 // inbound restore: replace provenance fakes in the assistant reply with the real
                 // values (only what we emitted outbound; model-invented token shapes stay as-is)
                 final var inbound = new io.yupiik.ia.agent.core.security.InboundLlmResponse(
@@ -1971,6 +1981,7 @@ public class AgentLoop {
                         roundCoverage,
                         roundMutatingBash);
                 toolsRanThisTurn = true;
+                emitPhase(AgentEvent.Phase.TOOL_BATCH_COMPLETE);
                 // a doom-loop refusal is surfaced to the model as ONE strategy-change nudge (never as a
                 // failed tool result): after the refused round completes, inject it and let the model adapt.
                 if (roundRefused[0] && !doomLoopNudged) {

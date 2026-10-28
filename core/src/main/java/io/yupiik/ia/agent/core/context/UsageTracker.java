@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
@@ -60,8 +61,18 @@ public class UsageTracker {
      * does not re-fail (and re-warn) on every resolution but at most once per day.
      */
     private static final long DETECTION_FAILURE_TTL_MILLIS = 24L * 60L * 60L * 1000L;
+    /**
+     * Anti-spam window for auth-related detection failures ({@code CodexNotAuthenticatedException}):
+     * unlike permanent failures these are recoverable within the session (the user can run
+     * {@code /codex login}), so retrying after a short backoff is correct; arming the 24h permanent
+     * backoff here pinned the conservative auto baseline for a whole day and inflated the displayed
+     * context usage (historical 1341% bug).
+     */
+    private static final long AUTH_DETECTION_RETRY_TTL_MILLIS = 60_000L;
     /** Last time auto-detection of the context window failed for a (provider id, model) key. */
     private final Map<Key, Long> detectionFailedAt = new ConcurrentHashMap<>();
+    /** Last time auto-detection failed for an auth (recoverable) reason: short retry window only. */
+    private final Map<Key, Long> authDetectionFailedAt = new ConcurrentHashMap<>();
 
     /** Stable identity for the (provider id, model) dimension over which auto-detection is coalesced. */
     private record Key(String providerId, String model) {}
@@ -329,6 +340,7 @@ public class UsageTracker {
                     "auto-baseline"));
         }
         return detectTokenCount(providerId, model)
+                .map(this::rememberExplicit)
                 .orElseGet(() -> rememberAuto(new ModelsResponse.TokenCount(
                         ModelsResponse.AUTO_DETECTED_BASELINE,
                         false,
@@ -599,7 +611,11 @@ public class UsageTracker {
 
     private Optional<ModelsResponse.TokenCount> detectTokenCount(final String providerId, final String model) {
         try {
-            final var response = chatClient.models();
+            // session-aware: resolve against the session's provider (per-tab selection), not the
+            // process-current one - a null settings made the /models call target the wrong provider
+            // (whose catalog does not contain the session model), arming a bogus 24h backoff keyed
+            // to this (providerId, model) and pinning the conservative auto baseline
+            final var response = chatClient.models(settings);
             if (response == null || response.data() == null) {
                 return Optional.empty();
             }
@@ -614,17 +630,48 @@ public class UsageTracker {
                     break;
                 }
             }
+        } catch (final CodexNotAuthenticatedException e) {
+            // recoverable within the session (login can happen after the first resolution attempt):
+            // only apply a short anti-spam backoff so the detection retries once the user signs in,
+            // unlike a permanent failure which must not re-fail on every resolution for a day
+            authDetectionFailedAt.put(new Key(providerId, model), clock.millis());
+            LOGGER.log(
+                    Level.INFO,
+                    e,
+                    () -> "Context window auto-detection postponed for " + providerId + "/" + model
+                            + ": provider not authenticated yet; will retry (short backoff) after login");
+            return staleWindow(providerId, model);
         } catch (final IOException | RuntimeException e) {
             detectionFailedAt.put(new Key(providerId, model), clock.millis());
             LOGGER.log(
                     Level.WARNING,
                     e,
                     () -> "Context window auto-detection failed for " + providerId + "/" + model
-                            + "; falling back to conservative default " + ModelsResponse.AUTO_DETECTED_BASELINE);
+                            + " (" + e.getClass().getSimpleName() + ")"
+                            + "; falling back to conservative default " + ModelsResponse.AUTO_DETECTED_BASELINE
+                            + " (no retry within 24h)");
+            return staleWindow(providerId, model);
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        return Optional.empty();
+        return staleWindow(providerId, model);
+    }
+
+    /**
+     * Last-resort stale cache read: when a fresh detection failed but an out-of-TTL entry exists for
+     * the (provider id, model) pair, it is still vastly better than the conservative auto baseline
+     * (a day-old 500000 beats a guessed 32000). Returns empty when the cache is unavailable.
+     */
+    private Optional<ModelsResponse.TokenCount> staleWindow(final String providerId, final String model) {
+        if (contextWindowCache == null) {
+            return Optional.empty();
+        }
+        final var stale = contextWindowCache.getStale(providerId, model);
+        if (stale.isPresent()) {
+            LOGGER.info(() -> "Using stale (expired) cached context window for " + providerId + "/" + model + ": "
+                    + stale.get().value() + " (detection failed, no fresher source)");
+        }
+        return stale;
     }
 
     /** Whether auto-detection already failed for the key within the retention window, so we stop re-attempting. */
@@ -633,7 +680,11 @@ public class UsageTracker {
             return false;
         }
         final var failedAt = detectionFailedAt.get(new Key(providerId, model));
-        return failedAt != null && clock.millis() - failedAt < DETECTION_FAILURE_TTL_MILLIS;
+        if (failedAt != null && clock.millis() - failedAt < DETECTION_FAILURE_TTL_MILLIS) {
+            return true;
+        }
+        final var authFailedAt = authDetectionFailedAt.get(new Key(providerId, model));
+        return authFailedAt != null && clock.millis() - authFailedAt < AUTH_DETECTION_RETRY_TTL_MILLIS;
     }
 
     /** The provider targeted by the session selection, else the process current provider; {@code null} when unknown. */

@@ -408,6 +408,30 @@ public class CodexDialect extends OpenAIResponsesDialect {
                 if (m.maxContextWindow() != null) {
                     attrs.put("max_context_window", m.maxContextWindow());
                 }
+                if (m.defaultReasoningLevel() != null
+                        && !m.defaultReasoningLevel().isBlank()) {
+                    attrs.put("default_reasoning_level", m.defaultReasoningLevel());
+                }
+                if (m.supportedReasoningLevels() != null
+                        && !m.supportedReasoningLevels().isEmpty()) {
+                    final var levels = new ArrayList<LinkedHashMap<String, Object>>();
+                    for (final var level : m.supportedReasoningLevels()) {
+                        if (level == null
+                                || level.effort() == null
+                                || level.effort().isBlank()) {
+                            continue;
+                        }
+                        final var attrsLevel = new LinkedHashMap<String, Object>();
+                        attrsLevel.put("effort", level.effort());
+                        if (level.description() != null && !level.description().isBlank()) {
+                            attrsLevel.put("description", level.description());
+                        }
+                        levels.add(attrsLevel);
+                    }
+                    if (!levels.isEmpty()) {
+                        attrs.put("supported_reasoning_levels", levels);
+                    }
+                }
                 models.add(new LlmModel(m.id(), null, null, m.displayName(), attrs));
             }
         }

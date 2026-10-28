@@ -120,6 +120,10 @@ public class ChatClient implements AutoCloseable {
     private static final long STRUCTURED_REJECTION_TTL_MILLIS = 10L * 60 * 1000;
     private final Map<String, Long> structuredOutputRejected = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ModelsResponse> cachedModelsByProvider = new ConcurrentHashMap<>();
+    // a failed best-effort catalog lookup is retried after a short delay so an unconfigured model
+    // request never pays a failing /models round-trip on every call
+    private static final long MODEL_CATALOG_FAILURE_BACKOFF_MILLIS = 60_000L;
+    private final Map<String, Long> modelCatalogRetryAfter = new ConcurrentHashMap<>();
 
     public ChatClient(
             final CodingAgentConfiguration configuration,
@@ -1013,8 +1017,8 @@ public class ChatClient implements AutoCloseable {
                 others,
                 model,
                 variant == null ? null : variant.reasoningEffort(),
-                tuning == null ? null : tuning.reasoningEffort(),
-                providerId);
+                providerManager.reasoningEffort(provider, model),
+                provider);
         // the thinking budget depends on the resolved max_tokens (the API requires
         // 1024 <= budget < max_tokens), so the injection happens in doWithFallback after
         // applyOutputBudget rather than here
@@ -1225,8 +1229,10 @@ public class ChatClient implements AutoCloseable {
         final var flavor = flavorOf(provider);
         final var releaseDate = provider == null ? null : provider.releaseDate();
         final var budget = outputTokens(provider, model);
+        final var catalog = catalogModel(provider, model);
+        final var catalogEfforts = catalog == null ? List.<String>of() : catalog.supportedReasoningLevels();
         return DefaultModelTuner.variants(new DefaultModelTuner.ModelContext(
-                model, provider == null ? null : provider.id(), flavor, budget, releaseDate));
+                model, provider == null ? null : provider.id(), flavor, budget, releaseDate, catalogEfforts));
     }
 
     /**
@@ -1279,7 +1285,7 @@ public class ChatClient implements AutoCloseable {
             final String model,
             final String variantEffort,
             final String configEffort,
-            final String providerId) {
+            final ProviderConfiguration provider) {
         if (requestEffort != null && !requestEffort.isBlank()) {
             return requestEffort;
         }
@@ -1292,11 +1298,16 @@ public class ChatClient implements AutoCloseable {
         if (configEffort != null && !configEffort.isBlank()) {
             return configEffort;
         }
+        final var catalog = catalogModel(provider, model);
+        final var catalogEffort = catalog == null ? null : catalog.defaultReasoningLevel();
+        if (catalogEffort != null && !catalogEffort.isBlank()) {
+            return catalogEffort;
+        }
         // The Codex backend (chatgpt.com) streams no reasoning unless the request asks for it, and the
         // upstream Codex CLI always sends one. Default an unconfigured codex session to "medium" so a
         // thought block is actually produced; this matches the user-selected alignment with OpenAI's
         // documented best starting point and is put-if-absent (an explicit variant/config still wins above).
-        if (effectiveFlavor() == ApiFlavor.CODEX) {
+        if (flavorOf(provider) == ApiFlavor.CODEX) {
             return "medium";
         }
         // opencode parity: do not force an implicit reasoning effort on the wire. The provider's
@@ -2379,6 +2390,81 @@ public class ChatClient implements AutoCloseable {
     /** The provider id for a request's effective provider, for the per-provider caches. */
     private String providerIdFor(final ChatCompletionRequest request) {
         return providerIdOf(provider(request.settings()));
+    }
+
+    /**
+     * Best-effort catalog entry for a model of the target provider, used to honor the reasoning
+     * capabilities advertised by OpenAI-compatible {@code /models} payloads. The regular model cache
+     * is reused; on a miss the listing is fetched lazily so {@code /variant}, persisted variants and
+     * direct requests work even when the context window is configured (and {@code UsageTracker} never
+     * lists the models). Failures are swallowed and retried after a short backoff: catalog metadata is
+     * optional and must never break a request.
+     */
+    private ModelsResponse.Model catalogModel(final ProviderConfiguration provider, final String model) {
+        if (provider == null || model == null || model.isBlank()) {
+            return null;
+        }
+        final var flavor = flavorOf(provider);
+        if (flavor != ApiFlavor.CODEX && flavor != ApiFlavor.RESPONSES && flavor != ApiFlavor.COMPLETIONS) {
+            return null;
+        }
+        final var providerId = providerIdOf(provider);
+        var cached = cachedModelsByProvider.get(providerId);
+        if (cached == null) {
+            final var retryAfter = modelCatalogRetryAfter.get(providerId);
+            if (retryAfter != null && retryAfter > clock.millis()) {
+                return null;
+            }
+            try {
+                cached = LlmWire.toModelsResponse(
+                        LlmWire.join(dialectClient(flavor, provider).models()));
+                cachedModelsByProvider.put(providerId, cached);
+                modelCatalogRetryAfter.remove(providerId);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                modelCatalogRetryAfter.put(providerId, clock.millis() + MODEL_CATALOG_FAILURE_BACKOFF_MILLIS);
+                return null;
+            } catch (final IOException | RuntimeException e) {
+                modelCatalogRetryAfter.put(providerId, clock.millis() + MODEL_CATALOG_FAILURE_BACKOFF_MILLIS);
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    LOGGER.fine(() ->
+                            "Unable to load the model catalog of provider '" + providerId + "': " + e.getMessage());
+                }
+                return null;
+            }
+        }
+        return findCatalogModel(cached, model);
+    }
+
+    private static ModelsResponse.Model findCatalogModel(final ModelsResponse response, final String model) {
+        if (response == null || response.data() == null) {
+            return null;
+        }
+        ModelsResponse.Model caseInsensitive = null;
+        for (final var candidate : response.data()) {
+            if (candidate == null || candidate.id() == null) {
+                continue;
+            }
+            if (candidate.id().equals(model)) {
+                return candidate;
+            }
+            if (caseInsensitive == null && candidate.id().equalsIgnoreCase(model)) {
+                caseInsensitive = candidate;
+            }
+        }
+        if (caseInsensitive != null) {
+            return caseInsensitive;
+        }
+        // routing refs ($provider/model) and gateways exposing qualified ids
+        for (final var candidate : response.data()) {
+            if (candidate == null || candidate.id() == null) {
+                continue;
+            }
+            if (model.endsWith("/" + candidate.id()) || candidate.id().endsWith("/" + model)) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     public ModelsResponse models() throws IOException, InterruptedException {

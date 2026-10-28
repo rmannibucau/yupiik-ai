@@ -143,6 +143,7 @@ class ChatClientMidStreamTest {
                 Map.entry("yca.provider.providers.0.model", "test-model"),
                 Map.entry("yca.provider.providers.0.api", "completions"),
                 Map.entry("yca.provider.providers.0.contextWindow", "128000"),
+                Map.entry("yca.provider.providers.0.tuning.reasoningEffort", "medium"),
                 Map.entry("yca.provider.providers.0.timeoutSeconds", "5"),
                 Map.entry("yca.llm.retriesMaxAttempts", "1"),
                 Map.entry("yca.llm.retriesBaseDelayMs", "1"),

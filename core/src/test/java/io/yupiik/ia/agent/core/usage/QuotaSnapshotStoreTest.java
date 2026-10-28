@@ -40,7 +40,12 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.HashMap;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -51,6 +56,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 class QuotaSnapshotStoreTest {
 
     private HttpServer server;
+    private ExecutorService serverExecutor;
     private String serverUrl;
     private Path storage;
     private ExtendedHttpClient httpClient;
@@ -60,6 +66,10 @@ class QuotaSnapshotStoreTest {
     private CodexAuthTemplateHelper auth;
     private final AtomicInteger fetches = new AtomicInteger();
     private final AtomicInteger usedPercent = new AtomicInteger(10);
+    /** When true, the very next /wham/usage request blocks until {@link #releaseFirstCall} is counted down. */
+    private volatile boolean holdFirstCall;
+
+    private CountDownLatch releaseFirstCall;
 
     @BeforeEach
     void start(final JsonMapper mapper) throws IOException {
@@ -67,12 +77,27 @@ class QuotaSnapshotStoreTest {
         serverUrl = "http://localhost:" + server.getAddress().getPort();
         server.createContext("/wham/usage", exchange -> {
             fetches.incrementAndGet();
+            final int pct = usedPercent.get(); // capture before any hold so each in-flight request keeps its value
+            if (holdFirstCall) {
+                holdFirstCall = false;
+                try {
+                    releaseFirstCall.await(
+                            30, TimeUnit.SECONDS); // bounded so a test failure never leaks a blocked worker
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             respond(exchange, 200, """
                     {"plan_type":"plus",
                      "rate_limit":{"primary_window":{"used_percent":%d,"limit_window_seconds":18000,"reset_at":1700000000}},
                      "credits":{"has_credits":true,"balance":"10"}}
-                    """.formatted(usedPercent.get()));
+                    """.formatted(pct));
         });
+        serverExecutor = Executors.newCachedThreadPool();
+        // set the executor BEFORE start(): the default HttpServer executor is single-threaded, which would
+        // serialize /wham/usage and deadlock tests that need two in-flight fetches concurrently (a held
+        // fetch blocks the second); a cached pool lets the provider-switch test's A/B run in parallel
+        server.setExecutor(serverExecutor);
         server.start();
         delegate = HttpClient.newBuilder().build();
         httpClient = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
@@ -104,6 +129,10 @@ class QuotaSnapshotStoreTest {
             server.stop(0);
             server = null;
         }
+        if (serverExecutor != null) {
+            serverExecutor.shutdownNow();
+            serverExecutor = null;
+        }
         if (httpClient != null) {
             httpClient.close();
             delegate.shutdownNow();
@@ -115,6 +144,11 @@ class QuotaSnapshotStoreTest {
 
     private QuotaSnapshotStore store(final JsonMapper mapper) {
         return new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, Clock.systemUTC());
+    }
+
+    /** A store with an injected shared pool: the async (non-blocking, coalesced) refresh path. */
+    private QuotaSnapshotStore asyncStore(final JsonMapper mapper, final ExecutorService executor) {
+        return new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, Clock.systemUTC(), executor);
     }
 
     @Test
@@ -192,6 +226,134 @@ class QuotaSnapshotStoreTest {
         assertFalse(store.snapshot("   ", true).supported(), "snapshot(blank, forced) must not NPE");
         assertFalse(store.refresh(null).supported(), "refresh(null) must not NPE");
         assertFalse(store.refresh("   ").supported(), "refresh(blank) must not NPE");
+    }
+
+    /**
+     * The async path must be non-blocking: attach returns immediately (the fetch runs on the executor)
+     * and the snapshot becomes available asynchronously.
+     */
+    @Test
+    void asyncAttachIsNonBlockingAndPopulates(final JsonMapper mapper) throws Exception {
+        final var executor = Executors.newSingleThreadExecutor();
+        try (executor) {
+            final var store = asyncStore(mapper, executor);
+            final long t0 = System.nanoTime();
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
+            final long attachNanos = System.nanoTime() - t0;
+            // the handler responds immediately here, so just assert attach did not wait long before returning
+            assertTrue(attachNanos < TimeUnit.SECONDS.toNanos(5), "attach must not block: took " + attachNanos + " ns");
+            awaitFetches(1);
+            // the view becomes available once the background fetch lands
+            awaitPrimaryWindow(store, "s1");
+            assertEquals(10.0, store.snapshot("s1", false).primaryWindow().usedPercent(), 0.001);
+            assertEquals(1, fetches.get(), "exactly one fetch for the first attached session");
+        }
+    }
+
+    /** Concurrent refreshes of one session coalesce into a single backend call, even across a forced /usage. */
+    @Test
+    void asyncRefreshesAreCoalesced(final JsonMapper mapper) throws Exception {
+        final var executor = Executors.newSingleThreadExecutor();
+        try (executor) {
+            final var store = asyncStore(mapper, executor);
+            releaseFirstCall = new CountDownLatch(1);
+            holdFirstCall = true;
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex")); // fires fetch #1 (blocked in handler)
+            awaitFetches(1);
+            // a stale non-forced read while #1 is in flight must coalesce, not start a second fetch
+            store.snapshot("s1", false);
+            // a forced refresh while #1 is in flight must also coalesce onto it
+            final var forced = new AtomicReference<QuotaSnapshotStore.QuotaView>();
+            final var forcedThread = new Thread(() -> forced.set(store.refresh("s1")));
+            forcedThread.start();
+            Thread.sleep(200); // give the forced read time to call scheduleAsync (it should coalesce)
+            assertEquals(1, fetches.get(), "refreshes must coalesce onto the single in-flight call");
+            releaseFirstCall.countDown(); // let fetch #1 complete
+            forcedThread.join(TimeUnit.SECONDS.toMillis(10));
+            awaitFetchesAtLeast(1);
+            assertTrue(forced.get() != null, "forced /usage must complete after the coalesced fetch lands");
+            assertEquals(1, fetches.get(), "no extra backend call for a forced refresh that coalesced");
+        }
+    }
+
+    /**
+     * A stale async refresh of a previous provider must not overwrite the snapshot of the newly selected
+     * provider: after switching to {@code codex2} while {@code codex}'s fetch is still in flight, the late
+     * {@code codex} completion is dropped so the reported quota stays the one {@code codex2} fetched.
+     */
+    @Test
+    void staleAsyncRefreshDoesNotOverwriteSwitchedProvider(final JsonMapper mapper) throws Exception {
+        final var props = new HashMap<String, String>();
+        props.put("yca.storageHome", storage.toString());
+        props.put("yca.provider.providers.length", "2");
+        props.put("yca.provider.providers.0.id", "codex");
+        props.put("yca.provider.providers.0.baseUrl", serverUrl + "/codex");
+        props.put("yca.provider.providers.0.apiKey", "");
+        props.put("yca.provider.providers.0.capabilities.codex.enableUsage", "true");
+        props.put("yca.provider.providers.1.id", "codex2");
+        props.put("yca.provider.providers.1.baseUrl", serverUrl + "/codex");
+        props.put("yca.provider.providers.1.apiKey", "");
+        props.put("yca.provider.providers.1.capabilities.codex.enableUsage", "true");
+        final var cfg = new CodingAgentConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(props.get(key)))
+                .get();
+        final var pm = new ProviderManager(cfg, mapper);
+        // seed auth for the second codex provider too, so its fetch is allowed (mirrors @BeforeEach for codex)
+        final Path second = storage.resolve("providers/codex2/codex.auth.json");
+        Files.createDirectories(second.getParent());
+        Files.write(second, mapper.toBytes(new CodexTokenStore("access", "refresh", "acc", farFuture(), "id")));
+
+        final var executor = Executors.newFixedThreadPool(2); // A (blocked) and B (fast) run concurrently
+        try (executor) {
+            final var store = new QuotaSnapshotStore(mapper, httpClient, auth, pm, Clock.systemUTC(), executor);
+            releaseFirstCall = new CountDownLatch(1);
+            holdFirstCall = true;
+            usedPercent.set(50);
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex")); // A: in flight and blocked
+            awaitFetches(1);
+            usedPercent.set(99);
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex2")); // switch -> schedules B
+            // B completes fast and publishes its (99) snapshot; wait until it lands
+            awaitPrimaryWindow(store, "s1");
+            assertEquals(99.0, store.snapshot("s1", false).primaryWindow().usedPercent(), 0.001);
+            releaseFirstCall.countDown(); // let the stale A completion land (it must be dropped)
+            awaitFetchesAtLeast(2);
+            // give the dropped A write a short window to (wrongly) overwrite, then assert it was dropped
+            Thread.sleep(300);
+            assertEquals(
+                    99.0,
+                    store.snapshot("s1", false).primaryWindow().usedPercent(),
+                    0.001,
+                    "the stale in-flight refresh of the previous provider must not overwrite the new provider's quota");
+        }
+    }
+
+    private void awaitFetches(final int expected) throws InterruptedException {
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (fetches.get() < expected && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        assertEquals(expected, fetches.get(), "expected " + expected + " backend fetch(es)");
+    }
+
+    private void awaitFetchesAtLeast(final int expected) throws InterruptedException {
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (fetches.get() < expected && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        assertTrue(fetches.get() >= expected, "expected at least " + expected + " backend fetch(es)");
+    }
+
+    private void awaitPrimaryWindow(final QuotaSnapshotStore store, final String session) throws InterruptedException {
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            final var view = store.snapshot(session, false);
+            if (view.primaryWindow() != null) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        throw new AssertionError("quota snapshot was not populated within the timeout");
     }
 
     private static long farFuture() {

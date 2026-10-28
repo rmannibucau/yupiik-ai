@@ -661,7 +661,14 @@ public class ProviderManager {
      * else the provider-level variants, else an empty list (implicit per-family discovery applies). Unmodifiable.
      */
     public List<ModelVariantConfiguration> variants(final ProviderConfiguration provider, final String model) {
-        final var tuning = tuning(provider, model);
+        final var entry = matchModel(provider, model);
+        final var perModel = entry == null || entry.behavior() == null
+                ? null
+                : entry.behavior().variants();
+        if (perModel != null && !perModel.isEmpty()) {
+            return List.copyOf(perModel);
+        }
+        final var tuning = providerTuning(provider);
         if (tuning != null && tuning.variants() != null && !tuning.variants().isEmpty()) {
             return List.copyOf(tuning.variants());
         }

@@ -190,6 +190,13 @@ from the `.../codex/models` catalog):
 per line, newline (`\n`) separated - not JSON objects. The default `{{exec}}`
 helper works exactly as described above.
 
+The Codex catalog also advertises each model's `supported_reasoning_levels` and
+`default_reasoning_level`. When no `variants` or `reasoningEffort` are
+configured, yca uses them directly: `/model` lists the advertised efforts (for
+example `xhigh`, `max`, `ultra` when the plan exposes them) and requests send
+the catalog default. Explicit variants or `reasoningEffort` always win; a
+catalog without those fields keeps the previous implicit behavior.
+
 The ChatGPT backend requires three extra request headers that are not sent by
 default, so declare them in the provider `headers` string: `OpenAI-Beta:
 responses=experimental`, the lowercase `originator: codex_cli_rs` (the backend
@@ -432,7 +439,9 @@ The models a subscription exposes often come with per-model behavior or
 variants (eg. reasoning-effort presets for a `gpt-6-luna`). Declare them under
 `provider.models`, each entry matching by id or substring, with per-model
 `contextWindow` and a `behavior` carrying `variants` selected at runtime with
-`/model <model> <variant>`:
+`/model <model> <variant>`. This is only needed to override the catalog: when no
+variant or effort is configured, yca uses the catalog's
+`supported_reasoning_levels` and `default_reasoning_level`. For example:
 
 [source,json]
 ----

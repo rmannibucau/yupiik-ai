@@ -395,6 +395,10 @@ public class RunCommand implements Runnable {
             } else if (event instanceof final AgentEvent.Compacted c) {
                 compactions.incrementAndGet();
                 detail.compact(started, String.join(",", c.kinds()), c.mode());
+            } else if (event instanceof final AgentEvent.Phase p) {
+                if (p.name() != null) {
+                    detail.phase(started, p.name());
+                }
             } else if (event instanceof final AgentEvent.ToolStarted t) {
                 toolCalls.incrementAndGet();
                 if (t.name().startsWith("code_")) {
@@ -505,6 +509,10 @@ public class RunCommand implements Runnable {
 
         void toolEnd(final long started, final String name, final long ms) {
             write("toolEnd t=" + (System.nanoTime() - started) / 1_000_000L + " name=" + name + " ms=" + ms);
+        }
+
+        void phase(final long started, final String name) {
+            write("phase t=" + (System.nanoTime() - started) / 1_000_000L + " name=" + name);
         }
 
         void answer(final long started, final int chars) {

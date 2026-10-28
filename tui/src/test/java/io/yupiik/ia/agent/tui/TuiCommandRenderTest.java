@@ -679,6 +679,46 @@ class TuiCommandRenderTest {
 
     /** Hovering a sidebar quota gauge surfaces its reset time as a floating chip; hiding the quota removes the chip. */
     @Test
+    void sidebarContextHoverShowsSizeTooltip() throws Exception {
+        backend = new HeadlessBackend(120, 40);
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-sidebar-context-tooltip-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("% context");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        // a non-zero context estimate so the chip shows a k/M-formatted size
+        frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72_000, 18, sessionId));
+        awaitText("18% context");
+
+        // locate the context gauge row from the rendered text and hover it: the size chip appears
+        final var lines = backend.text().split("\n");
+        int gaugeY = -1;
+        int gaugeX = -1;
+        for (var i = 0; i < lines.length; i++) {
+            final var col = lines[i].indexOf("% context");
+            if (col >= 0) {
+                gaugeY = i;
+                gaugeX = col; // the whole row is a hover area
+                break;
+            }
+        }
+        assertTrue(gaugeY >= 0, "context gauge row must be visible:\n" + backend.text());
+        tuiRef.get().dispatch(MouseEvent.move(gaugeX, gaugeY));
+        awaitTextWithin("~72k tok", 2_000);
+        assertTrue(backend.text().contains("~72k tok"), "chip must show the k/M token estimate:\n" + backend.text());
+
+        // moving the pointer away dismisses the chip
+        tuiRef.get().dispatch(MouseEvent.move(5, 20));
+        awaitTextGoneWithin("~72k tok", 2_000);
+        quit();
+    }
+
+    @Test
     void sidebarQuotaHoverShowsResetTooltipAndHidesWithProvider() throws Exception {
         backend = new HeadlessBackend(120, 40);
         final var shellRegistry = testRegistry();

@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.framework.build.api.json.JsonOthers;
 import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 import io.yupiik.fusion.json.pointer.GenericJsonPointer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -149,6 +150,44 @@ public record ModelsResponse(List<Model> data) {
                 return new TokenCount(tier2.value(), false, SourceType.DETECTED_RELATIVE, tier2.pointer());
             }
             return null;
+        }
+
+        /**
+         * The catalog default reasoning effort ({@code default_reasoning_level}) advertised by
+         * OpenAI-compatible model listings, or null when absent or malformed.
+         */
+        public String defaultReasoningLevel() {
+            final var value = tryLookup("/default_reasoning_level");
+            return value instanceof final String level && !level.isBlank() ? level.trim() : null;
+        }
+
+        /**
+         * The catalog reasoning efforts ({@code supported_reasoning_levels}) advertised by
+         * OpenAI-compatible model listings. Both a list of strings and a list of objects carrying an
+         * {@code effort} (plus an optional {@code description}) are accepted. Empty when absent or
+         * malformed so callers keep their existing fallback behavior.
+         */
+        public List<String> supportedReasoningLevels() {
+            final var value = tryLookup("/supported_reasoning_levels");
+            if (!(value instanceof final List<?> levels)) {
+                return List.of();
+            }
+            final var efforts = new ArrayList<String>(levels.size());
+            for (final var level : levels) {
+                final String effort;
+                if (level instanceof final String text) {
+                    effort = text;
+                } else if (level instanceof final Map<?, ?> object
+                        && object.get("effort") instanceof final String text) {
+                    effort = text;
+                } else {
+                    effort = null;
+                }
+                if (effort != null && !effort.isBlank()) {
+                    efforts.add(effort.trim());
+                }
+            }
+            return List.copyOf(efforts);
         }
 
         private Hit firstPositive(final String... pointers) {

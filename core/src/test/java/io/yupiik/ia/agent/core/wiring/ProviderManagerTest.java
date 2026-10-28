@@ -281,6 +281,8 @@ class ProviderManagerTest {
         assertEquals(90, manager.maxIterationsOverride(provider, "claude-sonnet-5"));
         // provider-level (top-level) providerSpecificOptions applies for an unlisted model
         assertEquals("{\"echo\":1}", manager.providerSpecificOptions(provider, "gpt-5"));
+        // a per-model behavior without variants falls back to the provider-level variants
+        assertEquals(2, manager.variants(provider, "claude-sonnet-5").size());
     }
 
     @Test

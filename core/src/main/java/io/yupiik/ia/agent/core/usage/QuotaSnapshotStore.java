@@ -25,7 +25,13 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.time.Clock;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -38,6 +44,16 @@ import java.util.logging.Logger;
  * <p>Refresh cadence: fetched at provider attach, then at most once per {@link #TTL_MILLIS} (~5 min)
  * unless forced (a {@code /usage} slash command always forces a refresh). The access token is
  * resolved through {@link CodexAuthTemplateHelper} and never leaves yca.</p>
+ *
+ * <p>Blocking semantics. When an {@link ExecutorService} is injected (the normal application wiring)
+ * refreshes run asynchronously on that shared pool so provider attachment and a stale (non-forced)
+ * snapshot read never block the inference/tool critical path: {@link #attach(String, ChatSettings)}
+ * and a non-forced {@link #snapshot(String, boolean)} return immediately with the cached snapshot and
+ * schedule a background refresh, and concurrent refreshes of the same session are coalesced into one
+ * backend call. Only the explicit {@code /usage} path ({@link #refresh(String)} /
+ * {@link #snapshot(String, true)}) joins the (coalesced) fetch so it returns fresh data, bounded so a
+ * stuck backend never hangs the command. Without an injected executor (legacy/programmatic use and the
+ * unit tests) the historical synchronous blocking behavior is preserved.</p>
  */
 @ApplicationScoped
 public class QuotaSnapshotStore {
@@ -46,17 +62,38 @@ public class QuotaSnapshotStore {
     /** Refresh TTL: at most one quota fetch every 5 minutes per session unless forced. */
     public static final long TTL_MILLIS = 5L * 60L * 1000L;
 
+    /** Bound on a forced (user-visible) refresh join so a stuck backend never hangs a {@code /usage}. */
+    private static final long FORCED_JOIN_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(15);
+
     private final CodexUsageClient client;
     private final ProviderManager providerManager;
     private final Clock clock;
+    private final ExecutorService executor;
+    private final boolean async;
     private final ConcurrentHashMap<String, SessionQuota> sessions = new ConcurrentHashMap<>();
+    /**
+     * One coalesced in-flight refresh per session, tagged with the provider generation it was fetched for.
+     * Coalescing is generation-scoped: re-attaching the same provider reuses the running fetch, while a
+     * provider switch (generation bump) starts a fresh refresh so the new provider's quota is fetched
+     * promptly even if the old provider's fetch is still in flight (the latter is dropped on completion).
+     * The entry is removed on completion so a later stale read starts fresh.
+     */
+    private final ConcurrentHashMap<String, InFlightRefresh> inFlight = new ConcurrentHashMap<>();
 
-    /** A session-scoped quota: the provider it runs on and the cached snapshot + fetch time. */
+    /** An in-flight refresh: the provider generation it was scheduled for, and the future the caller observes. */
+    private record InFlightRefresh(long generation, CompletableFuture<CodexUsageSnapshot> future) {}
+
+    /**
+     * A session-scoped quota: the provider it runs on, a provider generation (bumped on every provider
+     * change so a stale async refresh of a previous provider never overwrites the current one) and the
+     * cached snapshot + fetch time.
+     */
     private static final class SessionQuota {
         volatile ChatSettings settings;
         volatile ProviderConfiguration provider;
         volatile CodexUsageSnapshot snapshot = CodexUsageSnapshot.empty();
         volatile long lastFetchMillis;
+        volatile long providerGeneration;
 
         boolean stale(final long now) {
             return snapshot == null || now - lastFetchMillis >= TTL_MILLIS;
@@ -69,9 +106,23 @@ public class QuotaSnapshotStore {
             final CodexAuthTemplateHelper codexAuth,
             final ProviderManager providerManager,
             final Clock clock) {
+        this(mapper, httpClient, codexAuth, providerManager, clock, null);
+    }
+
+    public QuotaSnapshotStore(
+            final JsonMapper mapper,
+            final ExtendedHttpClient httpClient,
+            final CodexAuthTemplateHelper codexAuth,
+            final ProviderManager providerManager,
+            final Clock clock,
+            final ExecutorService executor) {
         this.client = new CodexUsageClient(mapper, httpClient, codexAuth);
         this.providerManager = providerManager;
         this.clock = clock;
+        this.executor = executor;
+        // A provided (app-managed, injected) executor enables non-blocking background refreshes; without
+        // one (tests/programmatic use) the historical synchronous blocking semantics are preserved.
+        this.async = executor != null;
         // precompute nothing; provider/root resolution is lazy per session
     }
 
@@ -79,9 +130,15 @@ public class QuotaSnapshotStore {
         this.client = null;
         this.providerManager = null;
         this.clock = null;
+        this.executor = null;
+        this.async = false;
     }
 
-    /** Records the session's provider selection so quota follows the tab's own provider. */
+    /**
+     * Records the session's provider selection so quota follows the tab's own provider. When an executor
+     * is wired, kicks off an asynchronous (non-blocking) background refresh; otherwise refreshes
+     * synchronously (legacy blocking semantics).
+     */
     public void attach(final String sessionId, final ChatSettings settings) {
         if (sessionId == null || sessionId.isBlank()) {
             // no session id yet (eg. a provider switch before the first turn): nothing to track
@@ -89,17 +146,27 @@ public class QuotaSnapshotStore {
         }
         final SessionQuota quota = sessions.computeIfAbsent(sessionId, s -> new SessionQuota());
         final ProviderConfiguration provider = resolveProvider(settings);
+        final ProviderConfiguration previous = quota.provider;
         quota.settings = settings;
         quota.provider = provider;
-        if (usageEnabled(provider)) {
-            refreshIfStale(sessionId, quota, true);
+        // bump the generation when the provider actually changes so an older in-flight refresh of the
+        // previous provider cannot publish its snapshot onto the newly selected one
+        if (previous != provider) {
+            quota.providerGeneration++;
+        }
+        // attach on a fresh session (or after the TTL) refreshes the gauge; re-attaching the same provider
+        // within the TTL is a no-op. Async when an executor is wired (non-blocking), else synchronous.
+        if (usageEnabled(provider) && isCodexProvider(provider) && quota.stale(clock.millis())) {
+            refreshIfEnabled(sessionId, quota);
         }
     }
 
     /**
-     * Returns the current quota snapshot for a session, refreshing it when the TTL elapsed or when
-     * {@code force} is set (a {@code /usage} call). Never throws for a quota-less/unauthenticated
-     * provider: it returns an empty snapshot carrying the capability state so UIs can hide the gauge.
+     * Returns the current quota snapshot. A non-forced read (the sidebar gauge / inference path) returns
+     * the cached snapshot immediately and, when stale, schedules a background refresh asynchronously
+     * (never blocking). A forced read (a {@code /usage} call) joins the coalesced fetch (bounded) so it
+     * returns fresh data. Never throws for a quota-less/unauthenticated provider: it returns an empty
+     * snapshot carrying the capability state so UIs can hide the gauge.
      *
      * @param sessionId the session to read.
      * @param force whether to bypass the TTL and re-fetch now.
@@ -118,8 +185,18 @@ public class QuotaSnapshotStore {
         final var provider = quota.provider;
         final boolean enabled = usageEnabled(provider);
         final boolean supported = enabled && isCodexProvider(provider);
-        if (supported && (force || quota.stale(clock.millis()))) {
-            refreshIfStale(sessionId, quota, force);
+        if (supported) {
+            if (force) {
+                // explicit user-visible refresh: await the (coalesced) result so /usage shows fresh data
+                if (async) {
+                    awaitFresh(sessionId, quota);
+                } else {
+                    refreshSynchronously(sessionId, quota, provider, quota.providerGeneration);
+                }
+            } else if (quota.stale(clock.millis())) {
+                // inference-path read: never block; schedule a background refresh when stale
+                refreshIfEnabled(sessionId, quota);
+            }
         }
         return new QuotaView(enabled, supported, quota.snapshot == null ? CodexUsageSnapshot.empty() : quota.snapshot);
     }
@@ -128,7 +205,6 @@ public class QuotaSnapshotStore {
     public QuotaView cachedSnapshot(final String sessionId) {
         if (sessionId == null || sessionId.isBlank()) {
             // a null/blank key would NPE inside ConcurrentHashMap.get(null); treat it as "no quota yet"
-            // instead of blowing up on a best-effort cached read (e.g. before a session's first turn).
             return new QuotaView(false, false, CodexUsageSnapshot.empty());
         }
         final SessionQuota quota = sessions.get(sessionId);
@@ -150,32 +226,152 @@ public class QuotaSnapshotStore {
     /** Releases a session's quota entry (called when the session closes). */
     public void close(final String sessionId) {
         sessions.remove(sessionId);
+        inFlight.remove(sessionId);
     }
 
-    private void refreshIfStale(final String sessionId, final SessionQuota quota, final boolean force) {
-        final var provider = quota.provider;
-        if (!usageEnabled(provider) || !isCodexProvider(provider)) {
+    /**
+     * Triggers a refresh for a session whose provider enables Codex usage. Async (coalesced, non-blocking)
+     * when an executor is wired, else the historical synchronous blocking refresh. The caller decides when
+     * a refresh is warranted (stale read, forced {@code /usage}); this method only executes it.
+     */
+    private void refreshIfEnabled(final String sessionId, final SessionQuota quota) {
+        if (!usageEnabled(quota.provider) || !isCodexProvider(quota.provider)) {
             return;
         }
-        final String root = codexRoot(provider);
+        final String root = codexRoot(quota.provider);
         if (root == null || root.isBlank()) {
             return;
         }
+        if (!async) {
+            refreshSynchronously(sessionId, quota, quota.provider, quota.providerGeneration);
+            return;
+        }
+        scheduleAsync(sessionId, quota);
+    }
+
+    /**
+     * Routes a refresh to the coalesced in-flight future. Atomically reuses the in-flight future when one
+     * is running, else installs a fresh one and schedules the fetch. Returns the future the caller should
+     * observe ({@code null} only when the caller should not proceed) so a forced read never waits on a
+     * completed/removed entry and never orphans a running refresh.
+     */
+    private CompletableFuture<CodexUsageSnapshot> scheduleAsync(final String sessionId, final SessionQuota quota) {
+        final var provider = quota.provider;
+        final long generation = quota.providerGeneration;
+        // compute() gives the read-or-create atomicity that get+putIfAbsent cannot: it always returns the
+        // future actually held in the map (never an orphaned one), and the binary-lock scope is limited to
+        // future creation + submit (the network fetch runs off this task). Coalescing is generation-scoped
+        // so a provider switch never lets the new provider's refresh ride on (and be dropped by) the old one.
+        final InFlightRefresh held = inFlight.compute(sessionId, (_, current) -> {
+            if (current != null
+                    && current.generation() == generation
+                    && !current.future().isDone()) {
+                return current; // coalesce: same provider's refresh is already in flight
+            }
+            final var task = new CompletableFuture<CodexUsageSnapshot>();
+            try {
+                executor.submit(() -> runAsyncRefresh(sessionId, task, provider, generation));
+                return new InFlightRefresh(generation, task);
+            } catch (final RuntimeException e) {
+                // pool rejected/shut down: do not leave a dead entry behind; the caller fell back to cached
+                return null;
+            }
+        });
+        return held == null ? null : held.future();
+    }
+
+    /** The async refresh body: fetch, publish (guarded by the provider generation), handle failures, clear in-flight. */
+    private void runAsyncRefresh(
+            final String sessionId,
+            final CompletableFuture<CodexUsageSnapshot> task,
+            final ProviderConfiguration provider,
+            final long generation) {
         try {
-            final CodexUsageSnapshot fresh = client.fetch(root, providerId(provider));
-            quota.snapshot = fresh;
-            quota.lastFetchMillis = clock.millis();
+            final CodexUsageSnapshot fresh = client.fetch(codexRoot(provider), providerId(provider));
+            publishIfCurrent(sessionId, provider, generation, fresh);
+            task.complete(fresh);
+        } catch (final Throwable e) {
+            final Throwable cause = unwrap(e);
+            task.completeExceptionally(cause);
+            if (cause instanceof CodexUsageClient.NeedsLoginException) {
+                LOGGER.log(
+                        Level.FINE,
+                        () -> "Codex usage not refreshed for session " + sessionId + ": " + cause.getMessage());
+            } else {
+                LOGGER.log(
+                        Level.WARNING,
+                        () -> "Could not refresh Codex usage for session " + sessionId + ": " + cause.getMessage());
+            }
+            // back off on failure so a broken/unauthorized backend is not hammered on every stale read
+            backOffIfCurrent(sessionId, provider, generation);
+        } finally {
+            // remove only if this exact generation/task is still the map entry: a provider switch already
+            // replaced it with a fresh refresh, which must stay in the map even as the stale task completes
+            inFlight.remove(sessionId, new InFlightRefresh(generation, task));
+        }
+    }
+
+    /** Captures the coalesced in-flight refresh and waits on it (bounded) so the caller sees fresh data. */
+    private void awaitFresh(final String sessionId, final SessionQuota quota) {
+        final CompletableFuture<CodexUsageSnapshot> future = scheduleAsync(sessionId, quota);
+        if (future == null) {
+            return; // unsupported provider or the pool rejected the submit (already handled/nopped)
+        }
+        try {
+            future.get(FORCED_JOIN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+        } catch (final TimeoutException e) {
+            LOGGER.log(
+                    Level.WARNING,
+                    () -> "Timed out waiting for the forced Codex usage refresh for session " + sessionId);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (final ExecutionException e) {
+            // already logged by the async task; the caller still returns the (possibly stale) cached snapshot
+        }
+    }
+
+    /** Legacy synchronous refresh (used when no executor is wired). Mirrors the historical behavior. */
+    private void refreshSynchronously(
+            final String sessionId,
+            final SessionQuota quota,
+            final ProviderConfiguration provider,
+            final long generation) {
+        try {
+            final CodexUsageSnapshot fresh = client.fetch(codexRoot(provider), providerId(provider));
+            publishIfCurrent(sessionId, provider, generation, fresh);
         } catch (final CodexUsageClient.NeedsLoginException e) {
             LOGGER.log(Level.FINE, () -> "Codex usage not refreshed for session " + sessionId + ": " + e.getMessage());
-            quota.lastFetchMillis = clock.millis(); // do not hammer the backend while unauthenticated
+            backOffIfCurrent(sessionId, provider, generation);
         } catch (final RuntimeException e) {
             LOGGER.log(
                     Level.WARNING,
                     () -> "Could not refresh Codex usage for session " + sessionId + ": " + e.getMessage());
-            quota.lastFetchMillis = clock.millis(); // back off on transient failures too
+            backOffIfCurrent(sessionId, provider, generation);
         }
     }
 
+    /** Publishes a fetched snapshot only if the session is still on the same provider lineage. */
+    private void publishIfCurrent(
+            final String sessionId,
+            final ProviderConfiguration provider,
+            final long generation,
+            final CodexUsageSnapshot fresh) {
+        final SessionQuota current = sessions.get(sessionId);
+        if (current != null && current.provider == provider && current.providerGeneration == generation) {
+            current.snapshot = fresh;
+            current.lastFetchMillis = clock.millis();
+        }
+    }
+
+    /** Records the failure back-off (so a broken backend is not re-polled every stale read) when still current. */
+    private void backOffIfCurrent(final String sessionId, final ProviderConfiguration provider, final long generation) {
+        final SessionQuota current = sessions.get(sessionId);
+        if (current != null && current.provider == provider && current.providerGeneration == generation) {
+            current.lastFetchMillis = clock.millis();
+        }
+    }
+
+    /** The current provider for the session (per-tab), never the process-global default. */
     private ProviderConfiguration resolveProvider(final ChatSettings settings) {
         if (providerManager == null) {
             return null;
@@ -224,6 +420,16 @@ public class QuotaSnapshotStore {
             url = url.substring(0, url.length() - 1);
         }
         return url.isEmpty() ? null : url;
+    }
+
+    private static Throwable unwrap(final Throwable e) {
+        if (e instanceof CompletionException ce && ce.getCause() != null) {
+            return unwrap(ce.getCause());
+        }
+        if (e instanceof ExecutionException ee && ee.getCause() != null) {
+            return unwrap(ee.getCause());
+        }
+        return e;
     }
 
     /** The quota view a session consumes: capability state plus the underlying snapshot. */

@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
@@ -151,5 +152,35 @@ class ModelsResponseTest {
         assertFalse(maxTokens.absolute());
         assertEquals(ModelsResponse.SourceType.DETECTED_RELATIVE, maxTokens.sourceType());
         assertEquals("/output_token_limit", maxTokens.sourcePointer());
+    }
+
+    @Test
+    void reasoningCatalogMetadataIsRead(final JsonMapper mapper) {
+        final var res = mapper.fromString(ModelsResponse.class, """
+                {"data":[{"id":"gpt-6.1-sol","default_reasoning_level":"low",
+                "supported_reasoning_levels":[
+                  {"effort":"low","description":"Fast"},
+                  {"effort":"xhigh"},
+                  "ultra",
+                  {"description":"missing effort"},
+                  {"effort":" "}
+                ]}]}""");
+        final var model = res.data().get(0);
+        assertEquals("low", model.defaultReasoningLevel());
+        assertEquals(List.of("low", "xhigh", "ultra"), model.supportedReasoningLevels());
+    }
+
+    @Test
+    void reasoningCatalogMetadataIsOptionalAndTolerant(final JsonMapper mapper) {
+        final var absent = mapper.fromString(ModelsResponse.class, "{\"data\":[{\"id\":\"m\"}]}");
+        assertNull(absent.data().get(0).defaultReasoningLevel());
+        assertTrue(absent.data().get(0).supportedReasoningLevels().isEmpty());
+
+        final var malformed = mapper.fromString(
+                ModelsResponse.class,
+                "{\"data\":[{\"id\":\"m\",\"default_reasoning_level\":42,"
+                        + "\"supported_reasoning_levels\":\"high\"}]}");
+        assertNull(malformed.data().get(0).defaultReasoningLevel());
+        assertTrue(malformed.data().get(0).supportedReasoningLevels().isEmpty());
     }
 }

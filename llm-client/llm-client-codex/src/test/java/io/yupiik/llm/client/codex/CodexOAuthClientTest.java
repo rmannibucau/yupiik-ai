@@ -271,11 +271,14 @@ class CodexOAuthClientTest {
 
     @Test
     void modelsFiltering() {
-        final var hidden = new CodexModels.CodexModel("hidden", "Hidden", null, "hide", true, List.of(0), null, null);
-        final var listed = new CodexModels.CodexModel("listed", "Listed", null, "list", true, List.of(0), null, null);
-        final var notApi = new CodexModels.CodexModel("notapi", "NoApi", null, "list", false, List.of(0), null, null);
-        final var gated =
-                new CodexModels.CodexModel("gated", "Gated", null, "list", true, List.of(0, 200, 0), null, null);
+        final var hidden =
+                new CodexModels.CodexModel("hidden", "Hidden", null, "hide", true, List.of(0), null, null, null, null);
+        final var listed =
+                new CodexModels.CodexModel("listed", "Listed", null, "list", true, List.of(0), null, null, null, null);
+        final var notApi =
+                new CodexModels.CodexModel("notapi", "NoApi", null, "list", false, List.of(0), null, null, null, null);
+        final var gated = new CodexModels.CodexModel(
+                "gated", "Gated", null, "list", true, List.of(0, 200, 0), null, null, null, null);
 
         assertFalse(hidden.selectable());
         assertTrue(listed.selectable());

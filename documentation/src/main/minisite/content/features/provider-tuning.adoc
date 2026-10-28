@@ -18,8 +18,12 @@ For every chat completion request yca resolves a per-model *budget*, a
 1. the explicit request/session value (eg. a `/model` command with a variant),
 2. a value already merged in `providerSpecificOptions` (put-if-absent),
 3. the selected per-model variant (`tuning.variants`),
-4. the provider-level tuning (`tuning.reasoningEffort`),
-5. otherwise *absent* - there is no implicit per-family default anymore.
+4. the configured reasoning effort (per-model `behavior` or provider-level
+   `tuning.reasoningEffort`),
+5. the model catalog default (`default_reasoning_level` from an
+   OpenAI-compatible `/models` payload),
+6. otherwise *absent* - there is no implicit per-family default anymore
+   (Codex keeps its unconfigured `medium` fallback).
 
 [a2s]
 ....
@@ -29,10 +33,12 @@ For every chat completion request yca resolves a per-model *budget*, a
       |  (2)
   per-model variant tuning.variants[].reasoningEffort
       |  (3)
-  provider tuning.reasoningEffort
+  configured effort (behavior or provider tuning)
       |  (4)
-  absent (no implicit default; field not sent)
+  model catalog default_reasoning_level
       |  (5)
+  absent (no implicit default; field not sent)
+      |  (6)
   payload: { model, messages, tools, reasoning_effort?, store:false, max_tokens?, ... }
 ....
 == Reasoning effort
@@ -44,10 +50,27 @@ thinking). yca mirrors opencode's tuning concept:
   `models[].tuning` - accepted values depend on the family, typically
   `none`, `low`, `medium`, `high` (and `max`/`xhigh` for the families that
   support them);
-- unset leaves the field **absent** on the wire for every model - the provider
-  default applies, with no implicit per-family tier injected by yca (deepseek-v4
-  is *not* forced to `max`, gpt-5 is *not* forced to `medium`). Reasoning is an
-  explicit opt-in, never a surprise.
+- unset leaves the field absent on the wire unless the model catalog advertises a
+  default: the provider default applies, with no implicit per-family tier
+  injected by yca (deepseek-v4 is *not* forced to `max`, gpt-5 is *not* forced
+  to `medium`). Reasoning is an explicit opt-in or a catalog capability, never a
+  surprise.
+- an OpenAI-compatible model listing can advertise the capabilities itself:
+  `supported_reasoning_levels` populates the `/model` variant picker with the
+  exact efforts the model accepts, and `default_reasoning_level` supplies the
+  effort sent when nothing is configured. Codex exposes both fields and yca
+  forwards them from its catalog; Responses/Completions backends that return
+  them get the same behavior. Configured variants and `reasoningEffort` always
+  win, and a listing without these fields keeps the previous behavior.
+
+[NOTE]
+.No catalog merge
+Configured variants replace the catalog ones entirely, and a configured effort
+replaces the catalog default. The two facets are independent, so setting a
+variant does not prevent the catalog default from applying when no variant is
+selected. Codex without any catalog metadata still defaults to `medium` (its
+backend streams no reasoning otherwise); other OpenAI-compatible wires leave the
+field absent.
 
 [NOTE]
 .Why there is no implicit default

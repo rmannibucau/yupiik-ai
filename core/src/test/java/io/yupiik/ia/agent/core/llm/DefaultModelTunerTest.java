@@ -233,6 +233,27 @@ class DefaultModelTunerTest {
         assertTrue(variants.get(0).extra().contains("\"thinking\":{\"type\":\"disabled\"}"));
     }
 
+    @Test
+    void catalogReasoningEffortsWinOverHeuristics() {
+        final var responses = DefaultModelTuner.variants(new DefaultModelTuner.ModelContext(
+                "gpt-6.1-sol", "openai", ApiFlavor.RESPONSES, null, null, List.of("low", "xhigh", "ultra")));
+        assertEquals(List.of("low", "xhigh", "ultra"), namesOf(responses));
+        assertEquals("low", responses.get(0).reasoningEffort());
+        assertNull(responses.get(0).extra(), "non-codex variants use the dedicated effort field");
+
+        final var codex = DefaultModelTuner.variants(new DefaultModelTuner.ModelContext(
+                "gpt-6.1-sol", "default", ApiFlavor.CODEX, null, null, List.of("low", "xhigh")));
+        assertEquals(List.of("low", "xhigh"), namesOf(codex));
+        assertTrue(codex.get(1).extra().contains("\"reasoning_effort\":\"xhigh\""));
+    }
+
+    @Test
+    void emptyCatalogReasoningEffortsKeepTheHeuristics() {
+        final var variants = DefaultModelTuner.variants(new DefaultModelTuner.ModelContext(
+                "gpt-6.1-sol", "openai", ApiFlavor.RESPONSES, null, null, List.of()));
+        assertEquals(List.of("low", "medium", "high"), namesOf(variants));
+    }
+
     private static List<String> namesOf(final List<ModelVariantConfiguration> variants) {
         return variants.stream().map(ModelVariantConfiguration::name).toList();
     }

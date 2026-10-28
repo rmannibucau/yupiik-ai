@@ -84,7 +84,21 @@ public class ContextWindowCache {
         return getEntry(providerId, model).map(Entry::maxTokens);
     }
 
+    /**
+     * The cached window even when older than the TTL: a day-stale figure is a far better fallback
+     * than the conservative auto baseline when a fresh detection fails (provider unreachable, auth
+     * pending). Only valid entries are returned - never expired-then-halved overflow adjustments
+     * beyond their usefulness, which is left to the caller to judge.
+     */
+    public Optional<ModelsResponse.TokenCount> getStale(final String providerId, final String model) {
+        return getEntry(providerId, model, true).map(Entry::window);
+    }
+
     private Optional<Entry> getEntry(final String providerId, final String model) {
+        return getEntry(providerId, model, false);
+    }
+
+    private Optional<Entry> getEntry(final String providerId, final String model, final boolean ignoreTtl) {
         final var file = file();
         if (!Files.isRegularFile(file)) {
             return Optional.empty();
@@ -103,7 +117,7 @@ public class ContextWindowCache {
                     continue;
                 }
                 if (matches(entry, providerId, model)
-                        && now - entry.fetchedAt() <= TTL_MILLIS
+                        && (ignoreTtl || now - entry.fetchedAt() <= TTL_MILLIS)
                         && (found.isEmpty() || entry.fetchedAt() > found.get().fetchedAt())) {
                     // keep the freshest (highest fetchedAt) matching entry, not merely the last line,
                     // so ordering accidents cannot let a stale entry shadow a fresh one

@@ -335,14 +335,14 @@ class SpawnSubagentToolTest {
     }
 
     @Test
-    void rejectsBlankAndUnknownProfiles() {
+    void toleratesBlankAgentProfileAndRejectsUnknown() {
         final var cfg = config(Map.of());
         final var reg = registry(cfg);
         final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
 
+        // null == blank: an empty/whitespace profile is treated as "no profile", so it succeeds.
         final var blankProfile = tool.execute(Map.of("task", "do work", "agent", "   "), context(noopTodoStore()));
-        assertFalse(blankProfile.success(), blankProfile.output());
-        assertTrue(blankProfile.output().contains("agent profile must not be blank"));
+        assertTrue(blankProfile.success(), blankProfile.output());
 
         final var unknownProfile = tool.execute(Map.of("task", "do work", "agent", "nope"), context(noopTodoStore()));
         assertFalse(unknownProfile.success(), unknownProfile.output());
@@ -350,13 +350,13 @@ class SpawnSubagentToolTest {
     }
 
     @Test
-    void rejectsBlankExplicitModel() {
+    void toleratesBlankExplicitModel() {
         final var cfg = config(Map.of());
         final var reg = registry(cfg);
         final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
+        // null == blank: an empty/whitespace model is treated as "no model", so it succeeds.
         final var result = tool.execute(Map.of("task", "do work", "model", "  "), context(noopTodoStore()));
-        assertFalse(result.success(), result.output());
-        assertTrue(result.output().contains("model must not be blank"));
+        assertTrue(result.success(), result.output());
     }
 
     @Test

@@ -31,6 +31,7 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -102,7 +103,10 @@ class CodexDialectTest {
                     "{\"models\":["
                             + "{\"slug\":\"gpt-5.3-codex\",\"display_name\":\"GPT-5.3 Codex\","
                             + "\"visibility\":\"list\",\"supported_in_api\":true,\"minimal_client_version\":[0,1,0],"
-                            + "\"context_window\":400000,\"max_context_window\":400000},"
+                            + "\"context_window\":400000,\"max_context_window\":400000,"
+                            + "\"default_reasoning_level\":\"medium\","
+                            + "\"supported_reasoning_levels\":["
+                            + "{\"effort\":\"low\",\"description\":\"Fast\"},{\"effort\":\"xhigh\"}]},"
                             + "{\"slug\":\"gpt-reserve\",\"display_name\":\"Reserve\","
                             + "\"visibility\":\"hide\",\"supported_in_api\":true,\"minimal_client_version\":[0,1,0]},"
                             + "{\"slug\":\"codex-auto-review\",\"display_name\":\"Review\","
@@ -136,6 +140,14 @@ class CodexDialectTest {
         assertEquals(1, models.data().size());
         assertEquals("gpt-5.3-codex", models.data().get(0).id());
         assertEquals(400_000, models.data().get(0).contextWindow());
+        final var attrs = models.data().get(0).others();
+        assertEquals("medium", attrs.get("default_reasoning_level"));
+        @SuppressWarnings("unchecked")
+        final var levels = (List<Map<String, Object>>) attrs.get("supported_reasoning_levels");
+        assertEquals(
+                List.of("low", "xhigh"),
+                levels.stream().map(level -> level.get("effort")).toList());
+        assertEquals("Fast", levels.get(0).get("description"));
     }
 
     @Test

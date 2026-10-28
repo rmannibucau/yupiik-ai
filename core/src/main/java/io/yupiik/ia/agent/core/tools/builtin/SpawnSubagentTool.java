@@ -153,9 +153,6 @@ public class SpawnSubagentTool implements EmbeddedTool {
         final var profile = arg(args, "agent");
         final var model = arg(args, "model");
         final var profileName = profile == null || profile.isBlank() ? null : profile.strip();
-        if (profile != null && profileName == null) {
-            return ToolResult.error("agent profile must not be blank");
-        }
         final var selectedProfile = profileName == null || configuration.agents() == null
                 ? null
                 : configuration.agents().stream()
@@ -165,9 +162,6 @@ public class SpawnSubagentTool implements EmbeddedTool {
                         .orElse(null);
         if (profileName != null && selectedProfile == null) {
             return ToolResult.error("Unknown agent profile: " + profileName);
-        }
-        if (model != null && model.isBlank()) {
-            return ToolResult.error("model must not be blank");
         }
         final var normalizedModel = model == null ? null : model.strip();
         final var policy =

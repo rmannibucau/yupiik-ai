@@ -62,6 +62,7 @@ public record WebEventDto(
             case AgentEvent.SubagentDelivered _ -> "subagent-delivered";
             case AgentEvent.PromptIntegrated _ -> "prompt-integrated";
             case AgentEvent.ToolTimingEvent _ -> "tool-timing";
+            case AgentEvent.Phase _ -> "phase";
         };
     }
 
@@ -87,11 +88,13 @@ public record WebEventDto(
             case AgentEvent.SubagentDelivered t -> t.summary();
             case AgentEvent.PromptIntegrated t -> t.text();
             case AgentEvent.ToolTimingEvent t -> t.toolName();
+            case AgentEvent.Phase t -> t.name();
         };
     }
 
     private static Map<String, Object> dataOf(final AgentEvent event) {
         return switch (event) {
+            case AgentEvent.Phase t -> Map.of("phase", t.name());
             case AgentEvent.ToolStarted t -> Map.of("args", t.args(), "ordinal", t.ordinal());
             case AgentEvent.ToolStream t ->
                 Map.of("stream", true, "fragment", t.fragment() == null ? "" : t.fragment(), "ordinal", t.ordinal());

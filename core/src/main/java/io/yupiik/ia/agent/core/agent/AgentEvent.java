@@ -595,4 +595,24 @@ public sealed interface AgentEvent {
             this(toolName, durationMs, wallDurationMs, parallelBatch, sessionId, null, null);
         }
     }
+
+    /**
+     * Emitted at well-defined phase boundaries of the task-solving loop so bench consumers can reconstruct
+     * the critical path (model request sent -> stream complete -> tool execution -> next request) without
+     * inferring it from wall-deltas. Carries no payload beyond the phase name; the timing is the event's
+     * arrival time relative to {@code detail.log} ticks. Benchmark/observability marker: UIs may ignore it.
+     *
+     * @param name one of {@code request-sent}, {@code stream-complete}, {@code tool-batch-complete},
+     *     {@code iteration-complete}.
+     */
+    record Phase(String name, String sessionId, String subagentId, String subagentName) implements AgentEvent {
+        public static final String REQUEST_SENT = "request-sent";
+        public static final String STREAM_COMPLETE = "stream-complete";
+        public static final String TOOL_BATCH_COMPLETE = "tool-batch-complete";
+        public static final String ITERATION_COMPLETE = "iteration-complete";
+
+        public Phase(final String name, final String sessionId) {
+            this(name, sessionId, null, null);
+        }
+    }
 }

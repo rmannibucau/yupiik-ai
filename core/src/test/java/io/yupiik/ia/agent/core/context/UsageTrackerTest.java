@@ -22,21 +22,30 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -457,6 +466,155 @@ class UsageTrackerTest {
     @Test
     void contextPercentIsComputedAgainstTheUsableWindow() {
         assertEquals(10.0, calibratedTracker().contextPercent(8_000), 0.001);
+    }
+
+    @Test
+    void authFailureDoesNotSuppressDetectionAfterRecovery() throws Exception {
+        final var calls = new AtomicInteger();
+        final var recovered = new AtomicBoolean();
+        // adjustable clock: an auth failure only anti-spams for 60s, so the recovery is observed by
+        // advancing the clock past the retry window (as it elapses in real sessions between turns)
+        final var now = new AtomicLong(System.currentTimeMillis());
+        final Clock clock = new Clock() {
+            @Override
+            public long millis() {
+                return now.get();
+            }
+
+            @Override
+            public Instant instant() {
+                return Instant.ofEpochMilli(now.get());
+            }
+
+            @Override
+            public ZoneId getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(final ZoneId zone) {
+                return this;
+            }
+        };
+        final var client = new ChatClient(configuration(-1), mapper, providerManager, Clock.systemUTC()) {
+            @Override
+            public ModelsResponse models(final ChatSettings s) {
+                if (!recovered.get()) {
+                    calls.incrementAndGet();
+                    throw new CodexNotAuthenticatedException("codex-yupiik");
+                }
+                return toModels("{\"data\":[{\"id\":\"test-model\",\"context_window\":272000}]}");
+            }
+        };
+        try {
+            final var tracker = new UsageTracker(
+                    providerManager, client, new ContextWindowCache(configuration, mapper, Clock.systemUTC()), clock);
+            // first resolution: auth failure -> conservative baseline, no permanent backoff
+            assertEquals(
+                    ModelsResponse.AUTO_DETECTED_BASELINE,
+                    tracker.contextWindowTokenCount().value());
+            assertEquals("auto", tracker.windowOrigin());
+            // auth recovers (user ran /codex login) and the short anti-spam window elapses: the next
+            // resolution must retry and succeed, never stay pinned to the baseline for a day
+            recovered.set(true);
+            now.addAndGet(61_000);
+            assertEquals(
+                    272_000,
+                    tracker.contextWindowTokenCount().value(),
+                    "an auth failure must not arm the 24h backoff: detection retries after login");
+            assertEquals("explicit", tracker.windowOrigin());
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    void permanentFailureStillBacksOffForADay() throws Exception {
+        final var calls = new AtomicInteger();
+        final var client = new ChatClient(configuration(-1), mapper, providerManager, Clock.systemUTC()) {
+            @Override
+            public ModelsResponse models(final ChatSettings s) {
+                calls.incrementAndGet();
+                throw new IllegalStateException("connection refused");
+            }
+        };
+        try {
+            final var tracker = new UsageTracker(
+                    providerManager,
+                    client,
+                    new ContextWindowCache(configuration, mapper, Clock.systemUTC()),
+                    Clock.systemUTC());
+            assertEquals(
+                    ModelsResponse.AUTO_DETECTED_BASELINE,
+                    tracker.contextWindowTokenCount().value());
+            assertEquals(
+                    ModelsResponse.AUTO_DETECTED_BASELINE,
+                    tracker.contextWindowTokenCount().value());
+            assertEquals(
+                    1,
+                    calls.get(),
+                    "a permanent detection failure must not re-attempt on every resolution (24h backoff)");
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    void staleCacheIsUsedWhenDetectionFails() throws Exception {
+        final var cfg = configuration(-1);
+        final var cache = new ContextWindowCache(cfg, mapper, Clock.systemUTC());
+        // seed an entry already out of TTL at resolution time
+        cache.put(
+                "default",
+                "test-model",
+                new ModelsResponse.TokenCount(
+                        272000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "/context_window"),
+                System.currentTimeMillis() - 25L * 60L * 60L * 1000L);
+        final var client = new ChatClient(cfg, mapper, providerManager, Clock.systemUTC()) {
+            @Override
+            public ModelsResponse models(final ChatSettings s) {
+                throw new IllegalStateException("provider unreachable");
+            }
+        };
+        try {
+            final var tracker = new UsageTracker(providerManager, client, cache, Clock.systemUTC());
+            assertEquals(
+                    272_000,
+                    tracker.contextWindowTokenCount().value(),
+                    "a stale (expired) cache entry must beat the conservative baseline when detection fails");
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    void detectionUsesTheSessionProviderSettings() throws Exception {
+        final var seen = new AtomicReference<ChatSettings>();
+        final var cfg = configuration(-1);
+        final var marker = new ChatSettings("default", "test-model", null, null);
+        final var client = new ChatClient(cfg, mapper, providerManager, Clock.systemUTC()) {
+            @Override
+            public ModelsResponse models(final ChatSettings s) {
+                seen.set(s);
+                return toModels("{\"data\":[{\"id\":\"test-model\",\"context_window\":500000}]}");
+            }
+        };
+        try {
+            final var tracker = new UsageTracker(
+                    providerManager, client, new ContextWindowCache(cfg, mapper, Clock.systemUTC()), Clock.systemUTC());
+            tracker.attach(marker);
+            assertEquals(500_000, tracker.contextWindowTokenCount().value());
+            assertEquals(
+                    marker,
+                    seen.get(),
+                    "detection must resolve the models list against the session's provider settings");
+        } finally {
+            client.close();
+        }
+    }
+
+    private ModelsResponse toModels(final String body) {
+        return mapper.fromString(ModelsResponse.class, body);
     }
 
     private UsageTracker calibratedTracker() {

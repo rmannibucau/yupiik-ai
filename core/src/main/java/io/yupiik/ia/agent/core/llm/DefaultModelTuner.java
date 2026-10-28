@@ -161,9 +161,25 @@ public final class DefaultModelTuner {
      * @param dialect the API wire flavor (our stand-in for opencode's npm package)
      * @param maxOutputTokens the resolved output budget, fine for the anthropic budget math (nullable)
      * @param releaseDate optional ISO-8601 release date (yyyy-MM-dd) unlocking OpenAI none/xhigh tiers
+     * @param supportedReasoningEfforts reasoning efforts advertised by the model catalog, used as-is when non-empty
      */
     public record ModelContext(
-            String model, String providerId, ApiFlavor dialect, Integer maxOutputTokens, String releaseDate) {}
+            String model,
+            String providerId,
+            ApiFlavor dialect,
+            Integer maxOutputTokens,
+            String releaseDate,
+            List<String> supportedReasoningEfforts) {
+
+        public ModelContext(
+                final String model,
+                final String providerId,
+                final ApiFlavor dialect,
+                final Integer maxOutputTokens,
+                final String releaseDate) {
+            this(model, providerId, dialect, maxOutputTokens, releaseDate, null);
+        }
+    }
 
     /**
      * Reasoning-effort variants exposed for reasoning-capable families that have no configured variants.
@@ -188,6 +204,19 @@ public final class DefaultModelTuner {
         // openai-compatible variant scheme (minus the provider-slug branches that never apply).
         final boolean openaiWire =
                 dialect == ApiFlavor.COMPLETIONS || dialect == ApiFlavor.RESPONSES || dialect == ApiFlavor.CODEX;
+
+        // The model catalog wins over every heuristic when it advertises reasoning efforts: the
+        // provider is the source of truth for what the model actually accepts. Absent/empty keeps
+        // the historical family/provider based resolution below unchanged.
+        if (openaiWire
+                && ctx.supportedReasoningEfforts() != null
+                && !ctx.supportedReasoningEfforts().isEmpty()) {
+            return efforts(
+                    ctx.supportedReasoningEfforts(),
+                    dialect == ApiFlavor.CODEX
+                            ? DefaultModelTuner::openAiReasoningSuffix
+                            : DefaultModelTuner::reasoningEffortOnly);
+        }
 
         // deepseek names excluded by opencode before any other resolution.
         if (m.contains("deepseek-chat")

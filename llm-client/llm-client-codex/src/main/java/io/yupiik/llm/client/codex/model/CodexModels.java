@@ -40,7 +40,9 @@ public record CodexModels(List<CodexModel> models) {
             @JsonProperty("supported_in_api") Boolean supportedInApi,
             @JsonProperty("minimal_client_version") List<Integer> minimalClientVersion,
             @JsonProperty("context_window") Long contextWindow,
-            @JsonProperty("max_context_window") Long maxContextWindow) {
+            @JsonProperty("max_context_window") Long maxContextWindow,
+            @JsonProperty("default_reasoning_level") String defaultReasoningLevel,
+            @JsonProperty("supported_reasoning_levels") List<ReasoningLevel> supportedReasoningLevels) {
 
         /** The model id handed to the Responses API {@code model} field. */
         public String id() {
@@ -73,4 +75,10 @@ public record CodexModels(List<CodexModel> models) {
             return minor == null || minor <= clientVersion;
         }
     }
+
+    /** A reasoning effort advertised by the catalog for a model. */
+    @JsonModel
+    public record ReasoningLevel(
+            @JsonProperty("effort") String effort,
+            @JsonProperty("description") String description) {}
 }

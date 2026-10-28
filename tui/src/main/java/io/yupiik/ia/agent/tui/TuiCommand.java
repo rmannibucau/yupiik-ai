@@ -1609,7 +1609,7 @@ public class TuiCommand implements Runnable {
             // states with no fallthrough. repaint when any hover state changed (a moved
             // pointer over a footer/sidebar must schedule a redraw or the chip never appears)
             final var footerHovered = state.toolOverlay != null && onToolFooterHover(move, state);
-            return footerHovered | onTabHover(move, state) | onQuotaHover(move, state);
+            return footerHovered | onTabHover(move, state) | onQuotaHover(move, state) | onContextHover(move, state);
         }
         if (state.toolOverlay != null) {
             return onToolOverlayEvent(event, runner, state);
@@ -1664,6 +1664,7 @@ public class TuiCommand implements Runnable {
                 }
                 state.hoverQuotaReset = null;
                 state.hoverQuotaRect = null;
+                state.hoverContextSize = null;
                 // tab close zones first: they are sub-rects of the tab cells
                 for (var i = 0; i < tabCloseRects.size(); i++) {
                     if (i < tabManager.size() && tabCloseRects.get(i).contains(mouse.x(), mouse.y())) {
@@ -3121,6 +3122,22 @@ public class TuiCommand implements Runnable {
         return true;
     }
 
+    /**
+     * Mouse motion over the sidebar context gauge: surfaces the estimated context size in a
+     * floating chip below the gauge row, cleared when the pointer leaves the gauge. Only
+     * repaints when the hover state changed. Hit-testing uses the current-frame
+     * {@link UiState#contextGaugeRect}, which is cleared whenever the gauge is not drawn.
+     */
+    private boolean onContextHover(final MouseEvent move, final UiState state) {
+        final var hovered = state.contextGaugeRect != null && state.contextGaugeRect.contains(move.x(), move.y());
+        final var next = hovered ? "~" + formatTokens(state.model.estimatedContext()) + " tok" : null;
+        if (Objects.equals(state.hoverContextSize, next)) {
+            return false;
+        }
+        state.hoverContextSize = next;
+        return true;
+    }
+
     /** Index of the tab whose bar cell contains the given coordinates, or {@code -1}. */
     private int tabIndexAt(final int x, final int y) {
         for (var i = 0; i < tabRects.size(); i++) {
@@ -3142,6 +3159,7 @@ public class TuiCommand implements Runnable {
         }
         state.hoverQuotaReset = null;
         state.hoverQuotaRect = null;
+        state.hoverContextSize = null;
         if (state.toolOverlay != null) {
             scrollToolOverlay(state, delta);
         } else if (tabManager.isListOpen()) {
@@ -3745,6 +3763,7 @@ public class TuiCommand implements Runnable {
         if (state.hoverQuotaReset != null && !state.hoverQuotaReset.isBlank()) {
             renderQuotaTooltip(frame, state);
         }
+        renderContextTooltip(frame, state);
         if (state.searchOpen) {
             renderSearchBar(frame, state);
         }
@@ -4074,6 +4093,9 @@ public class TuiCommand implements Runnable {
         }
         state.quotaHoverAreas = showQuota ? List.copyOf(hoverAreas) : List.of();
 
+        // the hover hit-area is only recorded while the gauge is actually drawn (no tooltip after
+        // a provider switch or resize): cleared on every frame where the gauge is absent
+        state.contextGaugeRect = null;
         if (!rows.get(2).isEmpty()) {
             final var percent = Math.clamp(state.model.contextPercent(), 0, 100);
             final var compactionThreshold = compactionThreshold();
@@ -4089,6 +4111,7 @@ public class TuiCommand implements Runnable {
                             .gaugeColor(gaugeColor)
                             .build(),
                     rows.get(2));
+            state.contextGaugeRect = rows.get(2);
         }
     }
 
@@ -6288,6 +6311,34 @@ public class TuiCommand implements Runnable {
      * the footer row so it reads without covering the output the user is looking at;
      * clamped to the frame so a very wide/tall payload never escapes the viewport.
      */
+    /**
+     * Floating chip just below a hovered sidebar context gauge: shows the estimated context
+     * size in a compact k/M form ("~12.3k tok"). Anchored under the hovered gauge row and
+     * clamped to the frame like the quota reset tooltip (the sidebar is bottom-left, so the
+     * chip grows upward when near the bottom edge).
+     */
+    private void renderContextTooltip(final dev.tamboui.terminal.Frame frame, final UiState state) {
+        final var caption = state.hoverContextSize;
+        final var rect = state.contextGaugeRect;
+        if (caption == null || caption.isBlank() || rect == null) {
+            return;
+        }
+        final var width = Math.max(1, Math.min(frame.area().width() - 2, caption.length() + 4));
+        final var tooltipBg =
+                palette.mono() ? null : TuiColors.blend(palette.borderActive(), palette.backgroundPanel(), 0.85);
+        final var tooltipStyle = palette.mono()
+                ? Style.EMPTY
+                : Style.EMPTY.fg(Color.hex(palette.text())).bg(tooltipBg);
+        final var x = Math.max(0, Math.min(frame.area().width() - width, rect.x()));
+        final var y = Math.max(1, Math.min(frame.height() - 1, rect.y() + rect.height()));
+        frame.renderWidget(
+                Paragraph.builder()
+                        .text(Text.from(Line.from(Span.styled(" " + caption + " ", tooltipStyle))))
+                        .overflow(Overflow.CLIP)
+                        .build(),
+                new Rect(x, y, width, 1));
+    }
+
     private void renderToolOverlayTooltip(final dev.tamboui.terminal.Frame frame, final UiState state) {
         final var cmd = state.hoverToolCmd;
         final var footer = state.toolOverlayFooter;
@@ -6749,6 +6800,7 @@ public class TuiCommand implements Runnable {
         state.hoverToolCmd = null;
         state.hoverQuotaReset = null;
         state.hoverQuotaRect = null;
+        state.hoverContextSize = null;
         if (mouse.isPress() && mouse.isLeftButton()) {
             state.selection.press(mouse.x(), mouse.y(), state.screenGrid, copyZones(state));
             return true;
@@ -8654,6 +8706,20 @@ public class TuiCommand implements Runnable {
          * reset tooltip chip below it), or {@code null} when not hovering a quota gauge.
          */
         private volatile Rect hoverQuotaRect;
+
+        /**
+         * Screen rect of the sidebar context gauge, recorded by the render thread each frame so the
+         * event thread can hit-test a MOVE and surface the estimated context size in a hover tooltip.
+         * Cleared whenever the gauge is not drawn, so no tooltip appears over a hidden gauge.
+         */
+        private volatile Rect contextGaugeRect;
+
+        /**
+         * Caption ("~12.3k tok") shown in the floating chip below the context gauge the pointer
+         * currently hovers, or {@code null}. Rendered by the render thread; cleared on
+         * scroll / press / drag / leave.
+         */
+        private volatile String hoverContextSize;
 
         private record QuotaHoverArea(Rect rect, long resetAtEpochSeconds) {}
 

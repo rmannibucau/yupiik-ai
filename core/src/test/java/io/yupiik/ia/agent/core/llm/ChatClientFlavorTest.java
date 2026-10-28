@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.model.LlmStreamEvent;
@@ -94,7 +95,9 @@ class ChatClientFlavorTest {
             respond(
                     exchange,
                     200,
-                    "{\"data\":[{\"id\":\"model-a\",\"owned_by\":\"x\"},{\"id\":\"model-b\",\"owned_by\":\"y\"}]}",
+                    "{\"data\":[{\"id\":\"model-a\",\"owned_by\":\"x\"},{\"id\":\"model-b\",\"owned_by\":\"y\"},"
+                            + "{\"id\":\"catalog-model\",\"owned_by\":\"x\",\"default_reasoning_level\":\"high\","
+                            + "\"supported_reasoning_levels\":[{\"effort\":\"low\"},{\"effort\":\"high\"},{\"effort\":\"ultra\"}]}]}",
                     "application/json");
         });
         server.start();
@@ -599,7 +602,80 @@ class ChatClientFlavorTest {
 
     @Test
     void modelsListsIds() throws Exception {
-        assertEquals(List.of("model-a", "model-b"), client.models().ids());
+        assertEquals(
+                List.of("catalog-model", "model-a", "model-b"), client.models().ids());
+    }
+
+    @Test
+    void catalogReasoningLevelsDriveVariantsAndDefaultEffort() throws Exception {
+        final var variants = client.variants("catalog-model");
+        assertEquals(
+                List.of("low", "high", "ultra"),
+                variants.stream().map(ModelVariantConfiguration::name).toList());
+        assertNull(variants.get(0).extra(), "completions variants use the dedicated reasoning_effort field");
+
+        assertEquals(
+                "hello there",
+                client.chat(request("catalog-model"), () -> false).message().content());
+        assertTrue(
+                bodies.getLast().contains("\"reasoning_effort\":\"high\""),
+                "the catalog default_reasoning_level must be sent: " + bodies.getLast());
+    }
+
+    @Test
+    void modelsWithoutReasoningCatalogKeepTheHeuristics() {
+        assertEquals(
+                List.of("low", "medium", "high"),
+                client.variants("model-a").stream()
+                        .map(ModelVariantConfiguration::name)
+                        .toList());
+    }
+
+    @Test
+    void configuredVariantsAndEffortWinOverTheCatalog() throws Exception {
+        final var cfg = configuration(Map.of(
+                "yca.provider.providers.0.tuning.reasoningEffort",
+                "low",
+                "yca.provider.providers.0.tuning.variants.length",
+                "1",
+                "yca.provider.providers.0.tuning.variants.0.name",
+                "custom",
+                "yca.provider.providers.0.tuning.variants.0.reasoningEffort",
+                "medium"));
+        client.close();
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        assertEquals(
+                List.of("custom"),
+                client.variants("catalog-model").stream()
+                        .map(ModelVariantConfiguration::name)
+                        .toList());
+        client.chat(request("catalog-model"), () -> false);
+        assertTrue(
+                bodies.getLast().contains("\"reasoning_effort\":\"low\""),
+                "the configured effort must win over the catalog default: " + bodies.getLast());
+
+        client.chat(request("catalog-model").withSettings(ChatSettings.EMPTY.withVariant("custom")), () -> false);
+        assertTrue(
+                bodies.getLast().contains("\"reasoning_effort\":\"medium\""),
+                "the selected configured variant must win: " + bodies.getLast());
+    }
+
+    @Test
+    void catalogFetchFailureFallsBackToTheHeuristics() throws Exception {
+        final var cfg = configuration(Map.of(
+                "yca.provider.providers.0.baseUrl",
+                "http://localhost:1/v1",
+                "yca.provider.providers.0.timeoutSeconds",
+                "1"));
+        client.close();
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        assertEquals(
+                List.of("low", "medium", "high"),
+                client.variants("model-a").stream()
+                        .map(ModelVariantConfiguration::name)
+                        .toList());
     }
 
     @Test
@@ -1127,14 +1203,16 @@ class ChatClientFlavorTest {
 
     @Test
     void modelsAreCachedAcrossCallsAndRefreshedOnProviderChange() throws Exception {
-        assertEquals(List.of("model-a", "model-b"), client.models().ids());
+        assertEquals(
+                List.of("catalog-model", "model-a", "model-b"), client.models().ids());
         assertEquals(1, modelsHits.get(), "the /v1/models endpoint must be hit once");
 
         assertEquals(client.models().ids(), client.models().ids());
         assertEquals(1, modelsHits.get(), "repeated calls must reuse the cached model list");
 
         client.setProvider("default");
-        assertEquals(List.of("model-a", "model-b"), client.models().ids());
+        assertEquals(
+                List.of("catalog-model", "model-a", "model-b"), client.models().ids());
         assertEquals(2, modelsHits.get(), "changing the provider must refresh the cached model list");
     }
 
