@@ -668,9 +668,17 @@ export function ChatPage({
         return;
       }
       if (e.key === 'Enter') {
-        e.preventDefault();
-        accept(items[activeIndex] ?? items[0]);
-        return;
+        const item = items[activeIndex] ?? items[0];
+        // A no-op completion (the candidate is textually identical to the span it
+        // would replace, e.g. a fully typed command like /editplan) must not hijack
+        // Enter: there is nothing to complete, so let Enter submit the line instead
+        // of swallowing the keystroke to accept the identical text.
+        const applied = applySuggestion(prompt, completionRef.current, item);
+        if (applied.text !== prompt) {
+          e.preventDefault();
+          accept(item);
+          return;
+        }
       }
     }
     if (e.key === 'Escape') {

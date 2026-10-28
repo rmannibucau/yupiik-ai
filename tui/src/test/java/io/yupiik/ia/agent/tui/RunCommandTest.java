@@ -32,6 +32,7 @@ import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.configuration.PermissionsConfiguration;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -45,6 +46,7 @@ import io.yupiik.ia.agent.core.tools.ToolCategory;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -508,6 +510,80 @@ class RunCommandTest {
                 return List.of();
             }
         };
+    }
+
+    @Test
+    void displayOnlyUsageRefreshDoesNotCountAsRequest() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                // synthetic display-only quota/context refresh (refreshUsage/pushUsageQuota at t0): even a
+                // NON-zero cumulative usage here must neither increment llmCalls nor add any token.
+                shellRegistry.onEvent(
+                        new AgentEvent.UsageUpdated(new Usage(10, 20, 30, 1, 0, 0, 0), 100, 5.0, sessionId));
+                // a real request with NO usage reported must still count exactly once (skipping a
+                // zero-usage request on account of "no tokens" would be wrong).
+                shellRegistry.onEvent(new AgentEvent.LlmRequestCompleted(Usage.EMPTY, "m", 1, sessionId));
+                return "ok";
+            }
+        };
+        final var metricsFile = temp.resolve("metrics1.txt");
+        final var command = new RunCommand(
+                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", metricsFile.toString(), ""),
+                shellRegistry,
+                runtimeFactory(agentLoop, new PermissionService(null)),
+                sessionStore(),
+                null);
+        command.run();
+        final var line = Files.readString(metricsFile, StandardCharsets.UTF_8);
+        assertTrue(line.contains("llmCalls=1"), "display refresh must not count as a request: " + line);
+        assertTrue(
+                line.contains("promptTokens=0 completionTokens=0 totalTokens=0"),
+                "display-only usage must not be aggregated: " + line);
+    }
+
+    @Test
+    void nonZeroDisplayRefreshDoesNotDoubleCountAndCumulativeUsageAggregatesOnce() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                // two real logical requests carrying per-request usage...
+                shellRegistry.onEvent(
+                        new AgentEvent.LlmRequestCompleted(new Usage(10, 20, 30, 1, 2, 3, 4), "m", 1, sessionId));
+                // ...with a display-only refresh re-publishing the same cumulative usage in between: this
+                // must add nothing (the OLD code added totalTokens=30 again as absolute + counted a call).
+                shellRegistry.onEvent(
+                        new AgentEvent.UsageUpdated(new Usage(10, 20, 30, 1, 2, 3, 4), 100, 5.0, sessionId));
+                shellRegistry.onEvent(
+                        new AgentEvent.LlmRequestCompleted(new Usage(5, 5, 10, 0, 0, 0, 0), "m", 2, sessionId));
+                return "ok";
+            }
+        };
+        final var metricsFile = temp.resolve("metrics2.txt");
+        final var command = new RunCommand(
+                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", metricsFile.toString(), ""),
+                shellRegistry,
+                runtimeFactory(agentLoop, new PermissionService(null)),
+                sessionStore(),
+                null);
+        command.run();
+        final var line = Files.readString(metricsFile, StandardCharsets.UTF_8);
+        assertTrue(line.contains("llmCalls=2"), "only the real requests count, refresh excluded: " + line);
+        assertTrue(
+                line.contains("promptTokens=15 completionTokens=25 totalTokens=40"),
+                "per-request usage aggregated once, the display refresh must not double-count: " + line);
     }
 
     private static ShellRegistry testRegistry() {

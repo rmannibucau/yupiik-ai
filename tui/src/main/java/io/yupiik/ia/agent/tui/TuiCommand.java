@@ -2102,9 +2102,16 @@ public class TuiCommand implements Runnable {
                 // accepts the highlighted candidate instead of submitting the line
                 // (Esc dismisses the popup first, a second Enter then submits). The
                 // user may also keep typing to refine the candidates.
-                applyCompletion(state);
-                dismissCompletion(state);
-                return true;
+                //
+                // But a no-op completion (the highlighted candidate is textually
+                // identical to the span it would replace, e.g. a fully typed command)
+                // must let Enter submit instead of silently eating the keystroke:
+                // otherwise a fully typed "/editplan" needs a confusing second Enter.
+                if (completionWouldChangeInput(state)) {
+                    applyCompletion(state);
+                    dismissCompletion(state);
+                    return true;
+                }
             }
             final var text = state.input.text().strip();
             state.input.clear();
@@ -2704,6 +2711,37 @@ public class TuiCommand implements Runnable {
         // position the cursor just after the inserted replacement range
         applyCursor(state, row, start + replacement.length());
         state.completionCursor = state.input.cursorCol();
+    }
+
+    /**
+     * Whether applying the currently highlighted completion candidate would actually change the
+     * input line. A no-op completion (the candidate is textually identical to the span it would
+     * replace, e.g. a fully typed command like {@code /editplan}) should not hijack Enter: it has
+     * nothing to complete, so Enter must fall through to the normal submit path.
+     */
+    private boolean completionWouldChangeInput(final UiState state) {
+        final var suggestion = state.completion;
+        if (suggestion == null || suggestion.empty()) {
+            return false;
+        }
+        final var items = suggestion.items();
+        if (items.isEmpty()) {
+            return false;
+        }
+        final var row = state.input.cursorRow();
+        final var line = state.input.getLine(row);
+        final var start = suggestion.replaceStart();
+        final var end = suggestion.replaceEnd();
+        if (start < 0 || end > line.length() || start >= end) {
+            // a degenerate span would be refused by replaceInput too; nothing to apply
+            return false;
+        }
+        final var choice = items.get(state.completionIndex % items.size());
+        return !(start == 0 && end == line.length() && choice.equals(line))
+                && !line.substring(0, start)
+                        .concat(choice)
+                        .concat(line.substring(end))
+                        .equals(line);
     }
 
     private void cycleCompletion(final UiState state, final boolean forward) {

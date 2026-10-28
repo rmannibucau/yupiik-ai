@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.shell;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.MemoryExtractor;
@@ -198,6 +199,9 @@ public class SessionRuntimeFactory {
                 null,
                 feedback,
                 precisionDurationMarker);
+        // bounded initialization telemetry: mark the runtime wiring window so pre-first-request
+        // startup is decomposable (runtime creation -> model resolution -> prompt build -> initial prompt)
+        emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_START);
         // resolve the session's working directory once (explicit override > recorded project marker >
         // process default) and freeze it in the loop + system prompt builder: the stable system-prompt
         // core must stay byte-identical across turns, so this is never re-read mid-conversation.
@@ -214,6 +218,7 @@ public class SessionRuntimeFactory {
                     sessionId,
                     sessionKey));
         }
+        emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_END);
         return new SessionRuntime(
                 loop,
                 permissions,
@@ -284,5 +289,11 @@ public class SessionRuntimeFactory {
         this.memoryProductionPolicy = null;
         this.quotaStore = null;
         this.secretRedactor = null;
+    }
+
+    private static void emitPhase(final Emitter emitter, final String sessionId, final String name) {
+        if (emitter != null) {
+            emitter.emit(new AgentEvent.Phase(name, sessionId));
+        }
     }
 }

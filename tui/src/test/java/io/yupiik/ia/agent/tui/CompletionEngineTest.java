@@ -170,6 +170,46 @@ class CompletionEngineTest {
         assertEquals(4, s.replaceEnd());
     }
 
+    /**
+     * Regression for the /editplan Enter swallow: a fully-typed slash command
+     * yields a suggestion whose highlighted candidate replaces the whole typed
+     * command with itself, i.e. applying it is a textual no-op. The TUI/web
+     * Enter handlers rely on detecting this so a single Enter submits the
+     * command instead of being silently consumed to "accept" the identical
+     * candidate.
+     */
+    @Test
+    void fullyTypedCommandSuggestionIsATextualNoOp() {
+        final var s = engine().suggest("/editplan", 9);
+        assertTrue(s.items().contains("/editplan"), "a fully typed command must be its own candidate");
+        assertEquals(0, s.replaceStart());
+        assertEquals(9, s.replaceEnd());
+        final var choice = s.items().get(0);
+        // applying the inverse of the skipped span must reproduce the same text
+        assertEquals(
+                "/editplan",
+                "/editplan"
+                        .substring(0, s.replaceStart())
+                        .concat(choice)
+                        .concat("/editplan".substring(s.replaceEnd())));
+    }
+
+    /**
+     * The mirror: a partial prefix (e.g. "/per" -> "/permissions") still
+     * changes the line, so Enter must keep accepting the expansion rather than
+     * submitting a half-typed command.
+     */
+    @Test
+    void partialCommandSuggestionChangesTheLine() {
+        final var s = engine().suggest("/per", 4);
+        assertEquals(0, s.replaceStart());
+        assertEquals(4, s.replaceEnd());
+        final var choice = s.items().get(0);
+        final var applied =
+                "/per".substring(0, s.replaceStart()).concat(choice).concat("/per".substring(s.replaceEnd()));
+        assertFalse(applied.equals("/per"), "a partial prefix expansion must differ from the typed text");
+    }
+
     @Test
     void completesModelParam() {
         final var s = engine().suggest("/model gpt", 10);

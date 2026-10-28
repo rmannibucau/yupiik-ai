@@ -1034,12 +1034,14 @@ public class AgentLoop {
                 ? null
                 : AgentModelRouting.refName(agent.model().name());
         final var useProfileModel = configuredAgentModel != null;
+        emitPhase(AgentEvent.Phase.MODEL_RESOLUTION_START);
         final var effectiveModel = EffectiveAgentModel.resolve(
                 providerManager != null && contextualSettings.providerId() != null ? providerManager : null,
                 contextualSettings,
                 skipConfiguredAgentModel ? null : agent,
                 explicitModel,
                 null);
+        emitPhase(AgentEvent.Phase.MODEL_RESOLUTION_END);
         final var runSettings =
                 !skipConfiguredAgentModel && useProfileModel ? effectiveModel.settings() : contextualSettings;
         final var runTuning =
@@ -1058,8 +1060,11 @@ public class AgentLoop {
         explorationNudged = false;
         doomLoopNudged = false;
         final var messages = new ArrayList<Message>();
-        messages.add(Message.system(systemPromptBuilder.build(promptForBuilding == null ? "" : promptForBuilding, agent)
-                + snapshotBlock(sessionId)));
+        emitPhase(AgentEvent.Phase.PROMPT_BUILD_START);
+        final var systemPrompt = systemPromptBuilder.build(promptForBuilding == null ? "" : promptForBuilding, agent)
+                + snapshotBlock(sessionId);
+        emitPhase(AgentEvent.Phase.PROMPT_BUILD_END);
+        messages.add(Message.system(systemPrompt));
         if (history != null) {
             // persisted session notices (role "system", e.g. an iteration-cap stop) must never reach
             // the LLM wire: they are display-only markers for the transcript. Everything else
@@ -1070,11 +1075,17 @@ public class AgentLoop {
                 }
             }
         }
-        if (userMessage != null && acceptInitialPrompt(userMessage, sessionId)) {
-            messages.add(Message.user(userMessage));
-            sessionStore.append(
-                    sessionId,
-                    SessionEntry.of(clock.millis(), "user", userMessage, null, null, null, identityOthers(agentName)));
+        if (userMessage != null) {
+            emitPhase(AgentEvent.Phase.INITIAL_PROMPT_START);
+            final var accepted = acceptInitialPrompt(userMessage, sessionId);
+            emitPhase(AgentEvent.Phase.INITIAL_PROMPT_END);
+            if (accepted) {
+                messages.add(Message.user(userMessage));
+                sessionStore.append(
+                        sessionId,
+                        SessionEntry.of(
+                                clock.millis(), "user", userMessage, null, null, null, identityOthers(agentName)));
+            }
         }
         statusReporter.setSink(message -> emitter.emit(status(message)));
         // surface provider throttles and retry backoffs: without this the UI only shows a
@@ -1797,6 +1808,13 @@ public class AgentLoop {
                     throw e;
                 }
                 usageTracker.record(usage[0]);
+                // exactly one logical (main) LLM request per stream invocation: this is the undo of the
+                // dialect End-fragmentation hazard (two End events for one logical request) and the single
+                // authoritative request counter + per-request usage payload for the metrics consumers. It
+                // is NOT incremented for the display-only pushUsageQuota/refreshUsage path.
+                turnState.llmCalls++;
+                emit(new AgentEvent.LlmRequestCompleted(
+                        usage[0], model, turnState.llmCalls, currentSessionId, subagentId, subagentName));
                 emitPhase(AgentEvent.Phase.STREAM_COMPLETE);
                 // inbound restore: replace provenance fakes in the assistant reply with the real
                 // values (only what we emitted outbound; model-invented token shapes stay as-is)
@@ -4159,9 +4177,12 @@ public class AgentLoop {
                         Math.toIntExact(upper.reasoning()),
                         upper.generationTime());
             }
-            turnState.llmCalls++;
-            // usage is recorded once per request after the stream completes (single record point,
-            // otherwise requests and tokens are double counted)
+            // NOTE: the logical request counter is NOT incremented here. A dialect may split the wire
+            // into two End events (a usage-only End plus a separate finish-reason End), so incrementing
+            // per End would double count. The counter is advanced exactly once per modelRoundProcessor
+            // stream invocation in the process() loop, which also emits the authoritative
+            // LlmRequestCompleted event. Usage is recorded once per request after the stream completes
+            // (single record point, otherwise requests and tokens are double counted).
         }
     }
 

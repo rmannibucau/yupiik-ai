@@ -49,6 +49,7 @@ public record WebEventDto(
             case AgentEvent.ToolStream _ -> "tool-stream";
             case AgentEvent.ToolFinished _ -> "tool-finished";
             case AgentEvent.UsageUpdated _ -> "usage-updated";
+            case AgentEvent.LlmRequestCompleted _ -> "llm-request-completed";
             case AgentEvent.Status _ -> "status";
             case AgentEvent.Pause _ -> "pause";
             case AgentEvent.Notice _ -> "notice";
@@ -75,6 +76,7 @@ public record WebEventDto(
             case AgentEvent.ToolStream t -> t.name();
             case AgentEvent.ToolFinished t -> t.name();
             case AgentEvent.UsageUpdated t -> t.model();
+            case AgentEvent.LlmRequestCompleted t -> t.model();
             case AgentEvent.Status t -> t.message();
             case AgentEvent.Pause t -> t.message();
             case AgentEvent.Notice t -> t.message();
@@ -142,6 +144,18 @@ public record WebEventDto(
                                     .toList());
                 }
                 data.put("quota", t.quota() == null ? null : quota);
+                yield data;
+            }
+            case AgentEvent.LlmRequestCompleted t -> {
+                final var data = new LinkedHashMap<String, Object>();
+                data.put("index", t.index());
+                data.put("model", t.model() == null ? null : t.model());
+                data.put("promptTokens", t.usage() == null ? 0 : t.usage().promptTokens());
+                data.put("completionTokens", t.usage() == null ? 0 : t.usage().completionTokens());
+                data.put("reasoningTokens", t.usage() == null ? 0 : t.usage().reasoningTokens());
+                data.put("cacheReadTokens", t.usage() == null ? 0 : t.usage().cacheReadTokens());
+                data.put("cacheWriteTokens", t.usage() == null ? 0 : t.usage().cacheWriteTokens());
+                data.put("totalTokens", t.usage() == null ? 0 : t.usage().totalTokens());
                 yield data;
             }
             case AgentEvent.Pause t ->

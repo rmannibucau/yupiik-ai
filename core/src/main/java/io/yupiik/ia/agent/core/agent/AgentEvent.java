@@ -250,6 +250,33 @@ public sealed interface AgentEvent {
         }
     }
 
+    /**
+     * Logical (main) LLM request completion, emitted exactly once per {@code modelRoundProcessor.stream}
+     * invocation regardless of how the dialect fragments the wire into {@code End} events (a usage-only
+     * {@code End} plus a separate finish-reason {@code End}, or a single combined one). It is the single
+     * authoritative count of real model requests per turn (used for {@code llmCalls} and per-request token
+     * aggregation) and is intentionally distinct from transport attempts/retries, which are internal to the
+     * stream call and never surface here. When the provider reports no usage, {@link Usage#EMPTY} is carried
+     * and the request still counts - a real zero-usage request must never be skipped.
+     *
+     * <p>It is not emitted by the display-only quota/context refresh path ({@code pushUsageQuota} /
+     * {@code refreshUsage}), so those synthetic {@link UsageUpdated}s never inflate the request or token
+     * aggregates.
+     *
+     * @param usage the per-request usage as reported by the provider, {@link Usage#EMPTY} when none
+     * @param model the resolved model that served the request
+     * @param index 1-based ordinal of this logical request within the current turn (successive rounds count
+     *        independently, 1, 2, 3, ...)
+     */
+    record LlmRequestCompleted(
+            Usage usage, String model, int index, String sessionId, String subagentId, String subagentName)
+            implements AgentEvent {
+
+        public LlmRequestCompleted(final Usage usage, final String model, final int index, final String sessionId) {
+            this(usage, model, index, sessionId, null, null);
+        }
+    }
+
     record Compacted(List<String> kinds, String mode, String sessionId, String subagentId, String subagentName)
             implements AgentEvent {
         /** Convenience for the single-strategy case (explicit tool request, LLM-only compaction...). */
@@ -507,7 +534,7 @@ public sealed interface AgentEvent {
     /**
      * Per-turn aggregate metrics emitted at turn completion.
      *
-     * @param llmCalls              number of LLM requests (UsageUpdated events) in this turn
+     * @param llmCalls              number of (main) LLM requests in this turn, one per {@link LlmRequestCompleted}
      * @param thinkingDurationMs    sum of wall-clock durations of all thinking sequences in this turn
      * @param toolDurationSumMs     sum of individual tool durations (linear, e.g. 3 tools x 100ms = 300ms)
      * @param toolDurationWallMs    wall-clock batch duration: first tool start to last tool finish in parallel batches
@@ -610,6 +637,25 @@ public sealed interface AgentEvent {
         public static final String STREAM_COMPLETE = "stream-complete";
         public static final String TOOL_BATCH_COMPLETE = "tool-batch-complete";
         public static final String ITERATION_COMPLETE = "iteration-complete";
+
+        // BOUNDED initialization telemetry: paired start/end markers that decompose the wall-clock
+        // between process/run entry and the first REQUEST_SENT, so a slow pre-first-request startup
+        // (JVM boot, DI bootstrap, runtime creation, model resolution, prompt build, initial-prompt
+        // hook, provider hand-off) can be attributed without speculation. REQUEST_SENT itself is the
+        // pre-processor marker: it is emitted immediately before the modelRoundProcessor.stream()
+        // hand-off, i.e. it measures the request entering the provider layer, not the wire I/O that
+        // happens inside stream(). Any time between the run/call entry and RUNTIME_CREATE_START is
+        // NOT covered by these paired markers - it must be attributed externally. That pre-runtime
+        // interval may include in-command setup (metrics/jump wiring) and is not necessarily JVM
+        // boot: the run detail clock starts inside RunCommand, so nothing here claims process start.
+        public static final String RUNTIME_CREATE_START = "runtime-create-start";
+        public static final String RUNTIME_CREATE_END = "runtime-create-end";
+        public static final String MODEL_RESOLUTION_START = "model-resolution-start";
+        public static final String MODEL_RESOLUTION_END = "model-resolution-end";
+        public static final String PROMPT_BUILD_START = "prompt-build-start";
+        public static final String PROMPT_BUILD_END = "prompt-build-end";
+        public static final String INITIAL_PROMPT_START = "initial-prompt-start";
+        public static final String INITIAL_PROMPT_END = "initial-prompt-end";
 
         public Phase(final String name, final String sessionId) {
             this(name, sessionId, null, null);

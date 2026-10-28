@@ -305,6 +305,10 @@ public class RunCommand implements Runnable {
                 + " codeCheckGraph=" + metrics.codeCheckGraph.get()
                 + " toolErrors=" + metrics.toolErrors.get()
                 + " toolMs=" + metrics.toolMs.get()
+                // nonToolElapsedMs = wall time not spent running tools (model/setup overhead).
+                // llmMs is kept as an alias of the same value so existing benchmarks/consumers that
+                // keyed on the old name keep parsing; it is NOT a distinct "LLM-only" wall measure.
+                + " nonToolElapsedMs=" + Math.max(0, elapsedMs - metrics.toolMs.get())
                 + " llmMs=" + Math.max(0, elapsedMs - metrics.toolMs.get())
                 + " outputTokens=" + metrics.throughput.get().outputTokens()
                 + " llmActiveMs=" + metrics.throughput.get().activeMs()
@@ -317,6 +321,12 @@ public class RunCommand implements Runnable {
                     Paths.get(conf.metricsOutputFile()), line + System.lineSeparator(), StandardCharsets.UTF_8);
         } catch (final IOException e) {
             LOGGER.severe(() -> "failed to write metrics to " + conf.metricsOutputFile() + ": " + e.getMessage());
+        }
+    }
+
+    private static void emitPhaseDetail(final Detail detail, final long started, final String name) {
+        if (detail != null) {
+            detail.phase(started, name);
         }
     }
 
@@ -355,41 +365,43 @@ public class RunCommand implements Runnable {
         private volatile double contextPercent;
         private volatile long maxContext;
         private volatile String model = "";
-        private long prevPromptTokens;
-        private long prevCompletionTokens;
-        private long prevCacheReadTokens;
-        private long prevCacheWriteTokens;
         private long perCallReasoning;
 
         void accept(final AgentEvent event, final long started, final Detail detail) {
+            // Display-only: UsageUpdated carries the session's current quota/context gauge (including the
+            // synthetic refresh events pushed by pushUsageQuota/refreshUsage). It must NOT increment the
+            // llmCalls counter or aggregate tokens - only the explicit LlmRequestCompleted event (one per
+            // real model request) accounts for logical requests and per-request spend. Otherwise a display
+            // refresh is miscounted as a request and cumulative currentUsage totals are double/triple added.
             if (event instanceof final AgentEvent.UsageUpdated u) {
                 if (u.model() != null && !u.model().isBlank()) {
                     model = u.model();
                 }
-                final var callPrompt = Math.max(0, u.usage().promptTokens() - prevPromptTokens);
-                final var callCompletion = Math.max(0, u.usage().completionTokens() - prevCompletionTokens);
-                final var callCacheRead = Math.max(0, u.usage().cacheReadTokens() - prevCacheReadTokens);
-                prevPromptTokens = u.usage().promptTokens();
-                prevCompletionTokens = u.usage().completionTokens();
-                prevCacheReadTokens = u.usage().cacheReadTokens();
-                promptTokens.addAndGet(callPrompt);
-                completionTokens.addAndGet(callCompletion);
-                cacheReadTokens.addAndGet(callCacheRead);
-                totalTokens.addAndGet(u.usage().totalTokens());
                 contextTokens = u.estimatedContextTokens();
                 contextPercent = u.contextPercent();
                 if (u.estimatedContextTokens() > maxContext) {
                     maxContext = u.estimatedContextTokens();
                 }
                 sumContext.addAndGet(u.estimatedContextTokens());
+            } else if (event instanceof final AgentEvent.LlmRequestCompleted c) {
+                // one per logical model request: per-request usage, even when the provider reported none
+                // (Usage.EMPTY still counts the request - a real zero-usage request must never be skipped).
                 llmCalls.incrementAndGet();
+                final var usage = c.usage();
+                if (usage != null) {
+                    promptTokens.addAndGet(Math.max(0, usage.promptTokens()));
+                    completionTokens.addAndGet(Math.max(0, usage.completionTokens()));
+                    cacheReadTokens.addAndGet(Math.max(0, usage.cacheReadTokens()));
+                    cacheWriteTokens.addAndGet(Math.max(0, usage.cacheWriteTokens()));
+                    totalTokens.addAndGet(Math.max(0, usage.totalTokens()));
+                }
                 detail.llm(
                         started,
                         contextTokens,
                         contextPercent,
-                        callPrompt,
-                        callCompletion,
-                        callCacheRead,
+                        usage == null ? 0 : Math.max(0, usage.promptTokens()),
+                        usage == null ? 0 : Math.max(0, usage.completionTokens()),
+                        usage == null ? 0 : Math.max(0, usage.cacheReadTokens()),
                         perCallReasoning);
                 perCallReasoning = 0;
             } else if (event instanceof final AgentEvent.Compacted c) {
