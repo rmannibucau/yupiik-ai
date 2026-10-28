@@ -144,7 +144,46 @@ public class CodexDialect extends OpenAIResponsesDialect {
             final int clientVersion,
             final java.util.function.Function<String, String> assertionUpgrader,
             final boolean includeEncryptedReasoning) {
-        super(mapper, client, provider);
+        this(
+                mapper,
+                client,
+                provider,
+                clientVersion,
+                assertionUpgrader,
+                includeEncryptedReasoning,
+                List.of("session-id", "prompt_cache_key"),
+                false);
+    }
+
+    /**
+     * Creates the dialect with tunable Codex client version, optional 3p auto-upgrade, an explicit
+     * encrypted-reasoning {@code include} decision and the session-affinity knobs.
+     *
+     * @param mapper JSON mapper used for wire serialization.
+     * @param client HTTP client used for provider calls.
+     * @param provider provider coordinates; {@code baseUrl} should end in {@code .../codex/responses}.
+     * @param clientVersion the whole part of the Codex client version this dialect advertises (eg. 160 for 0.160.x).
+     * @param assertionUpgrader when non-null, invoked on a {@code 3p_delegated_access_policy_denied}
+     *     rejection with the provider id to produce the signed {@code AgentAssertion {...}} header for
+     *     a single retry (it lazily enrolls the enterprise identity); {@code null} disables the
+     *     auto-upgrade. See {@link #DELEGATED_ACCESS_POLICY}.
+     * @param includeEncryptedReasoning whether to request the opaque {@code reasoning.encrypted_content}
+     *     blob; defaults to {@code false} for the Codex flavor.
+     * @param enabledKeys the provider's resolved {@code capabilities.openai.sessionId.enabledKeys}; the
+     *     codex default {@code ["session-id","prompt_cache_key"]} reproduces the Codex CLI's session
+     *     affinity ({@code prompt_cache_key} body field + {@code session-id} header).
+     * @param xClientRequestIdEnabled whether to emit a fresh per-request {@code x-client-request-id} marker.
+     */
+    public CodexDialect(
+            final JsonMapper mapper,
+            final ExtendedHttpClient client,
+            final ProviderSpec provider,
+            final int clientVersion,
+            final java.util.function.Function<String, String> assertionUpgrader,
+            final boolean includeEncryptedReasoning,
+            final List<String> enabledKeys,
+            final boolean xClientRequestIdEnabled) {
+        super(mapper, client, provider, enabledKeys, xClientRequestIdEnabled);
         this.clientVersion = clientVersion <= 0 ? DEFAULT_CLIENT_VERSION : clientVersion;
         this.assertionUpgrader = assertionUpgrader;
         this.includeEncryptedReasoning = includeEncryptedReasoning;

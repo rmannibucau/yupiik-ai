@@ -460,7 +460,12 @@ public class ChatClient implements AutoCloseable {
                 yield d;
             }
             case RESPONSES -> {
-                final var d = new OpenAIResponsesDialect(mapper, httpClient, spec);
+                final var d = new OpenAIResponsesDialect(
+                        mapper,
+                        httpClient,
+                        spec,
+                        openaiSessionIdEnabledKeys(provider, ApiFlavor.RESPONSES),
+                        openaiXClientRequestId(provider));
                 if (debugLogger != null) {
                     d.setOnRawLine(debugLogger::fine);
                 }
@@ -479,7 +484,9 @@ public class ChatClient implements AutoCloseable {
                         providerId == null || providerId.isBlank()
                                 ? null
                                 : ignored -> codexAuthTemplateHelper.resolveAgentAssertion(providerId),
-                        reasoningInclude(provider));
+                        reasoningInclude(provider),
+                        openaiSessionIdEnabledKeys(provider, ApiFlavor.CODEX),
+                        openaiXClientRequestId(provider));
                 if (debugLogger != null) {
                     d.setOnRawLine(debugLogger::fine);
                 }
@@ -520,6 +527,37 @@ public class ChatClient implements AutoCloseable {
      */
     private boolean reasoningInclude(final ProviderConfiguration provider) {
         return provider != null && provider.codexCapabilities().includeReasoning();
+    }
+
+    /**
+     * The resolved session-cache-affinity key list for a (provider, flavor) pair, read from
+     * {@code capabilities.openai.sessionId.enabledKeys}. When the provider does not configure it, the
+     * flavor-specific default applies: the codex flavor emits {@code session-id} + {@code prompt_cache_key}
+     * (matching the Codex CLI), the openai-responses flavor emits {@code x-session-id} + {@code prompt_cache_key}
+     * ({@code session_id} with an underscore is rejected by hardened Envoy/nginx gateways), and the other
+     * flavors (completions/anthropic) emit nothing.
+     */
+    private List<String> openaiSessionIdEnabledKeys(final ProviderConfiguration provider, final ApiFlavor flavor) {
+        final var openai = provider == null ? null : provider.openaiCapabilities();
+        final var keys = openai == null || openai.sessionId() == null
+                ? null
+                : openai.sessionId().enabledKeys();
+        if (keys != null) {
+            return keys;
+        }
+        return switch (flavor) {
+            case CODEX -> List.of("session-id", "prompt_cache_key");
+            case RESPONSES -> List.of("x-session-id", "prompt_cache_key");
+            default -> List.of();
+        };
+    }
+
+    /**
+     * Whether a provider requests the per-request {@code x-client-request-id} marker, read from
+     * {@code capabilities.openai.xClientRequestIdEnabled} and defaulting to {@code false}.
+     */
+    private boolean openaiXClientRequestId(final ProviderConfiguration provider) {
+        return provider != null && provider.openaiCapabilities().xClientRequestIdEnabled();
     }
 
     /**
@@ -2237,14 +2275,18 @@ public class ChatClient implements AutoCloseable {
         final var dialect = dialectClient(flavorForRouting(settings), provider);
         try {
             if (stream) {
-                final var publisher =
-                        LlmWire.join(dialect.stream(LlmWire.toLlmRequest(effective), cancelled, libraryListener));
+                final var publisher = LlmWire.join(dialect.stream(
+                        LlmWire.toLlmRequest(effective, openaiSessionIdEnabledKeys(provider, flavor)),
+                        cancelled,
+                        libraryListener));
                 return (A) repairToolCalls(
                         LlmWire.pump(publisher, onDeltaSafe, cancelled, effective.sessionId()), effective, provider);
             }
             return (A) repairToolCalls(
-                    LlmWire.toChatResult(
-                            LlmWire.join(dialect.chat(LlmWire.toLlmRequest(effective), cancelled, libraryListener))),
+                    LlmWire.toChatResult(LlmWire.join(dialect.chat(
+                            LlmWire.toLlmRequest(effective, openaiSessionIdEnabledKeys(provider, flavor)),
+                            cancelled,
+                            libraryListener))),
                     effective,
                     provider);
         } catch (final DialectNotSupportedException e) {

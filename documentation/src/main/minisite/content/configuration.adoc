@@ -302,6 +302,52 @@ usage/rate-limit quota (the `/usage` slash command and the sidebar quota gauge).
 quota is fetched from the Codex usage backend with the OAuth session, refreshed at
 most every 5 minutes and on each `/usage` call, and is scoped per session/tab.
 
+The `capabilities.openai` block groups the OpenAI-flavored knobs shared by the
+`responses` and `codex` flavors (both speak the OpenAI Responses wire). These are
+internal consumer options, never merged into the wire request payload.
+
+`capabilities.openai.sessionId.enabledKeys` is the ordered list of keys under which
+yca emits a single session-scoped identity, derived as a stable UUID from the local
+transcript id, so successive rounds of a session route to the same server-side prompt
+cache. The literal `prompt_cache_key` key names a Responses body field; any other
+key names an HTTP header carrying that same value. A request with no session id, an
+empty list, or a caller-supplied header for the same name suppresses the emission.
+When unset, the codex flavor defaults to `["session-id", "prompt_cache_key"]` and the
+openai-responses flavor to `["x-session-id", "prompt_cache_key"]` (the underscore form
+`session_id` is rejected by hardened Envoy/nginx gateways, so the portable
+`x-session-id` is the responses default). See
+<<features/prefix-cache.adoc,Provider prefix cache>> for the rationale and the
+body-versus-header portability notes.
+
+Set `capabilities.openai.xClientRequestIdEnabled: true` to emit a fresh per-request
+`x-client-request-id` UUID header (a new value on every request, not the stable
+session value), mirroring the Codex CLI's per-thread request marker. It defaults to
+`false`.
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "openai",
+        "baseUrl": "https://api.openai.com/v1/responses",
+        "api": "responses",
+        "model": "gpt-6-luna",
+        "capabilities": {
+          "openai": {
+            "sessionId": {
+              "enabledKeys": ["x-session-id", "prompt_cache_key"]
+            },
+            "xClientRequestIdEnabled": true
+          }
+        }
+      }
+    ]
+  }
+}
+----
+
 === Interactive login is optional
 
 `/codex login <provider>` is not a hard prerequisite. The OAuth session is needed

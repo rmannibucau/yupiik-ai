@@ -190,6 +190,15 @@ public record ProviderConfiguration(
         return caps.codex();
     }
 
+    /** The effective OpenAI capabilities: the configured record, or empty defaults when absent. */
+    public OpenAICapabilities openaiCapabilities() {
+        final var caps = capabilities;
+        if (caps == null || caps.openai() == null) {
+            return new OpenAICapabilities(null, false);
+        }
+        return caps.openai();
+    }
+
     /** Whether this provider enables the Codex account usage quota (the /usage command and sidebar gauge). */
     public boolean usageEnabled() {
         return codexCapabilities().enableUsage();

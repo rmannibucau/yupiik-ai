@@ -63,6 +63,38 @@ public final class LlmWire {
 
     private static final Logger LOGGER = Logger.getLogger(LlmWire.class.getName());
 
+    /**
+     * Derives the session-scoped cache-affinity identity and injects it as the {@code prompt_cache_key}
+     * extension when the provider enables it (the {@code sessionId.enabledKeys} list contains the literal
+     * {@code prompt_cache_key}). The value flows into the Responses request body (the {@code @JsonOthers}
+     * extensions bag) and is the value the dialect reads back to emit the matching header keys. When the
+     * key is absent from {@code enabledKeys} - or the request carries no session id - the extensions are
+     * left untouched, so callers never get a prompt cache from an identity-less request.
+     *
+     * @param request the neutral completion request carrying the transcript session id.
+     * @param enabledKeys the provider's resolved {@code capabilities.openai.sessionId.enabledKeys}.
+     * @return the wire request, with {@code prompt_cache_key} injected when enabled.
+     */
+    static LlmRequest toLlmRequest(final ChatCompletionRequest request, final List<String> enabledKeys) {
+        final var wire = toLlmRequest(request);
+        if (enabledKeys == null
+                || !enabledKeys.contains("prompt_cache_key")
+                || request.sessionId() == null
+                || request.sessionId().isBlank()) {
+            return wire;
+        }
+        // ChatGPT uses session affinity to route successive rounds to the same prompt cache.
+        // Hash the local transcript id: routing needs stability, not the user's session name.
+        final var extensions = new LinkedHashMap<>(wire.extensions());
+        extensions.putIfAbsent(
+                "prompt_cache_key",
+                java.util
+                        .UUID
+                        .nameUUIDFromBytes(request.sessionId().getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                        .toString());
+        return wire.with(extensions);
+    }
+
     static LlmRequest toLlmRequest(final ChatCompletionRequest request) {
         final Map<String, Object> extensions = request.others() == null ? Map.of() : request.others();
         return new LlmRequest(

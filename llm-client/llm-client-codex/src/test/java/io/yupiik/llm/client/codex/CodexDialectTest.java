@@ -73,6 +73,25 @@ class CodexDialectTest {
     }
 
     @Test
+    void cacheAffinityFollowsEachRequestWithoutLeakingAcrossSessions(final JsonMapper mapper) throws Exception {
+        final var sessions = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        server.createContext("/codex/responses", exchange -> {
+            sessions.add(String.valueOf(exchange.getRequestHeaders().getFirst("session-id")));
+            exchange.getRequestBody().readAllBytes();
+            respond(exchange, 200, "{}");
+        });
+        final var dialect =
+                new CodexDialect(mapper, client, new ProviderSpec(base + "/codex/responses", "key", null, null, null));
+        for (final var key : List.of("session-a", "session-b", "session-a")) {
+            dialect.chat(request().with(java.util.Map.of("prompt_cache_key", key)), () -> false)
+                    .toCompletableFuture()
+                    .get(5, TimeUnit.SECONDS);
+        }
+        dialect.chat(request(), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals(List.of("session-a", "session-b", "session-a", "null"), sessions);
+    }
+
+    @Test
     void listsAndFiltersCodexModels(final JsonMapper mapper) throws Exception {
         server.createContext("/codex/models", exchange -> {
             reqPath.set(exchange.getRequestURI().toString());

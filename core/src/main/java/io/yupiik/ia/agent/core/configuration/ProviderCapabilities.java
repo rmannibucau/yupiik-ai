@@ -26,4 +26,10 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 @JsonModel
 public record ProviderCapabilities(
         @Property(documentation = "Codex-flavored capability knobs (client version, reasoning include, usage quota).")
-        CodexCapabilities codex) {}
+        CodexCapabilities codex,
+
+        @Property(
+                documentation =
+                        "OpenAI-flavored capability knobs (shared by the responses and codex flavors): session affinity keys and "
+                                + "the per-request x-client-request-id marker.")
+        OpenAICapabilities openai) {}

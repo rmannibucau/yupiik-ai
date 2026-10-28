@@ -29,6 +29,32 @@ import org.junit.jupiter.api.Test;
 
 class LlmWireTest {
     @Test
+    void codexCacheAffinityIsStableAndSessionScoped() {
+        final var request = new ChatCompletionRequest(
+                "model", List.of(Message.user("hello")), null, null, true, null, null, null, null, Map.of());
+        final var enabledKeys = List.of("session_id", "prompt_cache_key");
+        final var first = LlmWire.toLlmRequest(request.withSessionId("first"), enabledKeys);
+        final var repeated = LlmWire.toLlmRequest(request.withSessionId("first"), enabledKeys);
+        final var other = LlmWire.toLlmRequest(request.withSessionId("other"), enabledKeys);
+        org.junit.jupiter.api.Assertions.assertEquals(first.extensions(), repeated.extensions());
+        org.junit.jupiter.api.Assertions.assertNotEquals(first.extensions(), other.extensions());
+        assertFalse(first.extensions().get("prompt_cache_key").equals("first"));
+        org.junit.jupiter.api.Assertions.assertEquals(
+                "prompt_cache_key", first.extensions().keySet().iterator().next());
+        // no session id, or a key list without prompt_cache_key, leaves the extensions untouched
+        assertTrue(LlmWire.toLlmRequest(request, enabledKeys).extensions().isEmpty());
+        assertTrue(LlmWire.toLlmRequest(request.withSessionId("first"), List.of("session_id"))
+                .extensions()
+                .isEmpty());
+        assertTrue(LlmWire.toLlmRequest(request.withSessionId("first"), List.of())
+                .extensions()
+                .isEmpty());
+        assertTrue(LlmWire.toLlmRequest(request.withSessionId("first"), null)
+                .extensions()
+                .isEmpty());
+    }
+
+    @Test
     void wireNeverContainsTheSpeakerIdentity() {
         final var m = Message.withIdentity(Message.assistant("a", List.of()), "p", "m", null);
         final var wire = LlmWire.toLlmMessage(m);

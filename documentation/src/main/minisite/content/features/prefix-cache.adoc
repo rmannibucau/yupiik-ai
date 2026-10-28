@@ -73,6 +73,62 @@ these backends.
   after the stable prefix, inside brand-new content - so the cached part is
   unaffected and no extra message enters the flow.
 
+== Session affinity and cache-key routing
+
+Structural stability alone is not enough for backends that also route by request
+identity: the ChatGPT/Codex edge, SGLang's session-aware radix cache and several
+caching gateways keep a per-session cache only when every request of the session
+carries the same, stable identity. yca addresses that with a session-affinity
+capability (see `capabilities.openai.sessionId` in
+<<configuration.adoc,Provider configuration>>): it derives one stable, session-scoped
+UUID from the local transcript id and emits it under every configured key.
+
+[cols="1,2,2",opts=headers]
+|===
+|Key
+|Where it is emitted
+|Purpose / notes
+
+|`prompt_cache_key`
+|Responses body field
+|The identity itself; on models before GPT-5.6 it drives cache routing, on GPT-5.6+
+it separates cache accounting. Never names a header.
+
+|`session-id`
+|HTTP header
+|The affinity signal the ChatGPT/Codex edge actually keys on; the codex flavor
+default. A caller-supplied header for the same name wins over the derived value.
+
+|`x-session-id`
+|HTTP header
+|The portable alias used by the openai-responses flavor default. The underscore
+form `session_id`, while valid per the HTTP token rules, is rejected by hardened
+Envoy (`headers_with_underscores_action`) and nginx (`underscores_in_headers off`)
+gateways, so the hyphenated `x-session-id` is the safer default for Responses-
+flavored providers sitting behind such proxies.
+
+|`x-client-request-id`
+|HTTP header (per-request)
+|Emitted when `capabilities.openai.xClientRequestIdEnabled` is `true`: a fresh
+UUID on every request (the Codex CLI's per-thread request marker), not the stable
+session value.
+|===
+
+The emission rules are unconditional:
+
+* one session-scoped UUID per session, byte-hashed from the transcript id - stable
+  across the round-trips of a session, and different from any other session;
+* the `prompt_cache_key` entry is emitted as the Responses body field; every other
+  entry names an HTTP header carrying the same value;
+* an empty `enabledKeys` list (or a request with no session id) emits nothing;
+* an explicitly configured caller header for a header entry name always wins over
+  the derived value.
+
+NOTE: the body and header identity use the same value, so a backend that keys on
+either (or both) sees one coherent session. See
+<<#_extending_yca_without_breaking_the_cache,Extending yca without breaking the cache>>
+for how to verify a routing change did not collapse the cached prefix.
+
 == The stale-read note as a case study
 
 When a `write_file`/`edit_file` invalidates the content of an earlier

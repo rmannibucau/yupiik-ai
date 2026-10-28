@@ -33,11 +33,14 @@ import io.yupiik.llm.client.spi.AbstractDialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.spi.SseParser;
 import io.yupiik.llm.client.spi.Streams;
+import java.net.http.HttpRequest;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
@@ -65,6 +68,20 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     private final AtomicBoolean encryptedReasoningRejected = new AtomicBoolean();
 
     /**
+     * Ordered header key names under which the session-scoped {@code prompt_cache_key} (read back from the
+     * request payload) is emitted as an HTTP header, eg. {@code session_id} or {@code x-session-id}. The
+     * literal {@code prompt_cache_key} entry of the provider's {@code enabledKeys} is not a header (it names
+     * the body field) and is filtered out here. Empty disables session-affinity header emission.
+     */
+    private final List<String> sessionIdHeaderKeys;
+
+    /**
+     * Whether to emit a fresh per-request {@code x-client-request-id} header (a new UUID per request, not the
+     * stable session value) - mirrors the Codex CLI's per-thread request marker.
+     */
+    private final boolean xClientRequestIdEnabled;
+
+    /**
      * Extension key on an assistant {@link LlmMessage} carrying the opaque reasoning items to replay as
      * {@code type:reasoning} input items (see {@link #replayReasoningItems}). Produced by the loop from
      * the {@code encrypted_content} blobs it captured and persisted; consumed here so the same model can
@@ -85,7 +102,33 @@ public class OpenAIResponsesDialect extends AbstractDialect {
      */
     public OpenAIResponsesDialect(
             final JsonMapper mapper, final ExtendedHttpClient client, final ProviderSpec provider) {
+        this(mapper, client, provider, List.of(), false);
+    }
+
+    /**
+     * Creates the dialect with explicit session-affinity knobs.
+     *
+     * @param mapper JSON mapper used for wire serialization.
+     * @param client HTTP client used for provider calls.
+     * @param provider provider coordinates (base URL, authentication, options).
+     * @param enabledKeys the provider's resolved {@code capabilities.openai.sessionId.enabledKeys}: the
+     *     {@code prompt_cache_key} entry names the body field (ignored here, it is injected upstream in the
+     *     wire request), every other entry names an HTTP header emitted with the session-scoped value.
+     * @param xClientRequestIdEnabled whether to emit a fresh per-request {@code x-client-request-id} header.
+     */
+    public OpenAIResponsesDialect(
+            final JsonMapper mapper,
+            final ExtendedHttpClient client,
+            final ProviderSpec provider,
+            final List<String> enabledKeys,
+            final boolean xClientRequestIdEnabled) {
         super(mapper, client, provider);
+        this.sessionIdHeaderKeys = enabledKeys == null
+                ? List.of()
+                : enabledKeys.stream()
+                        .filter(k -> !"prompt_cache_key".equals(k))
+                        .toList();
+        this.xClientRequestIdEnabled = xClientRequestIdEnabled;
     }
 
     /**
@@ -108,6 +151,41 @@ public class OpenAIResponsesDialect extends AbstractDialect {
      */
     protected boolean forceStream() {
         return false;
+    }
+
+    /**
+     * Emits the session-affinity headers on the wire request. When the payload carries a
+     * {@code prompt_cache_key} (injected upstream from the session id) and any enabled header key
+     * ({@code session_id}, {@code x-session-id}, ...) is not already present, the key is set to that same
+     * session-scoped value, so the provider routes every request of the session to the same prompt cache.
+     * An explicitly configured caller header for the same name wins. When
+     * {@link #xClientRequestIdEnabled} is set, adds a fresh per-request {@code x-client-request-id} UUID
+     * (never reused across requests).
+     */
+    @Override
+    protected HttpRequest http(final byte[] payload) {
+        var request = super.http(payload);
+        if (!sessionIdHeaderKeys.isEmpty()) {
+            final var body = mapper.fromString(Object.class, new String(payload, StandardCharsets.UTF_8));
+            if (body instanceof Map<?, ?> map
+                    && map.get("prompt_cache_key") instanceof final String key
+                    && !key.isBlank()) {
+                for (final var header : sessionIdHeaderKeys) {
+                    if (request.headers().firstValue(header).isEmpty()) {
+                        request = HttpRequest.newBuilder(request, (_, _) -> true)
+                                .setHeader(header, key)
+                                .build();
+                    }
+                }
+            }
+        }
+        if (xClientRequestIdEnabled
+                && request.headers().firstValue("x-client-request-id").isEmpty()) {
+            request = HttpRequest.newBuilder(request, (_, _) -> true)
+                    .setHeader("x-client-request-id", UUID.randomUUID().toString())
+                    .build();
+        }
+        return request;
     }
 
     /**
