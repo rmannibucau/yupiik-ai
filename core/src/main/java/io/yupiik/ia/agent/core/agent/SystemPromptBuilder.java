@@ -195,6 +195,8 @@ public class SystemPromptBuilder {
             sb.append(
                     "- Never compress active work: the current task, the messages you still need, or a section whose conclusion is not written yet. Prefer compressing one closed chapter at a time and keep the recent tail verbatim.\n");
             sb.append(
+                    "- The context-usage targets reported to you (compress at N / must at N) are proactive working-context targets, not model capacity: staying below them keeps the prompt lean and focused, but a low percentage of the usable window does not cancel them. Meeting them only ever means compressing genuinely closed ranges; if no safe closed range exists, keep working and do not call `compact` on the whole session just to satisfy a target.\n");
+            sb.append(
                     "- When a summary must preserve an already compressed block, include its `@bN@` placeholder exactly once in the new summary; placeholders are expanded and the consumed block is superseded.\n");
         }
         sb.append("- Persist durable facts/decisions with memory_write.\n");

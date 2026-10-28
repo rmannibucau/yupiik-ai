@@ -251,7 +251,11 @@ call, or malformed entries.
 === Nudges
 
 The model is nudged to compress when the context grows, but it is never forced
-to do so; this is the same contract as DCP.
+to do so; this is the same contract as DCP. The reported targets are proactive
+*working-context* targets, not model capacity: staying below them keeps the
+prompt lean and focused, so a low percentage of the usable window does not
+cancel them - but meeting them only ever means compressing genuinely closed
+ranges, never a whole-session `compact` or blocking active work.
 
 [cols="1,1,2",opts=headers]
 |===
@@ -266,27 +270,33 @@ Accepts tokens or a percentage of the context window.
 
 |`yca.compress.maxContextLimit`
 |`100000`
-|Strong floor: the model receives "You MUST use the compress tool now".
-Accepts tokens or a percentage.
+|Strong working-context floor at which a stronger compression reminder
+fires. Accepts tokens or a percentage.
 
 |`yca.compress.iterationNudgeThreshold`
 |`15`
-|Nudges after this many iterations without a user message.
+|Sends the soft reminder after this many rounds since the last user message.
 
 |`yca.compress.nudgeFrequency`
 |`5`
-|Repeats the strong nudge every N requests while above the limit.
+|Repeats the strong reminder every N real LLM request rounds while above the
+limit, and serves as the post-compression cooldown length so a successful
+`compress` is not immediately re-hammered.
 
 |`yca.compress.summaryBuffer`
 |`true`
-|Active summary tokens extend the effective `maxContextLimit`, so a recent
-compression does not immediately trigger the strong nudge again.
+|Active summary tokens extend the effective `maxContextLimit`
+(`baseMax + summaryTokens`), so an already-condensed working set is not
+immediately re-flagged. This is a guidance target only: summaries still count
+toward real context usage and the compaction guard is unchanged.
 |===
 
 The system prompt tells the model to evaluate signal-to-noise regularly, to
 compress when a section is genuinely closed, and not to compress active work.
 The nudge is a message, not a harness-side compaction: a model that ignores it
-keeps its full context until the core trigger fires.
+keeps its full context until the core trigger fires. A soft reminder and a
+strong reminder are emitted on separate cadences (see above), and the
+`/context` preview never advances either cadence - a preview is read-only.
 
 === Protection
 
@@ -456,8 +466,10 @@ strategies run once, in the compression pipeline.
 
 * **Large windows (`>= 128k`), long autonomous sessions** - keep the defaults:
   compression on, core compaction on, pruning off.
-  The `100k` MUST nudge keeps the working context an order of magnitude below
-  the window, and core compaction remains the hard stop near the limit.
+  The `100k` working-context reminder keeps the lean prompt an order of
+  magnitude below the window, and core compaction remains the hard stop near
+  the limit. The reminder is acknowledged to the model as a proactive
+  working-context target, not an out-of-memory alarm.
 * **Small windows (`<= 64k`)** - the absolute `50k`/`100k` thresholds are
   above the window, so compression cannot fire before core compaction.
   Either accept core compaction or use percentages, for example

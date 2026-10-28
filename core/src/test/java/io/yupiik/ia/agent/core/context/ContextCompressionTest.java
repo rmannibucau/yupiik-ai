@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.CompressConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ToolCall;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -163,6 +164,37 @@ class ContextCompressionTest {
         assertTrue(compression.savedTokens(messages) > 0);
         assertEquals(
                 Math.max(0, 1_000 - compression.savedTokens(messages)), compression.effectiveTokens(messages, 1_000));
+    }
+
+    @Test
+    void targetsExtendsTheHardLimitBySummaryTokensWhenBuffered() {
+        final var compression = new ContextCompression(config()); // summaryBuffer=true
+        final var messages = simpleConversation();
+        assignedRefs(compression, messages);
+        final var result =
+                compression.compress("first task", List.of(new ContextCompression.Range("1", "2", "first task done")));
+        assertTrue(result.success(), result.message());
+        assertTrue(compression.summaryTokens() > 0, "a summary must carry tokens");
+        final var targets = compression.targets(200_000);
+        assertEquals(50_000, targets.baseMin());
+        assertEquals(100_000, targets.baseMax());
+        assertEquals(100_000 + compression.summaryTokens(), targets.effectiveMax());
+        assertTrue(targets.summaryBuffer());
+    }
+
+    @Test
+    void targetsKeepsHardLimitWhenSummaryBufferIsOff() {
+        final var noBuffer = new CompressConfiguration(
+                true, "50000", "100000", 15, 5, false, false, false, List.of("my_tool"), false, 4, true, true, 4);
+        final var compression = new ContextCompression(noBuffer);
+        final var messages = simpleConversation();
+        assignedRefs(compression, messages);
+        final var result =
+                compression.compress("first task", List.of(new ContextCompression.Range("1", "2", "first task done")));
+        assertTrue(result.success(), result.message());
+        final var targets = compression.targets(200_000);
+        assertEquals(100_000, targets.effectiveMax());
+        assertFalse(targets.summaryBuffer());
     }
 
     @Test
@@ -343,6 +375,29 @@ class ContextCompressionTest {
         assertTrue(result.success(), result.message());
         final var summary = compression.blocks().get(0).summary();
         assertTrue(summary.contains("task one"), summary);
+        assertTrue(summary.contains("[protected tool output: my_tool]"), summary);
+        assertTrue(summary.contains("OK from my_tool"), summary);
+    }
+
+    @Test
+    void protectsRuntimeToolResultWithNameResolvedFromAssistantCall() {
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(
+                Message.system("system"),
+                Message.user("task one"),
+                Message.assistant(
+                        "calling",
+                        List.of(new ToolCall("call-1", "function", new ToolCall.FunctionCall("my_tool", "{}"), 0))),
+                Message.tool("call-1", "OK from my_tool"),
+                Message.user("task two"),
+                Message.assistant("done", List.of()));
+        assignedRefs(compression, messages);
+
+        final var result = compression.compress(
+                "first", List.of(new ContextCompression.Range("1", "3", "work done: fixed the rounding")));
+
+        assertTrue(result.success(), result.message());
+        final var summary = compression.blocks().getFirst().summary();
         assertTrue(summary.contains("[protected tool output: my_tool]"), summary);
         assertTrue(summary.contains("OK from my_tool"), summary);
     }

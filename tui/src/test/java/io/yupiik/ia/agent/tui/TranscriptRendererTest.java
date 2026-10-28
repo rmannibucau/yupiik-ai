@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Style;
@@ -140,6 +141,60 @@ class TranscriptRendererTest {
         final var md = "para\n\n```\ncode\n```\n\nafter";
         assertEquals(List.of("para", "", "code", "", "after"), fullRender(md));
         assertEveryFrameMatchesAFullRender(md);
+    }
+
+    @Test
+    void twoRowTableWithoutTrailingNewlineRendersAsATable() {
+        // the /usage regression: the transcript strip() removes the last row's newline,
+        // so the final row must not be split off from its header/separator and parsed
+        // independently (which would render its pipes literally)
+        final var md = "| window | used | reset |\n" + "|---|---|---|\n"
+                + "| primary | 6% | 2026-11-04T08:02:45Z |\n"
+                + "| secondary | 6% | 2026-11-05T08:02:45Z |";
+        final var expected = new MarkdownLines().render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        final var actual = plainOf(md);
+        assertEquals(plain(expected), actual);
+        assertTrue(actual.getFirst().startsWith("┌"));
+        assertTrue(actual.stream().anyMatch(line -> line.contains("│ secondary")));
+        assertTrue(actual.stream().noneMatch(line -> line.startsWith("| secondary")));
+    }
+
+    @Test
+    void twoRowTableWithTrailingNewlineRendersAsATable() {
+        final var md = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n";
+        final var expected = new MarkdownLines().render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        assertEquals(plain(expected), plainOf(md));
+    }
+
+    @Test
+    void streamedTableMatchesAFullRenderAtEveryFrame() {
+        // the header/separator/rows arrive over successive frames: the safe boundary must
+        // never fall between table lines, so every growing prefix renders exactly like a
+        // full markdown render of the same text
+        final var md = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |";
+        assertEveryFrameMatchesAFullRender(md);
+    }
+
+    @Test
+    void completeTableThenBlankAndTextTransitionsTheCachedPrefix() {
+        // once a table is fully committed (followed by a blank + paragraph), the next frame
+        // grows through the cached-prefix delta path: the table keeps its border and the
+        // trailing paragraph lands right behind it
+        final var withTable = "lead\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        final var a = plainOf(withTable);
+        assertEquals(fullRender(withTable), a);
+        // extend: blank line + a paragraph after the (now complete) table
+        final var b = plainOf(withTable + "\nafter");
+        assertEquals(fullRender(withTable + "\nafter"), b);
+        assertTrue(b.stream().anyMatch(line -> line.startsWith("┌")));
+        assertEquals("after", b.getLast());
+    }
+
+    @Test
+    void lonePipeParagraphStillSplitsSafely() {
+        // a single pipe line is a paragraph, not a table: splitting after it must keep working
+        final var md = "one\n| not a table |\ntwo";
+        assertEquals(fullRender(md), plainOf(md));
     }
 
     /** Renders every growing prefix of {@code md}, as a token-by-token stream would. */

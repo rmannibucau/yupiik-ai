@@ -182,16 +182,14 @@ public class ManageContextTool implements EmbeddedTool {
         out.put("summaryTokens", compression.summaryTokens());
         out.put("percentUsed", usable <= 0 ? 0 : Math.round(effective * 1000.0 / usable) / 10.0);
         if (configuration.compression() != null) {
-            out.put(
-                    "compressAtTokens",
-                    configuration
-                            .compression()
-                            .resolveLimit(configuration.compression().minContextLimit(), window, 50000));
-            out.put(
-                    "mustCompressAtTokens",
-                    configuration
-                            .compression()
-                            .resolveLimit(configuration.compression().maxContextLimit(), window, 100000));
+            final var targets = compression.targets(window);
+            // keep the historical base-limit keys for compatibility, and add the summary-buffer
+            // extension so status reconciles exactly with the context-usage line and the nudge.
+            out.put("compressAtTokens", targets.baseMin());
+            out.put("mustCompressAtTokens", targets.baseMax());
+            out.put("mustCompressAtTokensEffective", targets.effectiveMax());
+            out.put("summaryBuffer", targets.summaryBuffer());
+            out.put("summaryBufferTokens", targets.summaryBuffer() ? targets.summaryTokens() : 0);
         }
         final var blocks = new ArrayList<Map<String, Object>>();
         for (final var block : compression.blocks()) {

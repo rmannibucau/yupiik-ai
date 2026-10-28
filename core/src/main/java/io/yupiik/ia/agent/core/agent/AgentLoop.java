@@ -474,6 +474,25 @@ public class AgentLoop {
     private boolean doomLoopNudged;
 
     /**
+     * Compression-nudge cadence: real LLM request-round counter. Advanced only on actual request
+     * rounds inside the run loop (never by a {@code /context} preview), so preview rendering of the
+     * volatile tail stays side-effect free and the same decision a real round makes.
+     */
+    private int compressionNudgeRounds;
+
+    /** The real round of the last hard compression nudge actually placed on the wire. */
+    private int lastHardCompressionNudgeRound = Integer.MIN_VALUE;
+
+    /** Real round before which compression nudges (soft and hard) are suppressed; e.g. right after
+     * a successful {@code compress} so the model is not immediately re-hammered. */
+    private int compressionNudgeCooldownUntil = Integer.MIN_VALUE;
+
+    /** Last observed {@code savedTokens} of the compression view, to detect a fresh compress that
+     * arms {@link #compressionNudgeCooldownUntil}. {@code -1} means "not yet sampled" so the first
+     * round with no saved tokens does not spuriously arm a cooldown. */
+    private int lastCompressionSavedTokens = -1;
+
+    /**
      * The last {@code estimatedContextTokens} a {@link AgentEvent.UsageUpdated} carried, so a
      * quota-only push at provider switch or {@code /usage} preserves the live context gauge instead
      * of resetting it to zero (the push has no message list to recompute context from).
@@ -1602,7 +1621,11 @@ public class AgentLoop {
                 // exact bytes plus the tokens appended since. Nothing previously sent is ever moved or
                 // rewritten, so provider-side prefix caches (llama.cpp slot LCP with f_keep ~ 1.0,
                 // token-level gateways) keep matching instead of diverging mid-conversation.
-                appendStateIfChanged(sessionId, messages, prompt, toolsTokens);
+                advanceCompressionCadence(messages);
+                final var nudgeTier = appendStateIfChanged(sessionId, messages, prompt, toolsTokens);
+                if (nudgeTier == 2) {
+                    lastHardCompressionNudgeRound = compressionNudgeRounds;
+                }
                 // snapshot of what goes on the wire, for /context llm-payload: taken here so it
                 // carries the pruned/compacted list and the volatile tail, and copied because the
                 // live list keeps growing (messages/tools are immutable, so a shallow copy is enough)
@@ -2093,11 +2116,12 @@ public class AgentLoop {
      * and state changes appended since - so provider-side prefix caches (llama.cpp slot LCP, token
      * gateways) keep matching with f_keep ~ 1.0 like opencode instead of diverging mid-conversation.
      */
-    private void appendStateIfChanged(
+    private int appendStateIfChanged(
             final String sessionId, final List<Message> messages, final String prompt, final int toolsTokens) {
         // The tail keeps a stable compact shape across every request so the prefix (system +
         // user + tail) stays byte-identical and provider prompt caches keep hitting; only the
         // todo list (delta of what changed) and the usage line move between requests.
+        final var tier = contextView == null ? 0 : compressionNudgeTier(messages, toolsTokens);
         final var state = "<session-state>\n"
                 + systemPromptBuilder.sessionStateDelta()
                 + contextUsageLine(messages, toolsTokens)
@@ -2109,12 +2133,13 @@ public class AgentLoop {
             final var m = messages.get(i);
             if (isVolatileTail(m)) {
                 if (state.equals(String.valueOf(m.content()))) {
-                    return; // nothing changed since the last tail: keep the prefix byte-stable
+                    return tier; // nothing changed since the last tail: keep the prefix byte-stable
                 }
                 break;
             }
         }
         messages.add(new Message("user", state, null, null, null, Map.of("volatileTail", true)));
+        return tier;
     }
 
     private static boolean isVolatileTail(final Message message) {
@@ -4241,12 +4266,14 @@ public class AgentLoop {
         final var compression = configuration.compression();
         if (compression != null && compression.enabled() && contextView != null) {
             final var window = usageTracker.contextWindowTokenCount().value();
+            final var targets = contextView.compression().targets(window);
             final var raw = usageTracker.effectiveContext(messages, toolsTokens);
             final var effective = contextView.compression().effectiveTokens(messages, raw);
             final var percent = Math.round(usageTracker.contextPercent(effective) / 5d) * 5;
-            return "Context usage: ~" + (int) percent + "% of the usable window (compress at "
-                    + compression.resolveLimit(compression.minContextLimit(), window, 50000) + " / must at "
-                    + compression.resolveLimit(compression.maxContextLimit(), window, 100000) + " tokens).\n";
+            // report the working-context targets exactly as the nudge and the status tool see them,
+            // so the line, the nudge and `compress status` never appear to contradict one another.
+            return "Context usage: ~" + (int) percent + "% of the usable window (compress at " + targets.baseMin()
+                    + " / must at " + targets.effectiveMax() + " tokens).\n";
         }
         final var percent =
                 Math.round(usageTracker.contextPercent(usageTracker.effectiveContext(messages, toolsTokens)) / 5d) * 5;
@@ -4258,37 +4285,47 @@ public class AgentLoop {
     /**
      * Context-usage nudge appended to the volatile session state. With compression enabled this
      * follows opencode-dcp: a soft reminder once the effective size crosses the configured minimum
-     * and enough iterations passed since the last user message, then a hard MUST-compress reminder
-     * above the maximum, repeated at most every {@code nudgeFrequency} iterations. The legacy
-     * prune/compaction nudge remains for the pruning opt-in (disabled by default).
+     * and enough iterations passed since the last user message, then a stronger reminder above the
+     * maximum, repeated at most every {@code nudgeFrequency} real LLM rounds. The thresholds are
+     * proactive working-context targets, not model capacity, so the wording states that explicitly
+     * and never demands whole-session compaction or blocking active work. The legacy prune/compaction
+     * nudge remains for the pruning opt-in (disabled by default).
      */
     String nudgeBlock(final List<Message> messages, final int toolsTokens) {
         final var compression = configuration.compression();
-        if (compression != null && compression.enabled() && contextView != null) {
-            final var window = usageTracker.contextWindowTokenCount().value();
-            final var min = compression.resolveLimit(compression.minContextLimit(), window, 50000);
-            final var max = compression.resolveLimit(compression.maxContextLimit(), window, 100000);
-            if (min <= 0 && max <= 0) {
-                return "";
-            }
-            final var sinceLastUser = iterationsSinceLastUser(messages);
+        if (compression == null || !compression.enabled() || contextView == null) {
+            return legacyPruningNudge(messages, toolsTokens);
+        }
+        final var tier = compressionNudgeTier(messages, toolsTokens);
+        if (tier == 2) {
             final var raw = usageTracker.effectiveContext(messages, toolsTokens);
             final var effective = contextView.compression().effectiveTokens(messages, raw);
-            if (max > 0
-                    && effective >= max
-                    && (compression.nudgeFrequency() <= 0 || sinceLastUser % compression.nudgeFrequency() == 0)) {
-                return "\n<nudge>You MUST use the `compress` tool now. Do not continue normal exploration until"
-                        + " compression is handled. The context is ~" + effective + " tokens (limit " + max
-                        + "): compress a genuinely closed section (or several non-overlapping ranges) and"
-                        + " keep the active work verbatim.</nudge>";
-            }
-            if (min > 0 && effective >= min && sinceLastUser >= compression.iterationNudgeThreshold()) {
-                return "\n<nudge>Context is ~" + effective + " tokens (compress at " + min + " / must at " + max
-                        + "). If a chapter is genuinely closed, call `compress` on its range now and write an"
-                        + " exhaustive summary; keep the current task and its recent messages verbatim.</nudge>";
-            }
-            return "";
+            final var targets = contextView
+                    .compression()
+                    .targets(usageTracker.contextWindowTokenCount().value());
+            final var percent = Math.round(usageTracker.contextPercent(effective));
+            return "\n<nudge>The working context reached ~" + effective + " tokens, above the "
+                    + targets.effectiveMax() + " working-context target (~" + percent + "% of model capacity). "
+                    + "This is a proactive working-context target, not an out-of-memory alarm. Compress genuinely "
+                    + "closed ranges now if it is safe to do so; keep the active work verbatim and do not use a "
+                    + "whole-session compact just to meet this target.</nudge>";
         }
+        if (tier == 1) {
+            final var raw = usageTracker.effectiveContext(messages, toolsTokens);
+            final var effective = contextView.compression().effectiveTokens(messages, raw);
+            final var targets = contextView
+                    .compression()
+                    .targets(usageTracker.contextWindowTokenCount().value());
+            return "\n<nudge>Working context is ~" + effective + " tokens (compress at " + targets.baseMin()
+                    + " / must at " + targets.effectiveMax() + "). If a chapter is genuinely closed, call "
+                    + "`compress` on its range now and write an exhaustive summary; keep the current task "
+                    + "and its recent messages verbatim and do not block on it.</nudge>";
+        }
+        return "";
+    }
+
+    /** Legacy prune/compaction nudge for the pruning opt-in (disabled by default). */
+    private String legacyPruningNudge(final List<Message> messages, final int toolsTokens) {
         final var p = configuration.pruning();
         final var threshold = p.nudgeThresholdPercent();
         if (threshold <= 0) {
@@ -4321,6 +4358,68 @@ public class AgentLoop {
                                 String.valueOf(configuration.compaction().thresholdPercent()))
                         .replace("%ACTIONS%", manageContextActions())
                 + "</nudge>";
+    }
+
+    /**
+     * Pure (side-effect-free) compression nudge decision for the current round: {@code 0} = none,
+     * {@code 1} = soft reminder, {@code 2} = strong reminder. Reads the current cadence state but
+     * mutates nothing, so a {@code /context} preview and a real round see the same decision and
+     * rendering stays pure.
+     */
+    private int compressionNudgeTier(final List<Message> messages, final int toolsTokens) {
+        final var compression = configuration.compression();
+        if (compression == null || !compression.enabled() || contextView == null) {
+            return 0;
+        }
+        final var targets = contextView
+                .compression()
+                .targets(usageTracker.contextWindowTokenCount().value());
+        if (targets.baseMin() <= 0 && targets.baseMax() <= 0) {
+            return 0;
+        }
+        // bounded cooldown right after a successful compress: do not re-hammer the model for a few
+        // rounds while it still reaps the benefit (the hard tier otherwise restarts its cadence).
+        if (compressionNudgeRounds < compressionNudgeCooldownUntil) {
+            return 0;
+        }
+        final var sinceLastUser = iterationsSinceLastUser(messages);
+        final var raw = usageTracker.effectiveContext(messages, toolsTokens);
+        final var effective = contextView.compression().effectiveTokens(messages, raw);
+        // strong tier: above the (buffered) working target, cadenced on REAL rounds so a tool batch
+        // that appends many messages cannot make it fire erratically, and spaced at nudgeFrequency.
+        if (targets.effectiveMax() > 0
+                && effective >= targets.effectiveMax()
+                && (lastHardCompressionNudgeRound == Integer.MIN_VALUE
+                        || compression.nudgeFrequency() <= 0
+                        || compressionNudgeRounds - lastHardCompressionNudgeRound >= compression.nudgeFrequency())) {
+            return 2;
+        }
+        if (targets.baseMin() > 0
+                && effective >= targets.baseMin()
+                && sinceLastUser >= compression.iterationNudgeThreshold()) {
+            return 1;
+        }
+        return 0;
+    }
+
+    /**
+     * Advances the compression-nudge cadence once per real LLM request round and arms the post-compress
+     * cooldown when a fresh compression landed since the last round. Must be called on the run-loop
+     * thread only (never from a preview), and before the volatile tail is appended so the nudge decision
+     * reflects the new round.
+     */
+    private void advanceCompressionCadence(final List<Message> messages) {
+        compressionNudgeRounds++;
+        final var compression = configuration.compression();
+        if (contextView == null || compression == null || !compression.enabled()) {
+            return;
+        }
+        final var saved = contextView.compression().savedTokens(messages);
+        if (lastCompressionSavedTokens >= 0 && saved > lastCompressionSavedTokens) {
+            // a fresh compress reclaimed context: breathe for nudgeFrequency real rounds
+            compressionNudgeCooldownUntil = compressionNudgeRounds + Math.max(1, compression.nudgeFrequency());
+        }
+        lastCompressionSavedTokens = saved;
     }
 
     private int iterationsSinceLastUser(final List<Message> messages) {

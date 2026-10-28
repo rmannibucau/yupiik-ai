@@ -237,8 +237,19 @@ final class TranscriptRenderer {
 
     /**
      * Index just past the last {@code '\n'} that is a safe place to cut: not inside a
-     * fenced code block. Cutting between code-fence-aware lines keeps each suffix
-     * independently re-parseable, so streaming appends only re-render the tail.
+     * fenced code block and not inside a GFM table. Cutting between fence-aware or
+     * table-aware lines keeps each suffix independently re-parseable, so streaming
+     * appends only re-render the tail.
+     *
+     * <p>As a conservative heuristic, a table candidate is a contiguous run of two or
+     * more lines containing a pipe. CommonMark only recognizes a GFM table once the
+     * separator row follows the header. Splitting in the middle of such a run leaves the
+     * table's header/separator in the committed prefix and the remaining {@code |} rows
+     * in the suffix, which then parse as a literal-pipe paragraph (the reported
+     * {@code /usage} last-row symptom, made possible by the transcript's {@code strip()}
+     * removing the final row's newline). Keeping the whole run in the re-parsed suffix
+     * renders it as a single table. A lone pipe-containing line is an ordinary paragraph
+     * and stays a valid split point.
      *
      * @return if {@code source} contains any safe break the index right after its
      *         newline, otherwise {@code 0}
@@ -247,21 +258,43 @@ final class TranscriptRenderer {
         if (source == null || source.isEmpty()) {
             return 0;
         }
+        final var lines = source.split("\n", -1);
+        final var tableCandidate = new boolean[lines.length];
+        for (var i = 0; i < lines.length; i++) {
+            // GFM table rows may omit their optional leading pipe.
+            tableCandidate[i] = lines[i].contains("|");
+        }
+        // a line belongs to a table when it is part of a maximal contiguous run of two
+        // or more pipe-containing lines; a single such line is a paragraph and stays safe
+        final var tableLine = new boolean[lines.length];
+        for (var i = 0; i < lines.length; i++) {
+            if (!tableCandidate[i]) {
+                continue;
+            }
+            var j = i;
+            while (j < lines.length && tableCandidate[j]) {
+                j++;
+            }
+            final var isTable = (j - i) >= 2;
+            for (var k = i; k < j; k++) {
+                tableLine[k] = isTable;
+            }
+            i = j - 1;
+        }
         var inFence = false;
         var safe = 0;
         var start = 0;
-        while (start <= source.length()) {
-            final var nl = source.indexOf('\n', start);
-            final var line = nl < 0 ? source.substring(start) : source.substring(start, nl);
-            final var trimmed = line.strip();
+        for (var i = 0; i < lines.length; i++) {
+            final var trimmed = lines[i].strip();
             if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
                 inFence = !inFence;
             }
-            if (!inFence && nl >= 0) {
-                safe = nl + 1;
-            }
+            final var nl = source.indexOf('\n', start);
             if (nl < 0) {
                 break;
+            }
+            if (!inFence && !tableLine[i]) {
+                safe = nl + 1;
             }
             start = nl + 1;
         }

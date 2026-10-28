@@ -523,6 +523,30 @@ public final class ContextCompression {
                 .sum();
     }
 
+    /**
+     * The resolved compression guidance targets for a given provider window, shared by the loop
+     * (context-usage line, nudges) and the {@code compress} tool (status). The base {@code min} /
+     * {@code max} are the configured absolute or percentage limits; when {@code summaryBuffer} is
+     * enabled the hard target is extended by the active summary tokens, so an already-condensed
+     * working set is not immediately hammered by the strong nudge. The extension is purely a
+     * guidance target: {@link #effectiveTokens}/{@link #savedTokens} still count the summaries
+     * toward real context usage and the compaction guard is untouched, so capacity accounting
+     * never weakens.
+     */
+    public synchronized Targets targets(final int window) {
+        final var summary = summaryTokens();
+        final var baseMin =
+                configuration == null ? 0 : configuration.resolveLimit(configuration.minContextLimit(), window, 50000);
+        final var baseMax =
+                configuration == null ? 0 : configuration.resolveLimit(configuration.maxContextLimit(), window, 100000);
+        final var buffered = configuration != null && configuration.summaryBuffer() && summary > 0;
+        return new Targets(window, baseMin, baseMax, buffered ? baseMax + summary : baseMax, summary, buffered);
+    }
+
+    /** Resolved compression guidance targets (see {@link #targets(int)}). */
+    public record Targets(
+            int window, int baseMin, int baseMax, int effectiveMax, int summaryTokens, boolean summaryBuffer) {}
+
     // --- internals ---------------------------------------------------------------------------
 
     private record ResolvedRange(int startRef, int endRef, String summary) {}
@@ -574,6 +598,7 @@ public final class ContextCompression {
             return summary;
         }
         final var out = new StringBuilder(summary == null ? "" : summary);
+        final var toolNames = Message.toolNames(published);
         for (var i = start; i <= end; i++) {
             final var message = published.get(i);
             final var content = message.content() instanceof String s ? s : String.valueOf(message.content());
@@ -586,11 +611,13 @@ public final class ContextCompression {
                     out.append("\n\n[protected tag]\n").append(matcher.group(1));
                 }
             }
+            final var toolName = message.name() != null ? message.name() : toolNames.get(message.toolCallId());
             if ("tool".equals(message.role())
+                    && toolName != null
                     && configuration.protectedTools() != null
-                    && configuration.protectedTools().contains(message.name())) {
+                    && configuration.protectedTools().contains(toolName)) {
                 out.append("\n\n[protected tool output: ")
-                        .append(message.name())
+                        .append(toolName)
                         .append("]\n")
                         .append(content);
             }

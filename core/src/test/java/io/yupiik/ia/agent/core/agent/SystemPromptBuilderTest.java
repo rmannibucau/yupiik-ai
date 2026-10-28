@@ -604,6 +604,12 @@ class SystemPromptBuilderTest {
         assertTrue(
                 prompt.contains("The ONLY tool you have for context management is `compress`"),
                 "with compression enabled the rules must teach proactive context management");
+        assertTrue(
+                prompt.contains("proactive working-context targets, not model capacity"),
+                "the rules must distinguish working-context targets from model capacity");
+        assertTrue(
+                prompt.contains("if no safe closed range exists, keep working"),
+                "the rules must allow deferring compression when no closed range is safe");
     }
 
     @Test

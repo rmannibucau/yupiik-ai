@@ -60,6 +60,7 @@ import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.core.tools.builtin.ManageContextTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.LlmHttpFailureException;
@@ -4585,6 +4586,104 @@ class AgentLoopTest {
         assertTrue(line.contains("(prune at 90%, compaction at 80%)"), line);
         // the line is unconditional: rendered even when the nudge stays silent (iteration guard)
         assertTrue(loop.nudgeBlock(messages, 15).isEmpty());
+    }
+
+    @Test
+    void compressionHardNudgeCadenceAdvancesOnRealRequestRounds() {
+        final var requests = new ArrayList<List<Message>>();
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var round = 0; round < 5; round++) {
+            replies.add(toolCallReply("tick-" + round, "tick", "{\"round\":" + round + "}"));
+        }
+        replies.add(new ScriptedReply("all done", "stop", false));
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.compression.enabled", "true",
+                        "yca.compression.minContextLimit", "0",
+                        "yca.compression.maxContextLimit", "50",
+                        "yca.compression.nudgeFrequency", "2",
+                        "yca.llm.explorationNudgeRounds", "0"));
+        final var contextView = new ContextView(config.compression());
+        final var tool = testTool("tick", new ArrayList<>());
+        loop(
+                        chatClient(replies, requests),
+                        null,
+                        config,
+                        noContextManager(),
+                        noSessionStore(),
+                        contextView,
+                        registryOf(tool),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        final var hardNudges =
+                requests.stream().map(AgentLoopTest::hasHardCompressionNudge).toList();
+        assertEquals(6, requests.size(), "five tool-call rounds plus the final response");
+        assertEquals(
+                List.of(true, false, true, false, true, false),
+                hardNudges,
+                "the hard reminder should be emitted on request rounds 1, 3 and 5 only");
+    }
+
+    @Test
+    void successfulCompressionSuppressesHardNudgesForCooldownThenResumes() {
+        final var requests = new ArrayList<List<Message>>();
+        final var replies = new ArrayDeque<>(List.of(
+                toolCallReply(
+                        "compress-1",
+                        "compress",
+                        "{\"action\":\"compress\",\"topic\":\"closed work\",\"content\":["
+                                + "{\"startId\":\"@1@\",\"endId\":\"@2@\","
+                                + "\"summary\":\"A compact summary of the completed work.\"}] }"),
+                toolCallReply("tick-1", "tick", "{\"round\":1}"),
+                toolCallReply("tick-2", "tick", "{\"round\":2}"),
+                toolCallReply("tick-3", "tick", "{\"round\":3}"),
+                toolCallReply("tick-4", "tick", "{\"round\":4}"),
+                new ScriptedReply("all done", "stop", false)));
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.compression.enabled", "true",
+                        "yca.compression.minContextLimit", "0",
+                        "yca.compression.maxContextLimit", "50",
+                        "yca.compression.nudgeFrequency", "3",
+                        "yca.compression.summaryBuffer", "false",
+                        "yca.llm.explorationNudgeRounds", "0"));
+        final var contextView = new ContextView(config.compression());
+        final var manager = new ManageContextTool(config, mapper);
+        final var history =
+                List.of(Message.user("closed work with result"), Message.assistant("completed successfully", null));
+        loop(
+                        chatClient(replies, requests),
+                        null,
+                        config,
+                        noContextManager(),
+                        noSessionStore(),
+                        contextView,
+                        registryOf(manager, testTool("tick", new ArrayList<>())),
+                        directExecutions(),
+                        null)
+                .run("continue with the next task", null, "s1", history, () -> false);
+
+        final var hardNudges =
+                requests.stream().map(AgentLoopTest::hasHardCompressionNudge).toList();
+        assertEquals(1, contextView.compression().blocks().size(), "the dispatched compress call must create a block");
+        assertEquals(
+                io.yupiik.ia.agent.core.context.ContextCompression.Status.ACTIVE,
+                contextView.compression().blocks().getFirst().status());
+        assertTrue(hardNudges.getFirst(), "the initial request is above the configured target");
+        assertEquals(
+                List.of(false, false, false),
+                hardNudges.subList(1, 4),
+                "the three actual requests after compression are inside the cooldown");
+        assertTrue(hardNudges.get(4), "the hard reminder resumes after the bounded cooldown");
+    }
+
+    private static boolean hasHardCompressionNudge(final List<Message> request) {
+        final var tail = request.getLast();
+        return String.valueOf(tail.content()).toLowerCase(java.util.Locale.ROOT).contains("working context reached");
     }
 
     @Test
