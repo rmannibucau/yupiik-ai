@@ -323,6 +323,16 @@ public class ChatClient implements AutoCloseable {
     }
 
     /**
+     * The flavor actually used for routing a <em>session</em>, honoring its per-tab provider override
+     * (AUTO resolves to a concrete route for bare /v1). Mirrors {@link #model(ChatSettings)} and
+     * {@link #providerId(ChatSettings)} so the sidebar's flavor row follows a {@code /provider} switch
+     * instead of always reflecting the process-default provider.
+     */
+    public ApiFlavor flavor(final ChatSettings settings) {
+        return flavorForRouting(settings);
+    }
+
+    /**
      * The flavor used to select a dialect: an explicitly resolved flavor wins, then the configured
      * provider flavor, then a flavor deduced from the base URL route; {@link ApiFlavor#AUTO} when it
      * cannot be pinned (in which case the responses route is probed first and falls back).

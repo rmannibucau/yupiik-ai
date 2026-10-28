@@ -434,7 +434,9 @@ public class WebJsonRpc {
         return new SessionMetadataDto(
                 id,
                 chatClient == null ? "" : safe(() -> chatClient.model(chatSettings)),
-                chatClient == null ? "" : safe(() -> chatClient.flavor().name()),
+                chatClient == null
+                        ? ""
+                        : safe(() -> chatClient.flavor(chatSettings).name()),
                 chatClient == null ? "" : safe(() -> chatClient.providerId(chatSettings)),
                 dir == null ? "" : dir,
                 gitBranchOf(dir),

@@ -3130,7 +3130,20 @@ public class TuiCommand implements Runnable {
      */
     private boolean onContextHover(final MouseEvent move, final UiState state) {
         final var hovered = state.contextGaugeRect != null && state.contextGaugeRect.contains(move.x(), move.y());
-        final var next = hovered ? "~" + formatTokens(state.model.estimatedContext()) + " tok" : null;
+        String next = null;
+        if (hovered) {
+            final var est = state.model.estimatedContext();
+            final var pct = state.model.contextPercent();
+            // surface "current / max": the usable window is recovered as the inverse of
+            // contextPercent = 100 * current / usableWindow. Before any window is resolved
+            // (pct <= 0) only the current estimate is shown, never a division by zero.
+            if (pct > 0) {
+                final var max = Math.round(100.0 * est / pct);
+                next = "~" + formatTokens(est) + " / " + formatTokens(max) + " tok";
+            } else {
+                next = "~" + formatTokens(est) + " tok";
+            }
+        }
         if (Objects.equals(state.hoverContextSize, next)) {
             return false;
         }
@@ -3981,7 +3994,14 @@ public class TuiCommand implements Runnable {
                 Span.styled(ellipsize(state.activeAgent.isBlank() ? "-" : state.activeAgent, width - 7), value)));
         text.add(Line.from(
                 Span.styled("flavor ", label),
-                Span.styled(ellipsize(chatClient.flavor().name().toLowerCase(Locale.ROOT), width - 7), value)));
+                Span.styled(
+                        ellipsize(
+                                chatClient
+                                        .flavor(state.session.chatSettings())
+                                        .name()
+                                        .toLowerCase(Locale.ROOT),
+                                width - 7),
+                        value)));
         text.add(Line.from(
                 Span.styled("cwd ", label), Span.styled(ellipsizeLeading(workingDirectory(), width - 4), value)));
         if (branch != null) {

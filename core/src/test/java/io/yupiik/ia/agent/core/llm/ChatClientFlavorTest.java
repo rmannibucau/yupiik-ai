@@ -182,6 +182,37 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void sessionFlavorHonorsPerSessionProviderOverride() {
+        // the sidebar flavor row must follow a per-session provider override (e.g. after /provider),
+        // not always reflect the process-default provider. The no-arg flavor() reads the default
+        // provider (bare /v1 auto -> completions) while flavor(settings) resolves the override.
+        final var cfg = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "2"),
+                Map.entry("yca.provider.providers.0.id", "default"),
+                Map.entry(
+                        "yca.provider.providers.0.baseUrl",
+                        "http://localhost:" + server.getAddress().getPort() + "/v1"),
+                Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                Map.entry("yca.provider.providers.0.model", "test-model"),
+                Map.entry("yca.provider.providers.0.api", "completions"),
+                Map.entry("yca.provider.providers.1.id", "responses-provider"),
+                Map.entry(
+                        "yca.provider.providers.1.baseUrl",
+                        "http://localhost:" + server.getAddress().getPort() + "/v1"),
+                Map.entry("yca.provider.providers.1.apiKey", "test-key"),
+                Map.entry("yca.provider.providers.1.model", "test-model"),
+                Map.entry("yca.provider.providers.1.api", "responses")));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        // no settings -> the process-default provider's flavor
+        assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
+        // per-session override -> the override provider's flavor, matching model()/providerId()
+        assertEquals(ApiFlavor.RESPONSES, client.flavor(new ChatSettings("responses-provider", null, null, null)));
+        assertEquals("responses-provider", client.providerId(new ChatSettings("responses-provider", null, null, null)));
+    }
+
+    @Test
     void bareV1AutoPrefersCompletionsWithoutProbingResponses() throws Exception {
         stop();
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
