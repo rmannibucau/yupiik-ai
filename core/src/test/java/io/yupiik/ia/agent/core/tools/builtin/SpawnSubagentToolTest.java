@@ -403,4 +403,62 @@ class SpawnSubagentToolTest {
         assertTrue(result.success(), result.output());
         assertNull(captured.get(), "no explicit model means inherit (null on the state)");
     }
+
+    @Test
+    void ignoresNonPositiveOrMissingMaxTurnsAsNoPerSpawnOverride() {
+        final var cfg = config(Map.of());
+        final var reg = registry(cfg);
+        final AtomicReference<Integer> captured = new AtomicReference<>();
+        final var runner =
+                new SubagentRunner(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        reg,
+                        new PrecisionDurationMarkerProvider(),
+                        null, // quota store
+                        null) {
+                    @Override
+                    public void runAsync(
+                            final SubagentRegistry.SubagentState state,
+                            final SessionStore sessionStore,
+                            final SnapshotStore snapshotStore,
+                            final TodoStore todoStore,
+                            final ToolContext parentContext,
+                            final BooleanSupplier cancelled) {
+                        captured.set(state.maxTurns());
+                        reg.complete(
+                                state.id(), SubagentRegistry.SubagentResult.success("mock result", "conv", List.of()));
+                    }
+                };
+        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg);
+        final var ctx = context(noopTodoStore());
+
+        final var positive = tool.execute(Map.of("task", "do work", "max_turns", 7), ctx);
+        assertTrue(positive.success(), positive.output());
+        assertEquals(7, captured.get(), "a positive max_turns must set the per-spawn cap");
+
+        // zero and negative values (and omission) disable the per-spawn override -> null cap
+        for (final Object maxTurns : java.util.Arrays.asList(0, -3, null)) {
+            final Map<String, Object> args = new java.util.HashMap<>(Map.of("task", "do work"));
+            if (maxTurns != null) {
+                args.put("max_turns", maxTurns);
+            }
+            final var result = tool.execute(args, ctx);
+            assertTrue(result.success(), result.output());
+            assertNull(captured.get(), "max_turns=" + maxTurns + " must yield null (no per-spawn override)");
+        }
+    }
 }

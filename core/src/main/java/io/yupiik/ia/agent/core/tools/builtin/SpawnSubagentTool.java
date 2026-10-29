@@ -93,8 +93,9 @@ public class SpawnSubagentTool implements EmbeddedTool {
                 + "Do NOT sleep, poll, or repeatedly check on a sub-agent's progress: you will be notified automatically "
                 + "when it finishes. Avoid working on the same files or topics the sub-agent is using while it runs, and "
                 + "work on non-overlapping tasks or summarize to the user what you launched. "
-                + "max_turns sets a positive upper bound on the child's model round-trips; configured subagent and "
-                + "provider/model limits may lower it. Returns a subagent_id for tracking.";
+                + "max_turns sets a positive upper bound on the child's model round-trips; a non-positive or omitted "
+                + "max_turns disables the per-spawn override so the configured subagent/global/provider limit applies. "
+                + "Configured subagent and provider/model limits may lower a positive value. Returns a subagent_id for tracking.";
     }
 
     @Override
@@ -115,7 +116,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
                                         + "provider's defaultSubagentModel. The explicit model always wins."),
                         "max_turns",
                                 Schemas.intProp(
-                                        "Maximum model round-trips for the sub-agent (optional; capped by configured subagent and provider/model limits)."),
+                                        "Maximum model round-trips for the sub-agent; a non-positive or omitted value means no per-spawn override, so the configured subagent/global/provider limit applies."),
                         "tools",
                                 Schemas.arrayOf(
                                         "Optional allowlist of tool names for the sub-agent; an empty list allows no tools.",
@@ -177,11 +178,10 @@ public class SpawnSubagentTool implements EmbeddedTool {
                 return ToolResult.error("Model is not available for subagents: " + effective.routedReference());
             }
         }
+        // a non-positive or missing max_turns disables the per-spawn override: the child falls back to the
+        // configured yca.subagents.maxIterations / global / provider default (null = no per-run cap)
         final var maxTurnsObj = args.get("max_turns");
-        final Integer maxTurns = maxTurnsObj instanceof Number n ? n.intValue() : null;
-        if (maxTurns != null && maxTurns < 1) {
-            return ToolResult.error("max_turns must be a positive integer");
-        }
+        final Integer maxTurns = maxTurnsObj instanceof Number n && n.intValue() > 0 ? n.intValue() : null;
         final Set<String> allowedTools = args.get("tools") instanceof List<?> list
                 ? list.stream()
                         .filter(String.class::isInstance)

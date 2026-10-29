@@ -96,7 +96,9 @@ profile names or unavailable requested tools fail the child run. Sub-agents use
 separate permission grants; their approval prompts still appear in the parent
 session. Parent permission restrictions remain in force.
 
-`max_turns` counts model round-trips. The effective limit is the lowest of the
-per-spawn value, configured `yca.subagents.maxIterations`, and applicable
-provider/model iteration cap. If `max_turns` is omitted, the configured subagent
-limit applies. Nested sub-agents are disabled.
+`max_turns` counts model round-trips. A positive per-spawn value sets an upper
+bound; a non-positive or omitted `max_turns` disables the per-spawn override so
+the configured `yca.subagents.maxIterations` and applicable provider/model
+iteration cap apply. The effective limit is the lowest of the per-spawn value,
+configured `yca.subagents.maxIterations`, and applicable provider/model
+iteration cap. Nested sub-agents are disabled.
