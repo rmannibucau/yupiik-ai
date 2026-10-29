@@ -123,6 +123,50 @@ class ContextCompressionTest {
     }
 
     @Test
+    void withholdDanglingPrefixIgnoresGluedProseBeforeTheFragment() {
+        // the trailing-run scan must not walk back over the prose glued to the
+        // fragment ("answer@1"): only the token part anchored on the last '@' is a
+        // candidate, the prose before it stays visible
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(Message.system("system"), Message.user("instruction"));
+        compression.publish(messages);
+        compression.renderRefs(messages);
+        assertEquals("answer", compression.withholdDanglingPrefix("answer@1"));
+        // without glued prose the same fragment is still withheld
+        assertEquals("answer ", compression.withholdDanglingPrefix("answer @1"));
+    }
+
+    @Test
+    void withholdDanglingPrefixHidesStandaloneMultilineEchoWithLiveRefEvidence() {
+        // a literal newline can split the echoed seam across visual lines
+        // ("@3149\n@"): when the reconstructed token matches a live ref, both the
+        // fragment and its trailing closing delimiter line are display-only noise
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(Message.system("system"), Message.user("instruction"));
+        compression.publish(messages);
+        compression.renderRefs(messages);
+        assertEquals("done\n", compression.withholdDanglingPrefix("done\n@1\n@"));
+        assertEquals("done\n", compression.withholdDanglingPrefix("done\n@1\n\n@"));
+        assertEquals("done\n", compression.withholdDanglingPrefix("done\n@1\r\n@"));
+        // no live ref matches -> real content, untouched (e.g. a fenced '@9\n@' snippet);
+        // only the lone closing '@' is withheld (partial prefix of every ref)
+        assertEquals("done\n@9\n", compression.withholdDanglingPrefix("done\n@9\n@"));
+    }
+
+    @Test
+    void withholdDanglingPrefixNeverMatchesAcrossProse() {
+        // the multiline reconstruction is only for a fragment sitting alone on its
+        // own trailing lines: prose between the fragment and the closing '@' blocks
+        // it, so the prose and the fragment line stay visible; the lone trailing '@' is
+        // withheld by the existing partial-prefix rule (strict prefix of every ref)
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(Message.system("system"), Message.user("instruction"));
+        compression.publish(messages);
+        compression.renderRefs(messages);
+        assertEquals("done\n@1\nreal prose\n", compression.withholdDanglingPrefix("done\n@1\nreal prose\n@"));
+    }
+
+    @Test
     void compactedMessageRefLeavesTheWithholdWhitelist() {
         final var compression = new ContextCompression(config());
         final var system = Message.system("system");

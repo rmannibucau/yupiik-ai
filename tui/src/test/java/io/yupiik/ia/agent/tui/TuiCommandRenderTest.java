@@ -411,6 +411,67 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void echoedSeamFragmentsNeverRenderInTranscriptFrames() throws Exception {
+        // streaming a seam echo across deltas (with a tool call in between) must never show the
+        // anchor or a partial fragment on any frame: the transcript scrubs at its render chokepoint
+        final var shellRegistry = testRegistry();
+        final var sessionId = new AtomicReference<String>();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionIdArg,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                sessionId.set(sessionIdArg);
+                final var sid = sessionIdArg;
+                shellRegistry.onEvent(new AgentEvent.TextDelta("Let me commit.\n\n@", sid));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("1", sid));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("@", sid));
+                shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"git status\"}", sid));
+                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "clean", true, sid));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("done with the turn", sid));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done with the turn", sid));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-seam-frame-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("say hi"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+
+        awaitText("done with the turn");
+        awaitText("ready");
+        // the seam must be scrubbed from the final screen (whole token) and no partial
+        // fragment ("@1" or a lone "@") may appear anywhere on the pane
+        final var text = backend.text();
+        assertFalse(text.contains("@1"), "seam fragment must not render: " + text);
+        assertFalse(text.contains("@1@"), "echoed seam must not render: " + text);
+        assertTrue(text.contains("Let me commit."), text);
+        assertTrue(text.contains("done with the turn"), text);
+        assertTrue(text.contains("git status"), text);
+
+        quit();
+    }
+
+    @Test
     void rendersSidebarAndAnswer() throws Exception {
         final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {

@@ -131,6 +131,18 @@ describe('stripEchoedRefs', () => {
   it('keeps a lone @ and non-tag text untouched', () => {
     expect(stripEchoedRefs('user@example.com and @ alone')).toBe('user@example.com and @ alone');
   });
+
+  it('strips a seam literally split across lines at the end of the block ("@N" then lone "@")', () => {
+    // the newline before the fragment is kept (it is the paragraph separator)
+    expect(stripEchoedRefs('Let me commit.\n\n@1\n@')).toBe('Let me commit.\n\n');
+    expect(stripEchoedRefs('Let me commit.\n\n@3149\n\n@')).toBe('Let me commit.\n\n');
+    expect(stripEchoedRefs('Let me commit.\r\n\r\n@1\r\n@')).toBe('Let me commit.\r\n\r\n');
+    expect(stripEchoedRefs('turn\n@b21\n@')).toBe('turn\n');
+  });
+
+  it('does not let prose between the fragment and the closing @ form a multiline seam', () => {
+    expect(stripEchoedRefs('x\n@1\nreal prose\n@')).toBe('x\n@1\nreal prose\n@');
+  });
 });
 
 describe('hasOpenInlineSpan', () => {

@@ -57,6 +57,15 @@ public final class ContextCompression {
     private static final Pattern ECHOED_REF_INLINE =
             Pattern.compile("[ \t]*@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?");
 
+    /**
+     * Trailing multiline echoed seam: a lone fragment line ({@code @3149} or {@code @b} + digits,
+     * optionally with a trailing {@code [priority]} on the same line), followed only by empty lines
+     * and a closing lone {@code @} line at the very end of the text. Rebuilt as fragment + " " +
+     * priority so it compares against the single-line ref form.
+     */
+    private static final Pattern ECHOED_REF_MULTILINE_TAIL = Pattern.compile(
+            "(?s)(.*\\n)?[ \t]*(@[1-9]\\d*|@b[1-9]\\d*|@blocked)([ \t]+\\[(?:low|medium|high)\\])?[ \t]*\\r?\\n(?:[ \t]*\\r?\\n)*[ \t]*\\r?\\n?@[ \t]*\\r?\\n?\\z");
+
     public enum Status {
         ACTIVE,
         SUPERSEDED,
@@ -932,15 +941,24 @@ public final class ContextCompression {
         if (text == null) {
             return null;
         }
-        final var stripped = stripEchoedRefs(text);
+        var stripped = stripEchoedRefs(text);
+        stripped = withholdMultilineEcho(stripped);
         final var refs = renderedRefs;
         // take the trailing contiguous run of seam-token characters ([@A-Za-z0-9]); if it is a strict
-        // prefix of a live ref it is the half-arrived part of that seam, so withhold it from the copy
+        // prefix of a live ref it is the half-arrived part of that seam, so withhold it from the copy.
+        // The run is anchored on the last '@' of the string: prose glued in front of the fragment
+        // ("answer@1") is content, not part of the token, and must stay visible
         var i = stripped.length();
+        var lastAt = -1;
         while (i > 0) {
             final var c = stripped.charAt(i - 1);
-            if (Character.isLetterOrDigit(c) || c == '@') {
+            if (Character.isLetterOrDigit(c)) {
                 i--;
+            } else if (c == '@') {
+                i--;
+                if (lastAt < 0) {
+                    lastAt = i;
+                }
             } else {
                 break;
             }
@@ -948,12 +966,36 @@ public final class ContextCompression {
         if (i == stripped.length()) {
             return stripped;
         }
-        final var tail = stripped.substring(i);
+        // anchor the candidate on the last '@' so the tail is always '@'-led or pure digits
+        // following one; "answer@1" keeps the prose and only tests "@1"
+        final var tail = stripped.substring(lastAt < 0 ? i : lastAt);
         for (final var ref : refs) {
             if (tail.length() < ref.length() && ref.startsWith(tail)) {
-                return stripped.substring(0, i);
+                return stripped.substring(0, lastAt < 0 ? i : lastAt);
             }
         }
         return stripped;
+    }
+
+    /**
+     * Hides a seam token a model emitted literally split across lines (e.g. {@code @3149\n@}):
+     * a fragment standing alone on its own trailing line, optionally separated from the closing
+     * {@code @} by empty lines, whose reconstruction matches a live ref is display noise. Evidence
+     * -gated: without a live-ref match the text is real content and stays untouched, and prose
+     * between the fragment and the closing {@code @} blocks the reconstruction.
+     */
+    private String withholdMultilineEcho(final String text) {
+        final var matcher = ECHOED_REF_MULTILINE_TAIL.matcher(text);
+        if (!matcher.find()) {
+            return text;
+        }
+        // rebuilt as the single-line form; a trailing [priority] is display-only and ignored
+        final var rebuilt = matcher.group(2) + "@";
+        for (final var ref : renderedRefs) {
+            if (rebuilt.equals(ref)) {
+                return text.substring(0, matcher.start(2));
+            }
+        }
+        return text;
     }
 }

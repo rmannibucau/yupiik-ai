@@ -22,6 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.configuration.CompressConfiguration;
+import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
@@ -29,6 +31,12 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class ConversationTranscriptTest {
+
+    private static CompressConfiguration config() {
+        return new CompressConfiguration(
+                true, "50000", "100000", 15, 5, true, false, false, List.of("my_tool"), false, 4, true, true, 4);
+    }
+
     @Test
     void foldsTurnEventsIntoTranscript() {
         final var t = new ConversationTranscript();
@@ -805,6 +813,88 @@ class ConversationTranscriptTest {
         t.onEvent(new AgentEvent.Error("kaput", "s1"));
         t.onEvent(new AgentEvent.TextDelta("still streaming", "s1"));
         assertEquals("error: kaput", t.status(), "non-retryable errors stay until acknowledged");
+    }
+
+    @Test
+    void danglingFragmentBeforeAToolCardIsStillWithheld() {
+        // a fragment arriving mid-turn is no longer the trailing run of the whole
+        // markdown once the running-tool block is appended after the pending tail:
+        // the withhold must apply to the assistant content before the UI wrappers
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(Message.system("system"), Message.user("instruction"));
+        compression.publish(messages);
+        compression.renderRefs(messages);
+
+        final var t = new ConversationTranscript();
+        t.bindCompression(compression);
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("Let me run the proper typecheck.\n\n@1", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"git status\"}", "s1"));
+
+        final var md = t.markdown("|", "welcome");
+        assertTrue(md.contains("Let me run the proper typecheck."), md);
+        assertTrue(md.contains("git status"), md);
+        assertFalse(md.contains("@1"), "fragment buried by the tool card must not render: " + md);
+    }
+
+    @Test
+    void flushedPendingTailKeepsWithheldFragmentHidden() {
+        // when flushPending() freezes the pending tail into the durable transcript
+        // the previously-withheld fragment must not reappear in the flushed text
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(Message.system("system"), Message.user("instruction"));
+        compression.publish(messages);
+        compression.renderRefs(messages);
+
+        final var t = new ConversationTranscript();
+        t.bindCompression(compression);
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("answer tail @1", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
+
+        final var md = t.markdown("|", "welcome");
+        assertTrue(md.contains("answer tail"), md);
+        assertFalse(md.contains("@1"), "flushed fragment must stay hidden: " + md);
+    }
+
+    @Test
+    void perFrameFramesNeverRenderTheSeam() {
+        // each intermediate frame of a seam streamed one character at a time must be
+        // clean: "@", "@3", "@31" withheld as prefixes, "@3149@" stripped when complete
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(Message.system("system"), Message.user("instruction"));
+        compression.publish(messages);
+        compression.renderRefs(messages);
+
+        final var t = new ConversationTranscript();
+        t.bindCompression(compression);
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("Let me commit.\n\n", "s1"));
+        for (final var frame : new String[] {"@", "1", "@"}) {
+            t.onEvent(new AgentEvent.TextDelta(frame, "s1"));
+            final var md = t.markdown("|", "welcome");
+            assertTrue(md.contains("Let me commit."), md);
+            assertFalse(md.contains("@1"), "frame must not render the seam: " + md);
+        }
+    }
+
+    @Test
+    void literalNewlineSplitSeamIsScrubbedFromLiveMarkdown() {
+        // some models emit the seam literally split across lines ("@3149\n@"):
+        // with live-ref evidence both lines must disappear from the display
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(Message.system("system"), Message.user("instruction"));
+        compression.publish(messages);
+        compression.renderRefs(messages);
+
+        final var t = new ConversationTranscript();
+        t.bindCompression(compression);
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("Let me commit.\n\n@1\n@", "s1"));
+
+        final var md = t.markdown("|", "welcome");
+        assertTrue(md.contains("Let me commit."), md);
+        assertFalse(md.contains("@1\n@"), "newline-split seam must not render live: " + md);
     }
 
     @Test

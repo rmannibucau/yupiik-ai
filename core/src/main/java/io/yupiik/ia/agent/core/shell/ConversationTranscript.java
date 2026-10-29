@@ -794,12 +794,19 @@ public class ConversationTranscript {
         if (text.isBlank()) {
             return;
         }
+        // the flush freezes the tail into the durable transcript: strip complete echoed seams
+        // AND withhold a trailing half-arrived seam fragment, exactly like the live render did,
+        // so what is frozen matches what the user saw while it was streaming
+        final var sanitized = compression.withholdDanglingPrefix(text).stripTrailing();
+        if (sanitized.isBlank()) {
+            return;
+        }
         transcript.append("\n\n");
         if (!answerHeaderWritten) {
             answerHeaderWritten = true;
             transcript.append(assistantMarker() + "\n\n");
         }
-        transcript.append(text).append('\n');
+        transcript.append(sanitized).append('\n');
         touch();
     }
 
@@ -820,7 +827,10 @@ public class ConversationTranscript {
                 // same turn-scoped label as flushPending(): a turn streams one answer
                 sb.append(assistantMarker() + "\n\n");
             }
-            sb.append(pending);
+            // the pending tail is sanitized BEFORE the running-tool blocks are appended: a
+            // half-arrived seam fragment must stay hidden even once UI text follows it (the
+            // whole-string trailing-run withhold below cannot see it anymore at that point)
+            sb.append(withholdPendingTail());
         }
         // one running block per pending tool: parallel read-only tools each show
         // their own command and streamed output instead of aliasing a single slot.
@@ -1195,6 +1205,18 @@ public class ConversationTranscript {
      */
     public synchronized void bindCompression(final ContextCompression value) {
         this.compression = value != null ? value : new ContextCompression(null);
+        // the pending tail and cache were sanitized against the previous instance's refs:
+        // drop the cached markdown so the next render rebuilds against the new refs
+        markdownCache = null;
+    }
+
+    /**
+     * The pending tail (and only it, not the durable transcript) with complete echoed seams
+     * stripped and a trailing half-arrived seam fragment withheld, so the fragment stays hidden
+     * while it waits for its remainder and never gets frozen into the transcript by a flush.
+     */
+    private String withholdPendingTail() {
+        return compression.withholdDanglingPrefix(pending.toString());
     }
 
     public String runningTool() {

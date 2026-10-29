@@ -120,13 +120,25 @@ export function normalizeMarkdown(src: string): string {
 const ECHOED_REF_LINE = /^[ \t]*@(?:[1-9]\d*|b[1-9]\d*|blocked)@(?:[ \t]+\[(?:low|medium|high)\])?[ \t]*\r?\n/gm;
 const ECHOED_REF_INLINE = /[ \t]*@(?:[1-9]\d*|b[1-9]\d*|blocked)@(?:[ \t]+\[(?:low|medium|high)\])?/g;
 
+// Multiline echoed seam at the end of a block: a lone fragment line ("@3149") followed only by
+// empty lines and a closing lone "@" line. The frontend has no live-ref whitelist to gate it on
+// (the Java render path withholds it only with that evidence), but a fragment-plus-closing-
+// delimiter pair shaped exactly like a split seam is display noise: strip it like the Java
+// complete-token rules strip the single-line form. Prose between the lines blocks the match.
+const ECHOED_REF_MULTILINE_TAIL =
+  /(^|\n)[ \t]*(@[1-9]\d*|@b[1-9]\d*|@blocked)([ \t]+\[(?:low|medium|high)\])?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*@[ \t]*\r?\n?$/;
+
 /**
  * Removes echoed compact {@code @N@} ref tags from model-generated text (assistant or thought
  * blocks). Whole echo lines first (the observed failure mode was a wall of consecutive tag lines),
- * then any inline tags that survived (e.g. a tag glued to prose on one line). Only COMPLETE tags
- * are stripped; a lone {@code @} is prose and stays. A no-op on null/empty input.
+ * then any inline tags that survived (e.g. a tag glued to prose on one line), then the multiline
+ * split form at the end of the block. Only COMPLETE tags are stripped; a lone {@code @} is prose
+ * and stays. A no-op on null/empty input.
  */
 export function stripEchoedRefs(src: string | null | undefined): string {
   if (!src) return src ?? '';
-  return src.replace(ECHOED_REF_LINE, '').replace(ECHOED_REF_INLINE, '');
+  return src
+    .replace(ECHOED_REF_LINE, (_m: string, lead: string) => (lead === '\n' ? '\n' : ''))
+    .replace(ECHOED_REF_INLINE, '')
+    .replace(ECHOED_REF_MULTILINE_TAIL, (_m: string, lead: string) => lead);
 }
