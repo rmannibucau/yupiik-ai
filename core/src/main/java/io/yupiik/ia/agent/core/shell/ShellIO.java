@@ -52,6 +52,23 @@ public interface ShellIO {
      */
     CompletionStage<Optional<String>> pick(String title, List<String> options);
 
+    /**
+     * Selects one option among {@code options} with an explicit page size.
+     * <p>
+     * Implementations may expose {@code pageSize} as scrolling/paging unit (and, where the
+     * frontend has an inline filter box, search across the whole {@code options} list - not just
+     * the visible page). The default delegates to {@link #pick(String, List)} so existing callers
+     * keep their exact behaviour; interactive/CLI frontends override it to page long lists.
+     *
+     * @param title picker title
+     * @param options candidate labels, already in display (sorted) order
+     * @param pageSize number of options shown per page
+     * @return a stage completed with the picked option, an empty optional meaning cancelled
+     */
+    default CompletionStage<Optional<String>> pick(final String title, final List<String> options, final int pageSize) {
+        return pick(title, options);
+    }
+
     /** Tool execution approval gate of this shell (modal, inline box, auto, ...). */
     ApprovalGate approvalGate();
 

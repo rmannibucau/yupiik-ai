@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.shell.slash;
 
 import static java.util.concurrent.CompletableFuture.completedStage;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -142,6 +143,67 @@ class SessionCommandsTest {
         final var outcome = cmd.action().apply("", env()).toCompletableFuture().join();
         assertEquals("no session to resume", ((ShellOutcome.Status) outcome).message());
         assertTrue(picked.isEmpty(), "the picker must not open when there is nothing to pick");
+    }
+
+    @Test
+    void resumeOffersEverySessionSortedMostRecentFirst() {
+        // well above the historical 25-entry cap: every session must reach the picker (which owns
+        // live search + 50-per-page pagination), and the whole list must be most-recent first
+        final var sessions = new ArrayList<SessionStore.SessionInfo>();
+        for (int i = 0; i < 60; i++) {
+            sessions.add(new SessionStore.SessionInfo("s" + (100 - i), 1000L * (i + 1), 10));
+        }
+        final var store = new SessionStore() {
+            @Override
+            public List<SessionInfo> list() {
+                return sessions;
+            }
+        };
+        final var env = env();
+        final var outcome = new SessionCommands(store, null)
+                .commands().stream()
+                        .filter(c -> c.spec().name().equals("/resume"))
+                        .findFirst()
+                        .orElseThrow()
+                        .action()
+                        .apply("", env)
+                        .toCompletableFuture()
+                        .join();
+        assertEquals("resume cancelled", ((ShellOutcome.Status) outcome).message());
+        assertEquals(60, picked.size(), "the picker must see every session, not a capped recent window");
+        for (int i = 0; i < picked.size(); i++) {
+            assertTrue(picked.get(i).startsWith("s" + (41 + i)), picked.get(i));
+        }
+    }
+
+    @Test
+    void resumeLabelsIncludeTheFirstTitleLine() {
+        picked.clear();
+        final var store = new SessionStore() {
+            @Override
+            public List<SessionInfo> list() {
+                return List.of(new SessionInfo("s9", 1000, 10));
+            }
+
+            @Override
+            public String summary(final String id) {
+                return "my very first prompt title\nmore lines";
+            }
+        };
+        final var outcome = new SessionCommands(store, null)
+                .commands().stream()
+                        .filter(c -> c.spec().name().equals("/resume"))
+                        .findFirst()
+                        .orElseThrow()
+                        .action()
+                        .apply("", env())
+                        .toCompletableFuture()
+                        .join();
+        assertEquals("resume cancelled", ((ShellOutcome.Status) outcome).message());
+        assertEquals(1, picked.size());
+        assertTrue(picked.get(0).startsWith("s9"), picked.get(0));
+        assertTrue(picked.get(0).contains("my very first prompt title"), picked.get(0));
+        assertFalse(picked.get(0).contains("\n"), "only the first summary line becomes the title");
     }
 
     @Test

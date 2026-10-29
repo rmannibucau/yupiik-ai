@@ -50,7 +50,7 @@ public class SessionCommands implements SlashCommandSet {
         return "Session commands";
     }
 
-    private static final int MAX_RESUME_LIST = 25;
+    private static final int RESUME_PAGE_SIZE = 50;
     private static final int RESUME_SUMMARY_WIDTH = 80;
 
     private static final String TRANSCRIPT = "transcript";
@@ -197,26 +197,31 @@ public class SessionCommands implements SlashCommandSet {
         if (!arg.isBlank()) {
             return CompletableFuture.completedStage(doResume(arg.strip(), env));
         }
-        // most recent first regardless of the store implementation
-        final var sessions = sessionStore.list().stream()
+        // most recent first regardless of the store implementation; the id tie-breaker
+        // (also descending) makes the ordering absolute so pagination never reshuffles pages
+        final var labels = sessionStore.list().stream()
                 .sorted(Comparator.comparingLong(SessionStore.SessionInfo::modifiedAt)
-                        .reversed())
-                .limit(MAX_RESUME_LIST)
+                        .reversed()
+                        .thenComparing(SessionStore.SessionInfo::id, Comparator.reverseOrder()))
+                .map(this::labelOf)
                 .toList();
-        if (sessions.isEmpty()) {
+        if (labels.isEmpty()) {
             return CompletableFuture.completedStage(ShellOutcome.status("no session to resume"));
         }
-        final var labels = sessions.stream()
-                .map(s -> s.id() + "  (" + s.sizeBytes() + " bytes)"
-                        + (sessionStore.summary(s.id()).isBlank()
-                                ? ""
-                                : " -- " + SlashRegistry.firstLine(sessionStore.summary(s.id()), RESUME_SUMMARY_WIDTH)))
-                .toList();
+        // pass the whole (absolute-sorted) list to the picker: the picker owns live search across
+        // every session and pagination (RESUME_PAGE_SIZE) over the result, so an old session is
+        // reachable by typing its title instead of being hidden beyond a fixed-size recent window
         return env.io()
-                .pick("resume session", labels)
+                .pick("resume session", labels, RESUME_PAGE_SIZE)
                 .thenApply(selected -> selected.isEmpty()
                         ? ShellOutcome.status("resume cancelled")
                         : doResume(selected.get().split("\\s+")[0], env));
+    }
+
+    private String labelOf(final SessionStore.SessionInfo session) {
+        final var summary = sessionStore.summary(session.id());
+        return session.id() + "  (" + session.sizeBytes() + " bytes)"
+                + (summary.isBlank() ? "" : " -- " + SlashRegistry.firstLine(summary, RESUME_SUMMARY_WIDTH));
     }
 
     private ShellOutcome doResume(final String id, final ShellEnv env) {

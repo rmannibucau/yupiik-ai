@@ -2627,6 +2627,24 @@ public class TuiCommand implements Runnable {
                                 state,
                                 title,
                                 options,
+                                0,
+                                value -> future.complete(Optional.of(value)),
+                                () -> future.complete(Optional.empty())));
+                return future;
+            }
+
+            @Override
+            public CompletionStage<Optional<String>> pick(
+                    final String title, final List<String> options, final int pageSize) {
+                focus(state, runner);
+                final var future = new CompletableFuture<Optional<String>>();
+                runLater(
+                        state,
+                        () -> openPicker(
+                                state,
+                                title,
+                                options,
+                                pageSize,
                                 value -> future.complete(Optional.of(value)),
                                 () -> future.complete(Optional.empty())));
                 return future;
@@ -3497,6 +3515,7 @@ public class TuiCommand implements Runnable {
                 state,
                 "model",
                 ids,
+                0,
                 selected -> {
                     try {
                         // same reset semantics as AgentSessionService.setModel: a model
@@ -7219,6 +7238,7 @@ public class TuiCommand implements Runnable {
                 state,
                 "prompt history",
                 entries,
+                0,
                 selected -> {
                     beforeEdit(state);
                     state.input.setText(selected);
@@ -7616,11 +7636,13 @@ public class TuiCommand implements Runnable {
             final UiState state,
             final String title,
             final List<String> items,
+            final int pageSize,
             final Consumer<String> onSelect,
             final Runnable onCancel) {
         state.picker = new PickerPrompt(
                 title,
                 items,
+                pageSize,
                 selected -> {
                     state.picker = null;
                     onSelect.accept(selected);
@@ -7684,11 +7706,28 @@ public class TuiCommand implements Runnable {
         final var rows = Math.max(1, rect.height());
         final var total = visible.size();
         picker.prepareList(rect);
-        // viewport: keep the selection visible, clamp to the tail, render only the window
-        final var maxScroll = Math.max(0, total - rows);
-        final var scroll = Math.min(Math.max(0, picker.selected() - rows / 2), Math.max(0, maxScroll));
-        final var from = Math.min(scroll, total);
-        final var to = Math.min(total, scroll + rows);
+        // paged mode: show one pageSize-page, and let the selection stay within it (PgUp/PgDn
+        // or the page header navigate across pages). Non-paged mode keeps the historical viewport.
+        final var pageSize = picker.pageSize();
+        final int from;
+        int to;
+        if (pageSize > 0) {
+            final var page = picker.page();
+            final var pageStart = Math.min(page * pageSize, total);
+            final var pageEnd = Math.min(total, pageStart + pageSize);
+            // a viewport inside the page: a page may hold more rows than the modal shows, so keep
+            // the selection visible while never rendering past the current page's last row
+            final var pageRows = pageEnd - pageStart;
+            final var maxScroll = Math.max(0, pageRows - rows);
+            final var scroll = Math.min(Math.max(0, picker.selected() - pageStart - rows / 2), Math.max(0, maxScroll));
+            from = Math.min(pageStart + scroll, total);
+            to = Math.min(pageEnd, from + rows);
+        } else {
+            final var maxScroll = Math.max(0, total - rows);
+            final var scroll = Math.min(Math.max(0, picker.selected() - rows / 2), Math.max(0, maxScroll));
+            from = Math.min(scroll, total);
+            to = Math.min(total, scroll + rows);
+        }
         for (int row = from; row < to; row++) {
             final var lineRect = new Rect(rect.x(), rect.y() + (row - from), rect.width(), 1);
             picker.recordItem(lineRect, visible.get(row));
@@ -7705,14 +7744,20 @@ public class TuiCommand implements Runnable {
                             .build(),
                     lineRect);
         }
-        // scroll hint when the list overflows the window
-        if (total > rows) {
+        // page / scroll hint when the list overflows the window or the page
+        if (total > (pageSize > 0 ? pageSize : rows) && total > 0) {
+            final var page = picker.page() + 1;
+            final var pages = picker.pageCount();
+            final var hint = pageSize > 0 ? "page " + page + "/" + pages : (from + 1) + "/" + total;
             frame.renderWidget(
                     Paragraph.builder()
-                            .text(Text.from(Line.from(
-                                    Span.styled("▴ " + (scroll + 1) + "/" + total + " ▾", Style.EMPTY.fg(muted)))))
+                            .text(Text.from(Line.from(Span.styled("▴ " + hint + " ▾", Style.EMPTY.fg(muted)))))
                             .build(),
-                    new Rect(rect.x() + rect.width() - 12, rect.y() + Math.max(0, rect.height() - 1), 12, 1));
+                    new Rect(
+                            rect.x() + rect.width() - Math.max(12, hint.length() + 5),
+                            rect.y() + Math.max(0, rect.height() - 1),
+                            Math.max(12, hint.length() + 5),
+                            1));
         }
         if (total == 0) {
             frame.renderWidget(
@@ -8282,6 +8327,7 @@ public class TuiCommand implements Runnable {
     private static final class PickerPrompt {
         private final String title;
         private final List<String> items;
+        private final int pageSize;
         private final StringBuilder filter = new StringBuilder();
         private final Consumer<String> onSelect;
         private final Runnable onCancel;
@@ -8292,10 +8338,12 @@ public class TuiCommand implements Runnable {
         private PickerPrompt(
                 final String title,
                 final List<String> items,
+                final int pageSize,
                 final Consumer<String> onSelect,
                 final Runnable onCancel) {
             this.title = title;
             this.items = new ArrayList<>(items == null ? List.of() : items);
+            this.pageSize = pageSize > 0 ? pageSize : 0;
             this.onSelect = onSelect;
             this.onCancel = onCancel;
         }
@@ -8306,6 +8354,10 @@ public class TuiCommand implements Runnable {
 
         private int selected() {
             return selected;
+        }
+
+        private int pageSize() {
+            return pageSize;
         }
 
         private void prepareList(final Rect rect) {
@@ -8359,13 +8411,39 @@ public class TuiCommand implements Runnable {
             selected = 0;
         }
 
-        /** Moves the selection; the renderer keeps the selected row inside the visible window. */
+        /** Moves the selection one row; the renderer keeps the selected row inside the visible window. */
         private void move(final int delta) {
             final var v = visible();
             if (v.isEmpty()) {
                 return;
             }
             selected = Math.clamp(selected + delta, 0, v.size() - 1);
+        }
+
+        /** Moves the selection by a whole page ({@link #pageSize} rows), keeping global page boundaries (no-op when paging is off). */
+        private void movePage(final int pageDelta) {
+            if (pageSize <= 0) {
+                return;
+            }
+            final var v = visible();
+            if (v.isEmpty()) {
+                return;
+            }
+            selected = Math.clamp(selected + pageDelta * pageSize, 0, v.size() - 1);
+        }
+
+        /** @return the 0-based page that holds the current selection (0 when no paging). */
+        private int page() {
+            return pageSize <= 0 ? 0 : selected / pageSize;
+        }
+
+        /** @return the number of pages for the current (filtered) list (0 when empty). */
+        private int pageCount() {
+            final var size = visible().size();
+            if (size == 0) {
+                return 0;
+            }
+            return pageSize <= 0 ? 1 : (size + pageSize - 1) / pageSize;
         }
 
         private void stroke(final KeyEvent key, final ScrollService scroll) {
@@ -8379,7 +8457,11 @@ public class TuiCommand implements Runnable {
                 final var v = visible();
                 selected = v.isEmpty() ? 0 : v.size() - 1;
             } else if (key.isKey(KeyCode.PAGE_UP) || key.isKey(KeyCode.PAGE_DOWN)) {
-                move(scroll.keyDelta(key));
+                if (pageSize > 0) {
+                    movePage(key.isKey(KeyCode.PAGE_UP) ? -1 : 1);
+                } else {
+                    move(scroll.keyDelta(key));
+                }
             } else if (key.hasCtrl() && key.isCharIgnoreCase('u')) {
                 filterClear();
             } else if (key.isKey(KeyCode.BACKSPACE)) {

@@ -197,6 +197,70 @@ public class AnsiShellIO implements ShellIO {
     }
 
     @Override
+    public CompletionStage<Optional<String>> pick(final String title, final List<String> options, final int pageSize) {
+        if (options == null || options.isEmpty()) {
+            return CompletableFuture.completedStage(Optional.empty());
+        }
+        final var size = Math.max(1, pageSize);
+        return interact(() -> {
+            try {
+                int page = 0;
+                while (true) {
+                    final var total = options.size();
+                    final var pages = (total + size - 1) / size;
+                    final var from = Math.min(page * size, total);
+                    final var to = Math.min(total, from + size);
+                    println(MarkdownColorizer.status(
+                            title + (pages > 1 ? " (page " + (page + 1) + "/" + pages + ")" : "") + ":"));
+                    for (int i = from; i < to; i++) {
+                        println((i + 1) + ". " + options.get(i));
+                    }
+                    final var nav = new StringBuilder("select [");
+                    if (from > 0) {
+                        nav.append("p=prev ");
+                    }
+                    nav.append((from + 1)).append('-').append(to);
+                    if (to < total) {
+                        nav.append(" n=next");
+                    }
+                    nav.append("] or c/Enter to cancel: ");
+                    final var choice = interactionLine(MarkdownColorizer.accent(nav.toString()))
+                            .map(line -> line.strip().toLowerCase(Locale.ROOT))
+                            .orElse("");
+                    if (choice.isBlank() || choice.equals("c") || choice.equals("cancel")) {
+                        return CompletableFuture.completedStage(Optional.empty());
+                    }
+                    if (choice.equals("n") && to < total) {
+                        page++;
+                        continue;
+                    }
+                    if (choice.equals("p") && from > 0) {
+                        page--;
+                        continue;
+                    }
+                    final int index;
+                    try {
+                        index = Integer.parseInt(choice) - 1;
+                    } catch (final NumberFormatException e) {
+                        println(MarkdownColorizer.status("invalid selection"));
+                        return CompletableFuture.completedStage(Optional.empty());
+                    }
+                    if (index < 0 || index >= total) {
+                        println(MarkdownColorizer.status("invalid selection"));
+                        return CompletableFuture.completedStage(Optional.empty());
+                    }
+                    return CompletableFuture.completedStage(Optional.of(options.get(index)));
+                }
+            } catch (final PromptInterruptException e) {
+                onInterrupt.run();
+                return CompletableFuture.completedStage(Optional.empty());
+            } catch (final IOException e) {
+                return CompletableFuture.completedStage(Optional.empty());
+            }
+        });
+    }
+
+    @Override
     public ApprovalGate approvalGate() {
         return (title, detail, toolName, args) -> {
             onInteractionStart.run();
