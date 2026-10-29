@@ -599,3 +599,39 @@ legacy pruning layer respectively.
   }
 }
 ----
+
+=== Speculative compaction
+
+By default, compaction is synchronous: when the context reaches the trigger, the turn pauses while the summarizer runs.
+For long tool-heavy tasks this pause can be significant.
+
+Speculative compaction (opt-in) computes the summary in the background before the trigger is reached, while foreground inference continues:
+
+[source,json]
+----
+{
+  "yca": {
+    "compaction": {
+      "speculativePolicy": "concurrent",
+      "speculativeStartPercent": 80
+    }
+  }
+}
+----
+
+* `speculativePolicy` is `off` by default: the existing synchronous behavior is preserved, and no background work of any kind is started.
+  Set it to `concurrent` only when the effective provider/model routing accepts overlapping requests: a single-slot local inference server cannot run a background summarizer without delaying the foreground request, so moving the call earlier would not save latency.
+* `speculativeStartPercent` is the percentage of the automatic compaction trigger at which the background summary starts (1-99, default 80).
+  Example: with a 100k-token trigger and the default 80, speculation launches around 80k estimated prompt tokens.
+
+Guarantees, whichever the configuration:
+
+* Only the foreground compaction checkpoint replaces the live history, persists it and reports the reduction; the background job only computes a summary.
+* A candidate summarizes an exact prefix of the history. At adoption time that prefix is compared with the live history: any change (edit, prune, metadata change) rejects the candidate and the normal synchronous compaction runs instead.
+* Messages appended while the background summary was running (tool results, user input) are preserved at adoption.
+* A failed or cancelled speculation never touches the history: no local truncation fallback is installed from a background job.
+* The pre-compaction hook gate is checked both at launch (a veto means no launch) and at adoption (a veto discards the candidate; the synchronous path then applies its own gate).
+* Background summarizer calls are billed exactly once as auxiliary usage, at the call itself; adoption adds no usage.
+
+Speculation state is scoped to a single agent run: it is discarded when the run exits, is cancelled, or the session closes.
+A late remote inference completing after cancellation is never installed.

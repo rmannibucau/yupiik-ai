@@ -94,4 +94,32 @@ public record CompactionConfiguration(
                 documentation =
                         "Character cap (head and tail) applied to kept-tail messages when the compacted context still "
                                 + "exceeds the provider window after compaction.")
-        int overflowSpliceChars) {}
+        int overflowSpliceChars,
+
+        @Property(
+                defaultValue = "\"off\"",
+                documentation =
+                        "Speculative compaction policy: 'off' (default) keeps the synchronous compaction; 'concurrent' "
+                                + "lets a background summarizer request compute a compaction candidate before the trigger "
+                                + "while foreground inference continues. Only opt in when the effective provider/model "
+                                + "routing accepts overlapping requests (a single-slot local server cannot). History is "
+                                + "still only ever replaced by the foreground checkpoint, and a failed speculation never "
+                                + "touches it.")
+        String speculativePolicy,
+
+        @Property(
+                defaultValue = "80",
+                documentation =
+                        "Percentage of the automatic compaction trigger at which speculative compaction launches "
+                                + "(speculativePolicy=concurrent only); must stay between 1 and 99. Example: with a "
+                                + "100k-token trigger and 80, the background summary starts around 80k estimated tokens.")
+        int speculativeStartPercent) {
+    public CompactionConfiguration {
+        if (!"off".equals(speculativePolicy) && !"concurrent".equals(speculativePolicy)) {
+            throw new IllegalArgumentException("speculativePolicy must be off or concurrent");
+        }
+        if (speculativeStartPercent < 1 || speculativeStartPercent > 99) {
+            throw new IllegalArgumentException("speculativeStartPercent must be between 1 and 99");
+        }
+    }
+}

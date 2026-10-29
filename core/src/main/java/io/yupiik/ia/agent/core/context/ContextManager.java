@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Logger;
 
 /**
  * Triggers for context pruning/compaction and thin facades over the
@@ -28,6 +29,8 @@ import java.util.function.BooleanSupplier;
  * and honest-result reporting so compaction never fails silently.
  */
 public class ContextManager {
+    private static final Logger LOGGER = Logger.getLogger(ContextManager.class.getName());
+
     private final CodingAgentConfiguration configuration;
     private final UsageTracker usageTracker;
     private final CompactionCoordinator coordinator;
@@ -102,10 +105,12 @@ public class ContextManager {
     }
 
     public CompactionResult prune(final List<Message> messages) {
+        resetSpeculation();
         return coordinator.prune(messages);
     }
 
     public CompactionResult compact(final List<Message> messages) {
+        resetSpeculation();
         return coordinator.compact(messages, false, null, 0);
     }
 
@@ -114,6 +119,7 @@ public class ContextManager {
      * budget, using the tighter (halved tail) floors so short histories compact too.
      */
     public CompactionResult compact(final List<Message> messages, final boolean force) {
+        resetSpeculation();
         return coordinator.compact(messages, force, null, 0);
     }
 
@@ -122,6 +128,7 @@ public class ContextManager {
      * optional {@code keepLastOverride} raises the verbatim tail floor.
      */
     public CompactionResult compact(final List<Message> messages, final String focus, final int keepLastOverride) {
+        resetSpeculation();
         return coordinator.compact(messages, false, focus, keepLastOverride);
     }
 
@@ -132,6 +139,7 @@ public class ContextManager {
      */
     public CompactionResult compact(
             final List<Message> messages, final boolean force, final String focus, final int keepLastOverride) {
+        resetSpeculation();
         return coordinator.compact(messages, force, focus, keepLastOverride);
     }
 
@@ -141,6 +149,7 @@ public class ContextManager {
             final String focus,
             final int keepLastOverride,
             final BooleanSupplier cancelled) {
+        resetSpeculation();
         return coordinator.compact(messages, force, focus, keepLastOverride, cancelled, ChatSettings.EMPTY);
     }
 
@@ -152,6 +161,7 @@ public class ContextManager {
             final int keepLastOverride,
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
+        resetSpeculation();
         return coordinator.compact(messages, force, focus, keepLastOverride, cancelled, settings);
     }
 
@@ -162,16 +172,138 @@ public class ContextManager {
     }
 
     public CompactionResult compactForOverflow(final List<Message> messages) {
+        resetSpeculation();
         return coordinator.compact(messages, true, null, 0, Cancellations.NEVER, ChatSettings.EMPTY);
     }
 
     public CompactionResult compactForOverflow(final List<Message> messages, final BooleanSupplier cancelled) {
+        resetSpeculation();
         return coordinator.compact(messages, true, null, 0, cancelled, ChatSettings.EMPTY);
     }
 
     /** {@link #compactForOverflow(List, BooleanSupplier)} for the session's model selection. */
     public CompactionResult compactForOverflow(
             final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
+        resetSpeculation();
         return coordinator.compact(messages, true, null, 0, cancelled, settings);
+    }
+
+    private volatile SpeculativeCompactionManager speculation;
+
+    public boolean speculationEnabled() {
+        return configuration != null
+                && configuration.compaction() != null
+                && configuration.compaction().enabled()
+                && "concurrent".equals(configuration.compaction().speculativePolicy());
+    }
+
+    public int speculativeWatermarkTokens() {
+        final var trigger = compactionTriggerTokens();
+        return trigger == Integer.MAX_VALUE
+                ? trigger
+                : (int) ((long) trigger * configuration.compaction().speculativeStartPercent() / 100);
+    }
+
+    /** Best-effort capture; this path is a strict no-op while disabled. */
+    public boolean maybeLaunchSpeculation(
+            final List<Message> messages,
+            final int extraToolTokens,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings) {
+        if (!speculationEnabled() || cancelled.getAsBoolean() || usageTracker == null || coordinator == null) {
+            return false;
+        }
+        try {
+            final var effective = usageTracker.effectiveContext(messages, extraToolTokens);
+            if (effective < speculativeWatermarkTokens() || effective >= compactionTriggerTokens()) {
+                return false;
+            }
+            final var manager = manager();
+            if (!manager.canLaunch()) {
+                return false;
+            }
+            final var source = coordinator.prepareSpeculation(messages, settings, extraToolTokens);
+            if (source.isEmpty() || coordinator.hookVetoed() || cancelled.getAsBoolean()) {
+                return false;
+            }
+            final var launched = manager.launch(source.get(), cancelled);
+            if (launched) {
+                LOGGER.fine(() -> "Speculative compaction launched, estimated tokens="
+                        + source.get().capturedTokens());
+            }
+            return launched;
+        } catch (final RuntimeException e) {
+            LOGGER.log(
+                    java.util.logging.Level.FINE,
+                    "Speculative compaction preparation failed; continuing foreground",
+                    e);
+            return false;
+        }
+    }
+
+    /** Null means use synchronous compaction; NONE means cancellation/hook veto, without a bypass retry. */
+    public CompactionResult adoptSpeculation(
+            final List<Message> messages,
+            final int extraToolTokens,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings) {
+        final var manager = speculation;
+        if (manager == null || manager.source() == null) {
+            return null;
+        }
+        if (cancelled.getAsBoolean()) {
+            manager.invalidate();
+            return new CompactionResult(messages, CompactionResult.Mode.NONE, "cancelled");
+        }
+        final var source = manager.source();
+        if (!speculationEnabled() || !coordinator.compatibleSpeculation(source, messages, settings)) {
+            manager.invalidate();
+            return null;
+        }
+        final var started = System.nanoTime();
+        final var candidate = manager.take(source, cancelled).orElse(null);
+        LOGGER.fine(() -> "Speculative compaction wait ms="
+                + java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+        if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) {
+            return new CompactionResult(messages, CompactionResult.Mode.NONE, "cancelled");
+        }
+        if (candidate == null || !coordinator.compatibleSpeculation(source, messages, settings)) {
+            return null;
+        }
+        if (coordinator.hookVetoed()) {
+            return new CompactionResult(messages, CompactionResult.Mode.NONE, "compaction vetoed by hook");
+        }
+        final var adoption = coordinator.validateAndAssemble(
+                candidate, messages, coordinator.eligibleCutoff(messages), extraToolTokens);
+        if (!adoption.adopted()) {
+            LOGGER.fine(() -> "Speculative candidate rejected: " + adoption.rejection());
+            return null;
+        }
+        LOGGER.fine(() -> "Speculative compaction adopted, calls=" + candidate.summarizerCalls() + ", generation ms="
+                + candidate.elapsedMillis());
+        return adoption.result();
+    }
+
+    /** Invalidate before a history rewrite or another compaction operation. */
+    public void resetSpeculation() {
+        final var manager = speculation;
+        if (manager != null) {
+            manager.newGeneration();
+        }
+    }
+
+    /** Ends the run without treating cancelled client futures as proof that inference stopped. */
+    public void shutdownSpeculation() {
+        final var manager = speculation;
+        if (manager != null) {
+            manager.close();
+        }
+    }
+
+    private synchronized SpeculativeCompactionManager manager() {
+        if (speculation == null) {
+            speculation = new SpeculativeCompactionManager(coordinator::generateSpeculativeSummary);
+        }
+        return speculation;
     }
 }

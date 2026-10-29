@@ -20,6 +20,7 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
+import io.yupiik.ia.agent.core.context.SpeculativeCompaction.Candidate;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
@@ -236,6 +237,181 @@ public class CompactionCoordinator {
         return compact(messages, force, focus, keepLastOverride, Cancellations.NEVER, ChatSettings.EMPTY);
     }
 
+    /** Captures immutable source and resolved summarizer inputs on the foreground thread. */
+    public java.util.Optional<SpeculativeCompaction.Prepared> prepareSpeculation(
+            final List<Message> messages, final ChatSettings settings, final int extraToolTokens) {
+        final var cutoff = eligibleCutoff(messages);
+        final var from = leadingSystemMessages(messages).size();
+        if (cutoff <= from) {
+            return java.util.Optional.empty();
+        }
+        try {
+            final var prefix = SpeculativeCompaction.snapshot(messages.subList(0, cutoff));
+            final var routed = settings == null ? ChatSettings.EMPTY : settings;
+            final var model = compactModelReference(routed);
+            final var template = summaryRequest(model, configSystemPrompt(), "", routed);
+            final var chunkCap = effectiveChunkCap(model);
+            return java.util.Optional.of(new SpeculativeCompaction.Prepared(
+                    from,
+                    prefix,
+                    previousSummary(prefix),
+                    routed,
+                    template,
+                    chunkCap,
+                    effectiveDigestCap(model),
+                    Math.max(1, summarizerMinChunkChars()),
+                    usageTracker == null ? 0 : usageTracker.estimateContext(messages, extraToolTokens)));
+        } catch (final IllegalArgumentException e) {
+            LOGGER.fine("Skipping speculative compaction: unsupported snapshot payload");
+            return java.util.Optional.empty();
+        }
+    }
+
+    /** Re-evaluates normal retention, moving backwards rather than splitting a tool round. */
+    public int eligibleCutoff(final List<Message> messages) {
+        final var from = leadingSystemMessages(messages).size();
+        var boundary = splitBoundary(
+                messages, from, Math.max(2, configuration.pruning().keepRecent()), false);
+        boundary = Math.min(boundary, messages.size());
+        while (boundary > from && !safeBoundary(messages, boundary)) {
+            boundary--;
+        }
+        return boundary;
+    }
+
+    private static boolean safeBoundary(final List<Message> messages, final int cutoff) {
+        if (cutoff < messages.size() && "tool".equals(messages.get(cutoff).role())) {
+            return false;
+        }
+        final var outstanding = new java.util.HashSet<String>();
+        for (var i = 0; i < cutoff; i++) {
+            final var message = messages.get(i);
+            if (message.toolCalls() != null) {
+                for (final var call : message.toolCalls()) {
+                    if (call == null || call.id() == null || !outstanding.add(call.id())) {
+                        return false;
+                    }
+                }
+            }
+            if ("tool".equals(message.role()) && !outstanding.remove(message.toolCallId())) {
+                return false;
+            }
+        }
+        return outstanding.isEmpty();
+    }
+
+    /** Runs the blockable hook only on the foreground thread. */
+    public boolean hookVetoed() {
+        if (emitter == null) {
+            return false;
+        }
+        final var hook = new io.yupiik.ia.agent.core.events.HookResult();
+        emitter.emit(new io.yupiik.ia.agent.core.events.CompactionStartingEvent(
+                new io.yupiik.ia.agent.core.events.EventContext(
+                        sessionId, null, null, configuration.resolveProjectDir().toString(), null, null, null, null),
+                hook));
+        return hook.forbidden();
+    }
+
+    /** Pure computation with auxiliary accounting, but no foreground events or truncation fallback. */
+    public SpeculativeCompaction.Candidate generateSpeculativeSummary(
+            final SpeculativeCompaction.Prepared source, final BooleanSupplier cancelled) {
+        final var started = System.nanoTime();
+        var chunkCap = source.chunkCap();
+        var calls = 0;
+        while (!cancelled.getAsBoolean()) {
+            final var chunks =
+                    chunkCompact(source.prefix().subList(source.leadingSystemCount(), source.cutoff()), chunkCap);
+            final var outcome = summarizeReducing(
+                    "speculative compaction",
+                    configSystemPrompt(),
+                    chunks,
+                    source.priorSummary(),
+                    null,
+                    chunkCap,
+                    cancelled,
+                    source.settings(),
+                    true,
+                    source.requestTemplate(),
+                    source.digestCap());
+            calls += outcome.calls();
+            if (cancelled.getAsBoolean()) {
+                return null;
+            }
+            if (!outcome.summary().isBlank()) {
+                return new Candidate(
+                        source,
+                        outcome.summary(),
+                        calls,
+                        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+            }
+            if (!outcome.sizeError() || chunkCap <= source.minimumChunkCap()) {
+                return null;
+            }
+            chunkCap = Math.max(source.minimumChunkCap(), chunkCap / 2);
+        }
+        return null;
+    }
+
+    /** Prefix and routing validation before waiting and again immediately before installation. */
+    public boolean compatibleSpeculation(
+            final SpeculativeCompaction.Prepared source, final List<Message> current, final ChatSettings settings) {
+        if (!source.settings().equals(settings == null ? ChatSettings.EMPTY : settings)
+                || current.size() < source.cutoff()
+                || eligibleCutoff(current) < source.cutoff()
+                || !safeBoundary(current, source.cutoff())) {
+            return false;
+        }
+        try {
+            return source.prefix().equals(SpeculativeCompaction.snapshot(current.subList(0, source.cutoff())));
+        } catch (final IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /** Assembles against the current tail; oversized candidates are rejected, never destructively fitted. */
+    public SpeculativeCompaction.Adoption validateAndAssemble(
+            final SpeculativeCompaction.Candidate candidate,
+            final List<Message> current,
+            final int currentEligibleCutoff,
+            final int extraToolTokens) {
+        final var source = candidate.source();
+        SpeculativeCompaction.Rejection rejection = null;
+        if (currentEligibleCutoff < source.cutoff()) {
+            rejection = SpeculativeCompaction.Rejection.RETENTION_SHRUNK;
+        } else if (!compatibleSpeculation(source, current, source.settings())) {
+            rejection = SpeculativeCompaction.Rejection.SOURCE_CHANGED;
+        } else if (candidate.summary() == null || candidate.summary().isBlank()) {
+            rejection = SpeculativeCompaction.Rejection.EMPTY_SUMMARY;
+        }
+        if (rejection != null) {
+            return new SpeculativeCompaction.Adoption(false, null, rejection);
+        }
+        final var out = assembleSummary(current, source.leadingSystemCount(), source.cutoff(), candidate.summary());
+        if (usageTracker == null
+                || (long) usageTracker.estimateContext(out) + extraToolTokens > usageTracker.usableWindow()) {
+            return new SpeculativeCompaction.Adoption(false, null, SpeculativeCompaction.Rejection.TOO_LARGE);
+        }
+        if (usageTracker.estimateContext(out) >= usageTracker.estimateContext(current)) {
+            return new SpeculativeCompaction.Adoption(false, null, SpeculativeCompaction.Rejection.NO_REDUCTION);
+        }
+        return new SpeculativeCompaction.Adoption(true, new CompactionResult(List.copyOf(out), Mode.SUMMARY, ""), null);
+    }
+
+    private static List<Message> assembleSummary(
+            final List<Message> messages, final int from, final int boundary, final String summary) {
+        final var out = new ArrayList<Message>();
+        out.addAll(messages.subList(0, from));
+        out.add(Message.user(COMPACTED_MARKER + "\n" + summary + "\n</compacted-context>\n\n" + DIGEST_GUIDANCE));
+        out.addAll(subagentBlocks(messages.subList(from, boundary)));
+        out.addAll(messages.subList(boundary, messages.size()));
+        final var lastUser = lastUserMessageIndex(messages);
+        if (lastUser >= 0 && lastUser < boundary && !out.contains(messages.get(lastUser))) {
+            out.add(Message.user(str(messages.get(lastUser).content())));
+        }
+        return out;
+    }
+
     /**
      * @param settings the requesting session's selection (model/provider for the summarizer); null or
      *                 empty means the process default provider and model resolve the compact model
@@ -248,23 +424,8 @@ public class CompactionCoordinator {
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
         Objects.requireNonNull(cancelled, "cancelled");
-        // blockable hook gate: a forbid vetoes the compaction before any real work
-        if (emitter != null) {
-            final var hook = new io.yupiik.ia.agent.core.events.HookResult();
-            emitter.emit(new io.yupiik.ia.agent.core.events.CompactionStartingEvent(
-                    new io.yupiik.ia.agent.core.events.EventContext(
-                            sessionId,
-                            null,
-                            null,
-                            configuration.resolveProjectDir().toString(),
-                            null,
-                            null,
-                            null,
-                            null),
-                    hook));
-            if (hook.forbidden()) {
-                return new CompactionResult(messages, Mode.NONE, "compaction vetoed by hook");
-            }
+        if (hookVetoed()) {
+            return new CompactionResult(messages, Mode.NONE, "compaction vetoed by hook");
         }
         final var p = configuration.pruning();
         final var keepFloor =
@@ -287,7 +448,7 @@ public class CompactionCoordinator {
         while (true) {
             final var chunks = chunkCompact(messages.subList(from, boundary), chunkCap);
             outcome = summarizeReducing(
-                    "compaction", configSystemPrompt(), chunks, prior, focus, chunkCap, cancelled, settings);
+                    "compaction", configSystemPrompt(), chunks, prior, focus, chunkCap, cancelled, settings, false);
             if (!outcome.sizeError()) {
                 break;
             }
@@ -308,19 +469,7 @@ public class CompactionCoordinator {
                     sessionId));
         }
         if (!outcome.summary().isBlank()) {
-            List<Message> out = new ArrayList<>();
-            out.addAll(leadingSystem);
-            out.add(Message.user(
-                    COMPACTED_MARKER + "\n" + outcome.summary() + "\n</compacted-context>\n\n" + DIGEST_GUIDANCE));
-            // high-recall anchoring: delivered <subagent> blocks in the summarized region are kept
-            // verbatim right after the digest so a sub-agent's outcome is never paraphrased away.
-            out.addAll(subagentBlocks(messages.subList(from, boundary)));
-            out.addAll(messages.subList(boundary, messages.size()));
-            final var lastUser = lastUserMessageIndex(messages);
-            if (lastUser >= 0 && lastUser < boundary) {
-                // the current task must survive compaction even when the tail budget did not cover it
-                out.add(Message.user(str(messages.get(lastUser).content())));
-            }
+            List<Message> out = assembleSummary(messages, from, boundary, outcome.summary());
             final var digestIndex = leadingSystem.size();
             out = ensureUnderWindow(out, force, digestIndex);
             if (halvings == 0
@@ -609,15 +758,61 @@ public class CompactionCoordinator {
             final String focus,
             final int chunkCap,
             final BooleanSupplier cancelled,
-            final ChatSettings settings) {
-        final var digestCap = effectiveDigestCap(compactModelReference(settings));
+            final ChatSettings settings,
+            final boolean quiet) {
+        return summarizeReducing(
+                label,
+                systemPrompt,
+                chunks,
+                priorSummary,
+                focus,
+                chunkCap,
+                cancelled,
+                settings,
+                quiet,
+                summaryRequest(compactModelReference(settings), systemPrompt, "", settings),
+                effectiveDigestCap(compactModelReference(settings)));
+    }
+
+    private ChatCompletionRequest summaryRequest(
+            final String model, final String systemPrompt, final String prompt, final ChatSettings settings) {
+        final var routed = settings == null ? ChatSettings.EMPTY : settings;
+        return new ChatCompletionRequest(
+                        model,
+                        List.of(Message.system(systemPrompt), Message.user(prompt)),
+                        null,
+                        null,
+                        false,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null)
+                .withSessionId(sessionId)
+                .withSettings(routed)
+                .withTuning(
+                        providerManager == null ? null : providerManager.resolvedBackgroundTuning(routed, "compact"));
+    }
+
+    private Outcome summarizeReducing(
+            final String label,
+            final String systemPrompt,
+            final List<String> chunks,
+            final String priorSummary,
+            final String focus,
+            final int chunkCap,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings,
+            final boolean quiet,
+            final ChatCompletionRequest template,
+            final int digestCap) {
         final var summary = new StringBuilder();
         var calls = 0;
-        var sizeError = false;
-        warnOnceWhenNoCompactModel();
-        emit(new AgentEvent.Status(
-                "compacting (" + label + ", chunk 1/" + chunks.size() + ")...", sessionId, null, null));
-        final var model = compactModelReference(settings);
+        if (!quiet) {
+            warnOnceWhenNoCompactModel();
+            emit(new AgentEvent.Status(
+                    "compacting (" + label + ", chunk 1/" + chunks.size() + ")...", sessionId, null, null));
+        }
         for (var c = 0; c < chunks.size(); c++) {
             if (cancelled.getAsBoolean()) {
                 return new Outcome("", label + " cancelled", calls, false);
@@ -627,39 +822,35 @@ public class CompactionCoordinator {
             String error = null;
             for (var attempt = 0; attempt < retries(); attempt++) {
                 try {
-                    // no explicit compact model: the request settings alone resolve the route
-                    // (the session's effective provider/model); otherwise the resolved
-                    // $provider/model reference pins the target provider
-                    final var requestModel = model == null || model.isBlank() ? null : model;
-                    final var routedSettings = settings == null ? ChatSettings.EMPTY : settings;
+                    if (cancelled.getAsBoolean()) {
+                        return new Outcome("", label + " cancelled", calls, false);
+                    }
+                    final var request = new ChatCompletionRequest(
+                            template.model(),
+                            List.of(Message.system(systemPrompt), Message.user(prompt)),
+                            template.temperature(),
+                            template.topP(),
+                            false,
+                            null,
+                            template.toolChoice(),
+                            template.maxTokens(),
+                            template.reasoningEffort(),
+                            template.others(),
+                            template.sessionId(),
+                            template.settings());
                     final var res = chatClient.chat(
-                            new ChatCompletionRequest(
-                                            requestModel,
-                                            List.of(Message.system(systemPrompt), Message.user(prompt)),
-                                            null,
-                                            null,
-                                            false,
-                                            null,
-                                            null,
-                                            null,
-                                            null,
-                                            null)
-                                    .withSessionId(sessionId)
-                                    .withSettings(routedSettings)
-                                    .withTuning(
-                                            providerManager == null
-                                                    ? null
-                                                    : providerManager.resolvedBackgroundTuning(
-                                                            routedSettings, "compact")),
-                            // surface provider throttles/backoffs during compaction too:
-                            // transient right-slot feedback, never the leading status
-                            pause -> emit(new AgentEvent.Pause(
-                                    pause.kind() == io.yupiik.ia.agent.core.llm.PauseEvent.Pause.THROTTLE
-                                            ? AgentEvent.Pause.Kind.THROTTLE
-                                            : AgentEvent.Pause.Kind.RETRY,
-                                    "compacting " + label + ": " + pause.message(),
-                                    pause.durationMs(),
-                                    sessionId)),
+                            request,
+                            pause -> {
+                                if (!quiet) {
+                                    emit(new AgentEvent.Pause(
+                                            pause.kind() == io.yupiik.ia.agent.core.llm.PauseEvent.Pause.THROTTLE
+                                                    ? AgentEvent.Pause.Kind.THROTTLE
+                                                    : AgentEvent.Pause.Kind.RETRY,
+                                            "compacting " + label + ": " + pause.message(),
+                                            pause.durationMs(),
+                                            sessionId));
+                                }
+                            },
                             cancelled);
                     calls++;
                     if (usageTracker != null) {
@@ -684,12 +875,23 @@ public class CompactionCoordinator {
                     if (cancelled.getAsBoolean()) {
                         return new Outcome("", label + " cancelled", calls, false);
                     }
-                    emit(new AgentEvent.Pause(
-                            AgentEvent.Pause.Kind.RETRY,
-                            "compacting " + label + ": retrying in ~" + (backoff(attempt) / 1000) + "s...",
-                            backoff(attempt),
-                            sessionId));
-                    sleep(backoff(attempt));
+                    final var delay = backoff(attempt);
+                    if (!quiet) {
+                        emit(new AgentEvent.Pause(
+                                AgentEvent.Pause.Kind.RETRY,
+                                "compacting " + label + ": retrying in ~" + (delay / 1000) + "s...",
+                                delay,
+                                sessionId));
+                    }
+                    if (quiet) {
+                        final var deadline =
+                                System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(delay);
+                        while (!cancelled.getAsBoolean() && System.nanoTime() < deadline) {
+                            sleep(Math.min(50, delay));
+                        }
+                    } else {
+                        sleep(delay);
+                    }
                 }
             }
             if (part == null || part.isBlank()) {
@@ -699,7 +901,7 @@ public class CompactionCoordinator {
                 return new Outcome("", error, calls, false);
             }
             appendBounded(summary, part, digestCap);
-            if (c + 1 < chunks.size()) {
+            if (!quiet && c + 1 < chunks.size()) {
                 emit(new AgentEvent.Status(
                         "compacting (" + label + ", chunk " + (c + 2) + "/" + chunks.size() + ")...",
                         sessionId,

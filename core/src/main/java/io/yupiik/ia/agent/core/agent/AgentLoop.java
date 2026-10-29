@@ -775,6 +775,9 @@ public class AgentLoop {
             return;
         }
         closed = true;
+        if (contextManager != null) {
+            contextManager.shutdownSpeculation();
+        }
         if (emitter != null) {
             final var id = currentSessionId != null ? currentSessionId : this.sessionId;
             emitter.emit(new SessionEndedEvent(
@@ -1141,6 +1144,11 @@ public class AgentLoop {
         } finally {
             pauseListener = null;
             statusReporter.setSink(null);
+            // run exit invalidates speculation: late workers may still finish remotely but their
+            // results are discarded, and the next run starts from a clean speculative state
+            if (contextManager != null) {
+                contextManager.shutdownSpeculation();
+            }
             // End-of-turn memory: best-effort, asynchronous, only when the turn ended where the
             // user sees it - a real (non-empty) reply. Empty completions, hard stops (no progress,
             // plateau, max iterations), interrupts and uncaught failures all leave
@@ -1583,6 +1591,7 @@ public class AgentLoop {
                 if (contextManager.pruneNeeded(messages, toolsTokens)) {
                     appliedKinds.addAll(applyZeroLlmStrategies(messages));
                     if (!appliedKinds.isEmpty()) {
+                        contextManager.resetSpeculation();
                         persistContext(sessionId, messages);
                         usageTracker.clearAnchor();
                         appliedModes.add(CompactionResult.Mode.CLEARED);
@@ -1598,7 +1607,16 @@ public class AgentLoop {
                     }
                 }
                 if (contextManager.compactNeeded(messages, toolsTokens)) {
-                    final var compacted = contextManager.compact(messages, false, null, 0, cancelled, runSettings);
+                    // speculative adoption first: a validated candidate avoids the synchronous
+                    // stall; anything it cannot install falls back to the normal path below
+                    final var adopted = contextManager.adoptSpeculation(
+                            messages,
+                            toolsTokens,
+                            () -> closed || cancelled.getAsBoolean(),
+                            useProfileModel ? runSettings : chatSettings);
+                    final var compacted = adopted != null
+                            ? adopted
+                            : contextManager.compact(messages, false, null, 0, cancelled, runSettings);
                     if (compacted.changed()) {
                         messages.clear();
                         messages.addAll(compacted.messages());
@@ -1636,6 +1654,16 @@ public class AgentLoop {
                 }
                 if (!appliedKinds.isEmpty()) {
                     emit(compacted(appliedKinds, bestMode(appliedModes)));
+                }
+                if (compactedThisTurn) {
+                    contextManager.resetSpeculation();
+                    usageTracker.clearAnchor();
+                } else if (contextManager.speculationEnabled()) {
+                    contextManager.maybeLaunchSpeculation(
+                            messages,
+                            toolsTokens,
+                            () -> closed || cancelled.getAsBoolean(),
+                            useProfileModel ? runSettings : chatSettings);
                 }
                 if (compactedThisTurn
                         && !compactionPressureWarningEmitted
