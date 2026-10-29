@@ -433,7 +433,9 @@ class SystemPromptBuilderTest {
         final var builder = builder(cfg, todoResolver(), providerManager(cfg));
         final var prompt = builder.build();
         assertTrue(prompt.contains("<todo-guidance>"), "guidance appendix should be present by default");
-        assertTrue(prompt.contains("Do not batch up several todos"), "default family should map to the OpenAI block");
+        assertTrue(
+                prompt.contains("Combine todo updates with substantive tool calls"),
+                "default family should map to the OpenAI block");
     }
 
     @Test
@@ -468,13 +470,13 @@ class SystemPromptBuilderTest {
                 prompt.contains("Task Management (plan mode)"),
                 "plan mode must inject the plan variant of the guidance: " + prompt);
         assertFalse(
-                prompt.contains("Do not batch up several todos"),
+                prompt.contains("Combine todo updates with substantive tool calls"),
                 "plan mode must not inject the build completion wording: " + prompt);
 
         permissions.setMode(AgentMode.BUILD);
         final var buildPrompt = builder.build();
         assertTrue(
-                buildPrompt.contains("Do not batch up several todos"),
+                buildPrompt.contains("Combine todo updates with substantive tool calls"),
                 "build mode must inject the completion wording: " + buildPrompt);
         assertFalse(
                 buildPrompt.contains("Task Management (plan mode)"),
@@ -496,7 +498,8 @@ class SystemPromptBuilderTest {
         assertTrue(prompt.contains("<todo-guidance>"));
         assertTrue(prompt.contains("custom guidance text"));
         assertFalse(
-                prompt.contains("Do not batch up several todos"), "verbatim override must replace the canned block");
+                prompt.contains("Combine todo updates with substantive tool calls"),
+                "verbatim override must replace the canned block");
     }
 
     @Test
@@ -529,7 +532,7 @@ class SystemPromptBuilderTest {
         assertTrue(prompt.contains("<todo-guidance>"));
         assertTrue(prompt.contains("never stop with an open todo"));
         assertFalse(
-                prompt.contains("Do not batch up several todos"),
+                prompt.contains("Combine todo updates with substantive tool calls"),
                 "the global guidance replaces the family block of a provider that configures none");
     }
 

@@ -30,7 +30,8 @@ class TodoPromptResolverTest {
     @Test
     void autoDefaultsToOpenAiBlockWhenFamilyUnknown() {
         final var resolved = resolver.resolve("auto", "https://mystery.example/v1");
-        assertTrue(resolved.contains("Do not batch up several todos"));
+        assertTrue(resolved.contains("skip a new list for a straightforward single-step task"));
+        assertTrue(resolved.contains("Combine todo updates with substantive tool calls"));
         assertFalse(resolved.contains("VERY frequently"));
     }
 
@@ -73,13 +74,13 @@ class TodoPromptResolverTest {
     @Test
     void nullModeDefaultsToAuto() {
         final var resolved = resolver.resolve(null, "https://mystery.example/v1");
-        assertTrue(resolved.contains("Do not batch up several todos"));
+        assertTrue(resolved.contains("skip a new list for a straightforward single-step task"));
     }
 
     @Test
     void autoWithNullBaseUrlFallsBackToOpenAiBlock() {
         final var resolved = resolver.resolve("auto", null);
-        assertTrue(resolved.contains("Do not batch up several todos"));
+        assertTrue(resolved.contains("skip a new list for a straightforward single-step task"));
     }
 
     @Test
@@ -164,7 +165,7 @@ class TodoPromptResolverTest {
     @Test
     void twoArgResolveDefaultsToBuildModeVariant() {
         final var openai = resolver.resolve("auto", "https://mystery.example/v1");
-        assertTrue(openai.contains("Do not batch up several todos"));
+        assertTrue(openai.contains("Combine todo updates with substantive tool calls"));
         assertTrue(openai.contains("in parallel"), "openai build block must allow parallel in_progress: " + openai);
         assertEquals(
                 resolver.resolve("auto", "https://mystery.example/v1"),

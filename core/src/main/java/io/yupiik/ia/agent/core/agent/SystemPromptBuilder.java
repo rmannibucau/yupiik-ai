@@ -176,7 +176,7 @@ public class SystemPromptBuilder {
         sb.append("- Prefer the provided tools over printing code for the user to apply.\n");
         sb.append("- Read files before editing them; keep edits minimal and focused.\n");
         sb.append(
-                "- Track multi-step work with write_todo; completed/cancelled items stay in the list until the user asks to clear it.\n");
+                "- Track substantial multi-step work with write_todo; skip a new list for a straightforward single-step task. Completed/cancelled items stay in the list until the user asks to clear it.\n");
         sb.append(
                 "- The conversation carries <session-state> blocks with the current todo list, mode, date and memory; the most recent one is authoritative. Read it at the start of every turn: pending items are the task queue - continue with them unless the user redirects. Keep the list accurate with write_todo as work progresses.\n");
         sb.append(

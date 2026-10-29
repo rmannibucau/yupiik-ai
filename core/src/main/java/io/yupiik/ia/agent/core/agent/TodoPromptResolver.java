@@ -55,7 +55,7 @@ public class TodoPromptResolver {
 
     private static final String OPENAI = """
             Task Management:
-            Use write_todo to manage and plan tasks: break larger tasks into concrete steps and mark each completed as soon as it is done (including verification), cancelled when unnecessary. Do not batch up several todos. You may have several in_progress at once when you work in parallel. Completed/cancelled stay in the list as progress history. Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
+            Use write_todo for substantial multi-step work; skip a new list for a straightforward single-step task. Keep statuses accurate and mark items completed only when done, including verification, or cancelled when unnecessary. Combine todo updates with substantive tool calls whenever possible instead of spending a separate round on bookkeeping. You may have several in_progress at once when you work in parallel. Completed/cancelled stay in the list as progress history. Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
 
     private static final String OPENAI_PLAN = """
             Task Management (plan mode):
