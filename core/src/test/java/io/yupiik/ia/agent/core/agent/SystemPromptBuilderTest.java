@@ -587,6 +587,9 @@ class SystemPromptBuilderTest {
         assertTrue(
                 prompt.contains("read .` + `glob **/*.md"),
                 "a worked round-1 batching pattern must be present so the model batches from the start: " + prompt);
+        assertTrue(
+                prompt.contains("targeted content search that returns useful source and test context"),
+                "the tool policy must encourage actionable discovery without skipping necessary reads: " + prompt);
         assertFalse(
                 prompt.contains("batched read-only survey"),
                 "the chaining survey invite must not be advertised (it taught the noisy ls -la && echo form)");

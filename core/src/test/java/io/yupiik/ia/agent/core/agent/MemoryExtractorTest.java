@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
@@ -45,6 +46,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -619,6 +621,29 @@ class MemoryExtractorTest {
         // a below-threshold delta must still be extracted when forced (session close)
         final var messages = new ArrayList<Message>();
         messages.add(Message.user("short"));
+        // Drain a below-threshold background attempt before close: it must leave the fact pending.
+        try (final var executor = Executors.newSingleThreadExecutor()) {
+            final var gated = new MemoryExtractor(
+                    chat,
+                    gatedConfig,
+                    null,
+                    store,
+                    mapper,
+                    executor,
+                    null,
+                    Clock.systemUTC(),
+                    null,
+                    "s-short-async",
+                    null,
+                    null,
+                    null);
+            gated.asyncExtractNow(messages);
+            executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            assertTrue(store.readProject().isBlank(), "the background pass must honor the threshold");
+            assertTrue(gated.forceExtractNow(messages), "the skipped delta must remain eligible at close");
+            assertTrue(store.readProject().contains("short preference"));
+            assertFalse(gated.forceExtractNow(messages));
+        }
         final var ran = extractor.forceExtractNow(messages, ChatSettings.EMPTY);
         assertTrue(ran, "the forced pass must run on a non-empty delta");
         assertTrue(store.readProject().contains("short preference"), "the forced pass must save the fact");
@@ -666,9 +691,223 @@ class MemoryExtractorTest {
         Thread.sleep(300); // give the async task time to run
         assertEquals(1, calls.get(), "the async pass must run immediately (no debounce)");
         // a second hook on the same messages is a watermark no-op: the delta was already extracted
-        extractor.asyncExtractNow(List.of(Message.user("two")), ChatSettings.EMPTY);
+        extractor.asyncExtractNow(List.of(Message.user("one")), ChatSettings.EMPTY);
         Thread.sleep(300);
         assertEquals(1, calls.get(), "the watermark must dedup the already-extracted delta");
+    }
+
+    @Test
+    void queuedExtractionUsesSnapshotAndLeavesLaterMessagesPending() throws Exception {
+        final var config = config(home);
+        final var requests = new ArrayList<ChatCompletionRequest>();
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema) {
+                requests.add(request);
+                return new StructuredResult(
+                        new ChatResult(Message.assistant("{\"facts\":[]}", null), new Usage(1, 1, 2)), true);
+            }
+        };
+        final var release = new CountDownLatch(1);
+        try (final var executor = Executors.newSingleThreadExecutor()) {
+            executor.submit(() -> {
+                release.await();
+                return null;
+            });
+            final var extractor = new MemoryExtractor(
+                    chat,
+                    config,
+                    null,
+                    new MemoryStore(config),
+                    mapper,
+                    executor,
+                    null,
+                    Clock.systemUTC(),
+                    null,
+                    "snapshot",
+                    null,
+                    null,
+                    null);
+            final var messages = new ArrayList<>(List.of(Message.user("prefer tabs")));
+            try {
+                extractor.asyncExtractNow(messages);
+                messages.add(Message.user("prefer small commits"));
+            } finally {
+                release.countDown();
+            }
+            executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            assertEquals(1, requests.size());
+            assertFalse(String.valueOf(requests.getFirst().messages().get(1).content())
+                    .contains("small commits"));
+            assertTrue(extractor.forceExtractNow(messages));
+            assertEquals(2, requests.size());
+            final var excerpt =
+                    String.valueOf(requests.getLast().messages().get(1).content());
+            assertTrue(excerpt.contains("small commits"));
+            assertFalse(excerpt.contains("prefer tabs"));
+        }
+    }
+
+    @Test
+    void forcedExtractionWaitsForBackgroundPassInsteadOfDuplicatingIt() throws Exception {
+        final var config = config(home);
+        final var entered = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        final var calls = new AtomicInteger();
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
+                    throws InterruptedException {
+                calls.incrementAndGet();
+                entered.countDown();
+                assertTrue(release.await(5, TimeUnit.SECONDS));
+                return new StructuredResult(
+                        new ChatResult(Message.assistant("{\"facts\":[]}", null), new Usage(1, 1, 2)), true);
+            }
+        };
+        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var extractor = new MemoryExtractor(
+                    chat,
+                    config,
+                    null,
+                    new MemoryStore(config),
+                    mapper,
+                    executor,
+                    null,
+                    Clock.systemUTC(),
+                    null,
+                    "overlap",
+                    null,
+                    null,
+                    null);
+            final var messages = List.of(Message.user("prefer tabs"));
+            extractor.asyncExtractNow(messages);
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                final var forced = executor.submit(() -> extractor.forceExtractNow(messages));
+                assertThrows(TimeoutException.class, () -> forced.get(100, TimeUnit.MILLISECONDS));
+                release.countDown();
+                assertFalse(forced.get(5, TimeUnit.SECONDS));
+                assertEquals(1, calls.get(), "overlapping close must reuse the completed background extraction");
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    void newerForcedPassCoversOlderQueuedSnapshot() throws Exception {
+        final var config = config(home);
+        final var calls = new AtomicInteger();
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema) {
+                calls.incrementAndGet();
+                return new StructuredResult(
+                        new ChatResult(Message.assistant("{\"facts\":[]}", null), new Usage(1, 1, 2)), true);
+            }
+        };
+        final var release = new CountDownLatch(1);
+        try (final var executor = Executors.newSingleThreadExecutor()) {
+            executor.submit(() -> {
+                release.await();
+                return null;
+            });
+            final var extractor = new MemoryExtractor(
+                    chat,
+                    config,
+                    null,
+                    new MemoryStore(config),
+                    mapper,
+                    executor,
+                    null,
+                    Clock.systemUTC(),
+                    null,
+                    "stale",
+                    null,
+                    null,
+                    null);
+            final var first = Message.user("prefer tabs");
+            try {
+                extractor.asyncExtractNow(List.of(first));
+                assertTrue(extractor.forceExtractNow(List.of(first, Message.user("prefer small commits"))));
+            } finally {
+                release.countDown();
+            }
+            executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            assertEquals(1, calls.get(), "an older queued prefix must not repeat a successful extraction");
+        }
+    }
+
+    @Test
+    void failedExtractionRemainsRetryable() throws Exception {
+        final var config = config(home);
+        final var calls = new AtomicInteger();
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema) {
+                if (calls.incrementAndGet() == 1) {
+                    throw new IllegalStateException("temporary failure");
+                }
+                return new StructuredResult(
+                        new ChatResult(Message.assistant("{\"facts\":[]}", null), new Usage(1, 1, 2)), true);
+            }
+        };
+        final var extractor = new MemoryExtractor(
+                chat,
+                config,
+                null,
+                new MemoryStore(config),
+                mapper,
+                EXECUTOR,
+                null,
+                Clock.systemUTC(),
+                null,
+                "retry",
+                null,
+                null,
+                null);
+        final var messages = List.of(Message.user("prefer tabs"));
+        assertFalse(extractor.forceExtractNow(messages));
+        assertTrue(extractor.forceExtractNow(messages));
+        assertFalse(extractor.forceExtractNow(messages));
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void replacedHistoryOfSameSizeIsNotSkipped() throws Exception {
+        final var config = config(home);
+        final var calls = new AtomicInteger();
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema) {
+                calls.incrementAndGet();
+                return new StructuredResult(
+                        new ChatResult(Message.assistant("{\"facts\":[]}", null), new Usage(1, 1, 2)), true);
+            }
+        };
+        final var extractor = new MemoryExtractor(
+                chat,
+                config,
+                null,
+                new MemoryStore(config),
+                mapper,
+                EXECUTOR,
+                null,
+                Clock.systemUTC(),
+                null,
+                "replacement",
+                null,
+                null,
+                null);
+        assertTrue(extractor.forceExtractNow(List.of(Message.user("prefer tabs"))));
+        assertTrue(extractor.forceExtractNow(List.of(Message.user("prefer spaces"))));
+        assertEquals(2, calls.get());
     }
 
     @Test

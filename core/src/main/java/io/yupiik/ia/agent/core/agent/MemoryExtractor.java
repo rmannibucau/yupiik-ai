@@ -37,7 +37,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -53,10 +53,9 @@ import java.util.regex.Pattern;
  * extracted) user/assistant text accumulated since the last successful
  * extraction. Tool results, tool-call frames, the system prompt, compaction/
  * prune digests and the volatile {@code <session-state>} tail are excluded
- * from the excerpt: they carry no durable signal. Because the extraction
- * happens while the session is already idle, nothing is left to do at close:
- * {@code forceExtractNow()} (session close) is then a watermark no-op, so a
- * clean exit never blocks on the memory call.</p>
+ * from the excerpt: they carry no durable signal. A close-time forced pass
+ * waits for an active extraction and only processes the remaining delta,
+ * including short text deferred by the asynchronous threshold.</p>
  *
  * <p>Mined facts are written directly to the durable store
  * ({@link MemoryStore#append}/{@link MemoryStore#appendText}) - live and crash-safe.
@@ -66,7 +65,7 @@ import java.util.regex.Pattern;
  * <em>next</em> session (or a resume) which rebuilds the snapshot. The fact write
  * is invisible to the current prompt, so it never invalidates the provider cache.</p>
  *
- * <p>The watermark is an in-memory message-count: side-effect free on crash
+ * <p>The watermark is an in-memory conversation snapshot: side-effect free on crash
  * (nothing to recover - a killed session simply never ran its pass), and
  * re-feeding already extracted messages on resume is harmless thanks to the
  * fuzzy deduplication in {@link MemoryStore}. It guarantees the pending delta
@@ -158,8 +157,10 @@ public class MemoryExtractor {
     private final MemoryCompactor memoryCompactor;
     private final MemoryProductionPolicy productionPolicy;
     private volatile io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
-    /** Number of messages already extracted (in-memory watermark). */
-    private final AtomicLong watermark = new AtomicLong();
+    /** Serializes extraction and protects the successful input snapshot (in-memory watermark). */
+    private final ReentrantLock extractionLock = new ReentrantLock();
+
+    private List<Message> extractedMessages = List.of();
 
     public MemoryExtractor(
             final ChatClient chatClient,
@@ -209,10 +210,9 @@ public class MemoryExtractor {
     /**
      * End-of-turn hook: fires immediately - no debounce - and best-effort, asynchronously, on
      * the background executor. It runs while the app sits idle waiting for the next user input,
-     * so the memory LLM latency is invisible; the watermark guarantees the pending delta is
-     * extracted at most once until new messages appear, which is what makes the close-time
-     * forced pass a no-op. The {@code extractMinChars} threshold and the meaningful-delta gate
-     * are applied on the executor task, keeping the idle-hook itself a near-free call.
+     * with a stable copy of the conversation. The successful-input watermark avoids duplicate
+     * calls when hooks overlap with forced extraction. The {@code extractMinChars} threshold
+     * and meaningful-delta gate are applied on the executor task.
      */
     public void asyncExtractNow(final List<Message> messages) {
         asyncExtractNow(messages, ChatSettings.EMPTY, true);
@@ -236,15 +236,10 @@ public class MemoryExtractor {
             return;
         }
         final var effective = settings == null ? ChatSettings.EMPTY : settings;
+        final var snapshot = List.copyOf(messages);
         executor.execute(() -> {
             try {
-                // a delta made only of tool frames/digests is a terminal skip: those messages
-                // will never become worthy, so the watermark advances and no call is ever made
-                if (!hasMeaningfulDelta(messages)) {
-                    watermark.set(messages.size());
-                    return;
-                }
-                doExtract(messages, effective, false);
+                doExtractNow(snapshot, effective, false);
             } catch (final RuntimeException e) {
                 if (LOGGER.isLoggable(Level.FINER)) {
                     LOGGER.log(Level.FINER, "Memory extraction failed", e);
@@ -274,7 +269,7 @@ public class MemoryExtractor {
 
     public boolean forceExtractNow(final List<Message> messages, final ChatSettings settings) {
         try {
-            return doExtractNow(messages, settings == null ? ChatSettings.EMPTY : settings, true);
+            return doExtractNow(List.copyOf(messages), settings == null ? ChatSettings.EMPTY : settings, true);
         } catch (final RuntimeException e) {
             LOGGER.log(Level.FINE, "Forced memory extraction failed", e);
             return false;
@@ -287,11 +282,16 @@ public class MemoryExtractor {
      * (a short session must not lose its facts when it closes).
      */
     private boolean doExtractNow(final List<Message> messages, final ChatSettings settings, final boolean forced) {
-        if (!enabled() || !hasMeaningfulDelta(messages)) {
-            return false;
+        extractionLock.lock();
+        try {
+            if (!enabled() || !hasMeaningfulDelta(messages)) {
+                return false;
+            }
+            doExtract(messages, settings, forced);
+            return true;
+        } finally {
+            extractionLock.unlock();
         }
-        doExtract(messages, settings, forced);
-        return true;
     }
 
     private boolean enabled() {
@@ -321,9 +321,7 @@ public class MemoryExtractor {
     private void doExtract(final List<Message> messages, final ChatSettings settings, final boolean forced) {
         final var delta = delta(messages);
         if (!forced && deltaChars(delta) < configuration.memory().extractMinChars()) {
-            // below the threshold: nothing worth a call; the forced path still runs on any
-            // meaningful delta (a short session must not lose its facts to the JVM exit)
-            watermark.set(messages.size());
+            // Keep short deltas pending for the next eligible turn or forced close-time pass.
             return;
         }
         final var excerpt = buildExcerpt(delta);
@@ -404,7 +402,7 @@ public class MemoryExtractor {
                     }
                 }
                 resetFailures();
-                watermark.set(messages.size());
+                extractedMessages = messages;
                 return;
             }
             // structured output unsupported or rejected: fall back to a plain compression snippet
@@ -418,7 +416,7 @@ public class MemoryExtractor {
             // genuine structured success at the top of this method, clearing the streak so a real
             // recovery re-arms the notice). Keeping the counter non-zero makes notifyFailure's
             // `failures == 1` gate warn exactly once per consecutive non-structured window.
-            watermark.set(messages.size());
+            extractedMessages = messages;
         } catch (final IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
@@ -454,20 +452,18 @@ public class MemoryExtractor {
     }
 
     /**
-     * The not-yet-extracted messages: everything after the watermark. Pruning
-     * (AgentLoop) may have shrunk the live list below the watermark; the delta
-     * then falls back to the whole available list - re-processing a few already
-     * extracted messages is harmless thanks to memory dedup, and facts added
-     * before the shrink are never lost. When the watermark is exactly at the
-     * end, the delta is empty: nothing new to extract.
+     * The not-yet-extracted suffix of a stable snapshot. Changed history is
+     * reprocessed rather than silently skipped; an older prefix of an already
+     * extracted snapshot is a no-op. Called only while holding extractionLock.
      */
     private List<Message> delta(final List<Message> messages) {
-        final var wm = watermark.get();
-        if (wm == messages.size()) {
-            return messages.subList(messages.size(), messages.size()); // empty
+        final var sharedSize = Math.min(extractedMessages.size(), messages.size());
+        if (!extractedMessages.subList(0, sharedSize).equals(messages.subList(0, sharedSize))) {
+            // Pruned or replaced history: prefer harmless re-processing over losing facts.
+            return messages;
         }
-        final var from = wm > messages.size() ? 0 : (int) wm;
-        return messages.subList(from, messages.size());
+        // An older queued snapshot can run after a newer forced pass; it is already covered.
+        return messages.subList(sharedSize, messages.size());
     }
 
     private static long deltaChars(final List<Message> delta) {

@@ -228,6 +228,9 @@ public class SystemPromptBuilder {
                 + "so N independent read-only calls cost one round-trip. Always batch them where possible - for "
                 + "example start with `read .` + `glob **/*.md` (or any needed reads) together, and only sequence "
                 + "a call that depends on a previous result.\n");
+        sb.append("- When locating a bug, use a targeted content search that returns useful source and test context "
+                + "as well as paths, so you can act on the results without a separate discovery-only round when "
+                + "the evidence is already sufficient. Read more when needed for a safe change.\n");
         // Bookkeeping (todo-list maintenance) is cheap locally but each separate tool-only reply costs an extra
         // model round-trip (a fresh reasoning pass). Fold todo updates into the reply that already issues the
         // substantive tool call for that step, and don't spin a dedicated reply just to maintain the list.
