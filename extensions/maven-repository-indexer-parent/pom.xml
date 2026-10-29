@@ -9,6 +9,6 @@
 
   <subprojects>
     <subproject>maven-repository-knowledge</subproject>
-    <subproject>maven-repository-knowledge-mcp</subproject>
+    <!--subproject>maven-repository-knowledge-mcp</subproject-->
   </subprojects>
 </project>

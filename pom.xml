@@ -128,11 +128,11 @@
         <artifactId>llm-client-anthropic</artifactId>
         <version>${project.version}</version>
       </dependency>
-      <dependency>
+      <!--dependency>
         <groupId>io.yupiik.fusion.mcp</groupId>
         <artifactId>fusion-mcp-server-impl</artifactId>
         <version>1.0.0-SNAPSHOT</version>
-      </dependency>
+      </dependency-->
       <dependency>
         <groupId>io.yupiik.fusion</groupId>
         <artifactId>fusion-testing</artifactId>
