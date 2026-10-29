@@ -52,10 +52,10 @@ public final class ContextCompression {
     private static final Pattern PROTECT_TAG = Pattern.compile("<protect>(.*?)</protect>", Pattern.DOTALL);
     /** Echoed compact ref tags to remove from model output (strip-on-ingest defense). */
     private static final Pattern ECHOED_REF_LINE = Pattern.compile(
-            "(?m)^[ \t]*@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?[ \t]*\\r?\\n");
+            "(?m)^[ \t]*+@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?[ \t]*\\r?\\n");
 
     private static final Pattern ECHOED_REF_INLINE =
-            Pattern.compile("[ \t]*@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?");
+            Pattern.compile("(?<![ \t])[ \t]*+@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?");
 
     /**
      * Trailing multiline echoed seam: a lone fragment line ({@code @3149} or {@code @b} + digits,
@@ -64,7 +64,7 @@ public final class ContextCompression {
      * priority so it compares against the single-line ref form.
      */
     private static final Pattern ECHOED_REF_MULTILINE_TAIL = Pattern.compile(
-            "(?s)(.*\\n)?[ \t]*(@[1-9]\\d*|@b[1-9]\\d*|@blocked)([ \t]+\\[(?:low|medium|high)\\])?[ \t]*\\r?\\n(?:[ \t]*\\r?\\n)*[ \t]*\\r?\\n?@[ \t]*\\r?\\n?\\z");
+            "[ \t]*(@[1-9]\\d*|@b[1-9]\\d*|@blocked)([ \t]+\\[(?:low|medium|high)\\])?[ \t]*\\r?\\n(?:[ \t]*\\r?\\n)*[ \t]*\\r?\\n?@[ \t]*\\r?\\n?\\z");
 
     public enum Status {
         ACTIVE,
@@ -985,15 +985,24 @@ public final class ContextCompression {
      * between the fragment and the closing {@code @} blocks the reconstruction.
      */
     private String withholdMultilineEcho(final String text) {
-        final var matcher = ECHOED_REF_MULTILINE_TAIL.matcher(text);
-        if (!matcher.find()) {
+        final var closing = text.lastIndexOf('@');
+        if (closing < 0) {
+            return text;
+        }
+        final var fragment = text.lastIndexOf('@', closing - 1);
+        if (fragment < 0) {
+            return text;
+        }
+        final var lineStart = text.lastIndexOf('\n', fragment - 1) + 1;
+        final var matcher = ECHOED_REF_MULTILINE_TAIL.matcher(text).region(lineStart, text.length());
+        if (!matcher.matches()) {
             return text;
         }
         // rebuilt as the single-line form; a trailing [priority] is display-only and ignored
-        final var rebuilt = matcher.group(2) + "@";
+        final var rebuilt = matcher.group(1) + "@";
         for (final var ref : renderedRefs) {
             if (rebuilt.equals(ref)) {
-                return text.substring(0, matcher.start(2));
+                return text.substring(0, matcher.start(1));
             }
         }
         return text;
