@@ -18,7 +18,7 @@
     <maven.compiler.release>25</maven.compiler.release>
     <fusion.version>1.2.0</fusion.version>
     <tamboui.version>0.6.0</tamboui.version>
-    <jline.version>3.25.1</jline.version>
+    <jline.version>4.4.8</jline.version>
     <commonmark.version>0.31.0</commonmark.version>
     <junit.version>6.1.3</junit.version>
     <yupiik-tools.version>1.3.0</yupiik-tools.version>
