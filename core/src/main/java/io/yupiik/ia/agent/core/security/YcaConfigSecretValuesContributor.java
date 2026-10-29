@@ -41,6 +41,13 @@ import java.util.logging.Logger;
  * without {@code $inherit} would otherwise shadow the global file in the resolved configuration - so
  * no secret is missed. Every {@code *apiKey*} leaf value and every header value whose name matches
  * {@code yca.secrets.http.headerNames} (token-after-first-space rule) is harvested.
+ *
+ * <p>It also harvests the Codex provider token files ({@code <storageHome>/providers/&lt;provider&gt;/
+ * codex.auth.json}) so the OAuth tokens are redacted on the wire: the JWT matcher only catches
+ * {@code eyJ...} access/id tokens, but the refresh token ({@code rt.1.&lt;base64url&gt;}) - and any
+ * access/id token not starting with {@code eyJ} - would otherwise leak. The token-bearing leaves
+ * (access, refresh, id, {@code openai_api_key} and the Agent Identity Ed25519 private key) are
+ * harvested while non-secret metadata (account id, issuer, client id, timestamps, plan) is skipped.</p>
  */
 @ApplicationScoped
 public class YcaConfigSecretValuesContributor implements SecretValuesContributor {
@@ -71,6 +78,15 @@ public class YcaConfigSecretValuesContributor implements SecretValuesContributor
     private static final List<String> DEFAULT_HTTP_HEADER_NAMES =
             List.of("Authorization", "Proxy-Authorization", "Api-Key", "X-Api-Key", "Cookie");
 
+    /**
+     * Compacted (lower-cased, separators stripped) key names of the token-bearing leaves stored in the
+     * Codex provider {@code codex.auth.json} files. Harvested regardless of shape - these are the
+     * OAuth access/refresh/id tokens, the exchanged API key and the Agent Identity Ed25519 private key,
+     * none of which are reliably caught by the JWT shape matcher.
+     */
+    private static final Set<String> CODEX_TOKEN_KEYS =
+            Set.of("accesstoken", "refreshtoken", "idtoken", "openaiapikey", "agentprivatekey");
+
     @Override
     public Collection<String> values() {
         if (mapper == null || rawConfiguration == null) {
@@ -97,18 +113,68 @@ public class YcaConfigSecretValuesContributor implements SecretValuesContributor
                         out.add(path);
                     }
                 }
-                return out;
+            } else {
+                out.addAll(autoConfigurationFiles());
             }
+        } else {
+            out.addAll(autoConfigurationFiles());
         }
-        // no explicit locations: auto-compute local + global
+        // Codex provider auth files are always harvested, whatever the config-file locations: they
+        // carry the refresh token (and other non-eyJ tokens) that no shape matcher catches.
+        out.addAll(codexAuthFiles());
+        return out;
+    }
+
+    /** Auto-computed {@code configuration.json} files when no explicit ycaConfig locations are set. */
+    private List<Path> autoConfigurationFiles() {
         final var local = Path.of(rawConfiguration.get(WORKING_DIR_KEY).orElse("."))
                 .toAbsolutePath()
                 .normalize()
                 .resolve(".yca")
                 .resolve("configuration.json");
-        out.add(local);
-        out.add(globalConfigurationFile(rawConfiguration));
+        return List.of(local, globalConfigurationFile(rawConfiguration));
+    }
+
+    /** Every {@code <storageHome>/providers/&lt;provider&gt;/codex.auth.json} file present on disk. */
+    private List<Path> codexAuthFiles() {
+        final var providersHome = storageHomePath().resolve("providers");
+        if (!Files.isDirectory(providersHome)) {
+            return List.of();
+        }
+        final var out = new ArrayList<Path>();
+        try (final var dirs = Files.newDirectoryStream(providersHome)) {
+            for (final var dir : dirs) {
+                if (!Files.isDirectory(dir)) {
+                    continue;
+                }
+                final var auth = dir.resolve("codex.auth.json");
+                if (Files.isRegularFile(auth)) {
+                    out.add(auth);
+                }
+            }
+        } catch (final IOException e) {
+            LOGGER.log(Level.FINE, () -> "Cannot scan Codex providers dir " + providersHome + ": " + e.getMessage());
+        }
         return out;
+    }
+
+    /** Resolves the storage home directory (honouring {@code yca.storage.home} / {@code ~} expansion). */
+    private Path storageHomePath() {
+        if (configuration != null) {
+            final var resolved = configuration.resolveStorageHome();
+            if (resolved != null && !resolved.isBlank()) {
+                return Path.of(resolved);
+            }
+        }
+        final var storageHome =
+                rawConfiguration.get(STORAGE_HOME_KEY).orElse("").trim();
+        if (storageHome.isEmpty()) {
+            return Path.of(rawConfiguration.get(USER_HOME_KEY).orElse("."), ".yupiik", "coding-agent");
+        }
+        final var expanded = storageHome.startsWith("~/")
+                ? rawConfiguration.get(USER_HOME_KEY).orElse(".") + storageHome.substring(1)
+                : storageHome;
+        return Path.of(expanded);
     }
 
     private static Path globalConfigurationFile(final Configuration configuration) {
@@ -183,6 +249,8 @@ public class YcaConfigSecretValuesContributor implements SecretValuesContributor
                     .replace(".", "");
             if (headerNames.contains(key.toLowerCase(Locale.ROOT).trim())) {
                 addToken(value); // a known secret header: keep only the credential part
+            } else if (CODEX_TOKEN_KEYS.contains(compact)) {
+                out.add(value); // a Codex auth token (access/refresh/id/api-key/agent private key)
             } else if (compact.contains("apikey")) {
                 out.add(value); // any apikey-named leaf is a secret
             }

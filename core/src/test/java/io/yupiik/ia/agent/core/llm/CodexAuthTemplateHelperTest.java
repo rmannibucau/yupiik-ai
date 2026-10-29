@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -28,6 +29,9 @@ import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.core.security.SecretRedactor;
+import io.yupiik.ia.agent.core.security.SecretRegistry;
+import io.yupiik.ia.agent.core.security.SecretVault;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.codex.CodexOAuthConfig;
 import io.yupiik.llm.client.codex.Ed25519Util;
@@ -40,6 +44,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -80,7 +85,7 @@ class CodexAuthTemplateHelperTest {
                 respond(
                         exchange,
                         200,
-                        "{\"access_token\":\"refreshed\",\"refresh_token\":\"rotated\",\"expires_in\":3600}");
+                        "{\"access_token\":\"refreshed\",\"refresh_token\":\"rotated-token\",\"expires_in\":3600}");
             } else {
                 respond(exchange, 200, "{\"access_token\":\"fresh\"}");
             }
@@ -126,15 +131,23 @@ class CodexAuthTemplateHelperTest {
 
     @Test
     void expiredTokenRefreshesAndPersistsRotation(final JsonMapper mapper) throws Exception {
-        seed(mapper, "p2", new CodexTokenStore("stale", "refresh-tok", "acc", past(), "id"));
-        final var helper = helper(mapper);
+        seed(mapper, "p2", new CodexTokenStore("stale-access", "refresh-tok", "acc", past(), "id"));
+        final var registry = new SecretRegistry(config(), List.of(), new SecretVault(), List.of());
+        final var redactor = new SecretRedactor(registry, null);
+        registry.scan();
+        final var helper = new CodexAuthTemplateHelper(mapper, client, config(), new CodexSecretRegistration(registry));
+        helper.setOAuthConfig(oauthConfig());
         assertEquals("refreshed", render(helper, "{{codexAuth \"p2\"}}"));
         assertEquals(1, refreshCalls.get());
         // the rotated refresh token and the new access token must be persisted
         final CodexTokenStore saved = mapper.fromBytes(
                 CodexTokenStore.class, Files.readAllBytes(storage.resolve("providers/p2/codex.auth.json")));
         assertEquals("refreshed", saved.accessToken());
-        assertEquals("rotated", saved.refreshToken());
+        assertEquals("rotated-token", saved.refreshToken());
+        registry.scan();
+        for (final var value : List.of("stale-access", "refresh-tok", "refreshed", "rotated-token")) {
+            assertFalse(redactor.redact("value=" + value, null).contains(value));
+        }
         // a subsequent render reuses the freshly persisted token (no second refresh)
         assertEquals("refreshed", render(helper, "{{codexAuth \"p2\"}}"));
         assertEquals(1, refreshCalls.get(), "persisted fresh token must not re-refresh");

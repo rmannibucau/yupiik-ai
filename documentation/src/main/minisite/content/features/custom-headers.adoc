@@ -244,7 +244,17 @@ global one in the resolved configuration. Two families are harvested:
   is harvested with the token-after-first-space rule (`Bearer xyz` -> `xyz`).
 
 Set `yca.secrets.ycaConfig.locations` to an explicit list of files to scan instead
-of the auto-computed local + global pair.
+of the auto-computed local + global pair. The codex provider auth files are
+always harvested on top: every token-bearing value of
+`<storageHome>/providers/<provider>/codex.auth.json` (the OAuth access,
+refresh and id tokens, the exchanged `openai_api_key` and the Agent Identity
+Ed25519 private key) is treated as a secret, while non-secret metadata (account
+id, issuer, client id, timestamps) is skipped. This matters because the JWT
+shape matcher only catches `eyJ...` tokens, but the refresh token (`rt.1.`)
+and access/id tokens not starting with `eyJ` may not be detected by that matcher.
+The registry harvests files at startup and registers credentials obtained by the application's Codex login, enrollment and refresh flows at runtime.
+Previously registered values remain protected after rotation, including across subsequent scans.
+Changes made externally to an auth file are picked up on the next scan or when the application reads that file from disk; an already cached session is not automatically reloaded.
 
 ## Cloud provider credential files
 

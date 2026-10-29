@@ -54,6 +54,8 @@ public class SecretRegistry {
     /** Exact harvested values, longest first (so the most specific substring wins). */
     private volatile List<String> harvestedValues = List.of();
 
+    private final java.util.Set<String> runtimeValues = new LinkedHashSet<>();
+
     private volatile List<Pattern> customPatterns = List.of();
     private volatile List<Pattern> excludes = List.of();
     /** Guard so the harvest runs once (on Start, or lazily on first use when Start did not fire). */
@@ -90,7 +92,8 @@ public class SecretRegistry {
     }
 
     public synchronized void scan() {
-        final var base = new LinkedHashSet<String>();
+        final var base = new LinkedHashSet<String>(harvestedValues);
+        base.addAll(runtimeValues);
         for (final var contributor : contributors) {
             try {
                 base.addAll(contributor.values());
@@ -105,6 +108,23 @@ public class SecretRegistry {
             customPatterns = compile(config.patterns());
             excludes = compile(config.exclude());
         }
+        updateHarvest(base);
+    }
+
+    /** Adds values obtained at runtime, retaining them across subsequent scans. */
+    public synchronized void registerValues(final String... values) {
+        ensureScanned();
+        for (final var value : values) {
+            if (value != null && !value.isBlank() && value.length() >= minLength()) {
+                runtimeValues.add(value);
+            }
+        }
+        final var base = new LinkedHashSet<>(harvestedValues);
+        base.addAll(runtimeValues);
+        updateHarvest(base);
+    }
+
+    private void updateHarvest(final java.util.Set<String> base) {
         // longest first so substring replacement prefers the exact/longest match
         harvestedValues = base.stream()
                 .filter(v -> v != null && !v.isBlank() && v.length() >= minLength())

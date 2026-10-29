@@ -66,6 +66,7 @@ public class CodexAuthTemplateHelper {
     private final JsonMapper mapper;
     private final ExtendedHttpClient httpClient;
     private final Path providersHome;
+    private final CodexSecretRegistration secretRegistration;
     private volatile CodexOAuthClient oauth;
     private volatile CodexAgentIdentityClient agentIdentity;
     private volatile CodexLoginDispatcher codexLoginDispatcher;
@@ -76,8 +77,17 @@ public class CodexAuthTemplateHelper {
             final JsonMapper mapper,
             final ExtendedHttpClient httpClient,
             final CodingAgentConfiguration configuration) {
+        this(mapper, httpClient, configuration, new CodexSecretRegistration(null));
+    }
+
+    public CodexAuthTemplateHelper(
+            final JsonMapper mapper,
+            final ExtendedHttpClient httpClient,
+            final CodingAgentConfiguration configuration,
+            final CodexSecretRegistration secretRegistration) {
         this.mapper = mapper;
         this.httpClient = httpClient;
+        this.secretRegistration = secretRegistration;
         this.oauth = null; // built lazily on first use (or via setOAuthConfig in tests)
         this.agentIdentity = null; // built lazily on first use (or via setAgentIdentityConfig in tests)
         final String home = configuration == null ? null : configuration.resolveStorageHome();
@@ -342,6 +352,7 @@ public class CodexAuthTemplateHelper {
             return null;
         }
         final CodexTokenStore signedIn = dispatcher.signIn(providerName);
+        secretRegistration.register(signedIn);
         // prefer the store the dispatcher produced: a later cache/service save may not be visible to this
         // helper's cache yet, so reloading via load() could return a stale pre-login entry
         return signedIn == null ? load(providerName) : signedIn;
@@ -484,6 +495,7 @@ public class CodexAuthTemplateHelper {
         }
         try {
             final CodexTokenStore store = mapper.fromBytes(CodexTokenStore.class, Files.readAllBytes(file));
+            secretRegistration.register(store);
             authCache.put(providerName, store);
             return store;
         } catch (final IOException e) {
@@ -492,6 +504,7 @@ public class CodexAuthTemplateHelper {
     }
 
     private void save(final String providerName, final CodexTokenStore store) {
+        secretRegistration.register(store);
         final Path file = codexAuthFile(providerName);
         try {
             Files.createDirectories(file.getParent());

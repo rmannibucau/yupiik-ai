@@ -44,13 +44,23 @@ public class CodexLoginService {
     private final JsonMapper mapper;
     private final ExtendedHttpClient httpClient;
     private final Path providersHome;
+    private final CodexSecretRegistration secretRegistration;
 
     public CodexLoginService(
             final JsonMapper mapper,
             final ExtendedHttpClient httpClient,
             final CodingAgentConfiguration configuration) {
+        this(mapper, httpClient, configuration, new CodexSecretRegistration(null));
+    }
+
+    public CodexLoginService(
+            final JsonMapper mapper,
+            final ExtendedHttpClient httpClient,
+            final CodingAgentConfiguration configuration,
+            final CodexSecretRegistration secretRegistration) {
         this.mapper = mapper;
         this.httpClient = httpClient;
+        this.secretRegistration = secretRegistration;
         final String home = configuration == null ? null : configuration.resolveStorageHome();
         final String resolvedHome = home == null || home.isBlank() ? "~/.yupiik/coding-agent" : home;
         this.providersHome = Path.of(resolveHome(resolvedHome)).resolve("providers");
@@ -116,6 +126,7 @@ public class CodexLoginService {
         } else {
             store = oauth.browserFlow(urlSink, cancelled);
         }
+        secretRegistration.register(store);
         // record the OAuth authority (provenance) at login, in BOTH flows (mirrors upstream
         // persist_tokens_async which always writes issuer/client_id; the device flow only omits the
         // api key below). Do this BEFORE obtainApiKey so the id token is read from the annotated store.
@@ -220,7 +231,9 @@ public class CodexLoginService {
             return null;
         }
         try {
-            return mapper.fromBytes(CodexTokenStore.class, Files.readAllBytes(file));
+            final var store = mapper.fromBytes(CodexTokenStore.class, Files.readAllBytes(file));
+            secretRegistration.register(store);
+            return store;
         } catch (final IOException e) {
             throw new IllegalStateException("Cannot read the Codex auth file " + file + ": " + e.getMessage(), e);
         }
@@ -228,6 +241,7 @@ public class CodexLoginService {
 
     /** Persists a session atomically (temp file + move, owner-only perms). */
     public void save(final String provider, final CodexTokenStore store) {
+        secretRegistration.register(store);
         final var file = codexAuthFile(provider);
         try {
             Files.createDirectories(file.getParent());

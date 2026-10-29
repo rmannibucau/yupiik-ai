@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -26,6 +27,9 @@ import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.core.security.SecretRedactor;
+import io.yupiik.ia.agent.core.security.SecretRegistry;
+import io.yupiik.ia.agent.core.security.SecretVault;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.codex.CodexOAuthConfig;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
@@ -37,6 +41,7 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -137,6 +142,57 @@ class CodexLoginServiceTest {
                 "openid profile email offline_access api.connectors.read api.connectors.invoke",
                 "vurl",
                 1460);
+    }
+
+    @Test
+    void savedSessionsRegisterSecretsAndRetainPreviousValues(final JsonMapper mapper) {
+        final var registry = new SecretRegistry(null, List.of(), new SecretVault(), List.of());
+        final var modes = new io.yupiik.ia.agent.core.security.SecretSessionModes();
+        modes.set("test", io.yupiik.ia.agent.core.configuration.SecretRedactionMode.REDACT);
+        final var redactor = new SecretRedactor(registry, modes);
+        // Use a temporary storage home, never the real user's credentials.
+        final var cfg = new CodingAgentConfiguration$FusionConfigurationFactory(
+                        k -> Optional.ofNullable("yca.storageHome".equals(k) ? storage.toString() : null))
+                .get();
+        final var temporaryService = new CodexLoginService(mapper, client, cfg, new CodexSecretRegistration(registry));
+        temporaryService.save(
+                "test",
+                new CodexTokenStore("login-access", "login-refresh", "account-metadata", 1L, "login-id-token")
+                        .withApiKey("login-api-key")
+                        .withAgentIdentity(new io.yupiik.llm.client.codex.model.AgentIdentityRecord(
+                                "runtime", "private-key-value", "account", "user", null, "plan", false, "task")));
+        temporaryService.save(
+                "test", new CodexTokenStore("next-access", "next-refresh", "account-metadata", 2L, "next-id-token"));
+        registry.scan();
+        for (final var value : List.of(
+                "login-access",
+                "login-refresh",
+                "login-id-token",
+                "login-api-key",
+                "private-key-value",
+                "next-access",
+                "next-refresh",
+                "next-id-token")) {
+            assertFalse(redactor.redact("value=" + value, "test").contains(value));
+        }
+        assertEquals("account-metadata", redactor.redact("account-metadata", "test"));
+    }
+
+    @Test
+    void deviceLoginRegistersTokensAfterStartup(final JsonMapper mapper) {
+        final var registry = new SecretRegistry(null, List.of(), new SecretVault(), List.of());
+        final var modes = new io.yupiik.ia.agent.core.security.SecretSessionModes();
+        modes.set("test", io.yupiik.ia.agent.core.configuration.SecretRedactionMode.REDACT);
+        final var redactor = new SecretRedactor(registry, modes);
+        registry.scan();
+        final var cfg = new CodingAgentConfiguration$FusionConfigurationFactory(
+                        k -> Optional.ofNullable("yca.storageHome".equals(k) ? storage.toString() : null))
+                .get();
+        final var service = new CodexLoginService(mapper, client, cfg, new CodexSecretRegistration(registry));
+        service.signIn("device", true, url -> {}, b -> false, issuerConfig());
+        for (final var value : List.of("acc-token", "refresh-1", ID_TOKEN)) {
+            assertFalse(redactor.redact("value=" + value, "test").contains(value));
+        }
     }
 
     @Test
