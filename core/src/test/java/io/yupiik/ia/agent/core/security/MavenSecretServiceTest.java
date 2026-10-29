@@ -103,6 +103,100 @@ class MavenSecretServiceTest {
                         "{[name=master,cipher=AES/GCM/NoPadding,version=4.0]w+C6vJwryWolUYkLtAMCkMGCWfB09haER/AiingAH4NEDr37euLdwMYYLvxaSQe/97OJ+A==}"));
     }
 
+    @Test
+    void harvestsProfilePropertiesAndHttpHeadersWithBuiltInDefaults() throws Exception {
+        final var settings = tmp.resolve("settings-props.xml");
+        Files.writeString(settings, """
+                <settings>
+                  <profiles>
+                    <profile>
+                      <id>sign</id>
+                      <properties>
+                        <gpg.keyname>YZTE648RT4R4D74974F97GR97FG497GF97GF79GF</gpg.keyname>
+                        <gpg.passphrase>my-gpg-passphrase-value</gpg.passphrase>
+                        <deploy.password>plain-deploy-secret</deploy.password>
+                        <harmless.buildFlag>true</harmless.buildFlag>
+                      </properties>
+                    </profile>
+                  </profiles>
+                  <servers>
+                    <server>
+                      <id>bearer</id>
+                      <configuration>
+                        <httpHeaders>
+                          <property>
+                            <name>Authorization</name>
+                            <value>Bearer bearer-token-value</value>
+                          </property>
+                          <property>
+                            <name>X-Api-Key</name>
+                            <value>plain-api-key-value</value>
+                          </property>
+                        </httpHeaders>
+                      </configuration>
+                    </server>
+                    <server>
+                      <id>basic</id>
+                      <configuration>
+                        <httpHeaders>
+                          <property>
+                            <name>authorization</name>
+                            <value>Basic dXNlcjpwYXNz</value>
+                          </property>
+                        </httpHeaders>
+                      </configuration>
+                    </server>
+                  </servers>
+                </settings>
+                """);
+
+        final var secrets = new MavenSecretService().collectSecretNames(settings);
+
+        // profile properties: explicit allowlist (gpg.keyname) and keyword-derived (passphrase, password)
+        assertTrue(secrets.contains("YZTE648RT4R4D74974F97GR97FG497GF97GF79GF"), "gpg.keyname allowlist: " + secrets);
+        assertTrue(secrets.contains("my-gpg-passphrase-value"), "gpg.passphrase keyword: " + secrets);
+        assertTrue(secrets.contains("plain-deploy-secret"), "deploy.password keyword: " + secrets);
+        // a harmless property not matching allowlist or keyword must be ignored
+        assertTrue(!secrets.contains("true"), "harmless property must not be a secret: " + secrets);
+
+        // server httpHeaders: only the credential part after the scheme is harvested
+        assertTrue(secrets.contains("bearer-token-value"), "Bearer token after scheme: " + secrets);
+        assertTrue(secrets.contains("plain-api-key-value"), "X-Api-Key without space keeps full value: " + secrets);
+        assertTrue(secrets.contains("dXNlcjpwYXNz"), "Basic token after scheme: " + secrets);
+        // the scheme prefix alone must not be harvested
+        assertTrue(!secrets.contains("Bearer"), "scheme prefix alone must not be a secret: " + secrets);
+    }
+
+    @Test
+    void harvestsHttpHeaderPlaceholdersResolved() throws Exception {
+        final var settings = tmp.resolve("settings-header-placeholder.xml");
+        Files.writeString(settings, """
+                <settings>
+                  <servers>
+                    <server>
+                      <id>ph</id>
+                      <configuration>
+                        <httpHeaders>
+                          <property>
+                            <name>Authorization</name>
+                            <value>Bearer ${sys.yca.test.header.token}</value>
+                          </property>
+                        </httpHeaders>
+                      </configuration>
+                    </server>
+                  </servers>
+                </settings>
+                """);
+        System.setProperty("yca.test.header.token", "resolved-placeholder-secret");
+
+        try {
+            final var secrets = new MavenSecretService().collectSecretNames(settings);
+            assertTrue(secrets.contains("resolved-placeholder-secret"), "placeholder must resolve: " + secrets);
+        } finally {
+            System.clearProperty("yca.test.header.token");
+        }
+    }
+
     /** Reference encrypt matching Maven 4 plexus-sec-dispatcher AESGCMNoPadding (iv||salt||ct). */
     private static String encryptV4(final String plaintext, final String master) throws Exception {
         final var salt = new byte[16];

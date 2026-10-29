@@ -196,3 +196,72 @@ the redactor read it only to decipher in memory and never persist the plaintext.
 The same `yca.secrets.maven.*` settings feed the wire redactor
 (xref:configuration.adoc[Configuration]), so the ciphertext and the deciphered
 value are also scrubbed from any conversation context that might mention them.
+
+### Other secrets in `settings.xml`
+
+Beyond server passwords, the redactor harvests two more secret families from the
+configured `settings.xml`:
+
+* **`<profile><properties>` values.** A property whose key is on the explicit
+  `profilePropertyNames` allowlist (default `gpg.keyname`) or whose key contains
+  a secret token from `profilePropertyKeywords` (default `PASSWORD`, `PASSWD`,
+  `PASSPHRASE`, `SECRET`, `TOKEN`, ...) has its value treated as a secret. So both
+  a GPG key fingerprint stored as `<gpg.keyname>` and a signing passphrase stored
+  as `<gpg.passphrase>` are scrubbed. Only the value is harvested; the key name is
+  left alone.
+* **`<server><configuration><httpHeaders>` credentials.** For a header whose name
+  matches `yca.secrets.http.headerNames` (default `Authorization`,
+  `Proxy-Authorization`, `Api-Key`, `X-Api-Key`, `Cookie`; matched
+  case-insensitively), the credential part of the value is harvested. When the
+  value has a scheme prefix - `Bearer xyz`, `Basic abc`, `token xyz` - only the
+  part after the first space is kept; without a space the whole value is kept.
+  Maven `${env.VAR}` / `${sys.NAME}` placeholders are resolved so the real value
+  is the secret.
+
+Both are opt-out via the corresponding `yca.secrets.*` lists: empty the list
+you do not want (for example `profilePropertyNames=[]` to stop treating
+`gpg.keyname` as a secret).
+
+Note that harvested values still respect the global `yca.secrets.minValueLength`
+floor (default 8): a very short value - for example a `gpg.passphrase` of
+`xxxxxx` - is below the floor and is left untouched. Raise `minValueLength` in
+your config if you need to redact such short passphrases.
+
+## YCA configuration files
+
+The redactor also harvests secrets from the YCA `configuration.json` files - both
+the project-local `<workingDir>/.yca/configuration.json` and the global
+`~/.yupiik/coding-agent/configuration.json` (or the `yca.configuration.json` /
+storage-home override). Both files are read directly from disk, so no secret is
+missed even when a local file without `$inherit` would otherwise shadow the
+global one in the resolved configuration. Two families are harvested:
+
+* **Every `*apiKey*` value.** Any leaf whose key ends with / contains `apiKey`
+  (the provider `apiKey`, the structural-code-graph `apiKey`, a custom one, ...)
+  is a secret.
+* **Known secret HTTP headers.** A value whose key matches
+  `yca.secrets.http.headerNames` (the same shared list used for Maven `settings.xml`)
+  is harvested with the token-after-first-space rule (`Bearer xyz` -> `xyz`).
+
+Set `yca.secrets.ycaConfig.locations` to an explicit list of files to scan instead
+of the auto-computed local + global pair.
+
+## Cloud provider credential files
+
+The redactor can harvest long-lived credentials from the well-known cloud
+provider files, configured per provider via `locations`:
+
+* **AWS** - `yca.secrets.cloudCredentials.aws.locations` (default
+  `~/.aws/credentials`, `~/.aws/config`): INI `key=value` lines are parsed and
+  `aws_secret_access_key` / `aws_session_token` values harvested.
+* **GCP** - `yca.secrets.cloudCredentials.gcp.locations` (default
+  `~/.config/gcloud/application_default_credentials.json`): JSON is parsed and
+  `client_secret` / `refresh_token` / `access_token` values harvested.
+* **Azure** - `yca.secrets.cloudCredentials.az.locations` (default empty): no
+  standard long-lived static credential file exists, so nothing is scanned unless
+  you add a path that holds one.
+
+Only static, long-lived secret keys are harvested. Short-lived token caches (the
+AWS SSO cache, Azure MSAL / access-token JSON) and the SQLite gcloud
+`credentials.db` / `access_tokens.db` are not scanned by default - add their path
+to the relevant `locations` if you want them covered.

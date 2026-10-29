@@ -29,6 +29,7 @@ import java.util.Base64;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.logging.Level;
@@ -70,6 +71,98 @@ public class MavenSecretService {
     private static final int IV_LENGTH = 12;
     private static final int SALT_LENGTH = 16;
     private static final int TAG_LENGTH_BITS = 128;
+
+    /** Default <profile><properties> keys treated as secrets (used when no configuration is injected). */
+    private static final List<String> DEFAULT_PROFILE_PROPERTY_NAMES = List.of("gpg.keyname");
+
+    /** Default secret tokens matched against <profile><properties> key names. */
+    private static final List<String> DEFAULT_PROFILE_PROPERTY_KEYWORDS = List.of(
+            "PASSWORD",
+            "PASSWD",
+            "PASSPHRASE",
+            "SECRET",
+            "TOKEN",
+            "APIKEY",
+            "CREDENTIAL",
+            "PRIVATEKEY",
+            "KEY",
+            "CIPHER");
+
+    /** Default known secret HTTP header names harvested from <server><httpHeaders>. */
+    private static final List<String> DEFAULT_HTTP_HEADER_NAMES =
+            List.of("Authorization", "Proxy-Authorization", "Api-Key", "X-Api-Key", "Cookie");
+
+    /** Lower-cased <profile><properties> keys / secret HTTP header names effectively monitored. */
+    private final Set<String> profilePropertyNames;
+
+    /** Lower-cased secret tokens matched against <profile><properties> key names. */
+    private final Set<String> profilePropertyKeywords;
+
+    /** Lower-cased known secret HTTP header names matched against <server><httpHeaders> names. */
+    private final Set<String> httpHeaderNames;
+
+    /**
+     * Default constructor: uses the built-in allowlists (profile-property keys/keywords and HTTP header
+     * names), for direct instantiation (tests, tools) without a configuration.
+     */
+    public MavenSecretService() {
+        this(DEFAULT_PROFILE_PROPERTY_NAMES, DEFAULT_PROFILE_PROPERTY_KEYWORDS, DEFAULT_HTTP_HEADER_NAMES);
+    }
+
+    /**
+     * {@link ApplicationScoped} constructor: reads the profile-property and HTTP-header allowlists from the
+     * Maven secret configuration, falling back to the built-in defaults when absent or empty. Fusion selects
+     * this constructor over the no-arg one (it only considers parameterized constructors).
+     *
+     * @param configuration the global coding-agent configuration
+     */
+    public MavenSecretService(final CodingAgentConfiguration configuration) {
+        this(
+                listOr(
+                        configuration == null || configuration.secrets() == null
+                                ? null
+                                : configuration.secrets().maven().profilePropertyNames(),
+                        DEFAULT_PROFILE_PROPERTY_NAMES),
+                listOr(
+                        configuration == null || configuration.secrets() == null
+                                ? null
+                                : configuration.secrets().maven().profilePropertyKeywords(),
+                        DEFAULT_PROFILE_PROPERTY_KEYWORDS),
+                listOr(
+                        configuration == null || configuration.secrets() == null
+                                ? null
+                                : httpHeaderNames(configuration),
+                        DEFAULT_HTTP_HEADER_NAMES));
+    }
+
+    /** Reads the shared secret-header allowlist ({@code yca.secrets.http.headerNames}). */
+    private static List<String> httpHeaderNames(final CodingAgentConfiguration configuration) {
+        final var http = configuration.secrets().http();
+        return http == null ? null : http.headerNames();
+    }
+
+    private MavenSecretService(
+            final List<String> profilePropertyNames,
+            final List<String> profilePropertyKeywords,
+            final List<String> httpHeaderNames) {
+        this.profilePropertyNames = setOf(profilePropertyNames);
+        this.profilePropertyKeywords = setOf(profilePropertyKeywords);
+        this.httpHeaderNames = setOf(httpHeaderNames);
+    }
+
+    private static List<String> listOr(final List<String> configured, final List<String> fallback) {
+        return configured == null || configured.isEmpty() ? fallback : configured;
+    }
+
+    private static Set<String> setOf(final List<String> values) {
+        final var out = new HashSet<String>();
+        for (final var v : values) {
+            if (v != null) {
+                out.add(v.trim().toLowerCase(Locale.ROOT));
+            }
+        }
+        return out;
+    }
 
     /** Maven 4 self-describing ciphertext: {[name=...,cipher=...,version=...]base64}. */
     private static final Pattern MAVEN4_CIPHERTEXT =
@@ -114,7 +207,105 @@ public class MavenSecretService {
         while (legacy.find()) {
             out.add(legacy.group());
         }
+        collectProfileProperties(xml, out);
+        collectServerHttpHeaders(xml, out);
         return out;
+    }
+
+    /**
+     * Harvests the values of <profile><properties> entries whose key is either on the explicit
+     * {@code profilePropertyNames} allowlist or contains a {@code profilePropertyKeywords} secret token
+     * (e.g. {@code gpg.keyname} via the allowlist, {@code gpg.passphrase} via the {@code PASSPHRASE}
+     * keyword). Only the value is added; the key name is left alone.
+     */
+    private void collectProfileProperties(final String xml, final Set<String> out) {
+        try {
+            final var doc = parse(xml);
+            for (final var properties : descendantElements(doc.getDocumentElement(), "properties")) {
+                for (var child = properties.getFirstChild(); child != null; child = child.getNextSibling()) {
+                    if (child.getNodeType() != org.w3c.dom.Node.ELEMENT_NODE) {
+                        continue;
+                    }
+                    final var key = child.getNodeName();
+                    if (key == null || !isSecretProfileProperty(key)) {
+                        continue;
+                    }
+                    final var value = textOf(child);
+                    if (value != null && !value.isBlank()) {
+                        out.add(value);
+                    }
+                }
+            }
+        } catch (final RuntimeException e) {
+            LOGGER.log(Level.FINE, () -> "Cannot parse settings.xml profile properties: " + e.getMessage());
+        }
+    }
+
+    /** Whether a <profile><properties> key is on the explicit allowlist or contains a secret keyword. */
+    private boolean isSecretProfileProperty(final String key) {
+        final var lower = key.trim().toLowerCase(Locale.ROOT);
+        if (profilePropertyNames.contains(lower)) {
+            return true;
+        }
+        final var compact = lower.replace("_", "").replace("-", "").replace(".", "");
+        for (final var keyword : profilePropertyKeywords) {
+            if (compact.contains(keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Harvests the credential part of known secret HTTP headers carried by a
+     * <server><configuration><httpHeaders> block. When the stored value has a scheme prefix ('Bearer xyz',
+     * 'Basic abc', 'token xyz') only the part after the first space is harvested; otherwise the whole value
+     * is kept. Maven {@code ${env.X}} / {@code ${sys.Y}} placeholders are resolved so the real value is the
+     * secret.
+     */
+    private void collectServerHttpHeaders(final String xml, final Set<String> out) {
+        if (httpHeaderNames.isEmpty()) {
+            return;
+        }
+        try {
+            final var doc = parse(xml);
+            for (final var headers : descendantElements(doc.getDocumentElement(), "httpHeaders")) {
+                for (final var property : descendantElements(headers, "property")) {
+                    final var name = childText(property, "name");
+                    if (name == null || !httpHeaderNames.contains(name.trim().toLowerCase(Locale.ROOT))) {
+                        continue;
+                    }
+                    final var value = childText(property, "value");
+                    if (value == null || value.isBlank()) {
+                        continue;
+                    }
+                    final var token = tokenOf(resolvePlaceholders(value));
+                    if (token != null && !token.isBlank()) {
+                        out.add(token);
+                    }
+                }
+            }
+        } catch (final RuntimeException e) {
+            LOGGER.log(Level.FINE, () -> "Cannot parse settings.xml server httpHeaders: " + e.getMessage());
+        }
+    }
+
+    /** The credential part of a header value: everything after the first space, or the whole value. */
+    private static String tokenOf(final String value) {
+        final var space = value.indexOf(' ');
+        return space < 0 ? value : value.substring(space + 1).trim();
+    }
+
+    /** Parses the settings XML into a DOM, wrapped so callers can treat a malformed doc as harmless. */
+    private static org.w3c.dom.Document parse(final String xml) {
+        try {
+            final var dbf = DocumentBuilderFactory.newInstance();
+            dbf.setNamespaceAware(false);
+            return dbf.newDocumentBuilder()
+                    .parse(new java.io.ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+        } catch (final Exception e) {
+            throw new IllegalStateException("Invalid settings XML: " + e.getMessage(), e);
+        }
     }
 
     /** True for a Maven 4 self-describing ciphertext. */

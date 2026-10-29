@@ -101,4 +101,16 @@ public record SecretRedactionConfiguration(
         MavenSecretConfiguration maven,
 
         @Property(documentation = "Process-environment secret harvesting rules (System.getenv() name classification).")
-        SecretEnvironmentConfiguration environment) {}
+        SecretEnvironmentConfiguration environment,
+
+        @Property(
+                documentation =
+                        "Known secret HTTP header names, shared across all header-based secret harvesting (Maven settings, YCA config).")
+        SecretHttpConfiguration http,
+
+        @Property(
+                documentation = "YCA configuration file secret harvesting (global + project-local configuration.json).")
+        YcaConfigSecretConfiguration ycaConfig,
+
+        @Property(documentation = "Cloud provider credential-file secret harvesting (AWS/GCP/Azure).")
+        CloudCredentialsSecretConfiguration cloudCredentials) {}

@@ -148,6 +148,16 @@ To build a header from a credential stored in your Maven `settings.xml` (clear,
 the `{{mavenServerPassword "serverId"}}` helper - see
 xref:features/custom-headers.adoc#the-mavenServerPassword-helper[Custom headers].
 
+Beyond server passwords, the same `yca.secrets.*` settings drive the wire
+redactor's harvest of `settings.xml`, which also scrubs matching
+`<profile><properties>` values (by explicit key or a secret token in the key
+name) and the credential part of matching `<server><configuration><httpHeaders>`
+values, plus the YCA `configuration.json` files (apiKey and secret-header values)
+and the well-known cloud provider credential files - see
+xref:features/custom-headers.adoc#other-secrets-in-settings-xml[Other secrets in `settings.xml`],
+xref:features/custom-headers.adoc#yca-configuration-files[YCA configuration files]
+and xref:features/custom-headers.adoc#cloud-provider-credential-files[Cloud provider credential files].
+
 == Codex (ChatGPT subscription) providers
 
 Codex-flavored providers talk to OpenAI's ChatGPT subscription backend

@@ -58,6 +58,13 @@ class JdkLocatorTest {
             protected List<Path> commonRoots() {
                 return roots.getParent() == null ? List.of() : List.of(roots);
             }
+
+            // hermetic by construction: the temp JDKs must win the parser/project selection, so the
+            // host machine's JAVA_HOME/PATH (which may carry a JDK >= the parser floor) is neutralized.
+            @Override
+            protected String env(final String name) {
+                return null;
+            }
         };
     }
 
