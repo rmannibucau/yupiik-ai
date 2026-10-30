@@ -123,6 +123,10 @@ class MemoryCompactorTest {
         assertTrue(
                 notice.message().contains("/memory compact"),
                 "the notice must include the recovery hint: " + notice.message());
+        assertNotNull(notice.cause(), "the notice must carry the failing IOException for the Alt+E stack");
+        assertTrue(
+                notice.cause().getMessage().contains("json was malformed"),
+                "the cause must be the thrown IOException: " + notice.cause());
     }
 
     @Test

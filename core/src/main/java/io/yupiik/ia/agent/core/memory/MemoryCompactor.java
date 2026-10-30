@@ -270,14 +270,19 @@ public class MemoryCompactor {
             }
             LOGGER.log(Level.FINE, "memory compaction LLM call failed", e);
             LOGGER.info("memory compaction failed; run /memory compact to retry");
-            emitNotice("memory compaction failed: " + e.getMessage() + " - run /memory compact to retry");
+            emitNotice("memory compaction failed: " + e.getMessage() + " - run /memory compact to retry", e);
             return null;
         }
     }
 
     private void emitNotice(final String message) {
+        emitNotice(message, null);
+    }
+
+    private void emitNotice(final String message, final Throwable cause) {
         if (emitter != null) {
-            emitter.emit(AgentEvent.Notice.warn(message, sessionId));
+            emitter.emit(
+                    new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, message, null, sessionId, null, null, cause));
         }
     }
 

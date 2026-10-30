@@ -244,7 +244,7 @@ public class MemoryExtractor {
                 if (LOGGER.isLoggable(Level.FINER)) {
                     LOGGER.log(Level.FINER, "Memory extraction failed", e);
                 }
-                notifyFailure("memory extraction aborted: " + e.getMessage());
+                notifyFailure("memory extraction aborted: " + e.getMessage(), e);
             } finally {
                 if (memoryCompactor != null) {
                     memoryCompactor.maybeCompact(effective);
@@ -420,7 +420,7 @@ public class MemoryExtractor {
         } catch (final IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
-                notifyFailure("memory extraction (structured facts) failed: " + e.getMessage());
+                notifyFailure("memory extraction (structured facts) failed: " + e.getMessage(), e);
                 return;
             }
             // the structured call failed on the wire (e.g. a gateway that streams unconditionally and
@@ -429,22 +429,26 @@ public class MemoryExtractor {
             try {
                 final var snippet = compressExcerpt(redactedExcerpt, settings);
                 if (snippet == null || snippet.isBlank()) {
-                    notifyFailure("memory extraction (structured facts) failed: " + e.getMessage());
+                    notifyFailure("memory extraction (structured facts) failed: " + e.getMessage(), e);
                 } else {
                     memoryStore.appendText(false, snippet);
                     // NOTE: like the `structured=false` path above, a wire-failure salvage that persists
                     // memory is a steady-state degraded condition: do NOT resetFailures() here, or the
                     // 'rejected by the provider' WARN re-fires on every pass for a persistently-throwing
                     // backend. Only a genuine structured success (top of the method) clears the streak.
-                    notifyFailure("memory extraction (structured facts) failed: " + e.getMessage()
-                            + "; saving a plain snippet instead: " + clamp(snippet, 200));
+                    notifyFailure(
+                            "memory extraction (structured facts) failed: " + e.getMessage()
+                                    + "; saving a plain snippet instead: " + clamp(snippet, 200),
+                            e);
                 }
             } catch (final IOException | InterruptedException fallbackFailure) {
                 if (fallbackFailure instanceof InterruptedException) {
                     Thread.currentThread().interrupt();
                 }
-                notifyFailure("memory extraction (structured facts) failed: " + e.getMessage()
-                        + " (fallback snippet also failed: " + fallbackFailure.getMessage() + ")");
+                notifyFailure(
+                        "memory extraction (structured facts) failed: " + e.getMessage()
+                                + " (fallback snippet also failed: " + fallbackFailure.getMessage() + ")",
+                        e);
             }
             // the watermark is NOT advanced on failure: the delta stays pending for the next
             // pass (periodic or forced at close), so a transient failure never loses facts
@@ -561,9 +565,14 @@ public class MemoryExtractor {
     }
 
     private void notifyFailure(final String message) {
+        notifyFailure(message, null);
+    }
+
+    private void notifyFailure(final String message, final Throwable cause) {
         final int failures = consecutiveFailures.incrementAndGet();
         if (failures == 1 && emitter != null) {
-            emitter.emit(AgentEvent.Notice.warn(message, sessionId));
+            emitter.emit(
+                    new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, message, null, sessionId, null, null, cause));
         }
     }
 

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -340,6 +341,10 @@ class MemoryExtractorTest {
         assertTrue(
                 notice.message().contains("Unexpected character 'e'"),
                 "the notice must carry the contextual detail: " + notice.message());
+        assertNotNull(notice.cause(), "the notice must carry the failing exception for the Alt+E stack");
+        assertTrue(
+                notice.cause().getMessage().contains("unparseable response"),
+                "the cause must be the thrown IOException: " + notice.cause());
         final var project = store.readProject();
         assertTrue(project.contains("the team standard is tabs"), "the fallback snippet must be saved: " + project);
     }
