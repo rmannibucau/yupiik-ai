@@ -921,6 +921,70 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void configuredDefaultVariantAppliesWhenNoSessionVariant() throws Exception {
+        final var cfg = configuration(Map.ofEntries(
+                Map.entry("yca.provider.providers.0.tuning.variants.length", "1"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7"),
+                Map.entry("yca.provider.providers.0.tuning.defaultVariant", "balanced")));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        assertEquals(
+                "hello there",
+                client.chat(request().withSettings(ChatSettings.EMPTY), () -> false)
+                        .message()
+                        .content());
+        final var body = bodies.getLast();
+        assertEquals(1, occurrences(body, "\"temperature\":0.7"), body);
+        // the display helper surfaces the resolved default variant, not the process default
+        assertEquals("balanced", client.resolvedVariant(ChatSettings.EMPTY));
+        assertNull(client.variant(ChatSettings.EMPTY), "no explicit session selection exists");
+    }
+
+    @Test
+    void explicitSessionVariantWinsOverConfiguredDefault() throws Exception {
+        final var cfg = configuration(Map.ofEntries(
+                Map.entry("yca.provider.providers.0.tuning.variants.length", "2"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7"),
+                Map.entry("yca.provider.providers.0.tuning.variants.1.name", "fast"),
+                Map.entry("yca.provider.providers.0.tuning.variants.1.temperature", "0.3"),
+                Map.entry("yca.provider.providers.0.tuning.defaultVariant", "balanced")));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+        final var settings = ChatSettings.EMPTY.withVariant("fast");
+
+        assertEquals(
+                "hello there",
+                client.chat(request().withSettings(settings), () -> false)
+                        .message()
+                        .content());
+        final var body = bodies.getLast();
+        assertEquals(1, occurrences(body, "\"temperature\":0.3"), body);
+        assertTrue(!body.contains("\"temperature\":0.7"), body);
+        assertEquals("fast", client.resolvedVariant(settings), "explicit selection wins in the display helper too");
+    }
+
+    @Test
+    void danglingDefaultVariantFallsBackToImplicit() throws Exception {
+        final var cfg = configuration(Map.ofEntries(
+                Map.entry("yca.provider.providers.0.tuning.variants.length", "1"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7"),
+                Map.entry("yca.provider.providers.0.tuning.defaultVariant", "missing")));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        assertEquals(
+                "hello there",
+                client.chat(request().withSettings(ChatSettings.EMPTY), () -> false)
+                        .message()
+                        .content());
+        final var body = bodies.getLast();
+        // the dangling default matches no variant: the implicit defaults apply, never a failure
+        assertTrue(!body.contains("\"temperature\""), body);
+        assertNull(client.resolvedVariant(ChatSettings.EMPTY));
+    }
+
+    @Test
     void setProviderKeepsThePerSessionVariantSelection() throws Exception {
         final var cfg = configuration(Map.ofEntries(
                 Map.entry("yca.provider.providers.length", "2"),

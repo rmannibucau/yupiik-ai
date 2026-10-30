@@ -17,7 +17,8 @@ For every chat completion request yca resolves a per-model *budget*, a
 
 1. the explicit request/session value (eg. a `/model` command with a variant),
 2. a value already merged in `providerSpecificOptions` (put-if-absent),
-3. the selected per-model variant (`tuning.variants`),
+3. the selected per-model variant (`tuning.variants`, or its `defaultVariant`
+   when the session selected none),
 4. the configured reasoning effort (per-model `behavior` or provider-level
    `tuning.reasoningEffort`),
 5. the model catalog default (`default_reasoning_level` from an
@@ -31,7 +32,7 @@ For every chat completion request yca resolves a per-model *budget*, a
       |  (1)
   providerSpecificOptions (reasoning_effort already there?)
       |  (2)
-  per-model variant tuning.variants[].reasoningEffort
+  per-model variant tuning.variants[].reasoningEffort (or defaultVariant when none selected)
       |  (3)
   configured effort (behavior or provider tuning)
       |  (4)

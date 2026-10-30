@@ -110,6 +110,8 @@ public class ChatClient implements AutoCloseable {
     private final Map<ClientKey, DialectLlmClient> dialectClients = new HashMap<>();
     private final Map<ClientKey, LlmClientResilienceWrapper> resiliences = new HashMap<>();
     private final Set<String> budgetLogged = ConcurrentHashMap.newKeySet();
+    /** Dangling defaultVariant warn-once keys: provider + '\u0000' + model + '\u0000' + name. */
+    private final Set<String> warnedDefaultVariants = ConcurrentHashMap.newKeySet();
     // per-provider caches: the flavor AUTO fallback, structured-output support and the model list are
     // provider-scoped facts. With per-session providers (one per tab) a single process-wide slot would
     // leak a tab A provider observation (AUTO fell back to completions, structured unsupported) to tab B
@@ -766,6 +768,30 @@ public class ChatClient implements AutoCloseable {
     }
 
     /**
+     * The variant name that will actually be applied for a session: its explicit selection when set, else the
+     * configured defaultVariant of the effective model when it exists in the effective variant list, else null
+     * (implicit family defaults). Display/status helper; the request path applies the same rule in selectedVariant.
+     */
+    public String resolvedVariant(final ChatSettings settings) {
+        final var explicit = settings == null ? null : settings.variant();
+        if (explicit != null && !explicit.isBlank()) {
+            return explicit;
+        }
+        final var provider = provider(settings);
+        final var model = model(settings);
+        final var configured = provider == null ? null : providerManager.defaultVariant(provider, model);
+        if (configured == null || configured.isBlank()) {
+            return null;
+        }
+        for (final var variant : effectiveVariants(provider, model)) {
+            if (configured.equals(variant.name())) {
+                return configured;
+            }
+        }
+        return null;
+    }
+
+    /**
      * The implicit {@code default} variant for a specific model name against the current provider,
      * without changing the active model. A blank model falls back to the current model. The current
      * in-memory sampling override is not applied here since the model is not yet the active one.
@@ -1210,17 +1236,31 @@ public class ChatClient implements AutoCloseable {
                 message.role(), message.content(), message.name(), message.toolCalls(), message.toolCallId(), merged);
     }
 
-    /** The named variant requested via {@code /model}, validated against the configured variants, else null. */
+    /** The named variant requested via {@code /model}, validated against the configured variants, else null. When the
+     * session selected none, the provider-configured {@code defaultVariant} of the model applies when it exists in the
+     * effective variant list; when it matches nothing a warning is logged once and the implicit defaults apply (never a failure). */
     private ModelVariantConfiguration selectedVariant(
             final ProviderConfiguration provider, final String model, final ChatCompletionRequest request) {
-        final var selected =
+        final var explicit =
                 request.settings() == null ? null : request.settings().variant();
+        final var configured = providerManager.defaultVariant(provider, model);
+        final var selected = (explicit == null || explicit.isBlank()) && configured != null && !configured.isBlank()
+                ? configured
+                : explicit;
         if (selected == null || selected.isBlank()) {
             return null;
         }
         for (final var variant : effectiveVariants(provider, model)) {
             if (selected.equals(variant.name())) {
                 return variant;
+            }
+        }
+        if (explicit == null || explicit.isBlank()) { // only config-sourced defaults get the warn-once treatment
+            final var key = (provider == null ? "?" : provider.id()) + '\u0000' + model + '\u0000' + selected;
+            if (warnedDefaultVariants.add(key)) {
+                LOGGER.warning(() -> "defaultVariant '" + selected + "' of model '" + model + "' of provider '"
+                        + (provider == null ? "?" : provider.id())
+                        + "' matches no variant; falling back to the implicit defaults.");
             }
         }
         return null;

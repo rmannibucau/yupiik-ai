@@ -51,7 +51,9 @@ restores the provider default. The variant of the active model is selected per
 session with `/variant`, which is contextual to the current model: `/variant`
 lists the current model's variants (plus the implicit `default`) to pick from,
 and `/variant <name>` (or `/variant default`) switches the variant directly
-without touching the model. Every LLM call a session triggers - turns,
+without touching the model - `/variant default` restores the provider-configured
+default variant when the model declares one, else the implicit default. Every
+LLM call a session triggers - turns,
 sub-agents, compaction, memory extraction, plan seeding, indexing it asks for -
 uses that session's provider/model, resolved lazily at call time. The only
 process-default path left is genuinely session-less startup work (the

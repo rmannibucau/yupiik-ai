@@ -561,6 +561,8 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
         // sidebar starts with the provider-configured model
         awaitText("model test-model");
+        // no defaultVariant configured for the test fixture model: the strip marks the implicit default
+        awaitText("(default)");
 
         // /model overrides the per-session model: the sidebar must follow it
         tuiRef.get().dispatch(new PasteEvent("/model other-model"));

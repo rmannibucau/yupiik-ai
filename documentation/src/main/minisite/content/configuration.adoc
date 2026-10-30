@@ -449,9 +449,12 @@ The models a subscription exposes often come with per-model behavior or
 variants (eg. reasoning-effort presets for a `gpt-6-luna`). Declare them under
 `provider.models`, each entry matching by id or substring, with per-model
 `contextWindow` and a `behavior` carrying `variants` selected at runtime with
-`/model <model> <variant>`. This is only needed to override the catalog: when no
-variant or effort is configured, yca uses the catalog's
-`supported_reasoning_levels` and `default_reasoning_level`. For example:
+`/model <model> <variant>`. `defaultVariant` names one of these variants to
+apply when the session has no explicit selection; a name matching no variant
+logs a warning and falls back to the implicit default. This is only needed to
+override the catalog: when no variant or effort is configured, yca uses the
+catalog's `supported_reasoning_levels` and `default_reasoning_level`. For
+example:
 
 [source,json]
 ----
@@ -470,7 +473,8 @@ variant or effort is configured, yca uses the catalog's
               "variants": [
                 { "name": "default", "reasoningEffort": "medium" },
                 { "name": "reasoning", "reasoningEffort": "xhigh" }
-              ]
+              ],
+              "defaultVariant": "reasoning"
             }
           }
         ]

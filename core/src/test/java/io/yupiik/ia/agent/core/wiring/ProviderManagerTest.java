@@ -83,6 +83,21 @@ class ProviderManagerTest {
     }
 
     @Test
+    void defaultVariantIsNullWithoutConfiguration() {
+        final var manager = twoProviders();
+        final var provider = manager.providers().get(0);
+        assertNull(manager.defaultVariant(provider, "claude"));
+        // blank provider tuning counts as unset as well
+        final var withBlankTuning = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "m"),
+                Map.entry("yca.provider.providers.0.tuning.defaultVariant", "")));
+        assertNull(withBlankTuning.defaultVariant(withBlankTuning.providers().get(0), "m"));
+    }
+
+    @Test
     void outputTokensExactWinsOverContainsAndInvalidIsIgnored() {
         final var manager = twoProviders();
         final var provider = manager.providers().get(0);
@@ -231,6 +246,7 @@ class ProviderManagerTest {
                 Map.entry("yca.provider.providers.0.model", "m"),
                 Map.entry("yca.provider.providers.0.providerSpecificOptions", "{\"echo\":1}"),
                 Map.entry("yca.provider.providers.0.tuning.reasoningEffort", "medium"),
+                Map.entry("yca.provider.providers.0.tuning.defaultVariant", "balanced"),
                 Map.entry("yca.provider.providers.0.tuning.outputTokens", "4096"),
                 Map.entry("yca.provider.providers.0.tuning.systemPromptMaxChars", "5000"),
                 Map.entry("yca.provider.providers.0.tuning.plateauRounds", "3"),
@@ -245,6 +261,7 @@ class ProviderManagerTest {
                 Map.entry("yca.provider.providers.0.models.length", "1"),
                 Map.entry("yca.provider.providers.0.models.0.model", "claude-sonnet-5"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.reasoningEffort", "low"),
+                Map.entry("yca.provider.providers.0.models.0.behavior.defaultVariant", "fast"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.plateauRounds", "4"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.maxIterations", "90"),
                 Map.entry(
@@ -265,6 +282,7 @@ class ProviderManagerTest {
         assertEquals(3, manager.plateauRounds(provider, "gpt-5"));
         assertEquals(60, manager.maxIterationsOverride(provider, "gpt-5"));
         assertEquals(2, manager.variants(provider, "gpt-5").size());
+        assertEquals("balanced", manager.defaultVariant(provider, "gpt-5"));
     }
 
     @Test
@@ -283,6 +301,8 @@ class ProviderManagerTest {
         assertEquals("{\"echo\":1}", manager.providerSpecificOptions(provider, "gpt-5"));
         // a per-model behavior without variants falls back to the provider-level variants
         assertEquals(2, manager.variants(provider, "claude-sonnet-5").size());
+        // per-model behavior.defaultVariant wins over the provider-level tuning.defaultVariant
+        assertEquals("fast", manager.defaultVariant(provider, "claude-sonnet-5"));
     }
 
     @Test

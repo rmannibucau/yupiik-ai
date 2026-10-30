@@ -6161,7 +6161,7 @@ public class TuiCommand implements Runnable {
         }
         final var statusModel = chatClient.model(state.session.chatSettings());
         final var activeModel = ellipsize(statusModel, 40);
-        final var activeVariant = chatClient.variant(state.session.chatSettings());
+        final var activeVariant = chatClient.resolvedVariant(state.session.chatSettings());
         final var variantSuffix =
                 activeVariant == null || activeVariant.isBlank() ? " (default)" : " [" + activeVariant + "]";
         parts.add(Span.styled(modeWord() + " ", Style.EMPTY.fg(modeColor())));

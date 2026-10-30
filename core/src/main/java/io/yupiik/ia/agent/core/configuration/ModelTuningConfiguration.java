@@ -110,6 +110,14 @@ public record ModelTuningConfiguration(
         List<ModelVariantConfiguration> variants,
 
         @Property(
+                documentation = "Name of a variant from the `variants` list applied by default when the session has no "
+                        + "explicit variant selection (eg. /model <model> <variant> or /variant). Blank keeps the "
+                        + "implicit default behavior. When the name matches no configured or implicit variant, a "
+                        + "warning is logged and the implicit default applies - a dangling reference never fails "
+                        + "or blocks a request.")
+        String defaultVariant,
+
+        @Property(
                 defaultValue = "\"\"",
                 documentation =
                         "Optional raw JSON object merged (put-if-absent) into the payload of every request for this model, over the provider-level one. Empty is ignored.")

@@ -112,6 +112,7 @@ class ModelConfigurationTest {
                 null,
                 null,
                 List.of(),
+                null,
                 "");
         assertNull(tuning.outputTokens());
         assertNull(tuning.systemPromptMaxChars());
@@ -123,5 +124,28 @@ class ModelConfigurationTest {
         assertEquals(InBandToolCallsMode.AUTO, tuning.inBandToolCalls());
         assertEquals(ReasoningFormatMode.AUTO, tuning.reasoningFormat());
         assertEquals(List.of(), tuning.variants());
+        assertNull(tuning.defaultVariant());
+    }
+
+    @Test
+    void defaultVariantIsExposed() {
+        final var tuning = new ModelTuningConfiguration(
+                "",
+                RepairToolCallArgumentsMode.AUTO,
+                InBandToolCallsMode.AUTO,
+                ReasoningFormatMode.AUTO,
+                null,
+                null,
+                null,
+                null,
+                null,
+                PlateauFeedbackMode.NUDGE_2,
+                null,
+                null,
+                null,
+                List.of(),
+                "reasoning",
+                "");
+        assertEquals("reasoning", tuning.defaultVariant());
     }
 }

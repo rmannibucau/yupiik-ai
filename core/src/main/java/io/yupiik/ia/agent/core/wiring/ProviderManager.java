@@ -701,6 +701,27 @@ public class ProviderManager {
     }
 
     /**
+     * The configured default variant name for a model of a provider: the per-model {@code behavior.defaultVariant},
+     * else the provider-level {@code tuning.defaultVariant}, else null (blank counts as unset). The name is not
+     * validated here: {@link ChatClient} applies the warn-not-fail fallback when it matches no variant.
+     */
+    public String defaultVariant(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        final var perModel = entry == null || entry.behavior() == null
+                ? null
+                : entry.behavior().defaultVariant();
+        if (perModel != null && !perModel.isBlank()) {
+            return perModel;
+        }
+        final var tuning = providerTuning(provider);
+        return tuning == null
+                        || tuning.defaultVariant() == null
+                        || tuning.defaultVariant().isBlank()
+                ? null
+                : tuning.defaultVariant();
+    }
+
+    /**
      * Effective raw provider specific options JSON string for a model of a provider: the per-model
      * {@code behavior.providerSpecificOptions}, else the provider-level {@code providerSpecificOptions}. Null when neither.
      */

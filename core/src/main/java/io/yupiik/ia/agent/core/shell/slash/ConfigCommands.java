@@ -424,9 +424,8 @@ public class ConfigCommands implements SlashCommandSet {
             sb.append(String.join(", ", fields));
             sb.append(']');
         }
-        final var variant = chatClient.variant(settings);
-        final boolean namedVariant = variant != null && !variant.isBlank();
-        sb.append(" [variant ").append(namedVariant ? variant : "default").append(']');
+        final var resolved = chatClient.resolvedVariant(settings);
+        sb.append(" [variant ").append(resolved == null ? "default" : resolved).append(']');
         final var implicit = chatClient.implicitVariant(settings);
         if (implicit != null) {
             sb.append(" - default");
@@ -445,7 +444,7 @@ public class ConfigCommands implements SlashCommandSet {
             }
         }
         final var variants = chatClient.variants(settings);
-        final var activeVariant = namedVariant ? variant : "default";
+        final var activeVariant = resolved == null ? "default" : resolved;
         if (!variants.isEmpty()) {
             sb.append(" - variants: ");
             final var names = new ArrayList<String>();
