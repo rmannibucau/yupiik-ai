@@ -29,7 +29,7 @@ public record ModelTuningConfiguration(
         @Property(
                 defaultValue = "\"\"",
                 documentation =
-                        "Default reasoning effort hint for this model (eg. low, medium or high). Applied only when neither the request nor the providerSpecificOptions already carries one (put-if-absent). Blank is ignored.")
+                        "Default reasoning effort hint for this model (eg. low, medium or high). Applied only when neither the request nor the providerSpecificOptions already carries one (put-if-absent) and no selected variant sets it - the reasoningEffort of a selected variant (or of the defaultVariant preset) wins over this fallback. Blank is ignored.")
         String reasoningEffort,
 
         @Property(
@@ -114,7 +114,11 @@ public record ModelTuningConfiguration(
                         + "explicit variant selection (eg. /model <model> <variant> or /variant). Blank keeps the "
                         + "implicit default behavior. When the name matches no configured or implicit variant, a "
                         + "warning is logged and the implicit default applies - a dangling reference never fails "
-                        + "or blocks a request.")
+                        + "or blocks a request. Unlike the reasoningEffort scalar fallback (a single-facet "
+                        + "default), this selects the whole preset: the variant's facets (reasoningEffort, "
+                        + "temperature, top_p, top_k, max_tokens, extra) apply put-if-absent and win over the "
+                        + "tuning-level reasoningEffort; that fallback only applies when the selected variant "
+                        + "leaves the facet unset or when no defaultVariant is configured at all.")
         String defaultVariant,
 
         @Property(
