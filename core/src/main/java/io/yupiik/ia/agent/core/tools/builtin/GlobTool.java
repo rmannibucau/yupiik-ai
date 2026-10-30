@@ -131,6 +131,12 @@ public class GlobTool implements EmbeddedTool {
                     }
                     return FileVisitResult.CONTINUE;
                 }
+
+                @Override
+                public FileVisitResult visitFileFailed(final Path file, final IOException exc) {
+                    // ignore not allowed folders/files so the tool doesn't fail
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
             });
         } catch (final IOException e) {
             return ToolResult.error("Cannot walk " + base + ": " + e.getMessage());

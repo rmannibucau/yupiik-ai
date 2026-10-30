@@ -156,6 +156,12 @@ public class GrepTool implements EmbeddedTool {
                         }
                         return matches.size() >= max ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
                     }
+
+                    @Override
+                    public FileVisitResult visitFileFailed(final Path file, final IOException exc) {
+                        // ignore not allowed folders/files so the tool doesn't fail
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
                 });
             }
         } catch (final IOException e) {

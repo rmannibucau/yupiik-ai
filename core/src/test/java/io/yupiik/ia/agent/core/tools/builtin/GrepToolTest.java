@@ -19,9 +19,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -57,6 +59,28 @@ class GrepToolTest {
                 .output();
         assertTrue(out.contains("3 match(es)"), out);
         assertTrue(out.contains("results capped at 3"), out);
+    }
+
+    @Test
+    void keepsWalkingPastUnreadableDirectory() throws IOException {
+        Assumptions.assumeTrue(
+                FileSystems.getDefault().supportedFileAttributeViews().contains("posix"),
+                "test relies on POSIX permission bits");
+        // an unreadable directory/file (e.g. permission-denied subtrees) must not abort the whole walk
+        final var denied = root.resolve("denied");
+        Files.createDirectories(denied);
+        write(denied.resolve("Hidden.txt"), "needle hidden\n");
+        Files.setPosixFilePermissions(denied, java.nio.file.attribute.PosixFilePermissions.fromString("---------"));
+        final var locked = root.resolve("locked.txt");
+        write(locked, "needle locked\n");
+        Files.setPosixFilePermissions(locked, java.nio.file.attribute.PosixFilePermissions.fromString("---------"));
+        write(root.resolve("ok/App.java"), "needle here\n");
+
+        final var out = tool.execute(Map.of("pattern", "needle", "path", root.toString()))
+                .output();
+
+        assertTrue(out.contains("App.java"), "the walk must continue past an unreadable dir:\n" + out);
+        assertFalse(out.contains("Cannot search"), "unreadable subtrees must not fail the search:\n" + out);
     }
 
     @Test
