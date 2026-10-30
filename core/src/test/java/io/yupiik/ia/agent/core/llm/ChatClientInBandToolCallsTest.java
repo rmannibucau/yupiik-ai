@@ -16,7 +16,9 @@
 package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
@@ -167,6 +169,52 @@ class ChatClientInBandToolCallsTest {
         assertEquals("grep", message.toolCalls().get(0).function().name());
         assertEquals(
                 "{\"pattern\":\"foo\"}", message.toolCalls().get(0).function().arguments());
+    }
+
+    @Test
+    void repairsNativeToolArgumentsAndHandlesNull() throws Exception {
+        chatResponse.set(
+                ("{\"id\":\"c1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"tool_calls\":["
+                                + "{\"id\":\"call1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"} trailing\"}},"
+                                + "{\"id\":\"call2\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":null}}]},\"finish_reason\":\"tool_calls\"}]}")
+                        .getBytes(StandardCharsets.UTF_8));
+        final var calls = client.chat(request()).message().toolCalls();
+        assertEquals("{\"path\":\"a\"}", calls.get(0).function().arguments());
+        assertNull(calls.get(1).function().arguments());
+    }
+
+    @Test
+    void repairsHistoricalArgumentsAfterGatewayRejection() throws Exception {
+        final var bodies = new CopyOnWriteArrayList<String>();
+        server.removeContext("/v1/chat/completions");
+        server.createContext("/v1/chat/completions", exchange -> {
+            final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            bodies.add(body);
+            if (bodies.size() == 1) {
+                respond(
+                        exchange,
+                        400,
+                        "{\"message\":\"messages[1].tool_calls[0].function.arguments must be a valid JSON object string: trailing characters\"}",
+                        "application/json");
+            } else {
+                respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"c1\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}",
+                        "application/json");
+            }
+        });
+        final var call =
+                new ToolCall("call1", "function", new ToolCall.FunctionCall("read", "{\"path\":\"a\"} trailing"), null);
+        final var messages =
+                List.of(Message.user("hi"), Message.assistant(null, List.of(call)), Message.tool("call1", "ok"));
+        final var request =
+                new ChatCompletionRequest("test-model", messages, null, null, null, null, null, null, null, null);
+        assertEquals("ok", client.chat(request).message().content());
+        assertEquals(2, bodies.size());
+        assertTrue(bodies.get(0).contains("trailing"));
+        assertFalse(bodies.get(1).contains("trailing"));
+        assertEquals("{\"path\":\"a\"} trailing", call.function().arguments());
     }
 
     @Test

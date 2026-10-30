@@ -59,6 +59,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -2192,7 +2193,7 @@ public class ChatClient implements AutoCloseable {
             }
             final var arguments =
                     repairArgs ? toolCallArgumentsRepairer.repair(fn.arguments(), true, model) : fn.arguments();
-            if (arguments.equals(fn.arguments())) {
+            if (Objects.equals(arguments, fn.arguments())) {
                 repaired.add(call);
             } else {
                 changed = true;
@@ -2275,7 +2276,7 @@ public class ChatClient implements AutoCloseable {
             final boolean stream,
             final Consumer<LlmStreamEvent> onDelta)
             throws IOException, InterruptedException {
-        return doWithFallback(request, pauseListener, cancelled, stream, onDelta, false);
+        return doWithFallback(request, pauseListener, cancelled, stream, onDelta, false, false);
     }
 
     private <A> A doWithFallback(
@@ -2284,7 +2285,8 @@ public class ChatClient implements AutoCloseable {
             final BooleanSupplier cancelled,
             final boolean stream,
             final Consumer<LlmStreamEvent> onDelta,
-            final boolean reasoningAlreadyDropped)
+            final boolean reasoningAlreadyDropped,
+            final boolean argumentsAlreadyRepaired)
             throws IOException, InterruptedException {
         final Consumer<LlmStreamEvent> onDeltaSafe = onDelta == null ? event -> {} : onDelta;
         final var settings = request.settings();
@@ -2317,14 +2319,43 @@ public class ChatClient implements AutoCloseable {
             }
             // AUTO probed the responses route first: pin the fallback for this provider
             resolvedFlavors.put(providerId, ApiFlavor.COMPLETIONS);
-            return doWithFallback(request, pauseListener, cancelled, stream, onDelta, reasoningAlreadyDropped);
+            return doWithFallback(
+                    request,
+                    pauseListener,
+                    cancelled,
+                    stream,
+                    onDelta,
+                    reasoningAlreadyDropped,
+                    argumentsAlreadyRepaired);
         } catch (final IOException e) {
             // The Codex backend rejects a request carrying a stale reasoning blob (its encryption keys
             // rotated on the server, or the model changed) with 400 invalid_encrypted_content. Drop the
             // opaque reasoning items from the history and retry once without them rather than failing the
             // whole turn; the model simply re-derives its reasoning.
             if (!reasoningAlreadyDropped && isInvalidEncryptedContent(flavor, e)) {
-                return doWithFallback(stripReasoningItems(request), pauseListener, cancelled, stream, onDelta, true);
+                return doWithFallback(
+                        stripReasoningItems(request),
+                        pauseListener,
+                        cancelled,
+                        stream,
+                        onDelta,
+                        true,
+                        argumentsAlreadyRepaired);
+            }
+            if (!argumentsAlreadyRepaired
+                    && provider != null
+                    && providerManager != null
+                    && providerManager.repairToolCallArguments(provider, effective.model())
+                    && e instanceof LlmHttpFailureException failure
+                    && failure.status() == 400
+                    && failure.body() != null
+                    && failure.body().contains("tool_calls")
+                    && failure.body().contains("arguments")) {
+                final var repaired = repairHistoryArguments(request, effective.model());
+                if (repaired != request) {
+                    return doWithFallback(
+                            repaired, pauseListener, cancelled, stream, onDelta, reasoningAlreadyDropped, true);
+                }
             }
             throw e;
         }
@@ -2378,6 +2409,67 @@ public class ChatClient implements AutoCloseable {
                 ? new ChatCompletionRequest(
                         request.model(),
                         cleaned,
+                        request.temperature(),
+                        request.topP(),
+                        request.stream(),
+                        request.tools(),
+                        request.toolChoice(),
+                        request.maxTokens(),
+                        request.reasoningEffort(),
+                        request.others(),
+                        request.sessionId(),
+                        request.settings())
+                : request;
+    }
+
+    /** Repairs replayed arguments only after the provider reports invalid tool-call arguments. */
+    private ChatCompletionRequest repairHistoryArguments(final ChatCompletionRequest request, final String model) {
+        if (request.messages() == null || request.messages().isEmpty()) {
+            return request;
+        }
+        var changed = false;
+        final var messages = new ArrayList<Message>(request.messages().size());
+        for (final var message : request.messages()) {
+            if (message == null
+                    || message.toolCalls() == null
+                    || message.toolCalls().isEmpty()) {
+                messages.add(message);
+                continue;
+            }
+            var messageChanged = false;
+            final var calls = new ArrayList<ToolCall>(message.toolCalls().size());
+            for (final var call : message.toolCalls()) {
+                final var fn = call == null ? null : call.function();
+                if (fn == null) {
+                    calls.add(call);
+                    continue;
+                }
+                final var arguments = toolCallArgumentsRepairer.repair(fn.arguments(), true, model);
+                if (Objects.equals(arguments, fn.arguments())) {
+                    calls.add(call);
+                } else {
+                    calls.add(new ToolCall(
+                            call.id(), call.type(), new ToolCall.FunctionCall(fn.name(), arguments), call.index()));
+                    messageChanged = true;
+                }
+            }
+            if (messageChanged) {
+                messages.add(new Message(
+                        message.role(),
+                        message.content(),
+                        message.name(),
+                        calls,
+                        message.toolCallId(),
+                        message.others()));
+                changed = true;
+            } else {
+                messages.add(message);
+            }
+        }
+        return changed
+                ? new ChatCompletionRequest(
+                        request.model(),
+                        messages,
                         request.temperature(),
                         request.topP(),
                         request.stream(),
