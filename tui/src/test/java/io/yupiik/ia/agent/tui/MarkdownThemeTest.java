@@ -75,6 +75,8 @@ class MarkdownThemeTest {
         assertEquals(Style.EMPTY, styles.link());
         assertEquals(Style.EMPTY, styles.emphasis());
         assertEquals(Style.EMPTY, styles.heading(1));
+        assertEquals(Style.EMPTY, styles.heading(2));
+        assertEquals(Style.EMPTY, styles.heading(3));
     }
 
     @Test
@@ -107,6 +109,12 @@ class MarkdownThemeTest {
         final var h1 = styles.heading(1);
         assertEquals(Color.hex("#9d7cd8"), h1.fg().orElseThrow(), "heading 1 follows the accent color");
         assertTrue(h1.effectiveModifiers().contains(Modifier.BOLD), "heading 1 must be bold");
+        final var h2 = styles.heading(2);
+        assertEquals(Color.hex("#7fd88f"), h2.fg().orElseThrow(), "heading 2 follows the success color");
+        assertTrue(h2.effectiveModifiers().contains(Modifier.BOLD), "heading 2 must be bold");
+        final var h3 = styles.heading(3);
+        assertEquals(Color.hex("#fab283"), h3.fg().orElseThrow(), "heading 3 follows the primary color");
+        assertTrue(h3.effectiveModifiers().contains(Modifier.BOLD), "heading 3 must be bold");
     }
 
     @Test

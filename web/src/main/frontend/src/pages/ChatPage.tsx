@@ -791,7 +791,7 @@ export function ChatPage({
       <div className="flex items-center gap-2 border-b px-3 py-1 text-sm" style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}>
         <span
           title={reconnecting ? 'connection lost - reconnecting' : connected ? 'connected' : 'disconnected'}
-          style={{ color: connected ? (reconnecting ? 'var(--yca-yellow, #e5c07b)' : 'var(--yca-accent)') : '#ff6b6b' }}
+          style={{ color: connected ? (reconnecting ? 'var(--yca-warning)' : 'var(--yca-accent)') : '#ff6b6b' }}
         >
           {connected ? (reconnecting ? '⟳ reconnecting' : '● connected') : '○ disconnected'}
         </span>
@@ -1252,7 +1252,7 @@ function StatusBar({
       {status.notice?.level && status.notice.level !== 'INFO' && (
         <span
           className="shrink-0 rounded px-1 text-xs"
-          style={{ background: isError ? 'rgba(255,85,85,0.15)' : 'rgba(229,192,123,0.15)', color: isError ? '#ff8484' : '#e5c07b' }}
+          style={{ background: isError ? 'rgba(255,85,85,0.15)' : 'var(--yca-warning-soft)', color: isError ? '#ff8484' : 'var(--yca-warning)' }}
         >
           {status.notice.level}
         </span>
@@ -1647,7 +1647,7 @@ function TodoRow({ todo }: { todo: TodoItem }) {
   const glyph = todoGlyph(status);
   const color =
     status === 'in_progress'
-      ? 'var(--yca-yellow, #e5c07b)'
+      ? 'var(--yca-warning)'
       : status === 'completed'
       ? 'var(--yca-accent)'
       : status === 'cancelled'
@@ -1802,13 +1802,13 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
         className="rounded border px-3 py-1 text-[15px]"
         style={{
           borderColor: pending
-            ? 'var(--yca-yellow, #e5c07b)'
+            ? 'var(--yca-warning)'
             : failed
             ? 'rgba(255, 85, 85, 0.5)'
             : running
             ? 'var(--yca-accent)'
             : interrupted
-            ? 'rgba(229, 192, 123, 0.5)'
+            ? 'var(--yca-warning-soft)'
             : 'var(--yca-border)',
           background: 'var(--yca-panel)',
           borderRadius: 'var(--yca-radius-sm)',
@@ -1823,9 +1823,9 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
           {running ? (
             <span className="shrink-0" style={{ color: 'var(--yca-accent)' }}>▶ working…</span>
           ) : interrupted ? (
-            <span className="shrink-0" style={{ color: 'var(--yca-yellow, #e5c07b)' }}>◧ interrupted</span>
+            <span className="shrink-0" style={{ color: 'var(--yca-warning)' }}>◧ interrupted</span>
           ) : pending ? (
-            <span className="shrink-0" style={{ color: 'var(--yca-yellow, #e5c07b)' }}>◷ pending</span>
+            <span className="shrink-0" style={{ color: 'var(--yca-warning)' }}>◷ pending</span>
           ) : failed ? (
             <span className="shrink-0" style={{ color: '#ff6b6b' }}>✗</span>
           ) : (

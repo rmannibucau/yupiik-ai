@@ -86,6 +86,7 @@ is switched later.
 
 The transcript keeps one color per speaker: user turns are painted with the `yca.tui.primary` accent and assistant turns with `yca.tui.accent`, from the turn header and left bar down to the bold prose (unless `yca.tui.strongColor` pins an explicit bold color).
 These settings are documented in the xref:../configuration.adoc[configuration] reference.
+The markdown headings in assistant turns follow a fixed brand ladder: level 1 uses the accent color, level 2 the success (green) tone, level 3 the primary (purple) tone, and deeper levels keep the plain bold heading text; the heading tones are not configurable.
 Palette colors default to `auto` and follow the active named theme (`dark` or `light`); an explicit hex overrides the theme for that slot.
 The screen background defaults to `auto`, which keeps the terminal background untouched so a transparent terminal (e.g. Terminator) shows through; set `yca.tui.background` to a hex color to paint a translucent veil of that color over the terminal (see `yca.tui.backgroundOpacity`), or to an empty string to explicitly keep the terminal background.
 The inline code color follows the selected code theme by default.

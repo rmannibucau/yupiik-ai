@@ -51,8 +51,14 @@
   --yca-muted: #9aa3b2;
   --yca-primary: #fab283;
   --yca-accent: #46f72f;
-  --yca-plan: #f0a020;
-  --yca-build: #fab283;
+  /* plan mode + warning/pending status chips: the same amber as the TUI plan badge
+   * (palette.warning #fbbf24 on dark, #8a621f on light); --yca-warning-soft is the
+   * alpha wash for pill backgrounds. build mode reuses the web accent green so it
+   * reads as the active hue. */
+  --yca-warning: #fbbf24;
+  --yca-warning-soft: rgba(251, 191, 36, 0.15);
+  --yca-plan: #fbbf24;
+  --yca-build: var(--yca-accent);
   /* prose/code typography tokens (dark, default) */
   --yca-heading: #f2f5f9;
   --yca-code-bg: #232a36;
@@ -64,9 +70,12 @@
   --yca-blockquote-border: #fab283;
   --yca-user-bg: rgba(250, 178, 131, 0.08);
   /* heading titles in the assistant markdown output: a themed accent so "# title" sections read as
-   * real titles (brighter than plain --yca-heading text) + a short brand-colored rule underneath */
+   * real titles (brighter than plain --yca-heading text) + a short brand-colored rule underneath.
+   * Level 2 takes the brand green and level 3 the brand purple (TUI-aligned heading ladder). */
   --yca-heading-accent: #fab283;
   --yca-heading-rule: #fab283;
+  --yca-heading-h2: #46f72f;
+  --yca-heading-h3: #d858ff;
 }
 
 :root[data-theme='light'] {
@@ -91,8 +100,12 @@
   --yca-muted: #5a6474;
   --yca-primary: #b36a1f;
   --yca-accent: #1f7a12;
-  --yca-plan: #b36a1f;
-  --yca-build: #b36a1f;
+  /* plan mode + warning/pending status chips: TUI warning amber on light surfaces
+   * (#8a621f); build mode reuses the web accent green (#1f7a12). */
+  --yca-warning: #8a621f;
+  --yca-warning-soft: rgba(138, 98, 31, 0.15);
+  --yca-plan: #8a621f;
+  --yca-build: var(--yca-accent);
   /* prose/code typography tokens (light) */
   --yca-heading: #1c212b;
   --yca-code-bg: #fdf0e2;
@@ -104,7 +117,9 @@
   --yca-blockquote-border: #b36a1f;
   --yca-user-bg: rgba(179, 106, 31, 0.07);
   --yca-heading-accent: #b36a1f;
-  --yca-heading-rule: #02abea;
+  --yca-heading-rule: #b36a1f;
+  --yca-heading-h2: #2f7a43;
+  --yca-heading-h3: #a84fc9;
 }
 
 html,
@@ -159,9 +174,9 @@ body {
 
 /* headings: first-class hierarchy - bigger sizes, tighter letter-spacing, prominent themed
  * tint + a short brand-colored rule under h1 so an assistant "# title" reads as a real section
- * header. The tint (--yca-heading-accent) and rule (--yca-heading-rule) are per-theme tokens so
- * both the dark and light surfaces stay readable - h1/h2 take the accent color, h3+ stay neutral
- * to keep depth. */
+ * header. The tints are per-theme tokens mirroring the TUI heading ladder: h1 the accent, h2 the
+ * brand green, h3 the brand purple, h4+ neutral (--yca-heading) so depth stays readable on both
+ * surfaces. */
 .aui-md h1,
 .aui-md h2,
 .aui-md h3,
@@ -173,9 +188,14 @@ body {
   letter-spacing: -0.025em;
   line-height: 1.25;
 }
-.aui-md h1,
-.aui-md h2 {
+.aui-md h1 {
   color: var(--yca-heading-accent);
+}
+.aui-md h2 {
+  color: var(--yca-heading-h2);
+}
+.aui-md h3 {
+  color: var(--yca-heading-h3);
 }
 .aui-md h1 {
   position: relative;

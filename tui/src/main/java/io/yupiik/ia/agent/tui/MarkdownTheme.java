@@ -26,8 +26,9 @@ import dev.tamboui.style.Style;
  * colored bold following {@code yca.tui.inlineCodeColor} (default: the active code
  * theme string tone) with no background chip and the dim modifier dropped, so code
  * matches the normal-text baseline and is told apart by weight, not by a backdrop.
- * Links, list markers and level-1 headings are also overridden so the library's raw
- * ANSI defaults (terminal blue/cyan/reversed white) never leak into the theme.
+ * Links, list markers and level-1 to level-3 headings are also overridden so the library's raw
+ * ANSI defaults (terminal blue/cyan/reversed white) never leak into the theme: level 1 follows
+ * the accent, level 2 the success (brand green) tone and level 3 the primary (brand purple) tone.
  *
  * <p>Inside already-colored regions (thinking, tool output) the strong accent and
  * inline code yield to the region tone: they stay bold but take the region
@@ -62,6 +63,8 @@ public final class MarkdownTheme {
                 .link(Style.EMPTY.fg(Color.hex(palette.primary())).underlined())
                 .listMarker(Style.EMPTY.fg(Color.hex(palette.textMuted())))
                 .heading(1, Style.EMPTY.fg(Color.hex(palette.accent())).bold())
+                .heading(2, Style.EMPTY.fg(Color.hex(palette.success())).bold())
+                .heading(3, Style.EMPTY.fg(Color.hex(palette.primary())).bold())
                 .build();
     }
 
