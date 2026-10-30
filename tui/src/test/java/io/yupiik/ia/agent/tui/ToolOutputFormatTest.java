@@ -128,4 +128,11 @@ class ToolOutputFormatTest {
     void jsonStillWinsOverDetectedLanguage() {
         assertSame(ToolOutputFormat.Format.JSON, service.detect("{\"a\":1,\"b\":2}", "python3 x.py"));
     }
+
+    /** A proven document language renders as colored source, not the MARKDOWN document render. */
+    @Test
+    void provenDocumentLanguagesRenderAsColoredSource() {
+        assertSame(ToolOutputFormat.Format.CODE, service.detect("# Title\n\n```java\nint a;\n```\n", "markdown"));
+        assertSame(ToolOutputFormat.Format.CODE, service.detect("= Doc\n\n:key: value\n", "asciidoc"));
+    }
 }

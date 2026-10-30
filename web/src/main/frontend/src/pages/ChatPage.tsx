@@ -13,6 +13,8 @@ import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql';
 import markup from 'react-syntax-highlighter/dist/esm/languages/prism/markup';
 import json from 'react-syntax-highlighter/dist/esm/languages/prism/json';
 import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml';
+import asciidoc from 'react-syntax-highlighter/dist/esm/languages/prism/asciidoc';
+import markdownGrammar from 'react-syntax-highlighter/dist/esm/languages/prism/markdown';
 import oneDark from 'react-syntax-highlighter/dist/esm/styles/prism/one-dark';
 import { call, onServerRequest, type ServerRequest } from '../api/rpc';
 import { useSessionStream, type WebEvent, type SessionStatus } from '../api/useSessionStream';
@@ -27,8 +29,8 @@ import { useSlashCompletion, applySuggestion, type SlashSuggestion } from '../ap
 import { normalizeMarkdown, hasOpenInlineSpan, stripEchoedRefs } from '../lib/markdown';
 import { guessToolLanguage, summarizeArgs } from '../lib/toolOutput';
 
-// register the language grammars the TUI highlights (java, ts/js, python, shell, sql, xml/json)
-// plus a generic fallback, so fenced code blocks get syntax highlighting
+// register the language grammars the TUI highlights (java, ts/js, python, shell, sql, xml/json,
+// markdown/asciidoc) plus a generic fallback, so fenced code blocks get syntax highlighting
 SyntaxHighlighter.registerLanguage('java', java);
 SyntaxHighlighter.registerLanguage('typescript', typescript);
 SyntaxHighlighter.registerLanguage('ts', typescript);
@@ -45,6 +47,10 @@ SyntaxHighlighter.registerLanguage('html', markup);
 SyntaxHighlighter.registerLanguage('svg', markup);
 SyntaxHighlighter.registerLanguage('json', json);
 SyntaxHighlighter.registerLanguage('yaml', yaml);
+SyntaxHighlighter.registerLanguage('asciidoc', asciidoc);
+SyntaxHighlighter.registerLanguage('adoc', asciidoc);
+SyntaxHighlighter.registerLanguage('markdown', markdownGrammar);
+SyntaxHighlighter.registerLanguage('md', markdownGrammar);
 
 // resizable sidebar width bounds and default (px), persisted in localStorage like the theme
 const SIDEBAR_DEFAULT_WIDTH = 256; // matches the historical w-64

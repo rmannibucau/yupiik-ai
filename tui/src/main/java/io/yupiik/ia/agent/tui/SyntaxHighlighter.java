@@ -489,6 +489,60 @@ public class SyntaxHighlighter {
                     + "|(?<kw>\\b(?:true|false|null|True|False|Null|TRUE|FALSE|NULL|yes|no|on|off|Yes|No|On|Off)\\b|~)"
                     + "|(?<num>\\b\\d++(?:\\.\\d+)?+\\b)",
             Pattern.MULTILINE));
+
+    /**
+     * Markdown source markers: code spans and links (string), bold/italic/strike
+     * (type), headings, blockquotes, list markers, setext/hr rules (keyword),
+     * fences and table rows (tag), numbers and HTML comments. Every token whose
+     * closing delimiter can sit far away (spans, links) confirms the closer
+     * inside a possessive bounded window first, so a pathological line costs
+     * O(n*512) at worst instead of super-linear backtracking; line constructs
+     * are anchored to the line start.
+     */
+    private static final Highlighter MARKDOWN = new RegexHighlighter(Pattern.compile(
+            "(?<str>`(?=[^`\\n]{0,512}+`)[^`\\n]{0,512}`"
+                    + "|\\[(?=[^\\]\\n]{0,512}+\\](?:\\([^)\\n]{0,512}+\\))?)[^\\]\\n]{0,512}\\](?:\\([^)\\n]{0,512}\\))?)"
+                    + "|(?<com><!--(?:[^-]|-(?!-))*+-->)"
+                    + "|(?<kw>^#{1,6}(?=[ \\t])"
+                    + "|^[ \\t]{0,3}+>+"
+                    + "|^[ \\t]{0,3}+(?:-{3,}+|\\*{3,}+|_{3,}+)(?=[ \\t]*+$)"
+                    + "|^[ \\t]{0,3}+(?:[-*+]|\\d++[.)])[ \\t]++(?=\\S)"
+                    + "|^[=-]{2,}+$)"
+                    + "|(?<tag>^[ \\t]{0,3}+(?:```|~~~)(?=$|\\s)"
+                    + "|^\\|[^\\n]*+\\|?$)"
+                    + "|(?<ty>\\*\\*(?=((?:[^*\\n]|\\*(?!\\*)){0,512}+\\*\\*))(?:[^*\\n]|\\*(?!\\*)){0,512}\\*\\*"
+                    + "|\\*(?!\\*)(?=([^*\\n]{0,512}+\\*(?!\\*)))[^*\\n]{0,512}\\*(?!\\*)"
+                    + "|(?<![_\\w])_(?!\\s)(?=([^_\\n]{0,512}+_(?!\\w)))[^_\\n]{0,512}_(?!\\w)"
+                    + "|~~(?=([^~\\n]{0,512}+~~))[^~\\n]{0,512}~~)"
+                    + "|(?<num>\\b\\d++(?:\\.\\d+)?+\\b)",
+            Pattern.MULTILINE));
+
+    /**
+     * Asciidoc source markers: monospace/passthrough code, links, URLs and
+     * macros (string), bold/italic (type), anchors (annotation), headings and
+     * attributes (keyword), line comments, block delimiters and block
+     * attributions (tag), numbers. Same bounded-window discipline as
+     * {@link #MARKDOWN}.
+     */
+    private static final Highlighter ASCIIDOC = new RegexHighlighter(Pattern.compile(
+            "(?<str>`(?=[^`\\n]{0,512}+`)[^`\\n]{0,512}`"
+                    + "|(?<![A-Za-z0-9])\\+(?!\\s)(?=([^+\\n]{0,512}+\\+))[^+\\n]{0,512}\\+"
+                    + "|(?<![A-Za-z0-9])link:(?=([^\\s\\[\\]\\n]{0,512}+(?:\\[[^\\]]{0,512}+\\])?))[^\\s\\[\\]\\n]{0,512}(?:\\[[^\\]]{0,512}\\])?"
+                    + "|(?<![A-Za-z0-9:])(?:https?|ftp|mailto)://(?=[^\\s\\[\\]\\n]{0,512}+)[^\\s\\[\\]\\n]{0,512}"
+                    + "|(?=[A-Za-z0-9_]{1,64}::[^\\s\\[\\]\\n]{0,512}+\\[[^\\]]{0,512}+\\])[A-Za-z0-9_]{1,64}::[^\\s\\[\\]\\n]{0,512}\\[[^\\]]{0,512}\\])"
+                    + "|(?<ty>\\*\\*(?=((?:[^*\\n]|\\*(?!\\*)){0,512}+\\*\\*))(?:[^*\\n]|\\*(?!\\*)){0,512}\\*\\*"
+                    + "|\\*(?!\\*)(?=([^*\\n]{0,512}+\\*(?!\\*)))[^*\\n]{0,512}\\*(?!\\*)"
+                    + "|(?<![_\\w])_(?!\\s)(?=([^_\\n]{0,512}+_(?!\\w)))[^_\\n]{0,512}_(?!\\w))"
+                    + "|(?<ann>\\[\\[(?=([^\\]\\n]{0,512}+\\]\\]))[^\\]\\n]{0,512}\\]\\]"
+                    + "|\\[#(?=([^\\]\\n]{0,512}+\\]))[^\\]\\n]{0,512}\\])"
+                    + "|(?<com>^//[^\\n]*+)"
+                    + "|(?<kw>^=++\\s(?=\\S))"
+                    + "|(?<attr>^:[A-Za-z0-9_][A-Za-z0-9_.-]*+:(?=\\s|$))"
+                    + "|(?<tag>^(?:-{4,}+|\\.{4,}+|\\*{4,}+|_{4,}+|={4,}+)[ \\t]*+$"
+                    + "|^[ \\t]{0,3}+\\[[A-Za-z0-9_,=#. -]++\\]$)"
+                    + "|(?<num>\\b\\d++(?:\\.\\d+)?+\\b)",
+            Pattern.MULTILINE));
+
     private static final Highlighter GENERIC = language(
             List.of(
                     "return",
@@ -790,7 +844,7 @@ public class SyntaxHighlighter {
         if (m.group("tag") != null) {
             return token(theme.tag());
         }
-        if (m.group("attr") != null) {
+        if (m.pattern().namedGroups().containsKey("attr") && m.group("attr") != null) {
             return token(theme.attr());
         }
         if (m.pattern().namedGroups().containsKey("ann") && m.group("ann") != null) {
@@ -832,6 +886,12 @@ public class SyntaxHighlighter {
                 || l.equals("json")) {
             return TS;
         }
+        if (l.equals("md") || l.equals("markdown")) {
+            return MARKDOWN;
+        }
+        if (l.equals("adoc") || l.equals("asciidoc")) {
+            return ASCIIDOC;
+        }
         return GENERIC;
     }
 
@@ -864,6 +924,7 @@ public class SyntaxHighlighter {
             case "sh", "bash", "zsh" -> "shell";
             case "sql" -> "sql";
             case "md", "markdown" -> "markdown";
+            case "adoc", "asciidoc" -> "asciidoc";
             case "properties", "ini", "toml" -> "yaml";
             case "gradle", "groovy" -> "java";
             default -> null;

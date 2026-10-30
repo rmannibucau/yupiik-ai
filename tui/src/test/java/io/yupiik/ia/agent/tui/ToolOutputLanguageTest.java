@@ -80,6 +80,14 @@ class ToolOutputLanguageTest {
         assertNull(ToolOutputLanguage.guess("see README.md\n", null));
     }
 
+    /** Two agreeing document references paint the output as a document language. */
+    @Test
+    void documentReferencesAreGuessed() {
+        assertEquals("asciidoc", ToolOutputLanguage.guess("a.adoc\nb.adoc\n", null));
+        assertEquals("asciidoc", ToolOutputLanguage.guess("see README.adoc and CONTRIBUTING.asciidoc\n", null));
+        assertEquals("markdown", ToolOutputLanguage.guess("see README.md\nand CHANGELOG.md\n", null));
+    }
+
     @Test
     void keywordDensity() {
         assertEquals("python", ToolOutputLanguage.guess("def main():\n    import os\n    print('x')\n", null));

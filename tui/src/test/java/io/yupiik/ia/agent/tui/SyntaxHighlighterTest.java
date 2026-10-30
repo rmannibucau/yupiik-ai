@@ -476,9 +476,161 @@ class SyntaxHighlighterTest {
         assertEquals("shell", SyntaxHighlighter.guessLanguage("run.sh"));
         assertEquals("sql", SyntaxHighlighter.guessLanguage("query.sql"));
         assertEquals("markdown", SyntaxHighlighter.guessLanguage("README.md"));
+        assertEquals("markdown", SyntaxHighlighter.guessLanguage("CHANGELOG.markdown"));
+        assertEquals("asciidoc", SyntaxHighlighter.guessLanguage("README.adoc"));
+        assertEquals("asciidoc", SyntaxHighlighter.guessLanguage("doc.asciidoc"));
         assertNull(SyntaxHighlighter.guessLanguage("Makefile"), "extension-less files are unknown");
         assertNull(SyntaxHighlighter.guessLanguage("noext"));
         assertNull(SyntaxHighlighter.guessLanguage(null));
         assertNull(SyntaxHighlighter.guessLanguage(""));
+    }
+
+    @Test
+    void markdownIsHighlighted() {
+        final var lines = highlighter.highlightLines(
+                "markdown",
+                "# Title\n\n**bold** and *em* and _em2_ text\n\n- item\n\n`code` span\n\n| a | b |\n\n---\n");
+        final var all = lines.stream().flatMap(l -> l.spans().stream()).toList();
+        final var colored = all.stream()
+                .filter(s -> s.style().fg().isPresent())
+                .map(dev.tamboui.text.Span::content)
+                .toList();
+        assertTrue(colored.stream().anyMatch(c -> c.startsWith("#")), "heading must be colored");
+        assertTrue(colored.stream().anyMatch(c -> c.startsWith("**")), "bold must be colored");
+        assertTrue(colored.stream().anyMatch(c -> c.startsWith("*e") || c.equals("*em*")), "emphasis must be colored");
+        assertTrue(colored.stream().anyMatch(c -> c.startsWith("-")), "list marker must be colored");
+        assertTrue(
+                lines.stream()
+                        .anyMatch(l -> l.spans().stream()
+                                .anyMatch(s -> s.content().startsWith("`")
+                                        && s.style().fg().isPresent())),
+                "code span must be colored");
+        assertTrue(
+                lines.stream()
+                        .anyMatch(l -> l.spans().stream()
+                                .anyMatch(s -> s.content().startsWith("|")
+                                        && s.style().fg().isPresent())),
+                "table row must be colored");
+        // the whole source must reconstruct verbatim (no token is ever swallowed)
+        assertEquals(
+                "# Title\n\n**bold** and *em* and _em2_ text\n\n- item\n\n`code` span\n\n| a | b |\n\n---\n",
+                lines.stream().map(this::lineText).collect(java.util.stream.Collectors.joining("\n")));
+    }
+
+    @Test
+    void asciidocIsHighlighted() {
+        final var lines = highlighter.highlightLines(
+                "asciidoc",
+                "= Title\n\n:author: me\n\n*bold* and _italic_ text\n\n+code+ and `code2`\n\n[[anchor]]\n\n[source,java]\n----\nint a;\n----\n\n// comment\n");
+        final var all = lines.stream().flatMap(l -> l.spans().stream()).toList();
+        final var colored = all.stream()
+                .filter(s -> s.style().fg().isPresent())
+                .map(dev.tamboui.text.Span::content)
+                .toList();
+        assertTrue(colored.stream().anyMatch(c -> c.startsWith("=")), "heading must be colored");
+        assertTrue(colored.stream().anyMatch(c -> c.startsWith(":author")), "attribute must be colored");
+        assertTrue(
+                colored.stream().anyMatch(c -> c.startsWith("+code") || c.equals("+code+")),
+                "passthrough must be colored");
+        assertTrue(colored.stream().anyMatch(c -> c.equals("[[anchor]]")), "anchor must be colored");
+        assertTrue(colored.stream().anyMatch(c -> c.startsWith("----")), "block delimiter must be colored");
+        assertTrue(colored.stream().anyMatch(c -> c.startsWith("// comment")), "comment must be colored");
+        assertEquals(
+                "= Title\n\n:author: me\n\n*bold* and _italic_ text\n\n+code+ and `code2`\n\n[[anchor]]\n\n[source,java]\n----\nint a;\n----\n\n// comment\n",
+                lines.stream().map(this::lineText).collect(java.util.stream.Collectors.joining("\n")));
+    }
+
+    @Test
+    void mdAndAdocDoNotThrowAndRenderWithinBudget() {
+        assertFalse(highlighter.highlight("markdown", "# t\n\n- a\n\n**b**").isEmpty());
+        assertFalse(highlighter.highlight("md", "`c` and *e*").isEmpty());
+        assertFalse(highlighter
+                .highlight("asciidoc", "= T\n\n: k: v\n\n----\nx\n----\n")
+                .isEmpty());
+        assertFalse(highlighter
+                .highlight("adoc", "[source,java]\n----\nint a;\n----\n")
+                .isEmpty());
+        // adversarial unterminated spans must render within budget: the bounded lookahead keeps
+        // a single attempt O(512) instead of super-linear backtracking on the whole line.
+        assertTimeoutPreemptively(
+                Duration.ofSeconds(1),
+                () -> {
+                    final var line = "*a".repeat(5_000);
+                    assertEquals(line, concat(highlighter.highlightLines("markdown", line)));
+                },
+                "unterminated bold/emphasis must stay within the bounded lookahead budget");
+    }
+
+    @Test
+    void pathologicalMarkdownLineHighlightsWithinBudget() {
+        final var inputs = new String[] {
+            "*a".repeat(5_000),
+            "`".repeat(10_000),
+            "*_".repeat(5_000),
+            "**x".repeat(3_000),
+            "[a](b".repeat(3_000),
+            "#".repeat(10_000),
+        };
+        for (final var line : inputs) {
+            assertTimeoutPreemptively(
+                    Duration.ofSeconds(1),
+                    () -> assertEquals(
+                            line,
+                            concat(highlighter.highlightLines("markdown", line)),
+                            "markdown tokenizer must never corrupt the source"),
+                    "pathological markdown line must stay linear: " + line.length());
+        }
+    }
+
+    @Test
+    void pathologicalAsciidocLineHighlightsWithinBudget() {
+        final var inputs = new String[] {
+            "//".repeat(5_000), "+x".repeat(4_000), "=".repeat(10_000), "link:".repeat(3_000),
+        };
+        for (final var line : inputs) {
+            assertTimeoutPreemptively(
+                    Duration.ofSeconds(1),
+                    () -> assertEquals(
+                            line,
+                            concat(highlighter.highlightLines("asciidoc", line)),
+                            "asciidoc tokenizer must never corrupt the source"),
+                    "pathological asciidoc line must stay linear: " + line.length());
+        }
+        // a line full of `[[` anchor openers has no `]]` closer: every position is a valid
+        // candidate, so the check is O(n*512) by design (bounded, not super-linear). The
+        // 10k case stays inside a generous ceiling; the common case (few anchors) is instant.
+        final var anchorLine = "[[".repeat(5_000);
+        assertTimeoutPreemptively(
+                Duration.ofSeconds(2),
+                () -> assertEquals(anchorLine, concat(highlighter.highlightLines("asciidoc", anchorLine))),
+                "a closer-less anchor line must stay bounded (O(n*512)), not super-linear");
+    }
+
+    @Test
+    void largeMarkdownDocumentHighlightsWithinBudget() {
+        // a ~20k-line mixed markdown document: the per-line tokenizer plus the bounded
+        // lookahead must render far inside the ceiling (the linear-split precedent uses
+        // a 6 MB fenced body at 2s; here the doc is a realistic mix of all constructs)
+        final var doc = new StringBuilder();
+        for (var i = 0; i < 2_000; i++) {
+            doc.append("# Heading ").append(i).append('\n');
+            doc.append("Some **bold** and *em* text with `code` and a [link](https://example.com/a).\n\n");
+            doc.append("- item one\n- item two\n\n");
+            doc.append("| a | b |\n| --- | --- |\n| 1 | 2 |\n\n");
+            doc.append("```java\nint x = ").append(i).append(";\n```\n\n");
+        }
+        assertTimeoutPreemptively(
+                Duration.ofSeconds(2),
+                () -> {
+                    final var lines = longHighlighter.highlightLines("markdown", doc.toString());
+                    assertEquals(
+                            doc.toString(),
+                            lines.stream().map(this::lineText).collect(java.util.stream.Collectors.joining("\n")));
+                },
+                "a large markdown document must render within the linear budget");
+    }
+
+    private String lineText(final dev.tamboui.text.Line line) {
+        return line.spans().stream().map(dev.tamboui.text.Span::content).reduce("", String::concat);
     }
 }

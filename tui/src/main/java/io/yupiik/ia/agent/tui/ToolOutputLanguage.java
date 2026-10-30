@@ -96,8 +96,18 @@ public final class ToolOutputLanguage {
     private static final Set<String> EXEC_FLAGS = Set.of("-c", "-lc", "-ic", "-lic");
     private static final Pattern COMMAND_SEGMENT = Pattern.compile("(?:&&|\\|\\||[;|\\n])");
     /** Languages a referenced file extension may contribute ({@link SyntaxHighlighter} has a highlighter). */
-    private static final Set<String> PATH_LANGUAGES =
-            Set.of("java", "python", "shell", "sql", "javascript", "typescript", "json", "yaml", "xml");
+    private static final Set<String> PATH_LANGUAGES = Set.of(
+            "java",
+            "python",
+            "shell",
+            "sql",
+            "javascript",
+            "typescript",
+            "json",
+            "yaml",
+            "xml",
+            "markdown",
+            "asciidoc");
 
     private static final Pattern COMMAND_TOKEN = Pattern.compile("[\\s;&|()]+");
     private static final Pattern ASSIGNMENT = Pattern.compile("^[A-Za-z_][A-Za-z0-9_]*=.*$");

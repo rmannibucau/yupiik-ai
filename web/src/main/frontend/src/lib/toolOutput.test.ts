@@ -11,6 +11,10 @@ describe('guessPathLanguage', () => {
     expect(guessPathLanguage('index.html')).toBe('markup');
     expect(guessPathLanguage('run.sh')).toBe('bash');
     expect(guessPathLanguage('query.sql')).toBe('sql');
+    expect(guessPathLanguage('README.md')).toBe('markdown');
+    expect(guessPathLanguage('CHANGELOG.markdown')).toBe('markdown');
+    expect(guessPathLanguage('README.adoc')).toBe('asciidoc');
+    expect(guessPathLanguage('doc.asciidoc')).toBe('asciidoc');
   });
 
   it('returns null for unknown extensions and bare paths', () => {
@@ -60,6 +64,16 @@ describe('guessToolLanguage', () => {
   it('json output on a read_file with a .json path is detected as json', () => {
     const out = '{"a": 1, "b": [2, 3]}';
     expect(guessToolLanguage(out, '{"path":"conf/app.json"}')).toBe('json');
+  });
+
+  it('read_file output of a markdown document is highlighted as markdown', () => {
+    const out = '# Title\n\nSome **bold** text with `code`.\n\n- item\n';
+    expect(guessToolLanguage(out, '{"path":"README.md"}')).toBe('markdown');
+  });
+
+  it('read_file output of an asciidoc document is highlighted as asciidoc', () => {
+    const out = '= Title\n\n:author: me\n\n== Section\n\n*item*\n';
+    expect(guessToolLanguage(out, '{"path":"docs/guide.adoc"}')).toBe('asciidoc');
   });
 
   it('plain prose with no signal stays null (falls back to the plain pre)', () => {

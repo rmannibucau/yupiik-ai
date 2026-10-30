@@ -67,7 +67,19 @@ const WRAPPERS = new Set(['sudo', 'doas', 'env', 'time', 'nohup', 'nice', 'ionic
 const EXEC_FLAGS = new Set(['-c', '-lc', '-ic', '-lic']);
 const COMMAND_SEGMENT = /(?:&&|\|\||[;|\n])/;
 /** Languages a referenced file extension may contribute (Prism has a grammar for each). */
-const PATH_LANGUAGES = new Set(['java', 'python', 'bash', 'sql', 'javascript', 'typescript', 'json', 'yaml', 'markup']);
+const PATH_LANGUAGES = new Set([
+  'java',
+  'python',
+  'bash',
+  'sql',
+  'javascript',
+  'typescript',
+  'json',
+  'yaml',
+  'markup',
+  'markdown',
+  'asciidoc',
+]);
 
 const COMMAND_TOKEN = /[\s;&|()]+/;
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=.*$/;
@@ -108,6 +120,8 @@ export function guessPathLanguage(path: string | null | undefined): string | nul
     case 'py': case 'pyw': return 'python';
     case 'sh': case 'bash': case 'zsh': return 'bash';
     case 'sql': return 'sql';
+    case 'md': case 'markdown': return 'markdown';
+    case 'adoc': case 'asciidoc': return 'asciidoc';
     default: return null;
   }
 }
