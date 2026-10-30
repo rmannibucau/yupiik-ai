@@ -89,14 +89,17 @@ public class ToolCallArgumentsRepairer {
     }
 
     /**
-     * Drops a trailing second JSON value ({@code {...}} / {@code [...]} prefixed garbage or an
-     * incomplete re-emitted opening brace/bracket) after the first complete JSON value: the
-     * "unexpected '{'; expected end of input" signature, typically a truncated tool-call blob the
-     * model kept writing after it already closed the object. Anything else after the completed
-     * value (free text, a dangling comma, a cut-open string) is left untouched: it may belong to
-     * a value and silently dropping it would change the call semantics. Returns the input
-     * unchanged when no safe cut point is found. The prefix scan tracks string/escape depth so a
-     * {@code }} / {@code ]} inside a string value is never mistaken for the value end.
+     * Drops any trailing garbage after the first complete JSON value: a second JSON value
+     * ({@code {...}} / {@code [...]}), free text, or an incomplete re-emitted opening brace /
+     * bracket - the "expected end of input" and "trailing characters" signatures produced by a
+     * truncated tool-call blob the model kept writing after it already closed the object. A
+     * complete JSON document is a single value, so nothing structurally valid follows a closed
+     * top-level object (only JSON whitespace): any non-whitespace tail is garbage and safe to
+     * drop. {@link #repair} re-validates the cut with a strict parse and falls back to the
+     * original when it does not itself parse, so a genuinely corrupted call stays visible. When
+     * only whitespace follows the completed value (or no complete value was found) the input is
+     * returned unchanged. The prefix scan tracks string/escape depth so a {@code }} / {@code ]}
+     * inside a string value is never mistaken for the value end.
      */
     static String trimTailGarbage(final String json) {
         var inString = false;
@@ -134,10 +137,14 @@ public class ToolCallArgumentsRepairer {
         while (j < json.length() && Character.isWhitespace(json.charAt(j))) {
             j++;
         }
-        if (j >= json.length() || (json.charAt(j) != '{' && json.charAt(j) != '[')) {
-            // trailing whitespace only, or free-text garbage: not a second JSON value, keep everything
+        if (j >= json.length()) {
+            // trailing whitespace only: nothing to cut
             return json;
         }
+        // any non-whitespace after the closed first value is trailing garbage (a second JSON value,
+        // free text or a dangling continuation): a complete JSON document is a single value, so the
+        // tail cannot belong to the call. Drop it; repair() re-validates the result with a strict
+        // parse and falls back to the original when the cut does not itself parse.
         return json.substring(0, firstComplete);
     }
 

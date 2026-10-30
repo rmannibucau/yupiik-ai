@@ -27,6 +27,8 @@ import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderModelConfiguration;
 import io.yupiik.ia.agent.core.configuration.ReasoningFormatMode;
 import io.yupiik.ia.agent.core.configuration.RepairToolCallArgumentsMode;
+import io.yupiik.ia.agent.core.llm.ApiFlavor;
+import io.yupiik.ia.agent.core.llm.ChatRoutes;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import java.util.Collections;
 import java.util.HashMap;
@@ -413,10 +415,12 @@ public class ProviderManager {
     }
 
     /**
-     * Resolve the effective tool call arguments repair mode for a model of a provider: the
+     * Resolve whether tool call arguments are repaired for a model of a provider: the
      * {@code behavior.repairToolCallArguments} of the first matching model entry when it is not AUTO,
      * else the provider-level {@code tuning.repairToolCallArguments} when not AUTO, else the AUTO
-     * heuristic on the effective model name (enabled for any Qwen 27B variant).
+     * heuristic: enabled for any effective model that is a Qwen 27B variant and for any OpenAI
+     * compatible dialect (completions, responses, codex) or undetermined flavor, keeping the
+     * explicitly non-OpenAI anthropic dialect opted out unless configured.
      */
     public boolean repairToolCallArguments(final ProviderConfiguration provider, final String model) {
         final var entry = matchModel(provider, model);
@@ -433,7 +437,28 @@ public class ProviderManager {
         }
         final var auto =
                 perModel != null ? perModel : providerMode != null ? providerMode : RepairToolCallArgumentsMode.AUTO;
-        return auto.isAutoCandidate(model);
+        // auto is always AUTO here: non-AUTO per-model/provider values returned above.
+        return auto == RepairToolCallArgumentsMode.ENABLED || auto.isAutoCandidate(model) || openAiFamily(provider);
+    }
+
+    /**
+     * Whether an {@code AUTO} provider is part of the OpenAI compatible family: true for the
+     * completions / responses / codex dialects and for undetermined flavors (a null or AUTO
+     * effective flavor that cannot be guessed from the base URL), false only for the explicitly
+     * non-OpenAI anthropic dialect. Mirrors ChatClient's effective-flavor
+     * resolution: the configured {@code api} wins unless it is AUTO, which falls back to
+     * {@link ChatRoutes#detectFlavor} on the base URL.
+     */
+    private static boolean openAiFamily(final ProviderConfiguration provider) {
+        if (provider == null) {
+            return true;
+        }
+        final var configured = provider.api();
+        if (configured != null && configured != ApiFlavor.AUTO) {
+            return configured != ApiFlavor.ANTHROPIC;
+        }
+        final var detected = ChatRoutes.detectFlavor(provider.baseUrl());
+        return detected != ApiFlavor.ANTHROPIC;
     }
 
     /**

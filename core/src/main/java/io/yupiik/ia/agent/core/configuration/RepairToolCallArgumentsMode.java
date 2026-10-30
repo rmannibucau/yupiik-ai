@@ -21,13 +21,14 @@ import java.util.Locale;
 /**
  * Whether tool call arguments emitted by the model are repaired before being exposed / stored.
  *
- * <p>Some OpenAI compatible backends (llama.cpp / ollama style) occasionally emit JSON arguments
- * with unescaped control characters (literal tabs/newlines inside string values) or a dangling
- * tail when the generation is cut short under a heavy context, and reject the whole turn with an
- * HTTP 500 ("Failed to parse tool call arguments as JSON"). This is known to happen with the Qwen
- * 27B family on llama.cpp servers with a large context. The repair pass re-serializes the arguments
- * to canonical JSON and escapes control chars, but never invents values: when the payload stays
- * unparseable it is left untouched.</p>
+ * <p>Some OpenAI compatible backends (llama.cpp / ollama style, NVIDIA, ...) occasionally emit JSON
+ * arguments with unescaped control characters (literal tabs/newlines inside string values), a
+ * dangling tail or trailing free text after the closed object when the generation is cut short
+ * under a heavy context, and reject the whole turn with an HTTP 400/500 ("trailing characters" /
+ * "Failed to parse tool call arguments as JSON"). The repair pass escapes control chars and trims
+ * trailing garbage, but never invents values: when the payload stays unparseable it is left
+ * untouched. Repair is low-cost: valid payloads short-circuit on a strict parse and are never
+ * modified.</p>
  */
 @JsonModel
 public enum RepairToolCallArgumentsMode {
@@ -35,7 +36,12 @@ public enum RepairToolCallArgumentsMode {
     DISABLED,
     /** Always repair (best effort, unparseable payloads are left untouched). */
     ENABLED,
-    /** Repair when the effective model looks like a Qwen 27B (contains {@code qwen} and {@code 27b}); else disabled. */
+    /**
+     * Repair by default: enabled for any effective model that looks like a Qwen 27B (contains
+     * {@code qwen} and {@code 27b}) and for any OpenAI compatible dialect. The full heuristic is
+     * resolved by {@code ProviderManager#repairToolCallArguments}, which also enables AUTO for
+     * undetermined flavors and keeps the explicitly non-OpenAI anthropic dialect opted out.
+     */
     AUTO;
 
     public static RepairToolCallArgumentsMode fromConfigurationString(final String value) {

@@ -103,29 +103,39 @@ class ToolCallArgumentsRepairerTest {
     }
 
     @Test
-    void invalidStructureWithoutTrailingJsonValueIsLeftUntouched() {
-        // unterminated object: nothing complete to cut at, no value invented
+    void unterminatedObjectIsLeftUntouched() {
+        // no complete top-level value to cut at: nothing is invented or dropped
         final var unterminated = "{\"path\":\"src/main/java\",\"line\":12";
         assertEquals(unterminated, repairer.repair(unterminated, true, "qwen3.8-27b"));
-        // free text after the closed object is not a second JSON value: kept as-is
-        final var freeText = "{\"a\":1}\nimport jax\n";
-        assertEquals(freeText, repairer.repair(freeText, true, "qwen3.8-27b"));
     }
 
     @Test
-    void trimTailGarbageOnlyCutsSecondJsonValues() {
+    void trimTailGarbageCutsAnyTrailingGarbage() {
+        // a second JSON value, an incomplete re-emitted object and free text are all trimmed
         assertEquals("{\"a\":1}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}{\"b\":2}"));
         assertEquals("{\"a\":1}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}  {\"b\":2}"));
         assertEquals("{\"a\":1}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}{"));
-        // trailing whitespace only and free text are not a second JSON value: kept untouched
+        // only whitespace follows the closed value: nothing to cut
         assertEquals("{\"a\":1}   ", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}   "));
-        assertEquals("{\"a\":1} trailing", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1} trailing"));
+        // free text after the closed object is trailing garbage (the NVIDIA "trailing characters" 400)
+        assertEquals("{\"a\":1}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1} trailing"));
+        assertEquals("{\"a\":1}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}\nimport jax\n"));
+        assertEquals("{\"a\":1}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}, and more"));
         assertEquals("{\"a\":1}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}"));
         assertEquals("{\"a\":1", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1"));
         assertEquals("", ToolCallArgumentsRepairer.trimTailGarbage(""));
         assertEquals("x", ToolCallArgumentsRepairer.trimTailGarbage("x"));
         // a brace inside a string value is not a closing brace
         assertEquals("{\"a\":\"}\"}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":\"}\"}{\"b\":1}"));
+    }
+
+    @Test
+    void freeTextTailIsRepairedEndToEnd() {
+        // a valid object followed by free text is repaired to the valid object (the NVIDIA 400 case)
+        final var args = "{\"path\":\"src/main/java\",\"line\":12} trailing text";
+        assertEquals("{\"path\":\"src/main/java\",\"line\":12}", repairer.repair(args, true, "qwen3.8-27b"));
+        // a trimmed result must always parse
+        assertTrue(isParseable(repairer.repair(args, true, "qwen3.8-27b")));
     }
 
     @Test

@@ -338,7 +338,7 @@ class ProviderManagerTest {
                 withProviderDisabled.repairToolCallArguments(provider3, "qwen3.8-27b"),
                 "provider disabled must win over auto qwen 27B");
 
-        // no config at all: auto heuristic on the model name
+        // no config at all: auto enables for a Qwen 27B model and for OpenAI compatible dialects
         final var autoOnly = manager(Map.ofEntries(
                 Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "1"),
@@ -346,9 +346,29 @@ class ProviderManagerTest {
                 Map.entry("yca.provider.providers.0.model", "qwen3.8-27b")));
         final var provider4 = autoOnly.providers().get(0);
         assertTrue(autoOnly.repairToolCallArguments(provider4, "qwen3.8-27b"), "auto must enable for qwen 27B");
-        assertFalse(
+        // a non-Qwen model on an OpenAI compatible (default OpenAI v1) provider is repaired too
+        assertTrue(
                 autoOnly.repairToolCallArguments(provider4, "gpt-5-mini"),
-                "auto must stay disabled for non-qwen-27B models");
+                "auto must enable for a non-qwen-27B model on an OpenAI compatible provider");
+
+        // the explicitly non-OpenAI anthropic dialect stays opted out, an OpenAI completions one is on
+        final var dialects = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "2"),
+                Map.entry("yca.provider.providers.0.id", "a"),
+                Map.entry("yca.provider.providers.0.model", "claude-3-7-sonnet"),
+                Map.entry("yca.provider.providers.0.api", "anthropic"),
+                Map.entry("yca.provider.providers.1.id", "c"),
+                Map.entry("yca.provider.providers.1.model", "gpt-5-mini"),
+                Map.entry("yca.provider.providers.1.api", "completions")));
+        final var anthropicProvider = dialects.providers().get(0);
+        assertFalse(
+                dialects.repairToolCallArguments(anthropicProvider, "claude-3-7-sonnet"),
+                "auto must stay disabled for the non-OpenAI anthropic dialect");
+        final var completionsProvider = dialects.providers().get(1);
+        assertTrue(
+                dialects.repairToolCallArguments(completionsProvider, "gpt-5-mini"),
+                "auto must enable for an explicit completions (OpenAI) dialect");
     }
 
     @Test
