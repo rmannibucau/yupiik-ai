@@ -1690,7 +1690,11 @@ public class TuiCommand implements Runnable {
             // states with no fallthrough. repaint when any hover state changed (a moved
             // pointer over a footer/sidebar must schedule a redraw or the chip never appears)
             final var footerHovered = state.toolOverlay != null && onToolFooterHover(move, state);
-            return footerHovered | onTabHover(move, state) | onQuotaHover(move, state) | onContextHover(move, state);
+            return footerHovered
+                    | onTabHover(move, state)
+                    | onQuotaHover(move, state)
+                    | onContextHover(move, state)
+                    | (state.toolOverlay == null && onToolCardHover(move, state));
         }
         if (state.toolOverlay != null) {
             return onToolOverlayEvent(event, runner, state);
@@ -1746,6 +1750,7 @@ public class TuiCommand implements Runnable {
                 state.hoverQuotaReset = null;
                 state.hoverQuotaRect = null;
                 state.hoverContextSize = null;
+                state.hoverToolCard = -1L;
                 // tab close zones first: they are sub-rects of the tab cells
                 for (var i = 0; i < tabCloseRects.size(); i++) {
                     if (i < tabManager.size() && tabCloseRects.get(i).contains(mouse.x(), mouse.y())) {
@@ -3266,6 +3271,28 @@ public class TuiCommand implements Runnable {
      * repaints when the hover state changed. Hit-testing uses the current-frame
      * {@link UiState#contextGaugeRect}, which is cleared whenever the gauge is not drawn.
      */
+    /**
+     * Mouse motion over a tool card header strip in the transcript: records the hovered
+     * card ordinal and its screen rect so the render thread can reverse-video the header
+     * row and make the click target visible. Only repaints when the hovered card changed.
+     * Hit-testing uses the current-frame {@link UiState#toolAnchors}, cleared whenever the
+     * transcript does not show that card, so a hover never sticks to a scrolled-out card.
+     */
+    private boolean onToolCardHover(final MouseEvent move, final UiState state) {
+        long next = -1L;
+        for (final var anchor : state.toolAnchors) {
+            if (anchor.ordinal() >= 0 && anchor.header().contains(move.x(), move.y())) {
+                next = anchor.ordinal();
+                break;
+            }
+        }
+        if (state.hoverToolCard == next) {
+            return false;
+        }
+        state.hoverToolCard = next;
+        return true;
+    }
+
     private boolean onContextHover(final MouseEvent move, final UiState state) {
         final var hovered = state.contextGaugeRect != null && state.contextGaugeRect.contains(move.x(), move.y());
         String next = null;
@@ -3311,6 +3338,7 @@ public class TuiCommand implements Runnable {
         state.hoverQuotaReset = null;
         state.hoverQuotaRect = null;
         state.hoverContextSize = null;
+        state.hoverToolCard = -1L;
         if (state.toolOverlay != null) {
             scrollToolOverlay(state, delta);
         } else if (tabManager.isListOpen()) {
@@ -4445,9 +4473,14 @@ public class TuiCommand implements Runnable {
         // anchor even when scrolled out of view: navigation must reach off-screen cards
         final var anchors = new ArrayList<UiState.ToolAnchor>();
         for (final var top : toolTops) {
+            // a lone bordered card reserves its own top-border row, so its header text row
+            // (top.row()) sits one row below the block top: extend the clickable strip over
+            // both rows so clicking the border or the header text hits the same card
+            final var stripTop = top.bordered() ? top.row() - 1 : top.row();
+            final var stripH = top.bordered() ? 2 : 1;
             anchors.add(new UiState.ToolAnchor(
                     top.ordinal(),
-                    new Rect(content.x(), inner.y() + top.row() - viewOffset, content.width(), 1),
+                    new Rect(content.x(), inner.y() + stripTop - viewOffset, content.width(), stripH),
                     top.row(),
                     top.runMember()));
         }
@@ -4499,6 +4532,27 @@ public class TuiCommand implements Runnable {
         state.copyBoxes = List.copyOf(copyBoxes);
         // search match highlighting: reversed strips over matched rows, same buffer
         // trick as the scrollbar indicator (no span surgery needed)
+        if (state.hoverToolCard >= 0) {
+            // hovered card header: reverse-video the whole clickable strip so the
+            // click target is visible before the user presses. The rect is resolved
+            // from the current-frame anchors (never a stale coordinate): the transcript
+            // can auto-scroll between the MOVE and this render.
+            for (final var anchor : state.toolAnchors) {
+                if (anchor.ordinal() != state.hoverToolCard) {
+                    continue;
+                }
+                final var r = anchor.header();
+                final var visY = Math.max(inner.y(), r.y());
+                final var visBottom = Math.min(inner.y() + inner.height(), r.y() + r.height());
+                if (visBottom > visY) {
+                    frame.buffer()
+                            .setStyle(
+                                    new Rect(content.x(), visY, content.width(), visBottom - visY),
+                                    Style.EMPTY.reversed());
+                }
+                break;
+            }
+        }
         if (state.search.active() && !state.search.matches().isEmpty()) {
             final var matches = new HashSet<>(state.search.matches());
             var top = 0;
@@ -5217,7 +5271,7 @@ public class TuiCommand implements Runnable {
                 lines.add(line);
                 rows.add(plainText(line));
                 if (card.ordinal() >= 0) {
-                    toolTops.add(new UiState.ToolTop(card.ordinal(), y, true));
+                    toolTops.add(new UiState.ToolTop(card.ordinal(), y, true, false));
                 }
                 y++;
             }
@@ -5234,7 +5288,7 @@ public class TuiCommand implements Runnable {
                     rows.add(plainText(line));
                     if (first && card.ordinal() >= 0) {
                         // anchor the card on its header row: clicking it opens the full-output overlay
-                        toolTops.add(new UiState.ToolTop(card.ordinal(), y, true));
+                        toolTops.add(new UiState.ToolTop(card.ordinal(), y, true, false));
                     }
                     first = false;
                     y++;
@@ -5389,7 +5443,7 @@ public class TuiCommand implements Runnable {
             final var top = out.stream().mapToInt(RenderedChunk::height).sum();
             // the running card is clickable too: its ordinal is stamped by the runner
             // (or resolved by the renderer), so the running-tool overlay opens on click
-            toolTops.add(new UiState.ToolTop(card.ordinal(), top, false));
+            toolTops.add(new UiState.ToolTop(card.ordinal(), top, false, false));
             final var line = hiddenToolLine(card);
             rows.add(plainText(line));
             out.add(new RenderedChunk(
@@ -5402,10 +5456,11 @@ public class TuiCommand implements Runnable {
             return;
         }
         final var top = out.stream().mapToInt(RenderedChunk::height).sum();
-        // the running card is clickable too: the ordinal is stamped by the runner
-        // (or resolved by the renderer via pendingToolOrdinals), so clicking the live
-        // block opens the running-tool overlay instead of doing nothing
-        toolTops.add(new UiState.ToolTop(card.ordinal(), top, false));
+        // lone bordered card: the header TEXT row is at top+1 (the block reserves its own
+        // top-border row), so anchor there - stamping `top` put the 1-row click target on
+        // the border row and clicks on the visible header text missed the anchor entirely.
+        // `bordered` also makes the renderer extend the clickable strip over both rows.
+        toolTops.add(new UiState.ToolTop(card.ordinal(), top + 1, false, true));
         final var statusColor =
                 palette.color(card.pending() ? palette.warning() : card.failed() ? palette.error() : palette.success());
         final var blockBuilder = Block.builder()
@@ -6926,6 +6981,7 @@ public class TuiCommand implements Runnable {
             state.toolOverlay = null;
             state.toolOverlayFooter = null;
             state.hoverToolCmd = null;
+            state.hoverToolCard = -1L;
             return true;
         }
         if (key.hasCtrl() && key.hasShift() && key.isCharIgnoreCase('c')) {
@@ -8769,7 +8825,7 @@ public class TuiCommand implements Runnable {
         private record FooterLink(long ordinal, int row) {}
 
         /** A tool card position in the flat transcript row space (row = top line of the card). */
-        private record ToolTop(long ordinal, int row, boolean runMember) {}
+        private record ToolTop(long ordinal, int row, boolean runMember, boolean bordered) {}
 
         private final TuiTranscriptModel model;
         private final Clock clock;
@@ -8942,6 +8998,13 @@ public class TuiCommand implements Runnable {
          * scroll / press / drag / leave.
          */
         private volatile String hoverContextSize;
+
+        /**
+         * Ordinal of the tool card whose header strip (border + title row) the pointer
+         * currently hovers, or {@code -1}. Rendered by the render thread as a reversed
+         * header row so the click target is visible; cleared on scroll / press.
+         */
+        private volatile long hoverToolCard = -1;
 
         private record QuotaHoverArea(Rect rect, long resetAtEpochSeconds) {}
 

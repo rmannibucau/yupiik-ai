@@ -2691,6 +2691,126 @@ class TuiCommandRenderTest {
         quit();
     }
 
+    @Test
+    void clickingLoneShownCardHeaderCollapsesAndBorderRowClickAlsoHits() throws Exception {
+        // regression: the lone bordered card's click anchor used to sit on the block's
+        // top-border row, so clicking the visible header text did nothing until a resize
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-lone-card-click-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry)));
+        tuiRef.get().dispatch(new PasteEvent("/tool-output show"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        // see hoveringLoneShownCardHeaderReversesTheHeaderRow: "ls -la" also matches the
+        // collapsed line, so await the SHOWN-only card title before reading the row
+        awaitOccurrences("#1 - ", 1);
+        final var headerRow = rowOf("ls -la");
+        // clicking the header text collapses the card (turns it into a dim one-liner)
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 5, headerRow));
+        awaitTextGone("total 8"); // clicking the dim one-liner re-opens the full output modal
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 5, rowOf("ls -la")));
+        awaitText("full output");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("full output");
+        quit();
+    }
+
+    @Test
+    void hoveringLoneShownCardHeaderReversesTheHeaderRow() throws Exception {
+        // hover feedback: the clickable strip (border + header row) is reversed while hovered
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-lone-card-hover-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry)));
+        tuiRef.get().dispatch(new PasteEvent("/tool-output show"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        // the SHOWN card title (" #1 - 4ms") only exists once the bordered card replaced
+        // the dim one-liner: "ls -la" alone also matches the collapsed line, so awaiting
+        // it could race with the re-render and read a stale row
+        awaitOccurrences("#1 - ", 1);
+        final var borderRow = rowOf("#1 - ");
+        final var headerRow = rowOf("ls -la");
+        assertFalse(backend.reversed(5, headerRow), "header must not be reversed before hover:\n" + backend.text());
+        assertFalse(backend.reversed(5, borderRow), "border must not be reversed before hover:\n" + backend.text());
+        tuiRef.get().dispatch(MouseEvent.move(5, headerRow));
+        awaitReversed(5, headerRow);
+        if (!backend.reversed(5, borderRow)) {
+            final var sb = new StringBuilder("headerRow=" + headerRow + " borderRow=" + borderRow + " reversed:");
+            for (var y = 0; y < 30; y++) {
+                for (var x = 0; x < 92; x++) {
+                    if (backend.reversed(x, y)) {
+                        sb.append(" (").append(x).append(",").append(y).append(")");
+                    }
+                }
+            }
+            throw new AssertionError(sb + "\n" + backend.text());
+        }
+        assertTrue(backend.reversed(5, borderRow), "border row must be reversed on hover:\n" + backend.text());
+        // moving away (below the card, in the transcript's empty area) clears the highlight
+        tuiRef.get().dispatch(MouseEvent.move(5, borderRow + 6));
+        awaitReversedGone(5, headerRow);
+        quit();
+    }
+
+    @Test
+    void clickingRunningShownCardBodyOpensLiveOverlay() throws Exception {
+        // a running card in SHOWN mode: clicking anywhere in the card (not just the
+        // header strip) opens the live running-tool overlay
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-running-card-click-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        tuiRef.get().dispatch(new PasteEvent("/tool-output show"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"sleep 30\"}", sid(shellRegistry)));
+        awaitText("sleep 30");
+        final var headerRow = rowOf("sleep 30");
+        // click the header strip of the running card: opens the live overlay
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 5, headerRow));
+        awaitText("- running ");
+        awaitText("sleep 30");
+        quit();
+    }
+
+    /** Waits until the cell at the coordinate is rendered in reverse video. */
+    private void awaitReversed(final int x, final int y) throws InterruptedException {
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
+        while (!backend.reversed(x, y)) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("cell (" + x + "," + y + ") never reversed; last screen:\n" + backend.text());
+            }
+            assertTrue(
+                    backend.awaitFrame(1_000), "no frame received while waiting for reversal at (" + x + "," + y + ")");
+        }
+    }
+
+    /** Waits until the cell at the coordinate is no longer rendered in reverse video. */
+    private void awaitReversedGone(final int x, final int y) throws InterruptedException {
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
+        while (backend.reversed(x, y)) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError(
+                        "cell (" + x + "," + y + ") never un-reversed; last screen:\n" + backend.text());
+            }
+            assertTrue(
+                    backend.awaitFrame(1_000),
+                    "no frame received while waiting for un-reversal at (" + x + "," + y + ")");
+        }
+    }
+
     /** Counts non-overlapping occurrences of {@code token} on the current screen. */
     private int occurrences(final String token) {
         final var text = backend.text();
