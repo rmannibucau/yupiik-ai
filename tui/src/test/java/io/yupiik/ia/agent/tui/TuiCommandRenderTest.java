@@ -1678,6 +1678,73 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void btwUsesTheTabChatSettingsModelAndProvider() throws Exception {
+        // Regression: /btw must run on the active tab's per-session model/provider selection,
+        // not on the process default (prov0) provider. The tab is seeded with prov1/b03 so
+        // prov0 (llm) and prov1 (llm2) disagree on both the model and the answering server.
+        tuiConfig = twoProviderConfiguration();
+        llm.answer("default-provider answer");
+        llm2.answer("tab-provider answer");
+        final var settings = new AtomicReference<ChatSettings>(ChatSettings.EMPTY);
+        sessionAgentLoopFactory = sessionId -> new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId2,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId2,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId2, history, cancelled);
+            }
+
+            @Override
+            public ChatSettings chatSettings() {
+                return settings.get();
+            }
+
+            @Override
+            public void updateChatSettings(final ChatSettings value) {
+                settings.set(value);
+            }
+        };
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-btw-tab-settings-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // seed the active tab's per-session selection: prov1 with model b03 (like /provider + /model)
+        settings.set(ChatSettings.EMPTY.withProviderId("prov1").withModel("b03"));
+
+        tuiRef.get().dispatch(new PasteEvent("/btw what is this"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("Q: what is this");
+        awaitText("tab-provider answer");
+
+        final var sentToTabProvider = llm2.requests().stream()
+                .filter(it -> it.contains("what is this"))
+                .toList();
+        assertFalse(sentToTabProvider.isEmpty(), "/btw must reach the tab's provider (prov1/llm2)");
+        assertTrue(
+                sentToTabProvider.stream().anyMatch(it -> it.contains("\"model\":\"b03\"")),
+                "/btw must send the tab's model (b03), got: " + sentToTabProvider);
+
+        quit();
+    }
+
+    @Test
     void btwRetryRetriesAnEmptyAnswerInModal() throws Exception {
         // an empty /btw answer (with completion tokens) becomes a retryable failure surfaced in the modal
         llm.answer("");

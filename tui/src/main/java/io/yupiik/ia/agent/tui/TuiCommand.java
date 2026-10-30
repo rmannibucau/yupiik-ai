@@ -2470,7 +2470,7 @@ public class TuiCommand implements Runnable {
                                 : null,
                         cancelled::get,
                         btwGate(runner, state, ordinal),
-                        null,
+                        state.session == null ? null : state.session.chatSettings(),
                         state.session.runtime() != null
                                 ? state.session.runtime().systemPromptBuilder()
                                 : null)
