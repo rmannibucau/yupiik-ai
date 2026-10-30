@@ -1524,8 +1524,20 @@ public class TuiCommand implements Runnable {
                 state.pendingToolArgs.remove(finished.name());
             }
             final var ordinals = state.pendingToolOrdinals.get(finished.name());
-            final var ordinal =
-                    ordinals == null || ordinals.isEmpty() ? state.model.toolCallCount() : ordinals.pollFirst();
+            // The runner stamps the same authoritative ordinal on both ToolStarted and ToolFinished
+            // (a per-session atomic): prefer it so a same-name overlap (a subagent streaming the same
+            // tool, or parallel batches) can never record the finish under the wrong reserved ordinal
+            // and leave another call stuck "executing". Only fall back to the name deque / toolCallCount
+            // for legacy events that carry no ordinal (mirrors ConversationTranscript and the web reducer).
+            final long ordinal;
+            if (finished.ordinal() > 0) {
+                ordinal = finished.ordinal();
+                if (ordinals != null) {
+                    ordinals.remove(ordinal);
+                }
+            } else {
+                ordinal = ordinals == null || ordinals.isEmpty() ? state.model.toolCallCount() : ordinals.pollFirst();
+            }
             if (ordinals != null && ordinals.isEmpty()) {
                 state.pendingToolOrdinals.remove(finished.name());
             }
@@ -1550,6 +1562,14 @@ public class TuiCommand implements Runnable {
                             !finished.success(),
                             finished.pending(),
                             0));
+            // an open Ctrl+O overlay bound to this call must leave the running state too: only the
+            // ToolStream path re-arms it today, so a finish with no stream in between would leave the
+            // modal stuck on the running entry ("pending… (executing)") even after the card below
+            // turned done. Mirror the ToolStream swap (the store now holds the non-running finish),
+            // preserving the scroll offset.
+            if (state.toolOverlay != null && state.toolOverlay.ordinal() == ordinal) {
+                state.toolOverlay = state.toolOverlay.withEntry(state.toolOutputs.get(ordinal));
+            }
         } else if (event instanceof AgentEvent.TurnDone || event instanceof AgentEvent.TurnCancelled) {
             // tab icon: the last turn finished (done or cancelled) until a new one starts;
             // a cancellation is not an error, only the end of the current turn

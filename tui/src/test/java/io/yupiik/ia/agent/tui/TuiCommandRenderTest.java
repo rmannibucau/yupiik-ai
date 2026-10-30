@@ -2863,6 +2863,39 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void openToolOverlayLeavesRunningStateOnToolFinished() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-overlay-finish-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn -q test\"}", 7, sid(shellRegistry), null, null));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "compiling...", 7, sid(shellRegistry), null, null));
+        awaitText("running...");
+        final var row = rowOf("mvn -q test");
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, row));
+        tuiRef.get().dispatch(MouseEvent.release(MouseButton.LEFT, 2, row));
+        awaitText("bash - running"); // overlay open, marked running
+        awaitText("pending"); // pending marker in the overlay body
+        awaitText("compiling..."); // the ToolStream fragment reached the overlay body
+
+        // the tool finishes while the overlay is still open: the modal must leave the
+        // running state (regression: it used to keep the stale running entry forever,
+        // because only ToolStream re-armed the overlay, never ToolFinished)
+        shellRegistry.onEvent(
+                new AgentEvent.ToolFinished("bash", "Exit code: 1", false, false, 7, sid(shellRegistry), null, null));
+        awaitTextGone("pending"); // overlay no longer pending
+        awaitTextGone("bash - running");
+        awaitText("Exit code: 1"); // finished output visible in the (now closed-state) overlay
+
+        quit();
+    }
+
+    @Test
     void turnAndSessionMetricsShowInStatusBar() throws Exception {
         final var shellRegistry = testRegistry();
         final var usageTracker = newUsageTracker();
