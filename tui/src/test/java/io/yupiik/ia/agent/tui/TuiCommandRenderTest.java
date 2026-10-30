@@ -220,6 +220,41 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void sgrMouseTailDoesNotTypeIntoThePrompt() throws Exception {
+        // Moving the mouse over the prompt while ?1003h (any-motion tracking, enabled by
+        // TuiRunnerFactory) is on streams SGR extended-mouse reports (ESC[<button;col;rowM).
+        // Under load the leading ESC can be read alone and the printable tail "[<35;23;35M"
+        // is then delivered as ordinary character keys; it must not persist in the buffer.
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-mouse-tail-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        for (final var c : "hello".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitText("hello");
+
+        // the ESC-sliced printable tail of an SGR hover/move report
+        for (final var c : "[<35;23;35M".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        // the tail must not persist: the prompt drops back to the pre-mouse text
+        awaitNoText("35;23;35M");
+        awaitText("hello");
+
+        // genuine typing still works right after the mouse sweep
+        for (final var c : " world".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitText("hello world");
+
+        quit();
+    }
+
+    @Test
     void altEnterInsertsNewlineInsteadOfSubmitting() throws Exception {
         final var shellRegistry = testRegistry();
         final var received = new AtomicReference<String>();

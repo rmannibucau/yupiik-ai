@@ -1345,6 +1345,7 @@ public class TuiCommand implements Runnable {
                     final var cp = key.codePoint();
                     area.insert(
                             cp > Character.MAX_VALUE ? new String(Character.toChars(cp)) : String.valueOf((char) cp));
+                    rollbackSgrMouseTail(area);
                 }
             }
             default -> {}
@@ -1357,6 +1358,39 @@ public class TuiCommand implements Runnable {
             prompt.answered().set(false);
             prompt.latch.countDown();
             state.feedbackPrompt = null;
+        }
+    }
+
+    /**
+     * SGR extended-mouse report tail as it can appear in the prompt buffer:
+     * {@code ESC[<button;column;rowM} (or {@code m} for a release). The leading
+     * ESC is optional here because it is consumed separately by the escape race
+     * that delivers the tail as printable text.
+     * {@code button >= 64} is a wheel, {@code 32..35} a press/drag/hover; all
+     * collapse to the same {@code digits;digits;digits} shape.
+     */
+    private static final Pattern SGR_MOUSE_TAIL = Pattern.compile("\\u001b?\\[<\\d+;\\d+;\\d+[Mm]$");
+
+    /**
+     * Removes a stray SGR mouse-report tail from the end of a text area, leaving
+     * the pre-mouse text untouched. The TUI turns on {@code ?1003h} (any-motion
+     * tracking, see {@link TuiRunnerFactory}) so every mouse move over the prompt
+     * streams {@code ESC[<cb;cx;cyM}; when the leading ESC is read alone (TamboUI's
+     * escape timeout expiring under render load), the remaining printable
+     * {@code [<35;23;35M} is delivered as ordinary CHARACTER keys and would be typed
+     * into the prompt. Callers run this right after an insertion so a completed
+     * three-field tail is rolled back instead of appearing after the typed text.
+     * Only the fully-formed {@code button;column;row} shape is removed, so typing
+     * a literal {@code [<...} is unaffected until (if ever) it closes with a digit
+     * field ending in {@code M}/{@code m}.
+     */
+    private static void rollbackSgrMouseTail(final TextAreaState area) {
+        final var text = area.text();
+        final var matcher = SGR_MOUSE_TAIL.matcher(text);
+        if (matcher.find()) {
+            final var end = matcher.start();
+            area.setText(end == 0 ? "" : text.substring(0, end));
+            area.moveCursorToEnd();
         }
     }
 
@@ -1630,11 +1664,14 @@ public class TuiCommand implements Runnable {
             // normalize CRLF/CR so multiline pastes render and submit cleanly
             final var text = paste.text().replace("\r\n", "\n").replace("\r", "\n");
             if (state.feedbackPrompt != null) {
-                feedbackInput(state.feedbackPrompt).insert(text);
+                final var area = feedbackInput(state.feedbackPrompt);
+                area.insert(text);
+                rollbackSgrMouseTail(area);
                 return true;
             }
             beforeEdit(state);
             state.input.insert(text);
+            rollbackSgrMouseTail(state.input);
             return true;
         }
         if (event instanceof TickEvent) {
@@ -2201,6 +2238,7 @@ public class TuiCommand implements Runnable {
                     final var cp = key.codePoint();
                     state.input.insert(
                             cp > Character.MAX_VALUE ? new String(Character.toChars(cp)) : String.valueOf((char) cp));
+                    rollbackSgrMouseTail(state.input);
                     liveComplete(state);
                 }
             }
