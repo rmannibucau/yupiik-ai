@@ -25,40 +25,55 @@ import java.util.List;
 @RootConfiguration("yca.tui")
 @JsonModel
 public record TuiConfiguration(
+        @Property(documentation = "UI theme selection settings.")
+        TuiThemeConfiguration theme,
+
         @Property(
-                defaultValue = "\"#9d7cd8\"",
-                documentation = "Accent color (hex), used for panel titles and highlights.")
+                defaultValue = "\"auto\"",
+                documentation = "Accent color (hex), used for panel titles and highlights; "
+                        + "auto (default) follows the active theme (dark or light) palette.")
         String accent,
 
-        @Property(defaultValue = "\"#fab283\"", documentation = "Primary color (hex), used for labels and emphasis.")
+        @Property(
+                defaultValue = "\"auto\"",
+                documentation = "Primary color (hex), used for labels and emphasis; "
+                        + "auto (default) follows the active theme (dark or light) palette.")
         String primary,
 
         @Property(
-                defaultValue = "\"#7fd88f\"",
-                documentation = "Success color (hex), used for ready state and low context usage.")
+                defaultValue = "\"auto\"",
+                documentation = "Success color (hex), used for ready state and low context usage; "
+                        + "auto (default) follows the active theme (dark or light) palette.")
         String success,
 
         @Property(
-                defaultValue = "\"#f5a742\"",
-                documentation = "Warning color (hex), used for busy state, approvals and medium context usage.")
+                defaultValue = "\"auto\"",
+                documentation = "Warning color (hex), used for busy state, approvals and medium context usage; "
+                        + "auto (default) follows the active theme (dark or light) palette.")
         String warning,
 
         @Property(
-                defaultValue = "\"#e06c75\"",
-                documentation = "Error color (hex), used for errors and high context usage.")
+                defaultValue = "\"auto\"",
+                documentation = "Error color (hex), used for errors and high context usage; "
+                        + "auto (default) follows the active theme (dark or light) palette.")
         String error,
 
         @Property(
-                defaultValue = "\"#56b6c2\"",
-                documentation = "Info color (hex), used for gauges and informational values.")
+                defaultValue = "\"auto\"",
+                documentation = "Info color (hex), used for gauges and informational values; "
+                        + "auto (default) follows the active theme (dark or light) palette.")
         String info,
 
-        @Property(defaultValue = "\"#eeeeee\"", documentation = "Main text color (hex).")
+        @Property(
+                defaultValue = "\"auto\"",
+                documentation =
+                        "Main text color (hex); auto (default) follows the active theme (dark or light) palette.")
         String text,
 
         @Property(
-                defaultValue = "\"#808080\"",
-                documentation = "Muted text color (hex), used for hints and secondary values.")
+                defaultValue = "\"auto\"",
+                documentation = "Muted text color (hex), used for hints and secondary values; "
+                        + "auto (default) follows the active theme (dark or light) palette.")
         String textMuted,
 
         @Property(
@@ -88,13 +103,22 @@ public record TuiConfiguration(
                         "Transparency (0..1) of the tool output text toward the panel background: 0 is fully opaque, higher values fade tool output out (terminals have no alpha, the color is pre-blended).")
         double toolOutputOpacity,
 
-        @Property(defaultValue = "\"#484848\"", documentation = "Panel border color (hex).")
+        @Property(
+                defaultValue = "\"auto\"",
+                documentation =
+                        "Panel border color (hex); auto (default) follows the active theme (dark or light) palette.")
         String border,
 
-        @Property(defaultValue = "\"#606060\"", documentation = "Active/focused panel border color (hex).")
+        @Property(
+                defaultValue = "\"auto\"",
+                documentation = "Active/focused panel border color (hex); "
+                        + "auto (default) follows the active theme (dark or light) palette.")
         String borderActive,
 
-        @Property(defaultValue = "\"#141414\"", documentation = "Panel background color (hex).")
+        @Property(
+                defaultValue = "\"auto\"",
+                documentation = "Panel background color (hex); "
+                        + "auto (default) follows the active theme (dark or light) palette.")
         String backgroundPanel,
 
         @Property(
@@ -178,16 +202,26 @@ public record TuiConfiguration(
         int scrollPageLines,
 
         @Property(
-                defaultValue = "\"\"",
-                documentation = "Screen background color (hex) painted over the whole viewport before the UI widgets, "
-                        + "or blank (default) to keep the terminal background. Panels and cards draw their own "
-                        + "backgroundPanel-based colors on top.")
+                defaultValue = "\"auto\"",
+                documentation =
+                        "Screen background: auto (default) and blank keep the terminal background touched, "
+                                + "which lets a transparent terminal (e.g. Terminator) show through. Set a hex color to paint "
+                                + "a translucent veil of that color over the detected terminal background (see backgroundOpacity), "
+                                + "so the terminal stays visible underneath. Panels and cards draw their own backgroundPanel-based colors on top.")
         String background,
 
         @Property(
-                defaultValue = "\"#ff5555\"",
-                documentation = "Yolo approval color (hex), used for the red 'yolo ⚠' badge in the status bar when the "
-                        + "approval mode is set to yolo (danger mode).")
+                defaultValue = "0.8",
+                documentation =
+                        "Opacity (0..1) of the translucent screen background veil applied when yca.tui.background is an "
+                                + "explicit hex color: 0 lets the terminal show through fully, 1 paints the color opaque.")
+        double backgroundOpacity,
+
+        @Property(
+                defaultValue = "\"auto\"",
+                documentation =
+                        "Yolo approval color (hex), used for the red 'yolo ⚠' badge in the status bar when the "
+                                + "approval mode is set to yolo (danger mode); auto (default) follows the active theme (dark or light) palette.")
         String yolo,
 
         @Property(

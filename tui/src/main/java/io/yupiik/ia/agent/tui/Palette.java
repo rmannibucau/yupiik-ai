@@ -19,10 +19,11 @@ import dev.tamboui.style.Color;
 import dev.tamboui.style.Style;
 
 /**
- * Resolved color palette. In "dark" theme the configured values are used
- * verbatim; in "light" theme the base foreground/background/border colors are
- * inverted for readability and the accent/status colors are remapped to darker
- * WCAG-safe variants, because the dark-theme tones are too pale on white.
+ * Resolved color palette. Each slot follows the active named theme ("dark" or
+ * "light", see {@code tui.theme} and the persisted /theme switch) unless the
+ * matching {@code yca.tui.*} property is explicitly set to a hex color: a
+ * blank or {@code auto} value resolves to the theme value, any other value is
+ * used verbatim, so per-color overrides always win over the theme.
  *
  * <p>When the {@code NO_COLOR} environment variable is set (any non-empty
  * value, see https://no-color.org/), the palette turns monochrome: every
@@ -44,33 +45,45 @@ public record Palette(
         String yolo,
         boolean mono) {
 
+    /** Doc-aligned dark palette (yupiik minisite surface/brand tones). */
+    private static final Palette DARK = new Palette(
+            "#02ABEA", "#D858FF", "#46F72F", "#fbbf24", "#f87171", "#7ad2f7", "#eef0f3", "#9aa4b2", "#667587",
+            "#7ad2f7", "#12141a", "#ff5555", false);
+
+    /** Doc-aligned light palette (darker WCAG-safe brand variants on white). */
+    private static final Palette LIGHT = new Palette(
+            "#056EBB", "#a84fc9", "#2f7a43", "#8a621f", "#d1383d", "#1f7a88", "#24262b", "#626873", "#8995a3",
+            "#056EBB", "#ffffff", "#ff5555", false);
+
     public static Palette from(final String theme, final TuiConfiguration c) {
         return from(theme, c, noColorRequested());
     }
 
     public static Palette from(final String theme, final TuiConfiguration c, final boolean mono) {
-        if (!"light".equalsIgnoreCase(theme)) {
-            return new Palette(
-                    c.accent(),
-                    c.primary(),
-                    c.success(),
-                    c.warning(),
-                    c.error(),
-                    c.info(),
-                    c.text(),
-                    c.textMuted(),
-                    c.border(),
-                    c.borderActive(),
-                    c.backgroundPanel(),
-                    c.yolo(),
-                    mono);
-        }
-        // on light backgrounds the theme's dark accent tones are too pale to read (the dark
-        // peach/brown-orange sit under 3:1 on white), so the light palette remaps every status
-        // color to a darker, WCAG-safe variant while text/border/panel are inverted as today
+        final var builtin = "light".equalsIgnoreCase(theme) ? LIGHT : DARK;
         return new Palette(
-                "#7c5cd6", "#b55227", "#2f7a43", "#8a621f", "#d1383d", "#1f7a88", "#1a1a1a", "#6b6b6b", "#c0c0c0",
-                "#808080", "#ffffff", c.yolo(), mono);
+                resolve(builtin.accent(), c.accent()),
+                resolve(builtin.primary(), c.primary()),
+                resolve(builtin.success(), c.success()),
+                resolve(builtin.warning(), c.warning()),
+                resolve(builtin.error(), c.error()),
+                resolve(builtin.info(), c.info()),
+                resolve(builtin.text(), c.text()),
+                resolve(builtin.textMuted(), c.textMuted()),
+                resolve(builtin.border(), c.border()),
+                resolve(builtin.borderActive(), c.borderActive()),
+                resolve(builtin.backgroundPanel(), c.backgroundPanel()),
+                resolve(builtin.yolo(), c.yolo()),
+                mono);
+    }
+
+    /** @return the theme value when the configured slot is blank or {@code auto}, the configured hex otherwise. */
+    private static String resolve(final String themeValue, final String configured) {
+        final var value = configured == null ? "" : configured.strip();
+        if (value.isEmpty() || "auto".equalsIgnoreCase(value)) {
+            return themeValue;
+        }
+        return value;
     }
 
     /** @return true when NO_COLOR is set to a non-empty value. */

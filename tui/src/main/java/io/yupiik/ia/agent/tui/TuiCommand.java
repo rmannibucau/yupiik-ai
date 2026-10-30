@@ -433,7 +433,20 @@ public class TuiCommand implements Runnable {
             }
         });
         this.promptHistory = new PromptHistory();
-        applyTheme(persistedTheme() == null ? conf.theme() : persistedTheme());
+        final var configuredTheme = tuiConfiguration == null || tuiConfiguration.theme() == null
+                ? null
+                : tuiConfiguration.theme().name();
+        final var persisted = persistedTheme();
+        String theme = null;
+        if (configuredTheme != null && !configuredTheme.isBlank()) {
+            final var stripped = configuredTheme.strip();
+            if ("auto".equalsIgnoreCase(stripped)) {
+                theme = ThemeDetector.DETECTOR.get().orElse(null); // best-effort OS preference
+            } else {
+                theme = stripped;
+            }
+        }
+        applyTheme(theme != null ? theme : persisted == null ? conf.theme() : persisted);
     }
 
     @RootConfiguration("tui")
@@ -584,13 +597,24 @@ public class TuiCommand implements Runnable {
                 this.codeTheme,
                 roleStrong ? palette.accent() : strongColor,
                 tuiConfiguration.inlineCodeColor());
-        // screen background: blank keeps the terminal background (default), a configured hex
-        // paints the whole viewport first so empty areas match the palette instead of the
-        // terminal scheme (mono and NO_COLOR keep the terminal background)
+        // screen background: auto and blank keep the terminal background (real transparency),
+        // an explicit hex paints a translucent veil of that color over the detected terminal
+        // background so the terminal stays visible underneath (mono and NO_COLOR skip colors)
         final var configuredBackground = tuiConfiguration.background();
-        this.screenBackground = palette.mono() || configuredBackground == null || configuredBackground.isBlank()
-                ? null
-                : Color.hex(configuredBackground);
+        if (palette.mono()
+                || configuredBackground == null
+                || configuredBackground.isBlank()
+                || "auto".equalsIgnoreCase(configuredBackground.strip())) {
+            // auto and blank keep the terminal background (real transparency), mono skips colors
+            this.screenBackground = null;
+        } else {
+            // an explicit hex paints a translucent veil of that color over the detected terminal
+            // background, so the terminal stays visible underneath (backgroundOpacity)
+            this.screenBackground = TuiColors.blend(
+                    configuredBackground.strip(),
+                    ThemeDetector.terminalBackground(),
+                    Math.clamp(tuiConfiguration.backgroundOpacity(), 0.0, 1.0));
+        }
     }
 
     @Override
@@ -2694,7 +2718,7 @@ public class TuiCommand implements Runnable {
     }
 
     private boolean isPaletteLight() {
-        return "#1a1a1a".equalsIgnoreCase(palette.text());
+        return "light".equals(theme);
     }
 
     private void applyCompletion(final UiState state) {

@@ -65,6 +65,7 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -232,6 +233,199 @@ class TuiCommandHeadlessTest {
     }
 
     @Test
+    void jsonConfigurationIncludesThemeAndExistingTuiSettings() throws Exception {
+        final var file = temp.resolve("theme-configuration.json");
+        Files.writeString(
+                file, "{\"yca\":{\"tui\":{\"theme\":{\"name\":\"light\"},\"accent\":\"#123456\",\"history\":false}}}");
+        try (final var isolated = bootContainer(
+                        Map.of("yca.configuration.json", file.toString(), "yca.workingDir", temp.toString()));
+                final var configuration = isolated.lookup(TuiConfiguration.class)) {
+            assertEquals("light", configuration.instance().theme().name());
+            assertEquals("#123456", configuration.instance().accent());
+            assertFalse(configuration.instance().history());
+        }
+    }
+
+    @Test
+    void themeConfigurationPrecedenceAndSwitchPersistence() throws Exception {
+        final var cases = List.of(
+                Map.of("name", "light", "persisted", "dark", "legacy", "dark", "expected", "light"),
+                Map.of("name", "", "persisted", "light", "legacy", "dark", "expected", "light"),
+                Map.of("name", "", "persisted", "invalid", "legacy", "light", "expected", "light"),
+                Map.of("name", "", "persisted", "dark", "legacy", "light", "expected", "dark"),
+                Map.of("persisted", "missing", "legacy", "light", "expected", "light"),
+                Map.of("persisted", "light", "legacy", "dark", "expected", "light"));
+        for (final var testCase : cases) {
+            final var home = Files.createTempDirectory(temp, "theme-");
+            if (!"missing".equals(testCase.get("persisted"))) {
+                Files.writeString(home.resolve("theme"), testCase.get("persisted"));
+            }
+            final var config = new LinkedHashMap<String, String>();
+            config.put("yca.storageHome", home.toString());
+            if (testCase.containsKey("name")) {
+                config.put("yca.tui.theme.name", testCase.get("name"));
+            }
+            try (final var isolated = bootContainer(config)) {
+                final var command = newUiCommand(
+                        isolated,
+                        lookupDeps(isolated),
+                        new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, true, testCase.get("legacy")));
+                tuiRef.set(null);
+                backend = new HeadlessBackend();
+                uiThread = new Thread(command::run, "theme-test");
+                uiThread.setDaemon(true);
+                uiThread.start();
+                awaitTui();
+                awaitText("yca coding agent");
+                tuiRef.get().dispatch(new PasteEvent("/theme"));
+                tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+                awaitText("theme: " + testCase.get("expected"));
+                final var next = "light".equals(testCase.get("expected")) ? "dark" : "light";
+                tuiRef.get().dispatch(new PasteEvent("/theme " + next));
+                tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+                awaitText("theme: " + next);
+                assertEquals(next, Files.readString(home.resolve("theme")));
+                tuiRef.get().quit();
+                uiThread.join(TIMEOUT_MS);
+                assertFalse(uiThread.isAlive());
+            }
+        }
+    }
+
+    @Test
+    void screenBackgroundFollowsThemeUnlessExplicitlyConfigured() throws Exception {
+        // option 1: auto/blank keep the terminal background (real transparency in Terminator),
+        // an explicit hex paints a translucent veil blended toward the DETECTED terminal
+        // background; stub the detector so the expected colors are deterministic (dark terminal)
+        final var previousDetector = ThemeDetector.DETECTOR;
+        ThemeDetector.DETECTOR = () -> Optional.of("dark");
+        try {
+            final var hexVeil = TuiCommand.hexOf(TuiColors.blend("#123456", "#0c0c0c", 0.8));
+            final var halfHexVeil = TuiCommand.hexOf(TuiColors.blend("#123456", "#0c0c0c", 0.5));
+            final var cases = List.of(
+                    Map.of("label", "default", "dark", "", "light", ""),
+                    Map.of("label", "auto", "background", " AuTo ", "dark", "", "light", ""),
+                    Map.of("label", "hex", "background", "#123456", "dark", hexVeil, "light", hexVeil),
+                    Map.of(
+                            "label",
+                            "hexDimmed",
+                            "background",
+                            "#123456",
+                            "opacity",
+                            "0.5",
+                            "dark",
+                            halfHexVeil,
+                            "light",
+                            halfHexVeil),
+                    Map.of("label", "blank", "background", " ", "dark", "", "light", ""));
+            for (final var testCase : cases) {
+                final var config = new LinkedHashMap<String, String>();
+                config.put(
+                        "yca.storageHome",
+                        Files.createTempDirectory(temp, "background-").toString());
+                if (testCase.containsKey("background")) {
+                    config.put("yca.tui.background", testCase.get("background"));
+                }
+                if (testCase.containsKey("opacity")) {
+                    config.put("yca.tui.backgroundOpacity", testCase.get("opacity"));
+                }
+                try (final var isolated = bootContainer(config)) {
+                    final var command = newUiCommand(isolated, lookupDeps(isolated));
+                    tuiRef.set(null);
+                    backend = new HeadlessBackend();
+                    uiThread = new Thread(command::run, "background-test");
+                    uiThread.setDaemon(true);
+                    uiThread.start();
+                    awaitTui();
+                    awaitText("yca coding agent");
+                    assertScreenBackground(testCase.get("dark"), testCase.get("label") + " dark");
+
+                    tuiRef.get().dispatch(new PasteEvent("/theme light"));
+                    tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+                    awaitText("theme: light");
+                    assertScreenBackground(testCase.get("light"), testCase.get("label") + " light");
+
+                    tuiRef.get().dispatch(new PasteEvent("/theme dark"));
+                    tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+                    awaitText("theme: dark");
+                    assertScreenBackground(testCase.get("dark"), testCase.get("label") + " dark again");
+                    tuiRef.get().quit();
+                    uiThread.join(TIMEOUT_MS);
+                    assertFalse(uiThread.isAlive());
+                }
+            }
+        } finally {
+            ThemeDetector.DETECTOR = previousDetector;
+        }
+    }
+
+    private void assertScreenBackground(final String expected, final String message) throws InterruptedException {
+        // An empty transcript cell, away from panels and text, exposes the viewport background.
+        final var expectedColor = expected.isEmpty() ? null : Color.hex(expected);
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
+        while (!java.util.Objects.equals(expectedColor, backend.bg(50, 20).orElse(null))
+                && System.nanoTime() < deadline) {
+            backend.awaitFrame(50);
+        }
+        assertEquals(" ", backend.symbol(50, 20), message);
+        assertEquals(expectedColor, backend.bg(50, 20).orElse(null), message);
+    }
+
+    @Test
+    void themeNameAutoUsesDetectedPreferenceWithPersistedFallback() throws Exception {
+        final var home = Files.createTempDirectory(temp, "theme-auto-");
+        final var previous = ThemeDetector.DETECTOR;
+        try {
+            final var cases = List.of(
+                    Map.of("detected", "dark", "persisted", "", "expected", "dark"),
+                    Map.of("detected", "dark", "persisted", "light", "expected", "dark"),
+                    Map.of("detected", "light", "persisted", "dark", "expected", "light"),
+                    Map.of("detected", "", "persisted", "light", "expected", "light"),
+                    Map.of("detected", "", "persisted", "dark", "legacy", "light", "expected", "dark"),
+                    Map.of("detected", "", "persisted", "missing", "legacy", "light", "expected", "light"));
+            for (final var testCase : cases) {
+                final var homeDir = Files.createTempDirectory(temp, "theme-auto-case-");
+                final var persisted = testCase.get("persisted");
+                if (!"missing".equals(persisted)) {
+                    Files.writeString(homeDir.resolve("theme"), persisted);
+                }
+                final var detected = (String) testCase.get("detected");
+                ThemeDetector.DETECTOR =
+                        () -> detected == null || detected.isBlank() ? Optional.empty() : Optional.of(detected);
+                final var config = new LinkedHashMap<String, String>();
+                config.put("yca.storageHome", homeDir.toString());
+                config.put("yca.tui.theme.name", "auto");
+                try (final var isolated = bootContainer(config)) {
+                    final var command = newUiCommand(
+                            isolated,
+                            lookupDeps(isolated),
+                            new TuiCommand.TuiConf(
+                                    "",
+                                    "",
+                                    KeyBindingPreset.STANDARD,
+                                    true,
+                                    testCase.get("legacy") == null ? "dark" : testCase.get("legacy")));
+                    tuiRef.set(null);
+                    backend = new HeadlessBackend();
+                    uiThread = new Thread(command::run, "theme-auto-test");
+                    uiThread.setDaemon(true);
+                    uiThread.start();
+                    awaitTui();
+                    awaitText("yca coding agent");
+                    tuiRef.get().dispatch(new PasteEvent("/theme"));
+                    tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+                    awaitText("theme: " + testCase.get("expected"));
+                    tuiRef.get().quit();
+                    uiThread.join(TIMEOUT_MS);
+                    assertFalse(uiThread.isAlive());
+                }
+            }
+        } finally {
+            ThemeDetector.DETECTOR = previous;
+        }
+    }
+
+    @Test
     void answersThroughRealAgentLoop() throws Exception {
         final var command = newUiCommand(container, deps);
 
@@ -353,7 +547,7 @@ class TuiCommandHeadlessTest {
         // the error banner is a full-width rounded box: border rows on either side of the text
         assertEquals("╭", backend.symbol(0, errorRow - 1));
         assertEquals("╰", backend.symbol(0, errorRow + 1));
-        final var expected = Color.hex("#e06c75");
+        final var expected = Color.hex("#f87171");
         assertEquals(expected, backend.fg(0, errorRow - 1).orElseThrow());
         assertEquals(expected, backend.fg(0, errorRow + 1).orElseThrow());
     }

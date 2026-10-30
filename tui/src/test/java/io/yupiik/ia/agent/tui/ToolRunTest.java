@@ -106,6 +106,7 @@ class ToolRunTest {
                 new TuiLogLevelConfiguration("auto"),
                 new TuiLogLevelConfiguration("auto"));
         return new TuiConfiguration(
+                null,
                 "#9d7cd8",
                 "#fab283",
                 "#7fd88f",
@@ -136,6 +137,7 @@ class ToolRunTest {
                 3,
                 10,
                 "",
+                0.8,
                 "#ff5555",
                 new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0));
     }

@@ -1849,9 +1849,9 @@ class TuiCommandRenderTest {
         final var configuration = tuiConfig;
         final var conf = new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, showThinking, "dark");
         final var tuiConfiguration = new TuiConfiguration(
-                "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
-                0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, true, "unicode", "auto",
-                "auto", List.of(), null, null, true, 3, 10, "", "#ff5555", null);
+                null, "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0,
+                0.22, 0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, true, "unicode",
+                "auto", "auto", List.of(), null, null, true, 3, 10, "", 0.8, "#ff5555", null);
         final var chatClient = new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), clock);
         final var mcpManager = new McpManager(
                 configuration,

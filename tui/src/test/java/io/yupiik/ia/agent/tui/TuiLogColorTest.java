@@ -95,25 +95,26 @@ class TuiLogColorTest {
     }
 
     @Test
-    void lightThemeDefaultsFollowTheRemappedPalette() {
+    void lightThemeDefaultsFollowTheLightThemePalette() {
         final var light = Palette.from(
                 "light",
                 new TuiConfiguration(
-                        "#9d7cd8",
-                        "#fab283",
-                        "#7fd88f",
-                        "#f5a742",
-                        "#e06c75",
-                        "#56b6c2",
-                        "#eeeeee",
-                        "#808080",
+                        null,
+                        "auto",
+                        "auto",
+                        "auto",
+                        "auto",
+                        "auto",
+                        "auto",
+                        "auto",
+                        "auto",
                         -1.0,
                         0.22,
                         0.14,
                         0.85,
-                        "#484848",
-                        "#606060",
-                        "#141414",
+                        "auto",
+                        "auto",
+                        "auto",
                         "auto",
                         "auto",
                         4000L,
@@ -129,7 +130,8 @@ class TuiLogColorTest {
                         3,
                         10,
                         "",
-                        "#ff5555",
+                        0.8,
+                        "auto",
                         new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0)));
         assertEquals("#d1383d", TuiCommand.logLevelColor(light, null, Level.SEVERE));
         assertEquals("#8a621f", TuiCommand.logLevelColor(light, null, Level.WARNING));

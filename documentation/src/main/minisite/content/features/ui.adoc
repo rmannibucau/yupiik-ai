@@ -84,11 +84,14 @@ is switched later.
 
 == Transcript colors
 
-The transcript keeps one color per speaker: user turns are painted with the
-`yca.tui.primary` accent and assistant turns with `yca.tui.accent`, from the
-turn header and left bar down to the bold prose (unless `yca.tui.strongColor`
-pins an explicit bold color). Both are `yca.tui.*` settings documented in the
-xref:../configuration.adoc[configuration] reference.
+The transcript keeps one color per speaker: user turns are painted with the `yca.tui.primary` accent and assistant turns with `yca.tui.accent`, from the turn header and left bar down to the bold prose (unless `yca.tui.strongColor` pins an explicit bold color).
+These settings are documented in the xref:../configuration.adoc[configuration] reference.
+Palette colors default to `auto` and follow the active named theme (`dark` or `light`); an explicit hex overrides the theme for that slot.
+The screen background defaults to `auto`, which keeps the terminal background untouched so a transparent terminal (e.g. Terminator) shows through; set `yca.tui.background` to a hex color to paint a translucent veil of that color over the terminal (see `yca.tui.backgroundOpacity`), or to an empty string to explicitly keep the terminal background.
+The inline code color follows the selected code theme by default.
+At startup, a nonblank `yca.tui.theme.name` takes precedence over the persisted `/theme` selection, which in turn takes precedence over the legacy `tui.theme` setting (default `dark`).
+When `yca.tui.theme.name` is `auto`, the OS light/dark preference is detected at startup on a best-effort basis (macOS appearance, GNOME/KDE/GTK on Linux, Windows apps theme, `COLORFGBG` as a terminal fallback); when detection fails the normal precedence chain applies.
+The `/theme light` and `/theme dark` commands still switch the current theme and persist the selection, but an explicit `yca.tui.theme.name` takes precedence again on the next startup.
 
 Captured log regions (the inline log panels) never reuse a role color: each JUL
 level keeps its own hue, configurable per level:
@@ -112,7 +115,7 @@ level keeps its own hue, configurable per level:
 
 `auto` (the default) follows the closest palette accent: `severe` uses the
 error hue, `warning` the warning hue and the remaining levels the info hue
-(dimmed for the debug levels), so the light-theme remap keeps log regions
+(dimmed for the debug levels), so the light theme palette keeps log regions
 readable. Replace it with a hex color to pin a level tone.
 
 Log regions render as plain text: there is no background tint, the level color

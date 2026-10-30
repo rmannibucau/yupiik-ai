@@ -91,6 +91,7 @@ class ScrollServiceTest {
 
     private TuiConfiguration tuiConfiguration(final int scrollLines, final int scrollPageLines) {
         return new TuiConfiguration(
+                null,
                 "#9d7cd8",
                 "#fab283",
                 "#7fd88f",
@@ -121,6 +122,7 @@ class ScrollServiceTest {
                 scrollLines,
                 scrollPageLines,
                 "",
+                0.8,
                 "#ff5555",
                 new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0));
     }
