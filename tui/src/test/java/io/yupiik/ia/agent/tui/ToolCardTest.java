@@ -19,6 +19,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import org.junit.jupiter.api.Test;
 
 class ToolCardTest {
@@ -54,6 +56,80 @@ class ToolCardTest {
     void legacyHeaderHasNoOrdinal() {
         final var card = ToolCard.parse("*streaming `bash`: ls* (123 ms)");
         assertEquals(-1, card.ordinal());
+    }
+
+    @Test
+    void escapedStarsAreUnescapedInSuccessArgs() {
+        // ConversationTranscript escapes the streaming header (part_*.csv.gz + COUNT(*) in a
+        // heredoc would otherwise pair into an emphasis and hide both stars); the TUI renders the
+        // same header verbatim so the escapes must be undone back to the raw command
+        final var card = ToolCard.parse(
+                "*streaming `bash`: cat <<'EOF' plain \\* one two \\_ three EOF* (#7, 12 ms)\n\n```text\nout\n```");
+        assertEquals("cat <<'EOF' plain * one two _ three EOF", card.args());
+    }
+
+    @Test
+    void escapedTrailingStarSurvivesStripDuration() {
+        // a command ending with a bare star: the escape keeps the duration regex intact, then the
+        // unescape restores the star instead of stripDuration eating it
+        final var card = ToolCard.parse("*streaming `bash`: echo \\** (123 ms)\n\n```text\n*\n```");
+        assertEquals("echo *", card.args());
+    }
+
+    @Test
+    void genuineBackslashIsNotUnescaped() {
+        // only the escapes escapeMarkdown emits (\\* \\_ \\\\) are undone; a genuine backslash
+        // before any other char is kept
+        final var card = ToolCard.parse("*streaming `bash`: grep 'a\\b' \\*x* (123 ms)\n\n```text\nout\n```");
+        assertEquals("grep 'a\\b' *x", card.args());
+    }
+
+    @Test
+    void consecutiveEscapesAreAllUnescaped() {
+        final var card = ToolCard.parse("*streaming `bash`: echo \\\\\\* \\_x* (123 ms)\n\n```text\nout\n```");
+        // \\\\* is an escaped backslash followed by an escaped star -> "\*" ; \\_ -> "_"
+        assertEquals("echo \\* _x", card.args());
+    }
+
+    @Test
+    void noBackslashIsANoOp() {
+        assertEquals("plain args", ToolCard.unescape("plain args"));
+        assertEquals("COUNT(*) x", ToolCard.unescape("COUNT(*) x"));
+    }
+
+    @Test
+    void failedHeaderEscapedStarsAreUnescaped() {
+        // the failed header is escaped at emission too ("Error: \\* boom \\*"); the TUI restores
+        // the raw first line
+        final var card = ToolCard.parse("> tool `bash` failed: Error: \\* boom \\* (boom) (#7, 12 ms)");
+        assertEquals("Error: * boom * (boom)", card.args());
+    }
+
+    @Test
+    void transcriptHeaderRoundTripsThroughToolCard() {
+        // end-to-end: a real tool with a multi-line heredoc, flattened+escaped by the transcript,
+        // then parsed back by the TUI card -> the raw command is restored without backslashes and
+        // without the markdown star-loss
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.ToolStarted(
+                "bash",
+                "{\"command\":\"cat <<'SQL'\nALTER TABLE T LOCATION ('part_*.csv.gz');\nSELECT COUNT(*) FROM T;\nSQL\"}",
+                "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "ok", true, "s1"));
+
+        String cardArgs = null;
+        for (final var region : ConversationTranscript.regions(t.markdown("|", "busy"))) {
+            if (region.tool()) {
+                final var card = ToolCard.parse(region.text());
+                if (!card.running()) {
+                    cardArgs = card.args();
+                }
+            }
+        }
+        assertTrue(cardArgs != null, "a finished tool card must be found");
+        assertEquals("cat <<'SQL' ALTER TABLE T LOCATION ('part_*.csv.gz'); SELECT COUNT(*) FROM T; SQL", cardArgs);
+        assertFalse(cardArgs.contains("\\"), cardArgs);
     }
 
     @Test

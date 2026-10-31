@@ -146,7 +146,41 @@ public record ToolCard(
         if (rest.startsWith(":")) {
             rest = rest.substring(1).strip();
         }
-        return new Args(rest, elapsed, ordinal);
+        // ConversationTranscript escapes the metacharacters of every emitted header
+        // (*streaming, failed, still running and tool replay) so a markdown render keeps bare
+        // stars/underscores literal. The TUI renders the same header verbatim, so the escapes are
+        // undone here - after the duration strip, so a trailing \* (before the (#..)) is
+        // preserved then restored. A backslash before '*'/'_'/'\\' is always an escape by
+        // construction; anything else is left untouched (a genuine backslash in the raw output).
+        return new Args(unescape(rest), elapsed, ordinal);
+    }
+
+    /**
+     * Undoes the escapes {@code ConversationTranscript.escapeMarkdown} applied when it built a
+     * {@code *streaming ...*} header: {@code \\*} → {@code *}, {@code \\_} → {@code _} and
+     * {@code \\\\} → {@code \\}. A backslash before any other character is left untouched (a
+     * genuine backslash in the original command). Note this runs AFTER {@link #stripDuration}:
+     * a trailing {@code \\*} is preserved so the duration regex keeps matching, then unescaped
+     * here.
+     */
+    static String unescape(final String text) {
+        if (text == null || text.indexOf('\\') < 0) {
+            return text;
+        }
+        final var sb = new StringBuilder(text.length());
+        for (var i = 0; i < text.length(); i++) {
+            final var c = text.charAt(i);
+            if (c == '\\' && i + 1 < text.length()) {
+                final var next = text.charAt(i + 1);
+                if (next == '*' || next == '_' || next == '\\') {
+                    sb.append(next);
+                    i++;
+                    continue;
+                }
+            }
+            sb.append(c);
+        }
+        return sb.toString();
     }
 
     private static String extractCode(final String text) {

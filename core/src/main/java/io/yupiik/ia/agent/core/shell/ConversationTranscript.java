@@ -430,10 +430,17 @@ public class ConversationTranscript {
             }
             final var elapsedMs = tool == null ? 0 : Math.max(0, (System.nanoTime() - tool.startedNanos) / 1_000_000);
             if (tool != null && (!tool.stream.isEmpty() || (success && output != null && !output.isBlank()))) {
+                // The command is injected inside a markdown italic paragraph ("*streaming ...*").
+                // A multi-line command keeps the paragraph open across softbreaks, and two bare
+                // stars (eg. part_*.csv.gz and COUNT(*) in a heredoc) then pair into an emphasis
+                // that hides both when a markdown renderer displays the transcript. Flatten the
+                // command onto one line and escape the inline metacharacters so the header always
+                // renders verbatim. Only this display copy is escaped: RunningTool.command (the
+                // TUI ToolCard source) keeps the raw bytes.
                 final var header = tool.command == null || tool.command.isBlank()
                         ? "*streaming `" + name + "`* (#" + ordinal + ", " + elapsedMs + " ms)"
-                        : "*streaming `" + name + "`: " + tool.command.replace('`', '\'') + "* (#" + ordinal + ", "
-                                + elapsedMs + " ms)";
+                        : "*streaming `" + name + "`: " + escapeMarkdown(flatten(tool.command)) + "* (#" + ordinal
+                                + ", " + elapsedMs + " ms)";
                 final var captured = tool.stream.isEmpty()
                         ? capToolOutput(output == null ? "" : output)
                         : tool.stream.toString().stripTrailing();
@@ -455,7 +462,7 @@ public class ConversationTranscript {
                         .append("\n> tool `")
                         .append(name)
                         .append("` failed: ")
-                        .append(firstLine(output))
+                        .append(escapeMarkdown(firstLine(output)))
                         .append(" (#")
                         .append(ordinal)
                         .append(", ")
@@ -473,7 +480,7 @@ public class ConversationTranscript {
                         .append("\n> tool `")
                         .append(name)
                         .append("` still running: ")
-                        .append(firstLine(output))
+                        .append(escapeMarkdown(firstLine(output)))
                         .append(" (#")
                         .append(ordinal)
                         .append(")\n")
@@ -1045,7 +1052,7 @@ public class ConversationTranscript {
                             .append("\n\n*tool ")
                             .append(name == null ? "" : "`" + name + "` ")
                             .append("-> ")
-                            .append(firstLine(String.valueOf(message.content())))
+                            .append(escapeMarkdown(firstLine(String.valueOf(message.content()))))
                             .append("*\n");
                 }
                 case "system" -> {
@@ -1392,5 +1399,54 @@ public class ConversationTranscript {
         final var idx = text.indexOf('\n');
         final var line = idx < 0 ? text : text.substring(0, idx);
         return line.length() > 120 ? line.substring(0, 120) + "..." : line;
+    }
+
+    /**
+     * Flattens a command onto one line before it is embedded in a {@code *streaming ...*}
+     * header: newlines and carriage returns become single spaces so the markdown italic
+     * paragraph cannot be kept open across softbreaks (a multi-line heredoc would glue the
+     * remaining header lines into the following tool block).
+     */
+    private static String flatten(final String text) {
+        if (text == null || text.indexOf('\n') < 0 && text.indexOf('\r') < 0) {
+            return text;
+        }
+        final var sb = new StringBuilder(text.length());
+        var pendingSpace = false;
+        for (var i = 0; i < text.length(); i++) {
+            final var c = text.charAt(i);
+            if (c == '\n' || c == '\r') {
+                pendingSpace = true;
+            } else {
+                if (pendingSpace && sb.length() > 0) {
+                    sb.append(' ');
+                }
+                pendingSpace = false;
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Escapes the markdown inline metacharacters of the tool header so a renderer keeps
+     * them literal: {@code *} → {@code \\*}, {@code _} → {@code \\_} and {@code \\} →
+     * {@code \\\\}. This is the exact inverse of {@code ToolCard.unescape}, which restores
+     * the raw command when the TUI parses the header back. Only the display copy is
+     * escaped; {@code RunningTool.command} keeps the raw bytes.
+     */
+    private static String escapeMarkdown(final String text) {
+        if (text == null || text.indexOf('*') < 0 && text.indexOf('_') < 0 && text.indexOf('\\') < 0) {
+            return text;
+        }
+        final var sb = new StringBuilder(text.length() + 8);
+        for (var i = 0; i < text.length(); i++) {
+            final var c = text.charAt(i);
+            if (c == '*' || c == '_' || c == '\\') {
+                sb.append('\\');
+            }
+            sb.append(c);
+        }
+        return sb.toString();
     }
 }
