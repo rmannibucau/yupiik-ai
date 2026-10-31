@@ -51,6 +51,8 @@ public class FileSessionStore implements SessionStore {
     private final JsonMapper mapper;
     private final Clock clock;
     private final ReentrantLock fileLock = new ReentrantLock();
+    /** Id of the session created first for this process (never swept by housekeeping). */
+    private volatile String primarySessionId;
 
     public FileSessionStore(final CodingAgentConfiguration configuration, final JsonMapper mapper, final Clock clock) {
         this.configuration = configuration;
@@ -66,6 +68,9 @@ public class FileSessionStore implements SessionStore {
 
     public void onStart(@OnEvent final Start start) {
         cleanup();
+        // remember the most recent stored session so startup housekeeping can never delete
+        // the session the user is about to resume (it exists before the frontends resolve it)
+        primarySessionId = configuration.sessions() == null ? null : lastSessionId();
         // root <storageHome>/todos-<key>.json and snapshots/<id>.snap whose session folder
         // is gone are stale legacy leftovers: drop them so the storage root stays clean
         SessionStorageLayout.sweepOrphans(Path.of(configuration.resolveStorageHome()));
@@ -87,6 +92,48 @@ public class FileSessionStore implements SessionStore {
             return doHousekeeping(deleteEmpty);
         } finally {
             fileLock.unlock();
+        }
+    }
+
+    /**
+     * Id the process must never discard during housekeeping: the session resolved for
+     * this process (created or resumed). Callers resolving their session should register
+     * it via {@link #keepSession(String)} so a concurrent housekeeping run - and, for
+     * file-backed stores, a restart - never deletes it.
+     */
+    public void keepSession(final String id) {
+        if (id != null && !id.isBlank()) {
+            primarySessionId = id;
+        }
+    }
+
+    private boolean isProtectedFromHousekeeping(final String id) {
+        // the session resolved for this process, and everything written within the
+        // recent grace window (a long-lived active session must never be dropped on
+        // age alone - retention is about abandoned sessions)
+        return id != null && (id.equals(primarySessionId) || isRecent(id));
+    }
+
+    private boolean isRecent(final String id) {
+        return now() - lastModified(id) < DEFAULT_HOUSEKEEPING_GRACE_MILLIS;
+    }
+
+    private long lastModified(final String id) {
+        final var target = path(id);
+        try {
+            if (Files.isRegularFile(target)) {
+                return Files.getLastModifiedTime(target).toMillis();
+            }
+            final var gz = Path.of(target + GZ_SUFFIX);
+            if (Files.isRegularFile(gz)) {
+                return Files.getLastModifiedTime(gz).toMillis();
+            }
+            final var legacy = legacyPath(id);
+            return Files.isRegularFile(legacy)
+                    ? Files.getLastModifiedTime(legacy).toMillis()
+                    : 0L;
+        } catch (final IOException e) {
+            return 0L;
         }
     }
 
@@ -127,6 +174,10 @@ public class FileSessionStore implements SessionStore {
                     } else {
                         target = f;
                         isCompressed = name.endsWith(GZ_SUFFIX);
+                    }
+                    if (isProtectedFromHousekeeping(id) && !(deleteEmpty && !isCompressed && isEmpty(id))) {
+                        kept++;
+                        continue;
                     }
                     final var age = now - Files.getLastModifiedTime(target).toMillis();
                     if (retention >= 0 && age > retention) {
@@ -206,11 +257,26 @@ public class FileSessionStore implements SessionStore {
 
     @Override
     public String create() {
+        fileLock.lock();
+        try {
+            return doCreate();
+        } finally {
+            fileLock.unlock();
+        }
+    }
+
+    private String doCreate() {
         writableDir();
-        long stamp = clock.millis();
-        var id = "s" + Long.toHexString(stamp);
-        while (Files.exists(sessionDir(id)) || Files.exists(legacyPath(id)) || Files.exists(legacyGz(id))) {
-            id = "s" + Long.toHexString(++stamp);
+        String id;
+        final var stamp = clock.millis();
+        final var all = list();
+        final var used = new HashSet<String>();
+        all.forEach(info -> used.add(info.id()));
+        for (var i = 0; ; i++) {
+            id = "s" + Long.toHexString(stamp + i);
+            if (!used.contains(id)) {
+                break;
+            }
         }
         try {
             Files.createDirectories(path(id).getParent());
@@ -262,53 +328,186 @@ public class FileSessionStore implements SessionStore {
         if (source == null) {
             return List.of();
         }
-        try (final var in = !source.gz()
-                ? Files.newBufferedReader(source.path())
-                : new BufferedReader(new InputStreamReader(
-                        new GZIPInputStream(Files.newInputStream(source.path())), StandardCharsets.UTF_8))) {
-            final var out = new ArrayList<Message>();
-            // legacy sessions persisted the tool name as toolCallId: remember assistant call ids by
-            // tool name so such entries can be remapped to the real call id on load
-            final var allCallIds = new HashSet<String>();
-            final var callIdsByTool = new HashMap<String, ArrayDeque<String>>();
+        try (final var in = source.reader()) {
+            final var lines = new ArrayList<String>();
             String line;
             while ((line = in.readLine()) != null) {
-                if (line.isBlank()) {
-                    continue;
+                if (!line.isBlank()) {
+                    lines.add(line);
                 }
-                final SessionEntry e;
-                try {
-                    e = mapper.fromString(SessionEntry.class, line);
-                } catch (final RuntimeException re) {
-                    continue;
-                }
-                if (e.role() == null) {
-                    continue;
-                }
-                if (e.toolCalls() != null) {
-                    for (final var call : e.toolCalls()) {
-                        if (call != null && call.id() != null && call.function() != null) {
-                            allCallIds.add(call.id());
-                            callIdsByTool
-                                    .computeIfAbsent(call.function().name(), k -> new ArrayDeque<>())
-                                    .add(call.id());
-                        }
-                    }
-                }
-                var toolCallId = e.toolCallId();
-                if ("tool".equals(e.role()) && toolCallId != null && !allCallIds.contains(toolCallId)) {
-                    // not a real call id: remap to the first unmatched call of that tool name
-                    final var candidates = callIdsByTool.get(toolCallId);
-                    if (candidates != null) {
-                        toolCallId = candidates.poll();
-                    }
-                }
-                out.add(new Message(e.role(), e.content(), e.name(), e.toolCalls(), toolCallId, e.others()));
             }
-            return out;
+            return mapLines(lines);
         } catch (final IOException e) {
             return List.of();
         }
+    }
+
+    @Override
+    public List<Message> tail(final String id, final int count) {
+        if (count <= 0) {
+            return List.of();
+        }
+        final var source = resolveLoadSource(id);
+        if (source == null) {
+            return List.of();
+        }
+        try {
+            final var lines = new ArrayList<String>();
+            if (!source.gz()) {
+                // reverse line scan on the plain file: read only the last `count` non-blank lines
+                final var path = source.path();
+                final var size = Files.size(path);
+                final var raf = new java.io.RandomAccessFile(path.toFile(), "r");
+                try {
+                    long pos = size;
+                    var pending = new StringBuilder();
+                    while (pos > 0 && lines.size() < count) {
+                        final var chunk = Math.min(64 * 1024, pos);
+                        pos -= chunk;
+                        final var bytes = new byte[(int) chunk];
+                        raf.seek(pos);
+                        raf.readFully(bytes);
+                        // prepend the chunk to the pending buffer (we scan backwards)
+                        pending.insert(0, new String(bytes, StandardCharsets.UTF_8));
+                        final var text = pending.toString();
+                        pending.setLength(0);
+                        // split the buffer: complete lines are between the last '\n' and the end
+                        final var lastNl = text.lastIndexOf('\n');
+                        if (lastNl >= 0) {
+                            // tail of this chunk (after the last \n) is a complete line
+                            final var tailPart = text.substring(lastNl + 1);
+                            if (!tailPart.isBlank()) {
+                                lines.add(0, tailPart);
+                            }
+                            // the head (before the last \n) may hold more complete lines
+                            final var head = text.substring(0, lastNl);
+                            if (!head.isEmpty()) {
+                                pending.insert(0, head);
+                            }
+                        } else {
+                            // no newline: the whole chunk is partial, keep it pending
+                            pending.insert(0, text);
+                        }
+                    }
+                    // handle the very first pending buffer (file start, no leading newline)
+                    if (lines.size() < count && pending.length() > 0) {
+                        final var tailPart = pending.toString();
+                        if (!tailPart.isBlank()) {
+                            lines.add(0, tailPart);
+                        }
+                    }
+                } finally {
+                    raf.close();
+                }
+            } else {
+                // gz: fall back to a full read and take the last lines (compressed sessions are
+                // usually compacted/old, so reading them fully is acceptable)
+                try (final var in = source.reader()) {
+                    String line;
+                    while ((line = in.readLine()) != null) {
+                        if (!line.isBlank()) {
+                            lines.add(line);
+                            if (lines.size() > count) {
+                                lines.remove(0);
+                            }
+                        }
+                    }
+                }
+            }
+            return mapLines(lines);
+        } catch (final IOException e) {
+            return List.of();
+        }
+    }
+
+    @Override
+    public int count(final String id) {
+        final var source = resolveLoadSource(id);
+        if (source == null) {
+            return 0;
+        }
+        try {
+            if (!source.gz()) {
+                // cheap line count: scan the file counting '\n' (JSONL lines; a trailing missing
+                // newline still counts as one line when the file is non-empty)
+                final var size = Files.size(source.path());
+                if (size == 0) {
+                    return 0;
+                }
+                try (final var in = Files.newInputStream(source.path())) {
+                    var count = 0;
+                    final var buffer = new byte[64 * 1024];
+                    int read;
+                    var last = (byte) -1;
+                    while ((read = in.read(buffer)) > 0) {
+                        for (var i = 0; i < read; i++) {
+                            if (buffer[i] == '\n') {
+                                count++;
+                            }
+                            last = buffer[i];
+                        }
+                    }
+                    return last == '\n' ? count : count + 1;
+                }
+            }
+            try (final var in = source.reader()) {
+                var count = 0;
+                while (in.readLine() != null) {
+                    count++;
+                }
+                return count;
+            }
+        } catch (final IOException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Parses persisted JSONL lines into {@link Message}s with the same legacy
+     * {@code toolCallId -> toolName} remap as {@link #load(String)}. Shared by the
+     * full read and the tail read so both produce identical display shapes.
+     */
+    private List<Message> mapLines(final List<String> lines) {
+        final var out = new ArrayList<Message>(lines.size());
+        final var allCallIds = new HashSet<String>();
+        final var callIdsByTool = new HashMap<String, ArrayDeque<String>>();
+        for (final var line : lines) {
+            final SessionEntry e;
+            try {
+                e = mapper.fromString(SessionEntry.class, line);
+            } catch (final RuntimeException re) {
+                continue;
+            }
+            if (e.role() == null) {
+                continue;
+            }
+            if (e.toolCalls() != null) {
+                for (final var call : e.toolCalls()) {
+                    if (call != null && call.id() != null && call.function() != null) {
+                        allCallIds.add(call.id());
+                        callIdsByTool
+                                .computeIfAbsent(call.function().name(), k -> new ArrayDeque<>())
+                                .add(call.id());
+                    }
+                }
+            }
+            var toolCallId = e.toolCallId();
+            if ("tool".equals(e.role()) && toolCallId != null && !allCallIds.contains(toolCallId)) {
+                // not a real call id: remap to the first unmatched call of that tool name
+                final var candidates = callIdsByTool.get(toolCallId);
+                if (candidates != null) {
+                    toolCallId = candidates.poll();
+                }
+            }
+            // preserve the persisted timestamp inside others (reserved key), so a later
+            // replace() can round-trip it instead of re-stamping history with now()
+            final var others = e.others() == null ? null : new java.util.LinkedHashMap<>(e.others());
+            if (others != null) {
+                others.put(PERSISTED_AT_KEY, e.at());
+            }
+            out.add(new Message(e.role(), e.content(), e.name(), e.toolCalls(), toolCallId, others));
+        }
+        return out;
     }
 
     /** The file to read a session from, in priority order: folder jsonl, folder gz, legacy jsonl, legacy gz. */
@@ -333,16 +532,39 @@ public class FileSessionStore implements SessionStore {
         return null;
     }
 
-    private record LoadSource(Path path, boolean gz) {}
+    private record LoadSource(Path path, boolean gz) {
+        BufferedReader reader() throws IOException {
+            return !gz()
+                    ? Files.newBufferedReader(path)
+                    : new BufferedReader(new InputStreamReader(
+                            new GZIPInputStream(Files.newInputStream(path)), StandardCharsets.UTF_8));
+        }
+    }
 
     @Override
     public void replace(final String id, final List<Message> messages) {
         fileLock.lock();
         try {
+            // safety net: never overwrite a session that holds content with an empty history -
+            // a transient read error must not be able to wipe a good file (load-then-replace
+            // call sites all pass through here)
+            if (messages.isEmpty() && hasStoredContent(id)) {
+                throw new UncheckedIOException(new IOException(
+                        "Refusing to replace session '" + id + "' with an empty history: the stored session "
+                                + "has content and the in-memory copy may be incomplete"));
+            }
             final var sb = new StringBuilder();
             for (final var m : messages) {
+                // persist the original entry timestamp when known: the message carries its
+                // persisted "at" in others so a flush/compact/prune does not rewrite history
+                final var at = m.others() == null ? null : m.others().get(PERSISTED_AT_KEY);
+                final var stamp = at instanceof final Number n ? n.longValue() : now();
+                final var others = m.others() == null ? null : new java.util.LinkedHashMap<>(m.others());
+                if (others != null) {
+                    others.remove(PERSISTED_AT_KEY);
+                }
                 sb.append(mapper.toString(SessionEntry.of(
-                                now(), m.role(), m.content(), m.toolCalls(), m.toolCallId(), m.name(), m.others())))
+                                stamp, m.role(), m.content(), m.toolCalls(), m.toolCallId(), m.name(), others)))
                         .append('\n');
             }
             final var target = path(id);
@@ -352,8 +574,19 @@ public class FileSessionStore implements SessionStore {
                     target.getFileName() + ".tmp-" + ThreadLocalRandom.current().nextLong());
             try {
                 Files.createDirectories(target.getParent());
+                // keep a .bak sibling so a bad rewrite can be restored by hand
+                if (Files.isRegularFile(target)) {
+                    Files.copy(
+                            target,
+                            target.resolveSibling(target.getFileName() + ".bak"),
+                            StandardCopyOption.REPLACE_EXISTING);
+                }
                 Files.writeString(tmp, sb.toString());
-                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                try {
+                    Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
+                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                }
             } catch (final IOException e) {
                 try {
                     Files.deleteIfExists(tmp);
@@ -364,6 +597,23 @@ public class FileSessionStore implements SessionStore {
             }
         } finally {
             fileLock.unlock();
+        }
+    }
+
+    private boolean hasStoredContent(final String id) {
+        final var folder = path(id);
+        try {
+            if (Files.isRegularFile(folder) && Files.size(folder) > 0) {
+                return true;
+            }
+            final var folderGz = Path.of(folder + GZ_SUFFIX);
+            if (Files.isRegularFile(folderGz) && Files.size(folderGz) > 0) {
+                return true;
+            }
+            return (Files.isRegularFile(legacyPath(id)) && Files.size(legacyPath(id)) > 0)
+                    || (Files.isRegularFile(legacyGz(id)) && Files.size(legacyGz(id)) > 0);
+        } catch (final IOException e) {
+            return true; // cannot prove the session is writable: do not overwrite
         }
     }
 
@@ -515,7 +765,7 @@ public class FileSessionStore implements SessionStore {
                             return new SessionInfo(
                                     id, Files.getLastModifiedTime(stat).toMillis(), Files.size(stat));
                         } catch (final IOException e) {
-                            return new SessionInfo(name, 0, 0);
+                            return new SessionInfo(id, 0, 0);
                         }
                     })
                     .sorted(Comparator.comparingLong(SessionInfo::modifiedAt).reversed())
@@ -533,6 +783,10 @@ public class FileSessionStore implements SessionStore {
     private static final String JSONL_SUFFIX = ".jsonl";
     private static final String GZ_SUFFIX = ".jsonl.gz";
     private static final long MILLIS_PER_DAY = 24L * 60L * 60L * 1000L;
+    /** Reserved {@code others} key carrying the persisted entry timestamp for replace() round-trip. */
+    static final String PERSISTED_AT_KEY = "at";
+
+    static final long DEFAULT_HOUSEKEEPING_GRACE_MILLIS = 24L * 60L * 60L * 1000L;
 
     public long now() {
         return clock.millis();

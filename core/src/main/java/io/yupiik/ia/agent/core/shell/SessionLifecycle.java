@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.shell;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
+import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -52,9 +53,17 @@ public class SessionLifecycle {
             if (name.endsWith(".jsonl")) {
                 name = name.substring(0, name.length() - ".jsonl".length());
             }
+            keep(name);
             return name;
         }
-        return sessionStore.create();
+        return keep(sessionStore.create());
+    }
+
+    private String keep(final String id) {
+        if (sessionStore instanceof final FileSessionStore fileStore) {
+            fileStore.keepSession(id);
+        }
+        return id;
     }
 
     /**

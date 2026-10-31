@@ -54,6 +54,36 @@ public interface SessionStore {
     }
 
     /**
+     * Loads only the {@code count} most recent messages of a session (tail-first), used by
+     * paginated replay (the web transcript loads earlier history in slices). File-backed
+     * implementations read only the last lines; the default falls back to a full load so
+     * in-memory/subagent stores behave identically.
+     *
+     * @param id    the session ID
+     * @param count the maximum number of trailing messages to return ({@code <= 0} -> empty)
+     * @return the last {@code count} messages in order, empty if the session doesn't exist
+     */
+    default List<Message> tail(String id, int count) {
+        if (count <= 0) {
+            return List.of();
+        }
+        final var all = load(id);
+        return all.size() <= count ? all : List.copyOf(all.subList(all.size() - count, all.size()));
+    }
+
+    /**
+     * Total number of persisted messages of a session (used by the web transcript pagination
+     * to report how much older history remains). File-backed implementations count lines;
+     * the default falls back to a full load.
+     *
+     * @param id the session ID
+     * @return the number of persisted messages, 0 when the session doesn't exist
+     */
+    default int count(String id) {
+        return load(id).size();
+    }
+
+    /**
      * Replaces the entire session content.
      *
      * @param id the session ID
