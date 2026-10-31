@@ -69,6 +69,10 @@ class SubagentRegistryTest {
                         Map.of(),
                         Map.of(),
                         "",
+                        null,
+                        null,
+                        null,
+                        null,
                         null);
             }
         };

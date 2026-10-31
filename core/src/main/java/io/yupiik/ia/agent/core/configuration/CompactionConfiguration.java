@@ -113,7 +113,16 @@ public record CompactionConfiguration(
                         "Percentage of the automatic compaction trigger at which speculative compaction launches "
                                 + "(speculativePolicy=concurrent only); must stay between 1 and 99. Example: with a "
                                 + "100k-token trigger and 80, the background summary starts around 80k estimated tokens.")
-        int speculativeStartPercent) {
+        int speculativeStartPercent,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "When a compaction summarizer call exhausts all its retries on a transient 5xx/network failure, "
+                                + "retry the summarizer once on the provider's main (conversation) model before giving up "
+                                + "and skipping the compaction. Off by default because the main model is usually costlier; "
+                                + "a per-provider compaction.fallbackToMainModel value overrides this global default.")
+        boolean fallbackToMainModel) {
     public CompactionConfiguration {
         if (!"off".equals(speculativePolicy) && !"concurrent".equals(speculativePolicy)) {
             throw new IllegalArgumentException("speculativePolicy must be off or concurrent");

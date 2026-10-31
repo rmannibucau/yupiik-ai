@@ -151,6 +151,10 @@ class SubagentIntegrationTest {
                         Map.of(),
                         Map.of(),
                         "",
+                        null,
+                        null,
+                        null,
+                        null,
                         null);
             }
         };

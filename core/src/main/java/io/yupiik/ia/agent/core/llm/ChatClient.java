@@ -275,12 +275,22 @@ public class ChatClient implements AutoCloseable {
         return new ExtendedHttpClient(clientConfig);
     }
 
-    private LlmClientResilienceWrapper resilience(final int providerBounds) {
+    private LlmClientResilienceWrapper resilience(final ProviderConfiguration provider, final int providerBounds) {
+        final var compaction = provider == null ? null : provider.compaction();
+        final var retries = compaction != null && compaction.retriesMaxAttempts() > 0
+                ? compaction.retriesMaxAttempts()
+                : configuration.llm().retriesMaxAttempts();
+        final var baseDelay = compaction != null && compaction.retriesBaseDelayMs() > 0
+                ? compaction.retriesBaseDelayMs()
+                : configuration.llm().retriesBaseDelayMs();
+        final var rateLimit = compaction != null && compaction.rateLimitRequestsPerMinute() > 0
+                ? compaction.rateLimitRequestsPerMinute()
+                : configuration.llm().rateLimitRequestsPerMinute();
         return new LlmClientResilienceWrapper(
                 new LlmResilienceConfig(
-                        configuration.llm().retriesMaxAttempts(),
-                        configuration.llm().retriesBaseDelayMs(),
-                        configuration.llm().rateLimitRequestsPerMinute(),
+                        retries,
+                        baseDelay,
+                        rateLimit,
                         providerBounds,
                         // the summarizer has its own halving loop for context overflow (the agent
                         // loop owns overflow recovery for conversation requests); the library must
@@ -402,7 +412,8 @@ public class ChatClient implements AutoCloseable {
                     ? provider.maxConcurrent()
                     : configuration.llm().maxConcurrent();
             return new DialectLlmClient(
-                    dialect(flavor, spec, provider), resiliences.computeIfAbsent(key, _ -> resilience(bounds)));
+                    dialect(flavor, spec, provider),
+                    resiliences.computeIfAbsent(key, _ -> resilience(provider, bounds)));
         });
     }
 

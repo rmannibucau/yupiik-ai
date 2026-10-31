@@ -134,51 +134,20 @@ public record ProviderConfiguration(
 
         @Property(
                 documentation =
+                        "Per-provider compaction resilience overrides (summarizer retries, backoff, rate limit and "
+                                + "main-model fallback). Unset fields inherit the global yca.llm / yca.compaction values.")
+        ProviderCompactionConfiguration compaction,
+
+        @Property(
+                documentation =
                         "Declarative capability knobs of this provider (codex client version, encrypted-reasoning include, usage-quota enablement). "
                                 + "These are typed internal options that drive yca behaviour and, unlike providerSpecificOptions, are never merged "
                                 + "into the wire request payload.")
         ProviderCapabilities capabilities) {
 
-    /** Constructor accepting the fields before {@code defaultSubagentModel} (both it and {@code backgroundModelOverrides} and {@code capabilities} default to null). */
-    public ProviderConfiguration(
-            final String id,
-            final String baseUrl,
-            final String apiKey,
-            final String model,
-            final ApiFlavor api,
-            final int contextWindow,
-            final int outputTokens,
-            final String releaseDate,
-            final ModelTuningConfiguration tuning,
-            final List<ProviderModelConfiguration> models,
-            final int maxConcurrent,
-            final int timeoutSeconds,
-            final String providerSpecificOptions,
-            final Map<String, String> headers,
-            final Map<String, String> dynamicHeaders,
-            final String color,
-            final PromptConfiguration prompt) {
-        this(
-                id,
-                baseUrl,
-                apiKey,
-                model,
-                api,
-                contextWindow,
-                outputTokens,
-                releaseDate,
-                tuning,
-                models,
-                maxConcurrent,
-                timeoutSeconds,
-                providerSpecificOptions,
-                headers,
-                dynamicHeaders,
-                color,
-                prompt,
-                null,
-                null,
-                null);
+    /** The effective per-provider compaction overrides: the configured record, or null when absent. */
+    public ProviderCompactionConfiguration resolvedCompaction() {
+        return compaction;
     }
 
     /** The effective codex capabilities: the configured record, or empty defaults when absent. */

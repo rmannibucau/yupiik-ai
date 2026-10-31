@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderCompactionConfiguration;
 import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
 import io.yupiik.ia.agent.core.context.SpeculativeCompaction.Candidate;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -483,6 +484,23 @@ public class CompactionCoordinator {
             }
             return new CompactionResult(out, Mode.SUMMARY, "");
         }
+        // a transient summarizer failure (5xx/network after all retries and the optional main-model
+        // fallback) must not destructively truncate a heavy context: skip the pass and keep the raw
+        // messages so the next automatic compaction can retry from a clean state
+        if (outcome.transientFailure() && !outcome.sizeError()) {
+            final var failureMessage =
+                    outcome.error() == null || outcome.error().isBlank() ? "Summary failed" : outcome.error();
+            LOGGER.log(SessionAwareLogRecord.of(
+                    LOGGER,
+                    sessionId,
+                    Level.WARNING,
+                    failureMessage + "; compaction skipped, context kept raw (will retry next pass)"));
+            emit(new AgentEvent.Notice(
+                    AgentEvent.Notice.Level.WARN,
+                    failureMessage + "; compaction skipped, context kept raw (will retry next pass).",
+                    sessionId));
+            return new CompactionResult(messages, Mode.NONE, failureMessage + " (compaction skipped)");
+        }
         final var truncated = localTruncate(messages, from, boundary);
         final var keptTruncated = ensureUnderWindow(truncated, force, -1);
         final var failureMessage = (outcome.error() == null || outcome.error().isBlank()
@@ -815,15 +833,15 @@ public class CompactionCoordinator {
         }
         for (var c = 0; c < chunks.size(); c++) {
             if (cancelled.getAsBoolean()) {
-                return new Outcome("", label + " cancelled", calls, false);
+                return new Outcome("", label + " cancelled", calls, false, false);
             }
             final var prompt = chunkPrompt(chunks, c, summary, priorSummary, focus, digestCap);
             String part = null;
             String error = null;
-            for (var attempt = 0; attempt < retries(); attempt++) {
+            for (var attempt = 0; attempt < retries(settings); attempt++) {
                 try {
                     if (cancelled.getAsBoolean()) {
-                        return new Outcome("", label + " cancelled", calls, false);
+                        return new Outcome("", label + " cancelled", calls, false, false);
                     }
                     final var request = new ChatCompletionRequest(
                             template.model(),
@@ -864,18 +882,18 @@ public class CompactionCoordinator {
                 } catch (final ContextWindowExceededException e) {
                     // the chunk (+ rolling digest + template) is larger than the model's real window:
                     // signal the caller to halve the chunk cap and retry from scratch
-                    return new Outcome("", label + " summarizer input exceeds the context window", calls, true);
+                    return new Outcome("", label + " summarizer input exceeds the context window", calls, true, false);
                 } catch (final IOException e) {
                     error = label + " summarizer failed: " + e.getMessage();
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    return new Outcome("", label + " interrupted", calls, false);
+                    return new Outcome("", label + " interrupted", calls, false, false);
                 }
-                if (attempt + 1 < retries()) {
+                if (attempt + 1 < retries(settings)) {
                     if (cancelled.getAsBoolean()) {
-                        return new Outcome("", label + " cancelled", calls, false);
+                        return new Outcome("", label + " cancelled", calls, false, false);
                     }
-                    final var delay = backoff(attempt);
+                    final var delay = backoff(attempt, settings);
                     if (!quiet) {
                         emit(new AgentEvent.Pause(
                                 AgentEvent.Pause.Kind.RETRY,
@@ -898,7 +916,67 @@ public class CompactionCoordinator {
                 if (error == null) {
                     error = label + " produced no summary; truncated locally";
                 }
-                return new Outcome("", error, calls, false);
+                // a transient summarizer failure (5xx/network after all retries) with the main-model
+                // fallback enabled: retry once on the provider's conversation model before giving up
+                if (fallbackToMainModel(settings)) {
+                    final var mainModel = mainModelReference(settings);
+                    if (mainModel != null && !mainModel.equals(template.model())) {
+                        if (!quiet) {
+                            emit(new AgentEvent.Status(
+                                    "compacting " + label + ": summarizer unavailable, retrying on " + mainModel
+                                            + "...",
+                                    sessionId,
+                                    null,
+                                    null));
+                        }
+                        try {
+                            final var fallbackRequest = new ChatCompletionRequest(
+                                    mainModel,
+                                    List.of(Message.system(systemPrompt), Message.user(prompt)),
+                                    template.temperature(),
+                                    template.topP(),
+                                    false,
+                                    null,
+                                    template.toolChoice(),
+                                    template.maxTokens(),
+                                    template.reasoningEffort(),
+                                    template.others(),
+                                    template.sessionId(),
+                                    template.settings());
+                            final var res = chatClient.chat(fallbackRequest, null, cancelled);
+                            calls++;
+                            if (usageTracker != null) {
+                                usageTracker.recordAuxiliary(res.usage());
+                            }
+                            final var fallbackPart = res.message() == null
+                                    ? ""
+                                    : str(res.message().content());
+                            if (fallbackPart != null && !fallbackPart.isBlank()) {
+                                appendBounded(summary, fallbackPart, digestCap);
+                                if (!quiet && c + 1 < chunks.size()) {
+                                    emit(new AgentEvent.Status(
+                                            "compacting (" + label + ", chunk " + (c + 2) + "/" + chunks.size()
+                                                    + ")...",
+                                            sessionId,
+                                            null,
+                                            null));
+                                }
+                                continue;
+                            }
+                        } catch (final ContextWindowExceededException e) {
+                            // the main model is not smaller than the compact model: a window error here
+                            // means the chunk is genuinely too large for any model, treat as size error
+                            return new Outcome(
+                                    "", label + " summarizer input exceeds the context window", calls, true, false);
+                        } catch (final IOException e) {
+                            error = label + " summarizer failed also on " + mainModel + ": " + e.getMessage();
+                        } catch (final InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return new Outcome("", label + " interrupted", calls, false, false);
+                        }
+                    }
+                }
+                return new Outcome("", error, calls, false, true);
             }
             appendBounded(summary, part, digestCap);
             if (!quiet && c + 1 < chunks.size()) {
@@ -909,7 +987,7 @@ public class CompactionCoordinator {
                         null));
             }
         }
-        return new Outcome(summary.toString(), "", calls, false);
+        return new Outcome(summary.toString(), "", calls, false, false);
     }
 
     /**
@@ -996,7 +1074,7 @@ public class CompactionCoordinator {
      * LLM calls spent (for the success INFO feedback) and whether the failure was size-caused (a
      * {@link ContextWindowExceededException}), which triggers the chunk-cap halving restart.
      */
-    private record Outcome(String summary, String error, int calls, boolean sizeError) {}
+    private record Outcome(String summary, String error, int calls, boolean sizeError, boolean transientFailure) {}
 
     /** The consecutive leading {@code system}-role entries: the web project marker (if any) and the compaction marker. */
     private static List<Message> leadingSystemMessages(final List<Message> messages) {
@@ -1026,8 +1104,24 @@ public class CompactionCoordinator {
         return out;
     }
 
-    private int retries() {
-        return Math.max(1, configuration.llm() == null ? 1 : configuration.llm().retriesMaxAttempts());
+    private int retries(final ChatSettings settings) {
+        final var overrides = compactionOverrides(settings);
+        final var configured = overrides != null && overrides.retriesMaxAttempts() > 0
+                ? overrides.retriesMaxAttempts()
+                : (configuration.llm() == null ? 1 : configuration.llm().retriesMaxAttempts());
+        return Math.max(1, configured);
+    }
+
+    /** The per-provider compaction block for the session's provider, or null when absent/unresolvable. */
+    private ProviderCompactionConfiguration compactionOverrides(final ChatSettings settings) {
+        if (providerManager == null || settings == null) {
+            return null;
+        }
+        final var providerId = settings.providerId();
+        final var provider = providerId == null || providerId.isBlank()
+                ? providerManager.current()
+                : providerManager.provider(providerId);
+        return provider == null ? null : provider.compaction();
     }
 
     /*
@@ -1127,11 +1221,17 @@ public class CompactionCoordinator {
      * Exponential backoff with jitter, additionally dilated by the configured requests-per-minute
      * cap so compaction retries never hammer a rate-limited provider faster than the operator asked.
      */
-    private long backoff(final int attempt) {
-        final var base = configuration.llm() != null ? configuration.llm().retriesBaseDelayMs() : 500L;
+    private long backoff(final int attempt, final ChatSettings settings) {
+        final var overrides = compactionOverrides(settings);
+        final var base = overrides != null && overrides.retriesBaseDelayMs() > 0
+                ? overrides.retriesBaseDelayMs()
+                : (configuration.llm() != null ? configuration.llm().retriesBaseDelayMs() : 500L);
         var exp = base * (1L << Math.min(attempt, 5));
-        if (configuration.llm() != null && configuration.llm().rateLimitRequestsPerMinute() > 0) {
-            final var perRequestMs = 60_000L / configuration.llm().rateLimitRequestsPerMinute();
+        final var rateLimit = overrides != null && overrides.rateLimitRequestsPerMinute() > 0
+                ? overrides.rateLimitRequestsPerMinute()
+                : (configuration.llm() != null ? configuration.llm().rateLimitRequestsPerMinute() : 0);
+        if (rateLimit > 0) {
+            final var perRequestMs = 60_000L / rateLimit;
             exp = Math.max(exp, perRequestMs);
         }
         return exp + ThreadLocalRandom.current().nextLong(Math.max(1, exp / 4));
@@ -1175,6 +1275,40 @@ public class CompactionCoordinator {
             return providerId == null ? null : "$" + providerId + "/";
         }
         return (providerId == null ? "" : "$" + providerId + "/") + model;
+    }
+
+    /**
+     * Whether a transient summarizer failure should retry once on the provider's main model: the
+     * global {@code yca.compaction.fallbackToMainModel} default, overridden by the per-provider
+     * {@code compaction.fallbackToMainModel} when set. Never falls back for context-size errors
+     * (those are handled by the chunk-halving loop) and only makes sense when a dedicated compact
+     * model is configured (otherwise the summarizer already runs on the main model).
+     */
+    private boolean fallbackToMainModel(final ChatSettings settings) {
+        final var overrides = compactionOverrides(settings);
+        // the framework materializes a default-filled per-provider block even when none is configured,
+        // so only an explicit TRUE opts in at the provider level; the global default governs otherwise
+        if (overrides != null && Boolean.TRUE.equals(overrides.fallbackToMainModel())) {
+            return true;
+        }
+        return compactionConfigured() && configuration.compaction().fallbackToMainModel();
+    }
+
+    /** The session's main (conversation) model reference, or null when unresolvable. */
+    private String mainModelReference(final ChatSettings settings) {
+        if (providerManager == null) {
+            return null;
+        }
+        final var routed = settings == null ? ChatSettings.EMPTY : settings;
+        final var providerId = routed.providerId();
+        final var provider = providerId == null || providerId.isBlank()
+                ? providerManager.current()
+                : providerManager.provider(providerId);
+        if (provider == null || provider.model() == null || provider.model().isBlank()) {
+            return null;
+        }
+        return "$" + (provider.id() == null || provider.id().isBlank() ? "default" : provider.id()) + "/"
+                + provider.model();
     }
 
     /**

@@ -111,6 +111,12 @@ class AdaptiveCompactionTest {
 
     /** A two-provider config: 'main' (large window) plus a cheaper 'compact' provider (smaller window). */
     private static CodingAgentConfiguration twoProviderConfig(final int mainWindow, final int compactWindow) {
+        return twoProviderConfig(mainWindow, compactWindow, Map.of());
+    }
+
+    /** Like {@link #twoProviderConfig(int, int)} with extra configuration entries applied last. */
+    private static CodingAgentConfiguration twoProviderConfig(
+            final int mainWindow, final int compactWindow, final Map<String, String> extra) {
         final var entries = new HashMap<String, String>();
         entries.put("yca.storageHome", "x");
         entries.put("yca.workingDir", ".");
@@ -132,6 +138,7 @@ class AdaptiveCompactionTest {
         entries.put("yca.provider.providers.1.timeoutSeconds", "120");
         entries.put("yca.compaction.tailBudgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "1");
+        entries.putAll(extra);
         return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
     }
 
@@ -139,7 +146,8 @@ class AdaptiveCompactionTest {
 
     @Test
     void derivationRespectsTheConfiguredFloor() {
-        // 16k window -> usable ~12k tokens -> ~48k derived chars, floored at the configured 12k
+        // 16k window -> usable ~12k tokens -> chunk cap (usable chars, i.e. 1/4-window at 4 chars/token)
+        // is 12k chars, floored at the configured 12k minimum; digest = half the chunk cap.
         final var cfg = config(16_000, Map.of());
         final var coordinator = coordinator(cfg, null);
         assertEquals(12_000, coordinator.effectiveChunkCap(), "the floor must clamp the derived cap");
@@ -255,7 +263,7 @@ class AdaptiveCompactionTest {
     }
 
     @Test
-    void nonSizeFailureNeverHalvesAndUsesRetriesThenTruncates() {
+    void nonSizeFailureNeverHalvesRetriesThenSkipsKeepRaw() {
         final var attempts = new AtomicInteger();
         final var cfg = config(
                 128_000,
@@ -273,14 +281,16 @@ class AdaptiveCompactionTest {
                 throw new IOException("upstream 500");
             }
         };
+        final var history = oldHeavyHistory(6, 4_000);
         final var manager = new ContextManager(
                 cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()), coordinator(cfg, chat));
-        final var result = manager.compact(oldHeavyHistory(6, 4_000), true);
-        assertEquals(CompactionResult.Mode.TRUNCATE, result.mode());
+        final var result = manager.compact(history, true);
+        assertEquals(CompactionResult.Mode.NONE, result.mode(), "transient failures must skip, not truncate");
         assertEquals(2, attempts.get(), "non-size failures use the configured retries, no halving");
+        assertEquals(history, result.messages(), "a skipped compaction must keep the raw context verbatim");
         assertTrue(
                 result.error() != null && result.error().contains("upstream 500"),
-                "the truncation fallback must report the real cause");
+                "the skip fallback must report the real cause");
     }
 
     @Test
@@ -401,5 +411,97 @@ class AdaptiveCompactionTest {
         final var result = manager.compact(oldHeavyHistory(6, 500), true);
         assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
         assertEquals(1, calls.get(), "a history fitting one compact-window chunk must not overflow/halve");
+    }
+
+    /** Per-provider compaction.retriesMaxAttempts overrides the global; unset inherits it. */
+    @Test
+    void perProviderRetriesAndBackoffOverrideGlobals() {
+        // provider-level: retries=5, baseDelay=3000, rateLimit=120 -> backoff(0) >= 3000
+        final var cfg = config(
+                128_000,
+                Map.of(
+                        "yca.compaction.summarizerChunkChars", "2000",
+                        "yca.compaction.summarizerMinChunkChars", "1000",
+                        "yca.llm.retriesMaxAttempts", "2",
+                        "yca.llm.retriesBaseDelayMs", "500",
+                        "yca.llm.rateLimitRequestsPerMinute", "0",
+                        "yca.provider.providers.0.compaction.retriesMaxAttempts", "5",
+                        "yca.provider.providers.0.compaction.retriesBaseDelayMs", "3000",
+                        "yca.provider.providers.0.compaction.rateLimitRequestsPerMinute", "120"));
+        final var attempts = new AtomicInteger();
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                attempts.incrementAndGet();
+                throw new IOException("500 transient");
+            }
+        };
+        final var manager = new ContextManager(
+                cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()), coordinator(cfg, chat));
+        final var result = manager.compact(oldHeavyHistory(6, 300), true);
+        // per-provider retries=5, not the global 2: the summarizer attempts 5 times then skips
+        assertEquals(5, attempts.get(), "per-provider retriesMaxAttempts must win over the global");
+        assertEquals(CompactionResult.Mode.NONE, result.mode(), "transient failure must skip, not truncate");
+    }
+
+    /** Transient 5xx after all retries keeps the raw context (Mode.NONE), never local-truncates. */
+    @Test
+    void transientSummarizerFailureSkipsInsteadOfTruncating() {
+        final var cfg = config(128_000, Map.of("yca.compaction.summarizerChunkChars", "2000"));
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                throw new IOException("500 transient");
+            }
+        };
+        final var history = oldHeavyHistory(6, 4_000);
+        final var coordinator = coordinator(cfg, chat);
+        final var manager = new ContextManager(
+                cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()), coordinator);
+        final var result = manager.compact(history, true);
+        assertEquals(CompactionResult.Mode.NONE, result.mode(), "transient failures must skip, not truncate");
+        assertEquals(
+                history, result.messages(), "when compaction is skipped the raw context must be preserved verbatim");
+        assertTrue(result.error().contains("skipped"), "the result must surface the skip reason: " + result.error());
+    }
+
+    /** With fallbackToMainModel enabled (global toggle), a transient 5xx retries once on the main model. */
+    @Test
+    void transientFailureFallsBackToMainModelWhenEnabled() {
+        final var calls = new ArrayList<String>();
+        final var cfg = twoProviderConfig(128_000, 16_000, Map.of("yca.compaction.fallbackToMainModel", "true"));
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                calls.add(request.model());
+                // fails on the compact model ($compact/mini), succeeds on the main ($main/main-model)
+                if ("$main/main-model".equals(request.model())) {
+                    return new ChatResult(Message.assistant("digest: fallback", null), Usage.EMPTY);
+                }
+                throw new IOException("500 transient");
+            }
+        };
+        final var manager = new ContextManager(
+                cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()), coordinator(cfg, chat));
+        final var result = manager.compact(oldHeavyHistory(6, 300), true);
+        assertEquals(
+                CompactionResult.Mode.SUMMARY,
+                result.mode(),
+                "fallback must produce a summary; error=" + result.error() + " calls=" + calls);
+        assertTrue(
+                calls.stream().anyMatch("$main/main-model"::equals),
+                "the main model must be tried after the compact model fails: " + calls);
     }
 }
