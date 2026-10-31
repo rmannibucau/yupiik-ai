@@ -201,6 +201,13 @@ public class UsageTracker {
      * Anchors the hybrid usage computation on a real provider observation: {@code realPromptTokens}
      * is what the provider billed for the request built from the message list whose estimate is
      * {@code estimateAtAnchor}. Called after each successful LLM call, before the reply is appended.
+     *
+     * <p>Thread confinement: {@link #anchor(int, int)}, {@link #clearAnchor()} and
+     * {@link #lastRealPromptTokens()} are expected to be called from the agent-loop thread that
+     * owns the turn (the same thread appending messages and reading {@link #effectiveContext}).
+     * The anchor field read in {@link #effectiveContext} is volatile, but the estimate/messages
+     * correlation is only meaningful under this single-owner discipline; concurrent writers from
+     * other threads would interleave anchors with unrelated estimates.</p>
      */
     public void anchor(final int realPromptTokens, final int estimateAtAnchor) {
         this.anchor =

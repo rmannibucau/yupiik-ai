@@ -974,7 +974,14 @@ public class MemoryStore {
             final var tmp = file.resolveSibling(file.getFileName() + ".tmp-"
                     + Thread.currentThread().getName().hashCode());
             Files.writeString(tmp, content.toString());
-            Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            try {
+                Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (final AtomicMoveNotSupportedException e) {
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+            } catch (final IOException e) {
+                Files.deleteIfExists(tmp);
+                throw e;
+            }
             return content.length();
         } catch (final IOException e) {
             throw new UncheckedIOException(e);

@@ -134,14 +134,23 @@ public class CallbackRunner {
             return List.of();
         }
         final var futures = new ArrayList<Future<HookResponse>>(calls.size());
+        final var timeouts = new ArrayList<Integer>(calls.size());
         for (final var hook : calls) {
             final var timeoutSeconds = hook.effectiveTimeoutSeconds(inheritedTimeoutSeconds);
-            futures.add(executor.submit(() -> runOne(eventId, hook, timeoutSeconds, payload)));
+            try {
+                futures.add(executor.submit(() -> runOne(eventId, hook, timeoutSeconds, payload)));
+                timeouts.add(timeoutSeconds);
+            } catch (final java.util.concurrent.RejectedExecutionException e) {
+                // the executor is shutting down (app close): no point retrying, do not fail the turn
+                LOGGER.log(Level.WARNING, () -> "hook callback for " + eventId + " rejected: " + e.getMessage());
+            }
         }
         final var responses = new ArrayList<HookResponse>(calls.size());
-        for (final var future : futures) {
+        for (var i = 0; i < futures.size(); i++) {
+            final var future = futures.get(i);
+            final var timeoutSeconds = timeouts.get(i);
             try {
-                final var response = future.get();
+                final var response = future.get(timeoutSeconds > 0 ? timeoutSeconds : 1, TimeUnit.SECONDS);
                 if (response != null) {
                     responses.add(response);
                 }
@@ -150,6 +159,13 @@ public class CallbackRunner {
                 LOGGER.log(Level.WARNING, "hook callback for " + eventId + " interrupted", e);
             } catch (final ExecutionException e) {
                 LOGGER.log(Level.WARNING, () -> "hook callback for " + eventId + " failed: " + e.getCause());
+            } catch (final TimeoutException e) {
+                // cancel the callback: interrupt the drain threads (a verbose child holding a pipe open
+                // can otherwise outlive the timeout and pin the executor thread); the child process is
+                // already killed by runOne's finally (processes.dispose/untracked destroyForcibly), and a
+                // running inference killed here is bounded by the hook budget by design
+                future.cancel(true);
+                LOGGER.log(Level.WARNING, () -> "hook callback for " + eventId + " timed out: " + e.getMessage());
             }
         }
         return responses;

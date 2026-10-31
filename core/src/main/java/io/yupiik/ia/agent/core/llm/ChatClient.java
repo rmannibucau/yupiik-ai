@@ -107,8 +107,8 @@ public class ChatClient implements AutoCloseable {
     /** User-registered custom dynamic-header helpers, injected after the built-in ones; empty when none. */
     private final List<CustomDynamicHeaderTemplateHelper> customDynamicHeaderTemplateHelpers;
 
-    private final Map<ClientKey, DialectLlmClient> dialectClients = new HashMap<>();
-    private final Map<ClientKey, LlmClientResilienceWrapper> resiliences = new HashMap<>();
+    private final Map<ClientKey, DialectLlmClient> dialectClients = new ConcurrentHashMap<>();
+    private final Map<ClientKey, LlmClientResilienceWrapper> resiliences = new ConcurrentHashMap<>();
     private final Set<String> budgetLogged = ConcurrentHashMap.newKeySet();
     /** Dangling defaultVariant warn-once keys: provider + '\u0000' + model + '\u0000' + name. */
     private final Set<String> warnedDefaultVariants = ConcurrentHashMap.newKeySet();
@@ -815,7 +815,20 @@ public class ChatClient implements AutoCloseable {
     public void setProvider(final String id) {
         providerManager.setProvider(id);
         final var providerId = providerManager.currentProviderId();
-        this.dialectClients.clear();
+        // invalidate only the entries of the provider being switched (per-key, not a clear()):
+        // concurrent request threads may still be using other providers' clients, and a bare
+        // clear() racing with computeIfAbsent() could resurrect a stale client under the new
+        // provider configuration. The next dialectClient() re-builds this provider's client.
+        dialectClients
+                .keySet()
+                .removeIf(key -> key.provider() != null
+                        && providerId != null
+                        && providerId.equals(key.provider().id()));
+        resiliences
+                .keySet()
+                .removeIf(key -> key.provider() != null
+                        && providerId != null
+                        && providerId.equals(key.provider().id()));
         // the new provider never observed the response route or structured output yet
         this.resolvedFlavors.remove(providerId);
         // clear the structured-output memoization entries of this provider (keys are

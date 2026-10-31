@@ -28,6 +28,7 @@ import io.yupiik.ia.agent.core.context.SubagentUsageTracker;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
@@ -43,6 +44,7 @@ import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.time.Clock;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -422,13 +424,21 @@ public class SubagentRunner {
 
     private List<String> extractArtifacts(final SessionStore sessionStore, final String sessionId) {
         final var messages = sessionStore.load(sessionId);
+        // tool messages never carry toolCalls(): the calls live on the assistant message that
+        // declared them. Only keep calls whose result actually landed (skip interrupted/lost).
+        final var landed = new HashSet<String>();
+        messages.stream()
+                .filter(m -> "tool".equals(m.role()) && m.toolCallId() != null)
+                .map(Message::toolCallId)
+                .forEach(landed::add);
         return messages.stream()
-                .filter(m -> "tool".equals(m.role()))
+                .filter(m -> "assistant".equals(m.role()))
                 .filter(m -> m.toolCalls() != null)
                 .flatMap(m -> m.toolCalls().stream())
                 .filter(tc -> tc.function() != null)
                 .filter(tc -> Set.of("write_file", "edit_file", "apply_patch")
                         .contains(tc.function().name()))
+                .filter(tc -> landed.contains(tc.id()))
                 .map(tc -> {
                     try {
                         final var args =

@@ -80,7 +80,9 @@ final class SpeculativeCompactionManager implements AutoCloseable {
                                     || cancelled.getAsBoolean()
                                     || Thread.currentThread().isInterrupted());
                 } catch (final RuntimeException e) {
-                    LOGGER.log(Level.FINE, "Speculative compaction failed; history untouched", e);
+                    // a failed speculative compaction is a silently wasted inference (the history is
+                    // untouched and the next generation retries); surface it once so it is diagnosable
+                    LOGGER.log(Level.WARNING, "Speculative compaction failed; history untouched", e);
                 } finally {
                     launched.exited = true;
                     launched.result.complete(launched.cancelled.get() ? null : candidate);

@@ -254,6 +254,8 @@ public class AgentLoop {
     private volatile java.nio.file.Path sessionWorkdir;
     /** Set when the loop/session is closed so {@link #close()} fires the SessionEnded hook only once. */
     private volatile boolean closed;
+    /** True when the last persistContext failed: the on-disk session lags the in-memory one until the next retry. */
+    private volatile boolean persistDirty;
     /** Effective agent of the current turn (set at {@code doRun} start), used for identity capture. */
     private volatile String currentAgentName;
     /**
@@ -2568,7 +2570,9 @@ public class AgentLoop {
                     sessionId,
                     (messages.get(0).role().equals("system") ? messages.subList(1, messages.size()) : messages)
                             .stream().filter(m -> !isVolatileTail(m)).toList());
+            persistDirty = false;
         } catch (final RuntimeException e) {
+            persistDirty = true; // retried at the next persistContext / compaction point
             LOGGER.log(SessionAwareLogRecord.of(
                     LOGGER, sessionId, Level.WARNING, "Could not persist the compacted session " + sessionId, e));
             emit(notice(AgentEvent.Notice.Level.WARN, "Compacted context could not be persisted: " + e.getMessage()));
@@ -2638,8 +2642,13 @@ public class AgentLoop {
         // last index per signature (excluding protected tools); signatures are resolved across the
         // whole list so identical calls far apart collapse too
         final var lastBySignature = new LinkedHashMap<String, Integer>();
+        // callId -> index of its tool result, for O(1) replacement in the second pass
+        final var resultByCallId = new HashMap<String, Integer>();
         for (var i = 0; i < messages.size(); i++) {
             final var message = messages.get(i);
+            if ("tool".equals(message.role()) && message.toolCallId() != null) {
+                resultByCallId.putIfAbsent(message.toolCallId(), i);
+            }
             if (!"assistant".equals(message.role()) || message.toolCalls() == null) {
                 continue;
             }
@@ -2675,17 +2684,14 @@ public class AgentLoop {
                 if (last != null && last != i) {
                     // replace the matching tool result (same call id) with a marker; the assistant
                     // call itself is left in place to keep the call/result pairing unambiguous
-                    for (var j = i + 1; j < messages.size(); j++) {
-                        final var candidate = messages.get(j);
-                        if ("tool".equals(candidate.role()) && call.id().equals(candidate.toolCallId())) {
-                            messages.set(
-                                    j,
-                                    Message.tool(
-                                            call.id(),
-                                            "[duplicate tool call pruned - same tool and arguments as the last call, keeping the latest output]"));
-                            replaced++;
-                            break;
-                        }
+                    final var j = resultByCallId.get(call.id());
+                    if (j != null && j > i) {
+                        messages.set(
+                                j,
+                                Message.tool(
+                                        call.id(),
+                                        "[duplicate tool call pruned - same tool and arguments as the last call, keeping the latest output]"));
+                        replaced++;
                     }
                 }
             }
@@ -2888,9 +2894,33 @@ public class AgentLoop {
      * persisted and clears the usage anchor like any other context reduction.
      */
     private void checkRoundBudget(final String sessionId, final List<Message> messages, final int toolsTokens) {
+        checkRoundBudget(sessionId, messages, toolsTokens, null, null);
+    }
+
+    /**
+     * Round-level budget guard: after each tool result lands, if the estimated context is above the
+     * pruning threshold, prune locally first (zero LLM cost); only if it remains above the
+     * compaction threshold, run the LLM compaction. The round continues: the already-landed results
+     * stay in the verbatim tail protected by the compaction's keep budget. Each reduction is
+     * persisted and clears the usage anchor like any other context reduction.
+     *
+     * @param settings   the request settings to base the compaction request on (the session's
+     *                   effective settings when {@code null}), so the model/variant the user picked
+     *                   for this turn also drives the compaction call
+     * @param cancelled  the current run's cancellation probe, so a cancelled turn does not launch
+     *                   an expensive compaction
+     */
+    private void checkRoundBudget(
+            final String sessionId,
+            final List<Message> messages,
+            final int toolsTokens,
+            final ChatSettings settings,
+            final BooleanSupplier cancelled) {
         if (contextManager == null) {
             return;
         }
+        final var effectiveSettings = settings == null ? chatSettings : settings;
+        final var effectiveCancelled = cancelled == null ? (BooleanSupplier) () -> false : cancelled;
         final var appliedKinds = new ArrayList<String>(2);
         var appliedModes = new ArrayList<CompactionResult.Mode>(2);
         if (contextManager.pruneNeeded(messages, toolsTokens)) {
@@ -2905,7 +2935,11 @@ public class AgentLoop {
             }
         }
         if (contextManager.compactNeeded(messages, toolsTokens)) {
-            final var compacted = contextManager.compact(messages, false, null, 0, () -> false, chatSettings);
+            if (effectiveCancelled.getAsBoolean()) {
+                return;
+            }
+            final var compacted =
+                    contextManager.compact(messages, false, null, 0, effectiveCancelled, effectiveSettings);
             if (compacted.changed()) {
                 messages.clear();
                 messages.addAll(compacted.messages());
@@ -3329,7 +3363,7 @@ public class AgentLoop {
                         roundCoverage,
                         roundMutatingBash),
                 this::awaitTool,
-                () -> checkRoundBudget(sessionId, messages, toolsTokens),
+                () -> checkRoundBudget(sessionId, messages, toolsTokens, settings, cancelled),
                 precisionDurationMarker::now,
                 elapsedMs -> turnState.toolWallMs += elapsedMs,
                 () -> roundInformative[0]);
@@ -3437,13 +3471,27 @@ public class AgentLoop {
             return Map.of();
         }
         Map<String, Path> out = null;
+        // a read whose result never landed (interrupted/cancelled turn) or was replaced by a
+        // lost-result marker is not a live read: index only reads with a present tool result
+        final var landedResults = new HashSet<String>();
+        for (final var message : messages) {
+            if ("tool".equals(message.role()) && message.toolCallId() != null) {
+                final var content = String.valueOf(message.content());
+                if (!content.startsWith("[tool result lost:")) { // repairInterruptedToolCalls markers
+                    landedResults.add(message.toolCallId());
+                }
+            }
+        }
         for (final var message : messages) {
             if (message.toolCalls() == null || message.toolCalls().isEmpty()) {
                 continue;
             }
             for (final var call : message.toolCalls()) {
                 final var fn = call.function();
-                if (fn == null || !"read".equals(fn.name()) || fn.arguments() == null) {
+                if (fn == null
+                        || !"read".equals(fn.name())
+                        || fn.arguments() == null
+                        || !landedResults.contains(call.id())) {
                     continue;
                 }
                 try {
@@ -3953,6 +4001,11 @@ public class AgentLoop {
      * @return whether the failure is a tool-call pairing rejection that the interrupted-tool repair can fix.
      */
     private static boolean isToolPairingRejection(final Throwable failure) {
+        // prefer the typed failure: the status code is authoritative and never depends on
+        // message formatting ("LLM request failed (400)" is a bare prefix heuristic)
+        if (failure instanceof LlmHttpFailureException httpFailure) {
+            return httpFailure.status() == 400 && ModelRoundProcessor.isToolCallPairingRejected(httpFailure);
+        }
         final var message = failure == null ? null : failure.getMessage();
         if (message == null || !message.startsWith("LLM request failed (400)")) {
             return false;
