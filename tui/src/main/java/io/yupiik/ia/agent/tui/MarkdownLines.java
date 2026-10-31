@@ -22,6 +22,7 @@ import dev.tamboui.text.Span;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.regex.Pattern;
 import org.commonmark.ext.gfm.strikethrough.Strikethrough;
 import org.commonmark.ext.gfm.strikethrough.StrikethroughExtension;
 import org.commonmark.ext.gfm.tables.TableBlock;
@@ -97,7 +98,7 @@ public final class MarkdownLines {
         final var out = new ArrayList<Line>();
         final var codeStyle =
                 styles.codeBlock() == null ? base : styles.codeBlock().patch(base);
-        for (final var segment : splitSegments(markdown)) {
+        for (final var segment : splitSegments(escapeCodeLike(markdown))) {
             if (segment.block()) {
                 emitLiteral(segment.text(), codeStyle, width, out);
             } else {
@@ -107,6 +108,81 @@ public final class MarkdownLines {
         }
         return out;
     }
+
+    /**
+     * Escapes bare {@code *} / {@code _} on code-like lines (SQL/JSON/heredoc echoes the model
+     * reproduced verbatim) so CommonMark renders them literally instead of pairing them into an
+     * emphasis across a softbreak - e.g. {@code part_*.csv.gz} and {@code COUNT(*)} on two lines
+     * of the same paragraph used to hide both stars. Fenced code blocks and lines already
+     * escaped (a backslash before the metacharacter, as emitted by
+     * {@link ConversationTranscript} in the streaming headers) are left untouched. Prose with a
+     * lone {@code *} / {@code _} is never rewritten.
+     */
+    private static String escapeCodeLike(final String markdown) {
+        if (markdown == null || markdown.isEmpty()) {
+            return markdown;
+        }
+        final var lines = markdown.split("\n", -1);
+        final var out = new StringBuilder(markdown.length() + 16);
+        var inFence = 0; // fence char length while inside a fenced block; 0 = outside
+        var fenceChar = 0;
+        for (final var line : lines) {
+            if (inFence > 0) {
+                final var trimmed = line.stripLeading();
+                final var m = FENCE_CLOSE.matcher(trimmed);
+                if (m.matches()
+                        && m.group(1).charAt(0) == fenceChar
+                        && m.group(1).length() >= inFence) {
+                    inFence = 0;
+                }
+                out.append(line).append('\n');
+                continue;
+            }
+            final var fence = FENCE_RUN.matcher(line);
+            if (fence.find()) {
+                inFence = fence.group(1).length();
+                fenceChar = fence.group(1).charAt(0);
+                out.append(line).append('\n');
+                continue;
+            }
+            out.append(CODE_LIKE_LINE.matcher(line).find() ? escapeInline(line) : line)
+                    .append('\n');
+        }
+        final var len = out.length();
+        return len > 0 && out.charAt(len - 1) == '\n' ? out.substring(0, len - 1) : out.toString();
+    }
+
+    private static String escapeInline(final String line) {
+        final var sb = new StringBuilder(line.length() + 8);
+        var inCode = false;
+        for (var i = 0; i < line.length(); i++) {
+            final var c = line.charAt(i);
+            if (c == '\\') {
+                sb.append(c);
+                if (i + 1 < line.length()) {
+                    sb.append(line.charAt(i + 1));
+                    i++;
+                }
+                continue;
+            }
+            if (c == '`') {
+                inCode = !inCode;
+                sb.append(c);
+                continue;
+            }
+            if (!inCode && (c == '*' || c == '_')) {
+                sb.append('\\');
+            }
+            sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    private static final Pattern FENCE_RUN = Pattern.compile("(`{3,}|~{3,})");
+    private static final Pattern FENCE_CLOSE = Pattern.compile("^(`+|~+)\\s*$");
+    private static final Pattern CODE_LIKE_LINE = Pattern.compile(
+            "(?:SELECT\\b|INSERT\\b|UPDATE\\b|DELETE\\s+FROM\\b|CREATE\\b|ALTER\\b|DROP\\b|WITH\\b\\s+\\w+\\s+AS\\b|FROM\\s+\\w+|COUNT\\s*\\(|"
+                    + "<<['\"]|\\{\\s*\"command\"|\\bpython3?\\b|\\bcat\\s+>)");
 
     /**
      * Splits {@code markdown} into prose/markdown segments and character-exact block segments.

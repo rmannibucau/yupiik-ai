@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import dev.tamboui.style.Color;
 import dev.tamboui.tui.TuiConfig;
 import dev.tamboui.tui.TuiRunner;
 import dev.tamboui.tui.event.KeyCode;
@@ -2648,6 +2649,80 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("✓ bash");
         awaitTextGone("secret-out");
+
+        quit();
+    }
+
+    @Test
+    void readCardRendersNumberedJavaOutputWithHighlightedContent() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-read-highlight-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // finished read of a .java file: the numbered body must render with the content
+        // syntax-highlighted (the card falls into the special read/read_symbol path)
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"src/Foo.java\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished(
+                "read", " 1\tpublic class Foo {\n 2\t  private int x;\n 3\t}\n", true, sid(shellRegistry)));
+
+        awaitText("✓ read");
+        // collapsed by default: expand to reveal the body
+        tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
+        awaitText("public class Foo");
+        awaitText("private int x");
+
+        // the line-number gutter precedes the highlighted content on the same row
+        final var row = rowOf("public class Foo");
+        final var line = backend.text().split("\n")[row];
+        assertTrue(line.contains("1 public class Foo"), "line-number gutter precedes the content: " + line);
+        // the keyword tokenizer colored "public" with the theme keyword color, proving the
+        // CODE branch ran (and that it is not the muted gutter color)
+        final var column = columnOfLineContaining("public");
+        assertEquals(
+                Color.hex(CodeTheme.ONE_DARK.keyword()),
+                backend.fg(column, row).orElse(null),
+                "the highlighted 'public' must carry the keyword color");
+
+        quit();
+    }
+
+    @Test
+    void readSymbolCardHighlightsFromTheOutputHeaderFileReference() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-read-symbol-highlight-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("read_symbol", "{\"symbol\":\"Foo#bar\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished(
+                "read_symbol",
+                "symbol method Foo#bar (src/Foo.java:12-14)\n"
+                        + " 1\tpublic void bar() {\n"
+                        + " 2\t  return;\n"
+                        + " 3\t}\n",
+                true,
+                sid(shellRegistry)));
+
+        // the finished card is collapsed by default (no args in the header: the summary
+        // shows only the name); expand it to reveal the header + numbered body
+        awaitText("✓ read_symbol");
+        tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
+        awaitText("symbol method Foo#bar");
+        awaitText("public void bar()");
+        final var row = rowOf("public void bar()");
+        final var column = columnOfLineContaining("public");
+        assertEquals(
+                Color.hex(CodeTheme.ONE_DARK.keyword()),
+                backend.fg(column, row).orElse(null),
+                "read_symbol output must be highlighted from its header file reference");
 
         quit();
     }

@@ -46,6 +46,22 @@ class ToolOutputLanguageTest {
         assertNull(ToolOutputLanguage.guess("[INFO] BUILD SUCCESS\n", "mvn -q test"));
     }
 
+    /** A short command naming a known source file: the output is that file, so its extension wins. */
+    @Test
+    void shortCommandWithSourceFileIsGuessedByExtension() {
+        assertEquals("java", ToolOutputLanguage.guess(" 1\tpublic class Foo {\n", "src/Foo.java"));
+        assertEquals("java", ToolOutputLanguage.guess("public class Foo\n", "cat src/Foo.java"));
+        assertEquals("python", ToolOutputLanguage.guess("print(1)\n", "cat a.py"));
+        assertEquals("javascript", ToolOutputLanguage.guess("const a = 1\n", "cat app.js"));
+    }
+
+    /** Multi-token commands only paint for known interpreters: a grep of a file is not the file. */
+    @Test
+    void multiTokenCommandsWithFileRefsStayUncolored() {
+        assertNull(ToolOutputLanguage.guess("src/Foo.java:3: x\n", "grep -n foo src/Foo.java"));
+        assertNull(ToolOutputLanguage.guess("line: 1\nline: 2\n", "grep -rn foo src"));
+    }
+
     @Test
     void shebangOfPrintedScript() {
         assertEquals("python", ToolOutputLanguage.guess("#!/usr/bin/env python3\nprint(1)\n", "cat x.py"));
@@ -94,6 +110,16 @@ class ToolOutputLanguageTest {
         assertEquals(
                 "javascript",
                 ToolOutputLanguage.guess("const a = 1 => 1;\nfunction f() { const b = 2 => 2; }\n", null));
+        assertEquals(
+                "java",
+                ToolOutputLanguage.guess(
+                        "public class Main {\n"
+                                + "  public static void main(String[] args) {\n"
+                                + "    System.out.println(\"hi\");\n"
+                                + "    return;\n"
+                                + "  }\n"
+                                + "}\n",
+                        null));
     }
 
     @Test

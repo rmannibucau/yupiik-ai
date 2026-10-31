@@ -498,6 +498,86 @@ class MarkdownLinesTest {
         }
     }
 
+    @Test
+    void escapedHeaderStarsSurviveRendering() {
+        // a tool header emitted by ConversationTranscript after flatten+escapeMarkdown: the
+        // asterisk/underscore are backslash-escaped, the backtick became an apostrophe; rendering
+        // it must produce the literal stars/underscores, never consume them as emphasis
+        final var lines = renderer.render(
+                "*streaming `bash`: cat <<'EOF' plain \\* one two \\_ three use 'echo' EOF* (#1, 0 ms)",
+                80,
+                Style.EMPTY,
+                MarkdownStyles.DEFAULTS);
+        final var text = String.join("\n", plain(lines));
+        assertTrue(text.contains("plain * one"), text);
+        assertTrue(text.contains("two _ three"), text);
+        assertTrue(text.contains("use 'echo'"), text);
+    }
+
+    @Test
+    void codeLikeStarsSurviveRendering() {
+        // regression pin: a multi-line SQL heredoc echoed by the model inside a paragraph used to
+        // pair its bare stars (part_*.csv.gz / COUNT(*)) into an emphasis that hid both; the
+        // code-like pre-pass escapes them so the rendered text keeps them literal
+        final var lines = renderer.render(
+                "cat > /tmp/validate_ext_modify.sql <<'SQL'\n"
+                        + "ALTER TABLE T MODIFY PARTITION P_2026 LOCATION ('part_*.csv.gz');\n"
+                        + "SELECT COUNT(*) AS CNT FROM T;",
+                80,
+                Style.EMPTY,
+                MarkdownStyles.DEFAULTS);
+        final var text = String.join("\n", plain(lines));
+        assertTrue(text.contains("'part_*.csv.gz'"), text);
+        assertTrue(text.contains("COUNT(*)"), text);
+        assertFalse(text.contains("part_.csv.gz"), text);
+        assertFalse(text.contains("COUNT()"), text);
+    }
+
+    @Test
+    void englishProseWithSqlKeywordsIsNotEscaped() {
+        // WITH/FROM/cat in lowercase appear in plain sentences; only uppercase SQL and shell
+        // redirections claim a line. The prose keeps its emphasis delimiters (so CommonMark
+        // renders them as emphasis, i.e. the asterisks are consumed -> no literal backslashes).
+        final var lines = renderer.render(
+                "the data from the table is *ready*\nwith him as advisor, I _decided_ to go\nthe cat sat on the *mat*",
+                80,
+                Style.EMPTY,
+                MarkdownStyles.DEFAULTS);
+        final var text = String.join("\n", plain(lines));
+        // no escape was injected: no backslash character, and the words rendered (emphasis consumed)
+        assertFalse(text.contains("\\*"), text);
+        assertFalse(text.contains("\\_"), text);
+        assertTrue(text.contains("ready"), text);
+        assertTrue(text.contains("decided"), text);
+        assertTrue(text.contains("mat"), text);
+    }
+
+    @Test
+    void fencedCodeBlockStarsStayLiteral() {
+        final var lines = renderer.render(
+                "```sql\nSELECT * FROM t WHERE c = 'part_*.csv.gz';\n```", 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        final var text = String.join("\n", plain(lines));
+        assertTrue(text.contains("SELECT * FROM t"), text);
+        assertTrue(text.contains("'part_*.csv.gz'"), text);
+    }
+
+    @Test
+    void inlineCodeSpanOnCodeLikeLineIsNotDoubleEscaped() {
+        final var lines = renderer.render(
+                "ALTER TABLE t; use `SELECT *` now\nSELECT COUNT(*) FROM t;", 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        final var text = String.join("\n", plain(lines));
+        assertTrue(text.contains("SELECT *"), text); // inside the code span, unescaped
+        assertTrue(text.contains("COUNT(*)"), text); // bare star escaped then rendered literally
+    }
+
+    @Test
+    void existingBackslashIsNotDoubleEscaped() {
+        final var lines = renderer.render("grep '\\*' SELECT * FROM t;", 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        final var text = String.join("\n", plain(lines));
+        assertTrue(text.contains("grep '*'"), text);
+        assertTrue(text.contains("SELECT * FROM"), text);
+    }
+
     private static List<String> plain(final List<Line> lines) {
         return lines.stream().map(Line::rawContent).toList();
     }

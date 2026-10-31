@@ -1370,6 +1370,10 @@ public class TuiCommand implements Runnable {
      * collapse to the same {@code digits;digits;digits} shape.
      */
     private static final Pattern SGR_MOUSE_TAIL = Pattern.compile("\\u001b?\\[<\\d+;\\d+;\\d+[Mm]$");
+    /** The {@code (<file>:<start>-<end>)} reference {@code read_symbol} prints in its output header. */
+    private static final Pattern READ_SYMBOL_FILE = Pattern.compile("\\(([^()\\s]+(?::[^()\\s]+)*):\\d+(?:-\\d+)?\\)");
+    /** A {@code read}/{@code read_symbol} body line: {@code "%6d\t"} gutter followed by content. */
+    private static final Pattern NUMBERED_OUTPUT_LINE = Pattern.compile("^(\\s*\\d+\\t)(.*)$");
 
     /**
      * Removes a stray SGR mouse-report tail from the end of a text area, leaving
@@ -7080,6 +7084,14 @@ public class TuiCommand implements Runnable {
             if (!formatToolOutput) {
                 return legacyBody(output, width, isDiff);
             }
+            // read/read_symbol print files with a "%6d\t" line-number prefix: the file to
+            // highlight is the path the tool read (card/overlay command) or, for read_symbol,
+            // the "path:start-end" reference in the output header. When it resolves, the
+            // numbered renderer keeps the numbers as a muted gutter and colors the content.
+            final var readLanguage = readOutputLanguage(name, command, output);
+            if (readLanguage != null) {
+                return toolNumberedCodeLines(output, width, readLanguage);
+            }
             final var language = ToolOutputLanguage.guess(output, command);
             return switch (toolOutputFormat.detect(output, language)) {
                 case DIFF -> diffRenderer.render(output, width, palette);
@@ -7096,6 +7108,25 @@ public class TuiCommand implements Runnable {
     }
 
     /**
+     * Language of the file a {@code read}/{@code read_symbol} output displays, or {@code null}
+     * when the output is not a numbered file body (directory listings, errors, unknown paths).
+     */
+    private String readOutputLanguage(final String name, final String command, final String output) {
+        if (!"read".equals(name) && !"read_symbol".equals(name)) {
+            return null;
+        }
+        if ("read".equals(name)) {
+            // card command and overlay command both carry the path (keyCommand/commandOfArgs)
+            return SyntaxHighlighter.guessLanguage(command);
+        }
+        // read_symbol prints "symbol <kind> <fqn> (<file>:<start>-<end>)": the file reference
+        // lives in the output header, not in the (symbol-only) tool arguments
+        final var header = output == null ? "" : output.lines().findFirst().orElse("");
+        final var matcher = READ_SYMBOL_FILE.matcher(header);
+        return matcher.find() ? SyntaxHighlighter.guessLanguage(matcher.group(1)) : null;
+    }
+
+    /**
      * Syntax colored output, one source line per row: the highlighter tokenizes per line
      * and {@link MarkdownLines#wrapCode(List, int)} only hard-wraps what does not fit, so a
      * wrong language guess costs colors, never the layout (which is exactly what the
@@ -7103,6 +7134,36 @@ public class TuiCommand implements Runnable {
      */
     private List<Line> toolCodeLines(final String output, final int width, final String language) {
         return MarkdownLines.wrapCode(syntaxHighlighter.highlightLines(language, output), Math.max(1, width));
+    }
+
+    /**
+     * Renders the numbered body of {@code read}/{@code read_symbol}: each {@code "%6d\t"} prefix
+     * becomes a muted gutter span (so the number survives syntax coloring) and the content is
+     * tokenized in {@code language}. Header/trailer lines without a number (the "symbol ..."
+     * header, "Read directory ...", "{@code ... more lines below}" markers) stay plain, exactly
+     * like {@link #toolOutputLines(String, int, boolean)} would render them.
+     */
+    private List<Line> toolNumberedCodeLines(final String output, final int width, final String language) {
+        final var gutter = Style.EMPTY.fg(Color.hex(palette.textMuted()));
+        final var lines = new ArrayList<Line>();
+        for (final var raw : output.split("\n", -1)) {
+            final var matcher = NUMBERED_OUTPUT_LINE.matcher(raw);
+            if (!matcher.matches()) {
+                lines.add(Line.from(Span.styled(raw, toolStyle)));
+                continue;
+            }
+            final var content = matcher.group(2);
+            final var spans = new ArrayList<Span>();
+            spans.add(Span.styled(matcher.group(1), gutter));
+            if (!content.isEmpty()) {
+                spans.addAll(syntaxHighlighter
+                        .highlightLines(language, content)
+                        .getFirst()
+                        .spans());
+            }
+            lines.add(Line.from(spans.toArray(Span[]::new)));
+        }
+        return MarkdownLines.wrapCode(lines, Math.max(1, width));
     }
 
     private List<Line> legacyBody(final String output, final int width, final boolean isDiff) {

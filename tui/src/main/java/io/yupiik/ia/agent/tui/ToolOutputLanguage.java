@@ -87,7 +87,28 @@ public final class ToolOutputLanguage {
             "javascript",
             List.of("=>", "function ", "const ", "let ", "var ", "console.log(", "=== ", "await ", "export "),
             "sql",
-            List.of("SELECT ", "FROM ", "WHERE ", "JOIN ", "INSERT INTO ", "GROUP BY ", "ORDER BY ", "CREATE TABLE "));
+            List.of("SELECT ", "FROM ", "WHERE ", "JOIN ", "INSERT INTO ", "GROUP BY ", "ORDER BY ", "CREATE TABLE "),
+            "java",
+            List.of(
+                    "public ",
+                    "private ",
+                    "protected ",
+                    "static ",
+                    "class ",
+                    "interface ",
+                    "enum ",
+                    "record ",
+                    "void ",
+                    "return ",
+                    "extends ",
+                    "implements ",
+                    "package ",
+                    "import ",
+                    "@Override",
+                    "throws ",
+                    "System.out",
+                    "String ",
+                    "new "));
     private static final Set<String> SHELL_PROGRAMS = Set.of("sh", "bash", "zsh", "dash", "ksh");
     /** Launchers skipped when looking for the program actually doing the work. */
     private static final Set<String> WRAPPERS =
@@ -180,6 +201,18 @@ public final class ToolOutputLanguage {
                 continue;
             }
             final var tokens = tokenize(segment);
+            // a short command that names a known source file (eg. the read/cat path):
+            // the output is that file's content, so its extension decides the language.
+            // Multi-token commands (grep -Hn foo Foo.java) keep their old behavior: the
+            // interpreter loop below only fires for known programs, file refs stay plain.
+            if (tokens.size() <= 2) {
+                for (final var token : tokens) {
+                    final var byPath = SyntaxHighlighter.guessLanguage(token);
+                    if (byPath != null) {
+                        return byPath;
+                    }
+                }
+            }
             for (var index = 0; index < tokens.size(); index++) {
                 final var token = tokens.get(index);
                 if (ASSIGNMENT.matcher(token).matches() || WRAPPERS.contains(token)) {
