@@ -89,8 +89,11 @@ class DefaultModelTunerTest {
         assertEquals("medium", DefaultModelTuner.reasoningEffort("gpt-5", null));
         assertEquals("medium", DefaultModelTuner.reasoningEffort("gpt-5.1", null));
         assertEquals("medium", DefaultModelTuner.reasoningEffort("gpt-5.2", null));
+        assertEquals("medium", DefaultModelTuner.reasoningEffort("gpt-6", null));
+        assertEquals("medium", DefaultModelTuner.reasoningEffort("gpt-6.1-luna", null));
         assertNull(DefaultModelTuner.reasoningEffort("gpt-5-chat", null));
         assertNull(DefaultModelTuner.reasoningEffort("gpt-5-pro", null));
+        assertNull(DefaultModelTuner.reasoningEffort("gpt-6.1-pro", null));
         assertNull(DefaultModelTuner.reasoningEffort("claude-sonnet-5", null));
         assertNull(DefaultModelTuner.reasoningEffort(null, null));
     }
@@ -136,6 +139,60 @@ class DefaultModelTunerTest {
         // gpt-5.3-codex exposes the none..xhigh set.
         names = namesOf(DefaultModelTuner.variants(
                 new DefaultModelTuner.ModelContext("gpt-5.3-codex", "openai", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), names);
+    }
+
+    @Test
+    void gpt6TieringCoversUnversionedAndVersionedIds() {
+        // gpt-6 (launch era, no release date needed) accepts the full none..xhigh set; the
+        // gpt-5-only "minimal" effort is gone.
+        List<String> names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-6", "openai", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), names);
+
+        // the actual codex-yupiik main-thread models.
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-6-luna", "codex-yupiik", ApiFlavor.CODEX, null, null)));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), names);
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-6.1-sol", "codex-yupiik", ApiFlavor.CODEX, null, null)));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), names);
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-6.1-terra", "codex-yupiik", ApiFlavor.CODEX, null, null)));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), names);
+
+        // sub-families: chat only exposes medium, versioned pro the PRO_2_PLUS set, unversioned
+        // pro the high-only set.
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-6.1-chat", "openai", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("medium"), names);
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-6.1-pro", "openai", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("medium", "high", "xhigh"), names);
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-6-pro", "openai", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("high"), names);
+
+        // gpt-6 codex ids expose the newest codex effort set (none..xhigh).
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-6.1-codex", "default", ApiFlavor.CODEX, null, null)));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), names);
+    }
+
+    @Test
+    void underscoreSeparatedAndGenericProviderGptIdsUseTheSameTiers() {
+        // azure-style ids ("azure_gpt-5.5") start the family with an underscore separator.
+        List<String> names = namesOf(DefaultModelTuner.variants(new DefaultModelTuner.ModelContext(
+                "azure_gpt-5.5", "chatgpt-procapital", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), names);
+
+        // a provider without an openai/meta/azure/copilot catalog slug still gets the real
+        // OpenAI tiers for a gpt id (previously the widely-supported-only default).
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-6.1-sol", "freeinference", ApiFlavor.COMPLETIONS, null, null)));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), names);
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-5.5", "openrouter", ApiFlavor.COMPLETIONS, null, null)));
         assertEquals(List.of("none", "low", "medium", "high", "xhigh"), names);
     }
 
@@ -251,7 +308,7 @@ class DefaultModelTunerTest {
     void emptyCatalogReasoningEffortsKeepTheHeuristics() {
         final var variants = DefaultModelTuner.variants(new DefaultModelTuner.ModelContext(
                 "gpt-6.1-sol", "openai", ApiFlavor.RESPONSES, null, null, List.of()));
-        assertEquals(List.of("low", "medium", "high"), namesOf(variants));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), namesOf(variants));
     }
 
     private static List<String> namesOf(final List<ModelVariantConfiguration> variants) {

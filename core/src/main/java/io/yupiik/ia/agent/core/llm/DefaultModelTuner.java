@@ -45,7 +45,7 @@ public final class DefaultModelTuner {
             Pattern.compile("gemini-3[.-]1(?:[.-]|$)"),
             Pattern.compile("gemini-3[.-]5-flash(?!-lite)(?:[.-]|$)"));
 
-    // Reasoning effort tiers and gpt-5 family helpers, mirroring opencode transform.ts.
+    // Reasoning effort tiers and gpt family helpers, mirroring opencode transform.ts.
 
     private static final List<String> WIDELY_SUPPORTED_EFFORTS = List.of("low", "medium", "high");
     private static final List<String> OPENAI_EFFORTS = List.of("none", "minimal", "low", "medium", "high", "xhigh");
@@ -61,11 +61,17 @@ public final class DefaultModelTuner {
     private static final String OPENAI_NONE_EFFORT_RELEASE_DATE = "2025-11-13";
     private static final String OPENAI_XHIGH_EFFORT_RELEASE_DATE = "2025-12-04";
 
-    private static final Pattern GPT5_FAMILY_RE = Pattern.compile("(?:^|/)gpt-5(?:[.-]|$)");
-    private static final Pattern GPT5_VERSION_RE = Pattern.compile("(?:^|/)gpt-5[.-](\\d+)(?:[.-]|$)");
-    private static final Pattern GPT5_PRO_RE = Pattern.compile("(?:^|/)gpt-5[.-]?pro(?:[.-]|$)");
-    private static final Pattern GPT5_VERSIONED_PRO_RE = Pattern.compile("(?:^|/)gpt-5[.-]\\d+[.-]pro(?:[.-]|$)");
-    private static final Pattern GPT5_CHAT_RE = Pattern.compile(("(?:^|/)gpt-5[.-]?[a-z0-9]*chat(?:[.-]|$)"));
+    // Matches members of the gpt reasoning family across the id formats we encounter: "gpt-5",
+    // "gpt-5-nano", "gpt-5.4", "gpt-6", "gpt-6.1-terra", "openai/gpt-5.4-codex", "azure_gpt-5.5".
+    // Anchored to start-of-string or a "/" or "_" separator so it does not false-match "gpt-50",
+    // "gpt-5o" or "mygpt-5". The gpt-5.1/5.2+ tier sets are reused by later majors (gpt-6.x
+    // resolves to the newest sets); only the gpt-5 launch quirk (the "minimal" effort) is
+    // major-specific.
+    private static final Pattern GPT_FAMILY_RE = Pattern.compile("(?:^|[/_])gpt-(\\d+)(?:[.-](\\d+))?(?:[.-]|$)");
+    // unversioned pro only ("gpt-5-pro"): versioned pro ids ("gpt-5.1-pro") fall through to
+    // GPT_VERSIONED_PRO_RE and its dedicated PRO_2_PLUS tiers, mirroring opencode.
+    private static final Pattern GPT_PRO_RE = Pattern.compile("(?:^|[/_])gpt-\\d+[.-]?pro(?:[.-]|$)");
+    private static final Pattern GPT_VERSIONED_PRO_RE = Pattern.compile("(?:^|[/_])gpt-\\d+[.-]\\d+[.-]pro(?:[.-]|$)");
 
     private static final Pattern CLAUDE_VERSION_RE =
             Pattern.compile("claude-(?:[a-z]+-)?(\\d+)(?:[.-](\\d{1,2}))?(?:[.@-]|$)");
@@ -302,7 +308,7 @@ public final class DefaultModelTuner {
         // The Codex backend (chatgpt.com/backend-api/codex) speaks the OpenAI Responses wire with the
         // full OpenAI reasoning-effort set (none/none gated by the model/release date). The provider id
         // for a codex-flavored provider is user-chosen (eg. "default"), never a catalog slug, so route
-        // on the dialect instead: the openai-tier resolution already carries gpt5CodexReasoningEfforts.
+        // on the dialect instead: the openai-tier resolution already carries gptCodexReasoningEfforts.
         if (ctx.dialect() == ApiFlavor.CODEX) {
             return efforts(openAiReasoningEfforts(m, ctx.releaseDate()), DefaultModelTuner::openAiReasoningSuffix);
         }
@@ -347,7 +353,7 @@ public final class DefaultModelTuner {
             var efforts = new ArrayList<String>(WIDELY_SUPPORTED_EFFORTS);
             if (m.contains("5.1-codex-max") || m.contains("5.2") || m.contains("5.3")) {
                 efforts.add("xhigh");
-            } else if (gpt5Family(m)
+            } else if (gptReasoningFamily(m)
                     && ctx.releaseDate() != null
                     && ctx.releaseDate().compareTo(OPENAI_XHIGH_EFFORT_RELEASE_DATE) >= 0) {
                 efforts.add("xhigh");
@@ -362,6 +368,14 @@ public final class DefaultModelTuner {
         var efforts = new ArrayList<String>(WIDELY_SUPPORTED_EFFORTS);
         if (m.contains("deepseek-v4")) {
             efforts.add("max");
+        }
+        if (gptReasoningFamily(m)) {
+            // The real gpt-5/gpt-6 ids on a provider without an openai/meta/azure/copilot catalog
+            // slug (eg. freeinference, openrouter, chatgpt-procapital) still accept the OpenAI
+            // reasoning tiers: resolve them through the same major+minor tiering as the openai
+            // branches instead of the widely-supported-only default. The catalog
+            // (supported_reasoning_levels) still overrides when the provider advertises one.
+            return efforts(openAiReasoningEfforts(m, ctx.releaseDate()), DefaultModelTuner::reasoningEffortOnly);
         }
         return efforts(efforts, DefaultModelTuner::reasoningEffortOnly);
     }
@@ -420,73 +434,97 @@ public final class DefaultModelTuner {
         if (id.contains("deep-research")) {
             return List.of("medium");
         }
-        final var chat = gpt5ChatReasoningEfforts(id);
+        final var chat = gptChatReasoningEfforts(id);
         if (chat != null) {
             return chat;
         }
-        if (GPT5_PRO_RE.matcher(id).find()) {
+        if (GPT_PRO_RE.matcher(id).find()) {
             return OPENAI_GPT5_PRO_EFFORTS;
         }
-        final var codex = gpt5CodexReasoningEfforts(id);
+        final var codex = gptCodexReasoningEfforts(id);
         if (codex != null) {
             return codex;
         }
-        final var versioned = versionedGpt5ReasoningEfforts(id);
+        final var versioned = versionedGptReasoningEfforts(id);
         if (versioned != null) {
             return versioned;
         }
         final var efforts = new ArrayList<String>(WIDELY_SUPPORTED_EFFORTS);
-        if (gpt5Family(id)) {
-            efforts.add(0, "minimal");
-        }
-        if (releaseDate != null && releaseDate.compareTo(OPENAI_NONE_EFFORT_RELEASE_DATE) >= 0) {
-            efforts.add(0, "none");
-        }
-        if (releaseDate != null && releaseDate.compareTo(OPENAI_XHIGH_EFFORT_RELEASE_DATE) >= 0) {
-            efforts.add("xhigh");
+        if (gptFamily(id)) {
+            final var major = gptMajor(id);
+            if (major == 5) {
+                efforts.add(0, "minimal");
+                if (releaseDate != null && releaseDate.compareTo(OPENAI_NONE_EFFORT_RELEASE_DATE) >= 0) {
+                    efforts.add(0, "none");
+                }
+                if (releaseDate != null && releaseDate.compareTo(OPENAI_XHIGH_EFFORT_RELEASE_DATE) >= 0) {
+                    efforts.add("xhigh");
+                }
+            } else if (major >= 6) {
+                // gpt-6 launch-era models dropped the gpt-5-only "minimal" effort and accept the
+                // full none..xhigh set out of the box (both rollout tiers predate the family).
+                efforts.add(0, "none");
+                efforts.add("xhigh");
+            }
         }
         return efforts;
     }
 
-    private static List<String> versionedGpt5ReasoningEfforts(final String apiId) {
-        if (GPT5_VERSIONED_PRO_RE.matcher(apiId).find()) {
+    private static List<String> versionedGptReasoningEfforts(final String apiId) {
+        if (GPT_VERSIONED_PRO_RE.matcher(apiId).find()) {
             return OPENAI_GPT5_PRO_2_PLUS_EFFORTS;
         }
-        final var version = gpt5Version(apiId);
-        if (version == null) {
+        final var major = gptMajor(apiId);
+        final var minor = gptMinor(apiId);
+        if (major < 5 || minor == null) {
             return null;
         }
-        return version == 1 ? OPENAI_GPT5_1_EFFORTS : OPENAI_GPT5_2_PLUS_EFFORTS;
+        // gpt-5.1 replaced gpt-5's "minimal" effort with "none"; gpt-5.2+ and every gpt-6.x
+        // accept the full set. Unversioned ids fall through to the release-date gated logic.
+        return major == 5 && minor == 1 ? OPENAI_GPT5_1_EFFORTS : OPENAI_GPT5_2_PLUS_EFFORTS;
     }
 
-    private static List<String> gpt5CodexReasoningEfforts(final String apiId) {
-        if (!gpt5Family(apiId) || !apiId.contains("codex")) {
+    private static List<String> gptCodexReasoningEfforts(final String apiId) {
+        if (!gptReasoningFamily(apiId) || !apiId.contains("codex")) {
             return null;
         }
-        final var version = gpt5Version(apiId);
-        if (version != null && version >= 3) {
+        final var major = gptMajor(apiId);
+        final var minor = gptMinor(apiId);
+        // gpt-6 (and gpt-5.3+) carry the newest codex effort set; gpt-5.2+ and the codex-max
+        // ids expose xhigh; the remaining gpt-5 codex ids keep the widely-supported set.
+        if (major >= 6 || (minor != null && minor >= 3)) {
             return OPENAI_GPT5_CODEX_3_PLUS_EFFORTS;
         }
-        if (apiId.contains("codex-max") || (version != null && version >= 2)) {
+        if (apiId.contains("codex-max") || (minor != null && minor >= 2)) {
             return OPENAI_GPT5_CODEX_XHIGH_EFFORTS;
         }
         return WIDELY_SUPPORTED_EFFORTS;
     }
 
-    private static List<String> gpt5ChatReasoningEfforts(final String apiId) {
-        if (!gpt5Family(apiId) || !apiId.contains("-chat")) {
+    private static List<String> gptChatReasoningEfforts(final String apiId) {
+        if (!gptReasoningFamily(apiId) || !apiId.contains("-chat")) {
             return null;
         }
-        return gpt5Version(apiId) == null ? List.of() : OPENAI_GPT5_CHAT_EFFORTS;
+        return gptMinor(apiId) == null ? List.of() : OPENAI_GPT5_CHAT_EFFORTS;
     }
 
-    private static boolean gpt5Family(final String apiId) {
-        return GPT5_FAMILY_RE.matcher(apiId).find();
+    private static boolean gptFamily(final String apiId) {
+        return GPT_FAMILY_RE.matcher(apiId).find();
     }
 
-    private static Integer gpt5Version(final String apiId) {
-        final var matcher = GPT5_VERSION_RE.matcher(apiId);
-        return matcher.find() ? Integer.valueOf(matcher.group(1)) : null;
+    /** The gpt reasoning family: gpt-5 and later majors (gpt-4x predates reasoning efforts). */
+    private static boolean gptReasoningFamily(final String apiId) {
+        return gptMajor(apiId) >= 5;
+    }
+
+    private static int gptMajor(final String apiId) {
+        final var matcher = GPT_FAMILY_RE.matcher(apiId);
+        return matcher.find() ? Integer.parseInt(matcher.group(1)) : 0;
+    }
+
+    private static Integer gptMinor(final String apiId) {
+        final var matcher = GPT_FAMILY_RE.matcher(apiId);
+        return matcher.find() && matcher.group(2) != null ? Integer.valueOf(matcher.group(2)) : null;
     }
 
     /** Anthropic adaptive effort tiers for a model id, or null when the model predates adaptive thinking. */
@@ -585,9 +623,14 @@ public final class DefaultModelTuner {
     /**
      * The implicit reasoning-effort default for a model family, mirroring opencode. The deepseek-v4
      * family defaults to {@code max} (opencode exposes {@code max} as the strongest available effort for
-     * deepseek-v4); the gpt-5 family (excluding the gpt-5-chat and gpt-5-pro sub-models) defaults to
+     * deepseek-v4); the gpt-5/gpt-6 family (excluding the -chat and -pro sub-models) defaults to
      * {@code medium}; every other family returns {@code null} so nothing is forced and the provider
      * default applies.
+     *
+     * <p>Display/selection hint only: the request path does not apply this value on the wire.
+     * ChatClient.resolveReasoningEffort deliberately skips the implicit per-family default (the
+     * deepseek-v4 {@code max} fallback made freeinference emit tens of thousands of reasoning
+     * characters per call); the same tiering is exposed through the {@code /model} variants.</p>
      */
     public static String reasoningEffort(final String model, final String providerId) {
         final var m = norm(model);
@@ -597,10 +640,15 @@ public final class DefaultModelTuner {
         if (m.startsWith("deepseek-v4")) {
             return "max";
         }
-        if (m.contains("gpt-5") && !m.contains("gpt-5-chat") && !m.contains("gpt-5-pro")) {
+        if (gptReasoningFamily(m) && !m.contains("-chat") && !isGptPro(m)) {
             return "medium";
         }
         return null;
+    }
+
+    private static boolean isGptPro(final String apiId) {
+        return GPT_PRO_RE.matcher(apiId).find()
+                || GPT_VERSIONED_PRO_RE.matcher(apiId).find();
     }
 
     /** True when the model belongs to a Gemini family carrying explicit sampling defaults. */
