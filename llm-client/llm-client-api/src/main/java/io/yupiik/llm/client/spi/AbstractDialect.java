@@ -40,7 +40,10 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Shared HTTP, error-classification and JSON helpers for {@link Dialect} implementations. All
@@ -50,6 +53,12 @@ import java.util.function.BooleanSupplier;
 public abstract class AbstractDialect implements Dialect {
 
     private static final List<String> FLAVOR_MISSING_CODES = List.of("(404)", "(405)", "(501)");
+    /** Hard upper bound for an error body collected from a failed stream attempt (1 MiB). */
+    static final int MAX_ERROR_BODY_BYTES = 1024 * 1024;
+
+    private static final Logger LOGGER = Logger.getLogger(AbstractDialect.class.getName());
+    /** Rate-limits the per-dialect WARN on SSE frame parse failures: at most one log per 30s. */
+    private final AtomicReference<Long> lastMapEventWarnNanos = new AtomicReference<>(0L);
 
     /** Shared JSON mapper. */
     protected final JsonMapper mapper;
@@ -540,12 +549,29 @@ public abstract class AbstractDialect implements Dialect {
     }
 
     protected static CompletionStage<byte[]> collect(final Flow.Publisher<List<ByteBuffer>> publisher) {
+        return collect(publisher, MAX_ERROR_BODY_BYTES);
+    }
+
+    /**
+     * Collects a publisher into a byte array, bounding the buffered size to protect against an
+     * unbounded (or hostile) error body. When the body exceeds {@code maxBytes} the subscription is
+     * cancelled and the stage fails fast with an {@link IOException}, so a failed stream attempt is
+     * surfaced promptly instead of buffering gigabytes of error payload.
+     *
+     * @param publisher the raw byte publisher.
+     * @param maxBytes the maximum number of bytes to buffer.
+     * @return a stage completing with the collected body, or failing fast when it overflows.
+     */
+    protected static CompletionStage<byte[]> collect(
+            final Flow.Publisher<List<ByteBuffer>> publisher, final int maxBytes) {
         final var result = new CompletableFuture<byte[]>();
         publisher.subscribe(new Flow.Subscriber<>() {
             private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            private Flow.Subscription subscription;
 
             @Override
             public void onSubscribe(final Flow.Subscription subscription) {
+                this.subscription = subscription;
                 subscription.request(Long.MAX_VALUE);
             }
 
@@ -555,6 +581,12 @@ public abstract class AbstractDialect implements Dialect {
                     final var array = new byte[byteBuffer.remaining()];
                     byteBuffer.get(array);
                     buffer.writeBytes(array);
+                    if (buffer.size() > maxBytes) {
+                        subscription.cancel();
+                        result.completeExceptionally(new IOException(
+                                "error body exceeds " + maxBytes + " bytes; aborting the collection to stay bounded"));
+                        return;
+                    }
                 }
             }
 
@@ -569,6 +601,31 @@ public abstract class AbstractDialect implements Dialect {
             }
         });
         return result;
+    }
+
+    /**
+     * Rate-limited WARN for a streamed SSE frame that could not be mapped: logs the offending frame
+     * excerpt (bounded) at most once per 30 seconds per dialect instance, so a malformed provider
+     * frame is observable without flooding the log on every bad event.
+     *
+     * @param source the frame source description (eg. the event name).
+     * @param raw the raw frame payload (bounded excerpt is logged).
+     * @param error the mapping failure.
+     */
+    protected void warnMapEventFailure(final String source, final String raw, final RuntimeException error) {
+        final var now = System.nanoTime();
+        final var last = lastMapEventWarnNanos.get();
+        if (last != null && now - last < 30_000_000_000L) {
+            return; // rate-limited: at most one WARN per 30s
+        }
+        if (lastMapEventWarnNanos.compareAndSet(last, now)) {
+            final var excerpt = raw == null ? "" : (raw.length() <= 400 ? raw : raw.substring(0, 400) + "...");
+            LOGGER.log(
+                    Level.WARNING,
+                    "failed to map streamed " + source + " frame: " + error
+                            + (excerpt.isEmpty() ? "" : " frame=" + excerpt),
+                    error);
+        }
     }
 
     /**

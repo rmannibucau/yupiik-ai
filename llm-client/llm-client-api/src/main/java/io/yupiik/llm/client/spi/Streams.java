@@ -141,9 +141,20 @@ public final class Streams {
                         }
                     }
                     if (newline < 0) {
-                        if (flushRest && pendingLength > scan) {
-                            handleRaw(trimCr(new String(pending, scan, pendingLength - scan, StandardCharsets.UTF_8)));
-                            scan = pendingLength;
+                        if (flushRest) {
+                            if (pendingLength > scan) {
+                                handleRaw(trimCr(
+                                        new String(pending, scan, pendingLength - scan, StandardCharsets.UTF_8)));
+                                scan = pendingLength;
+                            }
+                            // a final event without a trailing blank line (some backends close the
+                            // stream right after the last data line) must still dispatch when it is
+                            // a complete JSON frame (terminal usage/response.completed); a tail cut
+                            // mid-line is truncated data and must NOT be emitted (it would corrupt
+                            // tool-call JSON with a partial payload)
+                            if (parser.hasCompleteJsonPayload()) {
+                                emit(parser.feed(null));
+                            }
                         }
                         break;
                     }
@@ -163,7 +174,11 @@ public final class Streams {
                 if (onRawLine != null) {
                     onRawLine.accept(rawLine);
                 }
-                for (final var event : parser.feed(rawLine)) {
+                emit(parser.feed(rawLine));
+            }
+
+            private void emit(final List<SseParser.Event> events) {
+                for (final var event : events) {
                     final var mapped = mapper.apply(event);
                     if (mapped == null || mapped.isEmpty()) {
                         continue;

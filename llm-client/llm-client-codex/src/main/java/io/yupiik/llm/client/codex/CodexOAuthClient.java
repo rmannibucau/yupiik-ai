@@ -574,8 +574,17 @@ public class CodexOAuthClient {
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> parse(final String body) {
-        final Object o = mapper.fromString(Map.class, body);
-        return o instanceof Map ? (Map<String, Object>) o : Map.of();
+        try {
+            final Object o = mapper.fromString(Map.class, body);
+            if (o instanceof Map) {
+                return (Map<String, Object>) o;
+            }
+        } catch (final RuntimeException e) {
+            throw new CodexOAuthMalformedResponseException(body, e);
+        }
+        // a JSON array/scalar/blank body is equally useless: fail with the same typed error
+        // instead of degrading to an empty map and a confusing downstream "missing field" error
+        throw new CodexOAuthMalformedResponseException(body, null);
     }
 
     private static String string(final Map<String, Object> map, final String key) {

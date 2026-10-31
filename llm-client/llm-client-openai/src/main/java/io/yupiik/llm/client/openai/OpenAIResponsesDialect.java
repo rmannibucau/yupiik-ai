@@ -60,7 +60,9 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     // Records the ids of tool calls whose arguments were already streamed incrementally via
     // response.function_call_arguments.delta, so the assembled arguments carried by the completion
     // events are only emitted as a fallback (when no delta was seen) and never double-appended.
-    private final Set<String> streamedArgIds = ConcurrentHashMap.newKeySet();
+    // Per-stream: each stream()/assemble() call creates its own set captured by a per-call mapper,
+    // so two concurrent streams on the shared dialect can never observe each other's deltas
+    // (the old instance-level mutable set was a cross-stream data race).
 
     // Set once a backend rejects the encrypted-reasoning include (reasoning.include) and a retry without it
     // succeeded: from then on the dialect stops sending the directive for this provider, so each later request
@@ -291,13 +293,16 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
             final LlmRequest request, final BooleanSupplier cancelled) {
         try {
-            streamedArgIds.clear();
             final var include = firstAttemptIncludeEncryptedReasoning();
             final var payload = mapper.toBytes(toWire(request, true, include));
             return openStream(payload, cancelled).thenCompose(attempt -> {
                 if (attempt.ok()) {
-                    return CompletableFuture.completedFuture(
-                            Streams.toEvents(attempt.live(), cancelled, this::mapEvent, () -> null, onRawLine));
+                    return CompletableFuture.completedFuture(Streams.toEvents(
+                            attempt.live(),
+                            cancelled,
+                            mapEventCapture(ConcurrentHashMap.newKeySet()),
+                            () -> null,
+                            onRawLine));
                 }
                 if (include && request.reasoningEffort() != null && isReasoningIncludeRejected(attempt)) {
                     // a gateway/edge rejected the encrypted-reasoning include: transparently
@@ -307,7 +312,11 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                                 if (retry.ok()) {
                                     encryptedReasoningRejected.set(true);
                                     return CompletableFuture.completedFuture(Streams.toEvents(
-                                            retry.live(), cancelled, this::mapEvent, () -> null, onRawLine));
+                                            retry.live(),
+                                            cancelled,
+                                            mapEventCapture(ConcurrentHashMap.newKeySet()),
+                                            () -> null,
+                                            onRawLine));
                                 }
                                 return streamError(attempt);
                             });
@@ -333,7 +342,6 @@ public class OpenAIResponsesDialect extends AbstractDialect {
      */
     protected CompletionStage<LlmResponse> assemble(final LlmRequest request, final BooleanSupplier cancelled) {
         try {
-            streamedArgIds.clear();
             final var include = firstAttemptIncludeEncryptedReasoning();
             final var payload = mapper.toBytes(toWire(request, true, include));
             return openStream(payload, cancelled).thenCompose(attempt -> {
@@ -364,9 +372,23 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     private CompletionStage<LlmResponse> assembleEvents(
             final Flow.Publisher<List<java.nio.ByteBuffer>> live, final BooleanSupplier cancelled) {
         final var future = new CompletableFuture<LlmResponse>();
-        Streams.toEvents(live, cancelled, this::mapEvent, () -> null, onRawLine)
+        Streams.toEvents(live, cancelled, mapEventCapture(ConcurrentHashMap.newKeySet()), () -> null, onRawLine)
                 .subscribe(new LlmResponseAssembler(future));
         return future;
+    }
+
+    /**
+     * Binds a per-stream {@code streamedArgIds} set to {@link #mapEvent(SseParser.Event, Set)}:
+     * the returned mapper routes every event of THIS stream (and only this stream) through the
+     * captured set, so concurrently-streaming calls on the shared dialect can never double-emit
+     * assembled tool-call arguments from each other's delta bookkeeping.
+     *
+     * @param streamedArgIds the per-stream delta-observed call-id set.
+     * @return a mapper function bound to that set.
+     */
+    private java.util.function.Function<SseParser.Event, List<LlmStreamEvent>> mapEventCapture(
+            final Set<String> streamedArgIds) {
+        return event -> mapEvent(event, streamedArgIds);
     }
 
     /**
@@ -777,7 +799,7 @@ public class OpenAIResponsesDialect extends AbstractDialect {
         return new LlmResponse(str(root.get("id")), str(root.get("model")), null, List.of(choice), usage, null);
     }
 
-    private List<LlmStreamEvent> mapEvent(final SseParser.Event event) {
+    private List<LlmStreamEvent> mapEvent(final SseParser.Event event, final Set<String> streamedArgIds) {
         try {
             final var type = event.event() == null ? "" : event.event();
             if (event.data() == null) {
@@ -883,6 +905,7 @@ public class OpenAIResponsesDialect extends AbstractDialect {
             }
             return result;
         } catch (final RuntimeException e) {
+            warnMapEventFailure("responses", event.data() == null ? null : event.data(), e);
             return List.of();
         }
     }

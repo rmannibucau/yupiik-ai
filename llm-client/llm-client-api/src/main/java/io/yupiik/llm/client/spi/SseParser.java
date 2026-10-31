@@ -48,6 +48,12 @@ public final class SseParser {
                 data.append('\n');
             }
             data.append(value(line, "data:".length()));
+        } else if ("data".equals(line)) {
+            // per the SSE spec a bare field name with no colon carries an empty payload: treat
+            // "data" as "data:" so the (empty-data) event is tracked like any other data line
+            if (data.length() > 0) {
+                data.append('\n');
+            }
         }
         return List.of();
     }
@@ -61,6 +67,46 @@ public final class SseParser {
             return List.of();
         }
         return List.of(new Event(type, payload));
+    }
+
+    /**
+     * Whether a full event payload is buffered and is a structurally complete JSON document
+     * (starts with an object/array and all brackets are balanced). LLM SSE frames are always
+     * JSON; a truncated/partial line (a mid-stream cut) can never be balanced and must not be
+     * dispatched as a terminal event.
+     */
+    public boolean hasCompleteJsonPayload() {
+        final var payload = data.toString().strip();
+        if (payload.isEmpty() || !(payload.startsWith("{") || payload.startsWith("["))) {
+            return false;
+        }
+        var depth = 0;
+        var inString = false;
+        var escaped = false;
+        for (final var c : payload.toCharArray()) {
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (c == '\\') {
+                    escaped = true;
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            switch (c) {
+                case '"' -> inString = true;
+                case '{', '[' -> depth++;
+                case '}', ']' -> depth--;
+                default -> {
+                    /* ignore */
+                }
+            }
+            if (depth < 0) {
+                return false;
+            }
+        }
+        return depth == 0 && !inString;
     }
 
     private static String value(final String line, final int offset) {

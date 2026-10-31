@@ -391,13 +391,19 @@ public class OpenAICompletionsDialect extends AbstractDialect {
         try {
             chunk = mapper.fromString(ChatChunk.class, data);
         } catch (final RuntimeException e) {
+            warnMapEventFailure("completions", data, e);
             return List.of();
         }
         final var out = new ArrayList<LlmStreamEvent>();
-        if (chunk.usage() != null) {
+        final var choices = chunk.choices();
+        final var finishPresent = choices != null && choices.stream().anyMatch(c -> c.finishReason() != null);
+        if (chunk.usage() != null && (finishPresent || choices == null || choices.isEmpty())) {
+            // only surface the usage on the terminal chunk (it carries a finish_reason, or the
+            // stream sends a bare usage-only chunk at the end): an intermediate "usage" field on
+            // a mid-stream delta would otherwise be emitted as a spurious terminal End(null, usage)
             out.add(new LlmStreamEvent.End(null, chunk.usage().toNeutral()));
         }
-        if (chunk.choices() != null) {
+        if (choices != null) {
             for (final var choice : chunk.choices()) {
                 final var delta = choice.delta();
                 if (delta != null) {

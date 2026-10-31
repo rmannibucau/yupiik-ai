@@ -28,6 +28,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayDeque;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -192,8 +193,8 @@ public final class LlmClientResilienceWrapper {
             final Consumer<PauseEvent> listener) {
         final var pause = listener == null ? pauseListener : listener;
         return acquire(pause)
-                .thenCompose(_ -> attempt(dialect, request, cancelled, pause))
-                .whenComplete((result, error) -> release());
+                .thenCompose(acquired ->
+                        attempt(dialect, request, cancelled, pause).whenComplete((result, error) -> release(acquired)));
     }
 
     /**
@@ -224,13 +225,13 @@ public final class LlmClientResilienceWrapper {
         // semantics as chat(). Once the publisher is handed out, mid-stream failures are the
         // caller's concern (it owns the partial content and decides whether to replay).
         return acquire(pause)
-                .thenCompose(_unused -> retryStream(dialect, request, cancelled, 1, pause)
+                .thenCompose(acquired -> retryStream(dialect, request, cancelled, 1, pause)
                         .whenComplete((publisher, error) -> {
                             if (error != null) {
-                                release();
+                                release(acquired);
                             }
-                        }))
-                .thenApply(publisher -> new ReleaseOnCompletePublisher<>(publisher, semaphore));
+                        })
+                        .thenApply(publisher -> new ReleaseOnCompletePublisher<>(publisher, semaphore, acquired)));
     }
 
     /**
@@ -241,11 +242,11 @@ public final class LlmClientResilienceWrapper {
      */
     public CompletionStage<LlmModels> models(final Dialect dialect) {
         return acquire(pauseListener)
-                .thenCompose(_unused -> dialect.models().whenComplete((result, error) -> release()));
+                .thenCompose(acquired -> dialect.models().whenComplete((result, error) -> release(acquired)));
     }
 
-    private void release() {
-        if (semaphore != null) {
+    private void release(final boolean acquired) {
+        if (acquired && semaphore != null) {
             semaphore.release();
         }
     }
@@ -307,6 +308,9 @@ public final class LlmClientResilienceWrapper {
         return result;
     }
 
+    /** Hard upper bound for a server-provided {@code retry-after} floor (5 minutes). */
+    static final long MAX_RETRY_AFTER_FLOOR_MS = 5L * 60_000;
+
     /**
      * Whether an error is worth retrying: HTTP 408, 429 and 5xx failures are, other explicit
      * provider rejections (eg. 400) are surfaced to the caller immediately. Typed failures are
@@ -318,9 +322,12 @@ public final class LlmClientResilienceWrapper {
         if (error instanceof LlmHttpFailureException http) {
             return http.retryableStatus() && !quotaExhaustedForLongWindow(http);
         }
-        final var m = error.getMessage();
-        if (m == null || !m.startsWith("LLM request failed (")) {
-            return true;
+        // Legacy string-only failures: the "LLM request failed (429): ..." shape is matched by
+        // status; anything else must be an explicitly transient transport message - a mis-parse or
+        // provider rejection must NOT be retried as if it were a transient hiccup.
+        final var m = error == null ? null : error.getMessage();
+        if (m == null) {
+            return false;
         }
         for (final var code : List.of(408, 429)) {
             if (m.startsWith("LLM request failed (" + code + ")")) {
@@ -332,8 +339,37 @@ public final class LlmClientResilienceWrapper {
                 return true;
             }
         }
+        final var lower = m.toLowerCase(Locale.ROOT);
+        for (final var transientMarker : TRANSIENT_MESSAGES) {
+            if (lower.contains(transientMarker)) {
+                return true;
+            }
+        }
         return false;
     }
+
+    /** Substrings marking a legacy string-only failure as a transient transport condition. */
+    private static final List<String> TRANSIENT_MESSAGES = List.of(
+            "timeout",
+            "timed out",
+            "timedout",
+            "connect",
+            "connection reset",
+            "reset by peer",
+            "read timed out",
+            "write timed out",
+            "connection refused",
+            "unexpected end of file",
+            "stream closed",
+            "broken pipe",
+            "no route to host",
+            "sslhandshake",
+            "ssl handshake",
+            "network is unreachable",
+            "host unreachable",
+            "request timed out",
+            // JDK/HTTP-client transport failures surfaced before any response line
+            "header parser received no bytes");
 
     /**
      * Soft decision for a {@code 429}: when the body parses as JSON and the error type is
@@ -463,7 +499,11 @@ public final class LlmClientResilienceWrapper {
         if (config.retryAfterEnabled()) {
             final var seconds = retryAfterSeconds(lastError);
             if (seconds != null) {
-                waitMs = Math.min(Math.max(waitMs, seconds * 1000L), config.retryAfterMaxWaitMs());
+                // a server-provided retry-after is a FLOOR, not a candidate: the provider knows
+                // when it can serve us again, so wait at least that long (only the jitter-derived
+                // portion stays capped). A hard 5-minute bound still protects against absurd
+                // server-suggested delays.
+                waitMs = Math.max(waitMs, Math.min(seconds * 1000L, MAX_RETRY_AFTER_FLOOR_MS));
                 waitReason = "retry-after=" + seconds + "s";
             } else if (isConcurrencyLimit(lastError)) {
                 // no explicit header on a concurrency limit: wait a sensible default so the
@@ -707,7 +747,7 @@ public final class LlmClientResilienceWrapper {
     }
 
     /** Throttle (token bucket) then acquire the concurrency permit; both interruptible. */
-    private CompletionStage<Void> acquire(final Consumer<PauseEvent> listener) {
+    private CompletionStage<Boolean> acquire(final Consumer<PauseEvent> listener) {
         try {
             throttle(null, listener);
             relaxAdaptedConcurrency();
@@ -721,8 +761,12 @@ public final class LlmClientResilienceWrapper {
                             0));
                 }
                 semaphore.acquire();
+                return completedFuture(true);
             }
-            return completedFuture(null);
+            // no gate: there is nothing to release later, so the caller must know the permit
+            // was never taken (a release() without an acquire would inflate the gate above its
+            // cap once concurrencyLimitDetected() lazily creates it mid-flight)
+            return completedFuture(false);
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
             return failed(new IOException(e));
@@ -789,7 +833,7 @@ public final class LlmClientResilienceWrapper {
     }
 
     /** Wraps a publisher to release the concurrency permit when the stream ends or is cancelled. */
-    private record ReleaseOnCompletePublisher<T>(Flow.Publisher<T> delegate, Semaphore semaphore)
+    private record ReleaseOnCompletePublisher<T>(Flow.Publisher<T> delegate, Semaphore semaphore, boolean acquired)
             implements Flow.Publisher<T> {
 
         @Override
@@ -833,7 +877,7 @@ public final class LlmClientResilienceWrapper {
                 }
 
                 private void release() {
-                    if (released.complete(null) && semaphore != null) {
+                    if (released.complete(null) && acquired && semaphore != null) {
                         semaphore.release();
                     }
                 }

@@ -243,12 +243,18 @@ public final class AnthropicDialect extends AbstractDialect {
             for (final var call : toolCalls) {
                 neutralCalls.add(new LlmToolCall(call.id(), call.type(), call.function(), index.getAndIncrement()));
             }
+            // keep the inter-tool narration: a model may stream text both before and between
+            // tool_use blocks, and dropping it would lose the explanation accompanying the calls
+            final var content = text.toString();
             return new LlmResponse(
                     id[0],
                     model[0],
                     null,
                     List.of(new LlmResponse.LlmChoice(
-                            0, new LlmMessage("assistant", null, null, neutralCalls, null, null), "tool_calls")),
+                            0,
+                            new LlmMessage(
+                                    "assistant", content.isEmpty() ? null : content, null, neutralCalls, null, null),
+                            "tool_calls")),
                     usage[0],
                     null);
         }
@@ -500,7 +506,10 @@ public final class AnthropicDialect extends AbstractDialect {
                 final var message = request.messages().get(i);
                 final var trusted = i < verificationStart;
                 if ("system".equals(message.role())) {
-                    system = textOf(message.content());
+                    final var text = textOf(message.content());
+                    // multiple system messages must not be last-one-wins: concatenate them so every
+                    // system instruction reaches the wire (Anthropic takes a single system string)
+                    system = system == null || system.isEmpty() ? text : system + "\n\n" + text;
                 } else if ("assistant".equals(message.role())
                         && message.toolCalls() != null
                         && !message.toolCalls().isEmpty()) {
@@ -750,8 +759,12 @@ public final class AnthropicDialect extends AbstractDialect {
             for (final var call : toolCalls) {
                 neutralCalls.add(new LlmToolCall(call.id(), call.type(), call.function(), index.getAndIncrement()));
             }
+            // keep the inter-tool narration carried by text blocks alongside the tool calls
+            final var content = text.toString();
             choice = new LlmResponse.LlmChoice(
-                    0, new LlmMessage("assistant", null, null, neutralCalls, null, null), "tool_calls");
+                    0,
+                    new LlmMessage("assistant", content.isEmpty() ? null : content, null, neutralCalls, null, null),
+                    "tool_calls");
         } else {
             choice = new LlmResponse.LlmChoice(
                     0,
@@ -829,6 +842,7 @@ public final class AnthropicDialect extends AbstractDialect {
             }
             return result;
         } catch (final RuntimeException e) {
+            warnMapEventFailure("anthropic", event.data(), e);
             return List.of();
         }
     }
