@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -102,6 +103,10 @@ public class WebFetchTool implements EmbeddedTool {
         if (!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme())) {
             return ToolResult.error("Only http/https URLs are supported");
         }
+        final var ssrf = ssrfError(uri);
+        if (ssrf != null) {
+            return ToolResult.error(ssrf);
+        }
         final var request = HttpRequest.newBuilder()
                 .uri(uri)
                 .timeout(Duration.ofSeconds(timeout))
@@ -169,6 +174,33 @@ public class WebFetchTool implements EmbeddedTool {
             case "text", "txt", "html", "htm" -> lower.startsWith("text") ? "text" : "html";
             default -> "markdown";
         };
+    }
+
+    /**
+     * SSRF guard: rejects URLs whose host resolves (partly or fully) to a loopback, link-local,
+     * private or otherwise non-routable address - the classic metadata-service (169.254.169.254)
+     * and localhost pivot. Resolution happens at request time (DNS rebinding window is small and
+     * the web UI Host/Origin guards cover the browser path); a resolution failure is fail-closed.
+     */
+    static String ssrfError(final URI uri) {
+        if (uri.getHost() == null) {
+            return "URL has no host: " + uri;
+        }
+        final InetAddress[] resolved;
+        try {
+            resolved = InetAddress.getAllByName(uri.getHost());
+        } catch (final java.net.UnknownHostException e) {
+            return "Cannot resolve host " + uri.getHost();
+        }
+        for (final var address : resolved) {
+            if (address.isLoopbackAddress()
+                    || address.isLinkLocalAddress()
+                    || address.isSiteLocalAddress()
+                    || address.isAnyLocalAddress()) {
+                return "Refusing to fetch non-routable address " + address.getHostAddress() + " for " + uri;
+            }
+        }
+        return null;
     }
 
     private static boolean isHtml(final String contentType) {

@@ -345,6 +345,10 @@ public class ApplyPatchTool implements EmbeddedTool {
         if (!candidate.startsWith(base)) {
             throw new PatchException("Patch path escapes the project directory: '" + raw + "'");
         }
+        final var symlinkEscape = io.yupiik.ia.agent.core.tools.ToolContainment.symlinkEscapeError(base, candidate);
+        if (symlinkEscape != null) {
+            throw new PatchException(symlinkEscape);
+        }
         return candidate;
     }
 

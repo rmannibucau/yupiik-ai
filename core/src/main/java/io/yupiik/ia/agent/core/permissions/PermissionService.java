@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -39,6 +40,12 @@ public class PermissionService {
     private final CodingAgentConfiguration configuration;
     private final Emitter emitter;
     private final BashRulesRegistry bashRulesRegistry;
+    /**
+     * SPI customizing the automatic permission-anchor selection of a bash command when
+     * the user allows it. Consulted in {@link PermissionGrantingMatcherService#order()}
+     * ascending order; the FIRST service returning a non-empty result decides.
+     */
+    private final List<PermissionGrantingMatcherService> grantingMatchers;
     /**
      * Session-scoped dynamic bash rule overrides (eg. families the user allowed for this session), cleared
      * when switching back to {@code PLAN} and when the session closes. Kept here (not in the
@@ -62,30 +69,44 @@ public class PermissionService {
         this(configuration, null, null);
     }
 
-    /** Set once when the session runtime is created so allowlist hashing scopes to the session's project. */
-    public void projectDir(final java.nio.file.Path dir) {
-        this.projectDir = dir == null ? null : dir.toAbsolutePath().normalize();
-    }
-
-    public PermissionService(
-            final CodingAgentConfiguration configuration, final io.yupiik.fusion.framework.api.event.Emitter emitter) {
+    public PermissionService(final CodingAgentConfiguration configuration, final Emitter emitter) {
         this(configuration, emitter, null);
     }
 
-    /** Session services created by the runtime factory pass the shared registry; tests/transient usages pass null. */
     public PermissionService(
             final CodingAgentConfiguration configuration,
-            final io.yupiik.fusion.framework.api.event.Emitter emitter,
+            final Emitter emitter,
             final BashRulesRegistry bashRulesRegistry) {
+        this(configuration, emitter, bashRulesRegistry, List.of());
+    }
+
+    /** Full constructor: session services created by the runtime factory pass the shared registry + SPI beans. */
+    public PermissionService(
+            final CodingAgentConfiguration configuration,
+            final Emitter emitter,
+            final BashRulesRegistry bashRulesRegistry,
+            final List<PermissionGrantingMatcherService> grantingMatchers) {
         this.configuration = configuration;
         this.emitter = emitter;
         this.bashRulesRegistry = bashRulesRegistry;
+        final var effective = bashRulesRegistry != null ? bashRulesRegistry.grantingMatchers() : grantingMatchers;
+        this.grantingMatchers = effective == null || effective.isEmpty()
+                ? List.of()
+                : effective.stream()
+                        .sorted(java.util.Comparator.comparingInt(PermissionGrantingMatcherService::order))
+                        .toList();
     }
 
     protected PermissionService() {
         this.configuration = null;
         this.emitter = null;
         this.bashRulesRegistry = null;
+        this.grantingMatchers = List.of();
+    }
+
+    /** Set once when the session runtime is created so allowlist hashing scopes to the session's project. */
+    public void projectDir(final java.nio.file.Path dir) {
+        this.projectDir = dir == null ? null : dir.toAbsolutePath().normalize();
     }
 
     /**
@@ -128,7 +149,16 @@ public class PermissionService {
     }
 
     public void grantSession(final String toolName, final Map<String, Object> args) {
-        sessionGrants.add(grantKey(toolName, args));
+        final var key = grantKey(toolName, args);
+        if (key.indexOf('\n') >= 0) {
+            for (final var line : key.split("\n")) {
+                if (!line.isBlank()) {
+                    sessionGrants.add(line);
+                }
+            }
+        } else {
+            sessionGrants.add(key);
+        }
     }
 
     /** Current session-scoped grants as human readable entries (project|tool:prefix), for the /permissions show command. */
@@ -145,12 +175,61 @@ public class PermissionService {
     }
 
     /**
+     * Removes a single session-approved anchor ({@code /permission-remove}); no-op when absent.
+     * The anchor is the bare permission value (eg. {@code mvn} or {@code docker run}), the
+     * project/tool decoration is resolved here.
+     */
+    public void removeSessionGrant(final String anchor) {
+        if (anchor == null || anchor.isBlank()) {
+            return;
+        }
+        final var project = projectDir();
+        final var bare = anchor.strip();
+        sessionGrants.remove(project + "|bash:" + bare);
+        sessionGrants.remove(project + "|bash:bash:" + bare); // tolerant double-tool
+        sessionGrants.remove(project + "|bash:");
+    }
+
+    /** Adds a raw session-approved anchor ({@code /permissions-add}); {@code '*'} is the tool-wide wildcard. */
+    public void addSessionGrantAnchor(final String anchor) {
+        if (anchor == null) {
+            return;
+        }
+        final var bare = anchor.strip();
+        final var project = projectDir();
+        if (bare.equals("*") || bare.isEmpty()) {
+            sessionGrants.add(project + "|bash:"); // tool-wide wildcard (empty prefix)
+        } else {
+            sessionGrants.add(project + "|bash:" + bare);
+        }
+    }
+
+    /**
+     * The session-approved bash anchors as bare values (project/tool decoration stripped),
+     * for {@code /permissions-show} and diagnostics; {@code "*"} is the tool-wide wildcard.
+     */
+    public List<String> sessionGrantAnchors() {
+        final var project = projectDir();
+        final var out = new ArrayList<String>();
+        for (final var grant : sessionGrants) {
+            final var sep = grant.indexOf('|');
+            final var colon = grant.indexOf(':', sep + 1);
+            if (sep <= 0 || colon < 0 || !grant.substring(0, sep).equals(project)) {
+                continue;
+            }
+            final var anchor = grant.substring(colon + 1);
+            out.add(anchor.isEmpty() ? "*" : anchor);
+        }
+        return out;
+    }
+
+    /**
      * Creates child-scoped permission state for a delegated agent run. Effective modes, project scope,
      * dynamic bash rules, and the approval transport are inherited; session grants are deliberately not
      * copied, and any approval granted to the child is recorded only on the returned instance.
      */
     public PermissionService forkForChild() {
-        final var child = new PermissionService(configuration, emitter, bashRulesRegistry);
+        final var child = new PermissionService(configuration, emitter, bashRulesRegistry, grantingMatchers);
         child.projectDir(projectDir);
         child.mode = mode();
         child.permissionMode = permissionMode();
@@ -352,7 +431,23 @@ public class PermissionService {
     }
 
     private String grantKey(final String toolName, final Map<String, Object> args) {
-        return projectDir() + "|" + toolName + ":" + commandPrefixOf(args);
+        if (args.get("command") instanceof final String command && !command.isBlank()) {
+            // bash: one grant entry per segment anchor, so a compound command
+            // needs every segment approved (allow-all-or-reject-all)
+            final var anchors = anchorsOf(command);
+            if (anchors.isEmpty()) {
+                return projectDir() + "|" + toolName + ":" + prefixOf(args);
+            }
+            final var sb = new StringBuilder();
+            anchors.forEach(a -> sb.append(projectDir())
+                    .append('|')
+                    .append(toolName)
+                    .append(':')
+                    .append(a)
+                    .append('\n'));
+            return sb.substring(0, sb.length() - 1);
+        }
+        return projectDir() + "|" + toolName + ":" + prefixOf(args);
     }
 
     private record RulesCache(BashPermissionsConfiguration source, BashRules.Compiled compiled) {}
@@ -389,7 +484,26 @@ public class PermissionService {
 
     private boolean matchesSessionGrant(final String toolName, final Map<String, Object> args) {
         final var project = projectDir();
-        final var requestedPrefix = commandPrefixOf(args);
+        if (args.get("command") instanceof final String command && !command.isBlank()) {
+            // bash: every segment anchor must be session-approved (allow-all-or-reject-all for
+            // compounds); the '*' wildcard grants everything and is recorded by grantSession("bash")
+            final var anchors = anchorsOf(command);
+            if (anchors.isEmpty()) {
+                return false;
+            }
+            final var approved = new HashSet<String>();
+            sessionGrants.forEach(g -> approved.add(g));
+            for (final var anchor : anchors) {
+                if (approved.contains(project + "|bash:*")
+                        || approved.contains(project + "|bash:" + anchor)
+                        || approved.contains(project + "|bash:")) {
+                    continue;
+                }
+                return false;
+            }
+            return true;
+        }
+        final var requestedPrefix = prefixOf(args);
         for (final var grant : sessionGrants) {
             // format: <project>|<tool>:<prefix>
             final var sep = grant.indexOf('|');
@@ -410,6 +524,82 @@ public class PermissionService {
         return false;
     }
 
+    /**
+     * Whether a session-approved anchor is already covered by a GLOBALLY configured bash rule
+     * ({@code yca.permissions.bash.rules}), used by {@code /permissions-show} to list only the
+     * grants the global config does not already provide. Session dynamic rules are ignored.
+     */
+    public boolean coveredByGlobalRules(final String anchor) {
+        if (anchor == null || anchor.isBlank() || anchor.equals("*")) {
+            return false;
+        }
+        final var compiled = bashRulesRegistry != null ? bashRulesRegistry.base() : null;
+        if (compiled == null) {
+            // no registry: fall back to the effective rules (which are the configured ones without dynamics)
+            return compiledBashRules().rulePrefixFor(anchor) != null;
+        }
+        return compiled.rulePrefixFor(anchor) != null;
+    }
+
+    /**
+     * The permission anchors of every segment of a bash command, in order. Per segment the anchor is
+     * the matched global bash-rule {@code commandStart} (so a {@code docker run} rule keys
+     * {@code docker run}), else the first {@link PermissionGrantingMatcherService} returning a
+     * non-empty result (eg. the built-in well-known command matcher anchoring {@code git commit}),
+     * else the command name (first token). A segment with no anchor (keyword-only, blank) is skipped.
+     */
+    public List<String> anchorsOf(final String command) {
+        if (command == null || command.isBlank()) {
+            return List.of();
+        }
+        final var segments = compiledBashRules().segments(command);
+        if (segments.isEmpty()) {
+            return List.of();
+        }
+        final var out = new ArrayList<String>(segments.size());
+        for (final var segment : segments) {
+            final var rulePrefix = compiledBashRules().rulePrefixFor(segment);
+            if (rulePrefix != null) {
+                if (!out.contains(rulePrefix)) {
+                    out.add(rulePrefix);
+                }
+                continue;
+            }
+            final var tokens = segmentTokens(segment);
+            final var spied = grantingMatchers.stream()
+                    .map(m -> m.grantedPermissions(tokens))
+                    .filter(o -> o.isPresent() && !o.get().isEmpty())
+                    .map(Optional::get)
+                    .findFirst()
+                    .orElse(null);
+            if (spied != null) {
+                final var anchor = String.join(" ", spied);
+                if (!out.contains(anchor)) {
+                    out.add(anchor);
+                }
+                continue;
+            }
+            if (!tokens.isEmpty()) {
+                final var anchor = tokens.get(0);
+                if (!out.contains(anchor)) {
+                    out.add(anchor);
+                }
+            }
+        }
+        return out;
+    }
+
+    private static List<String> segmentTokens(final String segment) {
+        final var trimmed = segment == null ? "" : segment.strip();
+        if (trimmed.isEmpty()) {
+            return List.of();
+        }
+        // quote-aware-ish split: bash segment tokens are space separated; embedded quotes are rare
+        // in command names and the rule/SPI fallbacks tolerate them (the first token is preserved)
+        final var parts = trimmed.split("\\s+");
+        return List.of(parts);
+    }
+
     private static String prefixOf(final Map<String, Object> args) {
         if (args.get("command") instanceof final String command) {
             final var trimmed = command.strip();
@@ -420,21 +610,6 @@ public class PermissionService {
             return path;
         }
         return "";
-    }
-
-    /**
-     * Command prefix used to key session grants. Bash commands matched by a {@code yca.permissions.bash.rules}
-     * entry use the rule {@code commandStart} tokens (opencode arity style: approving {@code docker run x}
-     * grants {@code docker run}, not {@code docker}); anything else falls back to the first word.
-     */
-    private String commandPrefixOf(final Map<String, Object> args) {
-        if (args.get("command") instanceof final String command) {
-            final var prefix = compiledBashRules().evaluate(mode(), command).prefix();
-            if (prefix != null) {
-                return prefix;
-            }
-        }
-        return prefixOf(args);
     }
 
     private String projectDir() {

@@ -146,9 +146,10 @@ public class EditFileTool implements EmbeddedTool {
             return null;
         }
         final var base = context.projectDir().toAbsolutePath().normalize();
-        return path.toAbsolutePath().normalize().startsWith(base)
-                ? null
-                : "path '" + raw + "' escapes the session project directory";
+        if (!path.toAbsolutePath().normalize().startsWith(base)) {
+            return "path '" + raw + "' escapes the session project directory";
+        }
+        return io.yupiik.ia.agent.core.tools.ToolContainment.symlinkEscapeError(context.projectDir(), path);
     }
 
     /**

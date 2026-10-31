@@ -55,6 +55,12 @@ public class BashRulesRegistry {
     public static final int DEFAULT_MAX_COMBINED = 1024;
 
     private final CodingAgentConfiguration configuration;
+    /**
+     * SPI customizing the automatic permission-anchor selection of a bash command
+     * (see {@link PermissionGrantingMatcherService}); injected by the container,
+     * empty in tests/direct constructions.
+     */
+    private final List<PermissionGrantingMatcherService> grantingMatchers;
 
     private volatile BashPermissionsConfiguration configOverride;
     /** Base evaluator: the configured rules compiled once per config identity. */
@@ -66,11 +72,24 @@ public class BashRulesRegistry {
             new ConcurrentHashMap<>();
 
     public BashRulesRegistry(final CodingAgentConfiguration configuration) {
+        this(configuration, List.of());
+    }
+
+    public BashRulesRegistry(
+            final CodingAgentConfiguration configuration,
+            final List<PermissionGrantingMatcherService> grantingMatchers) {
         this.configuration = configuration;
+        this.grantingMatchers = grantingMatchers == null ? List.of() : grantingMatchers;
     }
 
     protected BashRulesRegistry() {
         this.configuration = null;
+        this.grantingMatchers = List.of();
+    }
+
+    /** The container-injected permission-granting matcher SPI beans (empty when none/not wired). */
+    public List<PermissionGrantingMatcherService> grantingMatchers() {
+        return grantingMatchers;
     }
 
     /**

@@ -114,7 +114,7 @@ public class WriteFileTool implements EmbeddedTool {
         if (!path.toAbsolutePath().normalize().startsWith(base)) {
             return "path '" + raw + "' escapes the session project directory";
         }
-        return null;
+        return io.yupiik.ia.agent.core.tools.ToolContainment.symlinkEscapeError(context.projectDir(), path);
     }
 
     /**

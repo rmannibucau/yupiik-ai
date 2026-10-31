@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class BashTool implements EmbeddedTool {
@@ -223,7 +224,7 @@ public class BashTool implements EmbeddedTool {
         }
         emitter.emit(new AgentEvent.ToolStream(
                 "bash",
-                "$ " + command,
+                maskSecretsForDisplay("$ " + command),
                 context.ordinal(),
                 context.sessionId(),
                 context.subagentId(),
@@ -347,5 +348,26 @@ public class BashTool implements EmbeddedTool {
                     ? s.substring(0, maxOutputChars) + "\n... output truncated"
                     : s.stripTrailing();
         }
+    }
+
+    /** Known secret shapes masked in the DISPLAYED command echo (never in the executed command). */
+    private static final Pattern[] DISPLAY_SECRET_PATTERNS = {
+        Pattern.compile("(?i)(Bearer\\s+)[A-Za-z0-9._~+/=-]+"),
+        Pattern.compile("(?i)((?:api[_-]?key|token|password|passwd|secret|client[_-]?secret)\\s*[=:]\\s*)[^\\s'\"]+"),
+        Pattern.compile("(?i)((?:authorization|proxy-authorization|x-api-key|x-auth-token)\\s*:\\s*)[^\\s'\"]+"),
+    };
+
+    private static String maskSecretsForDisplay(final String line) {
+        if (line == null || line.isEmpty()) {
+            return line;
+        }
+        String out = line;
+        for (final var pattern : DISPLAY_SECRET_PATTERNS) {
+            out = pattern.matcher(out).replaceAll(m -> {
+                final var header = m.groupCount() >= 1 ? m.group(1) : "";
+                return header + "***";
+            });
+        }
+        return out;
     }
 }

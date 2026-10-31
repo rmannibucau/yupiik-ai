@@ -393,6 +393,30 @@ public final class BashRules {
             return best;
         }
 
+        /**
+         * Best matching configured rule prefix for a single normalized segment text
+         * (eg. {@code docker run nginx}), or null when no rule matches. This is the
+         * anchor used to key a session grant: when the global rules recognize the
+         * command, the grant is keyed by the rule {@code commandStart}, not the first
+         * word, so {@code docker run x} grants {@code docker run} - and consequently
+         * any {@code docker run ...} command.
+         */
+        public String rulePrefixFor(final String segment) {
+            if (segment == null || segment.isBlank()) {
+                return null;
+            }
+            final var masked = mask(segment);
+            final var texts = new ArrayList<String>();
+            for (final var token : tokenize(masked.text())) {
+                for (final var effective : withoutToleratedRedirects(token.tokens())) {
+                    if (!effective.redirect() && !effective.substitution()) {
+                        texts.add(effective.text());
+                    }
+                }
+            }
+            return texts.isEmpty() ? null : coveragePrefix(texts);
+        }
+
         private record SegmentDecision(boolean allowed, String matchedStart, Cause cause) {}
 
         private SegmentDecision evaluateSegment(
