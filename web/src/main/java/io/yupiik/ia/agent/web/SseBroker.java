@@ -212,6 +212,11 @@ public class SseBroker {
             } catch (final RuntimeException e) {
                 // a dead subscription: drop it and keep the others alive
                 bySession.remove(subscriber);
+                if (bySession.isEmpty()) {
+                    // no live subscriber left for this session: drop the (now empty) set too, so a
+                    // session closed by a dead tab does not linger in the subscriptions map forever
+                    subscriptions.remove(sessionId, bySession);
+                }
             }
         }
     }

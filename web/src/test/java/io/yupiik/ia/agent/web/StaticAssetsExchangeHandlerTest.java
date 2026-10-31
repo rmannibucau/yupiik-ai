@@ -25,6 +25,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -113,5 +114,73 @@ class StaticAssetsExchangeHandlerTest {
         final var resp = client.send(request, HttpResponse.BodyHandlers.ofString());
         assertEquals(200, resp.statusCode());
         assertEquals("", resp.body());
+    }
+
+    @Test
+    void encodedTraversalIsRejected() throws Exception {
+        final var s = start(new StaticAssetsExchangeHandler());
+        // %2e%2e decodes to .. and /static/../../etc/passwd escapes the web root -> 403
+        final var resp = get(url(s, "/static/%2e%2e/%2e%2e/etc/passwd"));
+        assertEquals(403, resp.statusCode());
+        // mixed-case hex, escaping the root -> 403
+        final var resp2 = get(url(s, "/static/%2E%2E/%2E%2E/index.html"));
+        assertEquals(403, resp2.statusCode());
+        // encoded backslash traversal (windows-style separators) -> 403
+        final var resp3 = get(url(s, "/static/%2e%2e%5c%2e%2e%5cetc"));
+        assertEquals(403, resp3.statusCode());
+        // a leading /.. escape is rejected too
+        final var resp4 = get(url(s, "/..%2fetc/passwd"));
+        assertEquals(403, resp4.statusCode());
+        // ...while a normalization that STAYS inside the root is fine: /static/../index.html -> /index.html
+        final var benign = get(url(s, "/static/%2E%2E/index.html"));
+        assertEquals(200, benign.statusCode());
+    }
+
+    @Test
+    void binaryAssetsAreServedByteFaithful() throws Exception {
+        final var s = start(new StaticAssetsExchangeHandler());
+        final var expected = new byte[] {0x00, 0x01, 0x00, 0x00, (byte) 0xff, (byte) 0xfe, (byte) 0x80, 0x7f};
+        final var resp = client.send(
+                HttpRequest.newBuilder(URI.create(url(s, "/static/font.a1b2c3d4e5.woff2")))
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, resp.statusCode());
+        assertEquals("font/woff2", resp.headers().firstValue("content-type").orElse(""));
+        assertTrue(
+                Arrays.equals(expected, resp.body()),
+                "binary asset must be served byte-faithfully, got: " + Arrays.toString(resp.body()));
+    }
+
+    @Test
+    void securityHeadersAreSentOnStaticResponses() throws Exception {
+        final var s = start(new StaticAssetsExchangeHandler());
+        final var html = get(url(s, "/index.html")); // test classpath index.html (SPA shell)
+        assertEquals(200, html.statusCode());
+        assertEquals(
+                "nosniff", html.headers().firstValue("x-content-type-options").orElse(""));
+        assertEquals(
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+                html.headers().firstValue("content-security-policy").orElse(""));
+        // non-HTML responses carry nosniff but no CSP
+        final var js = get(url(s, "/static/index.a1b2c3d4e5.js"));
+        assertEquals(200, js.statusCode());
+        assertEquals(
+                "nosniff", js.headers().firstValue("x-content-type-options").orElse(""));
+        assertTrue(js.headers().firstValue("content-security-policy").isEmpty());
+    }
+
+    @Test
+    void foreignHostAndOriginAreRejectedWith403() throws Exception {
+        final var s = start(new StaticAssetsExchangeHandler());
+        // java.net.http always sends Host; override it with an explicit foreign Host header
+        final var foreign = get(url(s, "/index.html"), "Host", "evil.com");
+        assertEquals(403, foreign.statusCode());
+        // loopback Host with a foreign Origin is also rejected (CSRF)
+        final var csrf = get(url(s, "/index.html"), "Origin", "http://evil.com");
+        assertEquals(403, csrf.statusCode());
+        // but a loopback Origin is fine
+        final var ok = get(url(s, "/index.html"), "Origin", "http://localhost:6060");
+        assertEquals(200, ok.statusCode());
     }
 }

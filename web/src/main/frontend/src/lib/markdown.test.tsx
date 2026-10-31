@@ -67,6 +67,65 @@ describe('normalizeMarkdown', () => {
     }
   });
 
+  it('keeps bare stars on code-like lines literal (heredoc with part_*.csv.gz and COUNT(*))', () => {
+    // the exact failure mode: a multi-line SQL heredoc the model echoed inside a paragraph; the
+    // bare * of part_*.csv.gz and COUNT(*) used to pair across the softbreak into an emphasis
+    const src =
+      "cat > /tmp/validate_ext_modify.sql <<'SQL'\n" +
+      "ALTER TABLE SYNCTEST.EXT_HOP_PART_DIR MODIFY PARTITION P_2026 LOCATION ('part_*.csv.gz');\n" +
+      "SELECT 'MODIFY_PARTITION_QUERY' AS TEST, COUNT(*) AS CNT FROM EXT_HOP_PART_DIR;";
+    const out = normalizeMarkdown(src);
+    // the render source escapes the bare * on the code-like line (whatever happens to the _)
+    expect(out).toContain('\\*.csv.gz');
+    expect(out).toContain('COUNT(\\*)');
+    // the user-visible HTML keeps them literal: no star is consumed by an emphasis
+    const html = renderMd(src);
+    // ReactMarkdown HTML-encodes the apostrophes (&#x27;), so assert on the unquoted fragments
+    expect(html).toContain('part_*.csv.gz');
+    expect(html).toContain('COUNT(*)');
+    expect(html).not.toContain('part_.csv.gz');
+    expect(html).not.toContain('COUNT()');
+  });
+
+  it('does not touch prose emphasis with a lone star or underscore', () => {
+    const src = 'a *small* note with _emphasis_ and a star: * here';
+    expect(normalizeMarkdown(src)).toBe(src);
+  });
+
+  it('does not claim English prose with SQL keywords in lowercase', () => {
+    // WITH/FROM/cat appear in plain sentences: only uppercase SQL and shell redirections count
+    for (const src of [
+      'the data from the table is *ready*',
+      'with him as advisor, I _decided_ to go',
+      'the cat sat on the *mat*',
+    ]) {
+      expect(normalizeMarkdown(src)).toBe(src);
+    }
+  });
+
+  it('leaves fenced code blocks untouched (stars inside are already literal)', () => {
+    const src = '```sql\nSELECT * FROM t WHERE c = \'part_*.csv.gz\';\n```';
+    expect(normalizeMarkdown(src)).toBe(src);
+    const html = renderMd(src);
+    expect(html).toContain('SELECT * FROM t');
+    expect(html).not.toContain('SELECT \\* FROM t');
+  });
+
+  it('does not escape inside an inline code span on a code-like line', () => {
+    const src = 'ALTER TABLE t; use `SELECT *` now\nSELECT COUNT(*) FROM t;';
+    const out = normalizeMarkdown(src);
+    // the inline span content stays untouched; the bare star on the SQL line is escaped
+    expect(out).toContain('`SELECT *`');
+    expect(out).toContain('COUNT(\\*)');
+  });
+
+  it('does not double-escape an existing backslash', () => {
+    const src = "grep '\\*' SELECT * FROM t;";
+    const out = normalizeMarkdown(src);
+    expect(out).toContain("grep '\\*'");
+    expect(out).toContain('SELECT \\* FROM');
+  });
+
   it('renders the settled session text with the correct code spans (regression: the inverted pairing)', () => {
     // The exact assistant prose that was seen inverted mid-stream in session s1a135cadfe0. Once the
     // block settles (balanced backticks), every intended code token must render as its own <code>,

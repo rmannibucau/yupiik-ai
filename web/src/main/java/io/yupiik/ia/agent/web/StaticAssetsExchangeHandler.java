@@ -20,11 +20,12 @@ import static java.util.concurrent.CompletableFuture.completedFuture;
 import io.yupiik.fusion.http.server.api.Request;
 import io.yupiik.fusion.http.server.api.Response;
 import io.yupiik.fusion.http.server.spi.Endpoint;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.URLConnection;
-import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayDeque;
 import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Map;
@@ -40,6 +41,22 @@ import java.util.regex.Pattern;
  */
 public class StaticAssetsExchangeHandler implements Endpoint {
     private static final String RESOURCES_PREFIX = "META-INF/resources/";
+    /** Hardened security headers shipped on static responses. */
+    private static final String X_CONTENT_TYPE_OPTIONS = "nosniff";
+
+    /** Restrictive CSP for HTML responses (the SPA shell): only self, inline styles, self/data images. */
+    private static final String CSP_HTML = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:";
+
+    private final String boundHost;
+
+    public StaticAssetsExchangeHandler() {
+        this(null);
+    }
+
+    /** @param boundHost the explicitly bound host ({@code --host}), accepted by the Host guard. */
+    public StaticAssetsExchangeHandler(final String boundHost) {
+        this.boundHost = boundHost;
+    }
 
     /** A path segment that looks like a content hash (lowercase hex, 8+ chars) marks an immutable asset. */
     private static final Pattern HASH_SEGMENT = Pattern.compile("[0-9a-f]{8,}");
@@ -71,8 +88,18 @@ public class StaticAssetsExchangeHandler implements Endpoint {
 
     @Override
     public CompletionStage<Response> handle(final Request request) {
-        final var path = request.path();
-        if (path.contains("..")) {
+        final var rejected = HttpOriginGuard.rejectIfForeign(request, boundHost);
+        if (rejected != null) {
+            return completedFuture(rejected);
+        }
+        // normalize BEFORE the traversal guard: the JRE adapter exposes the URI path (already
+        // percent-decoded by java.net.URI), so an encoded traversal (%2e%2e%2f) must not slip past
+        // a literal ".." check. Only the traversal-relevant escapes are decoded here (whether or
+        // not the server already decoded them, double-decoding arbitrary sequences would corrupt
+        // asset names containing a literal '%' or '+'). A residual ".." component after resolution
+        // is an escape attempt and rejected.
+        final var path = normalizePath(decodeTraversalEscapes(request.path()));
+        if (path == null || path.contains("..")) {
             return completedFuture(Response.of().status(403).body("forbidden").build());
         }
         final var resource = resourceFor(path);
@@ -145,20 +172,94 @@ public class StaticAssetsExchangeHandler implements Endpoint {
             final byte[] bytes, final String resource, final Request request) {
         final var etag = '"' + HexFormat.of().formatHex(digest(bytes)) + '"';
         if (etag.equals(request.header("if-none-match"))) {
-            return completedFuture(
-                    Response.of().status(304).header("etag", etag).build());
+            return completedFuture(Response.of()
+                    .status(304)
+                    .header("etag", etag)
+                    .header("x-content-type-options", X_CONTENT_TYPE_OPTIONS)
+                    .build());
         }
         final var contentType = contentType(resource);
-        final var builder =
-                Response.of().status(200).header("content-type", contentType).header("etag", etag);
+        final var builder = Response.of()
+                .status(200)
+                .header("content-type", contentType)
+                .header("etag", etag)
+                .header("x-content-type-options", X_CONTENT_TYPE_OPTIONS);
+        if ("text/html".equals(contentType)) {
+            builder.header("content-security-policy", CSP_HTML);
+        }
         final var immutable = isImmutable(resource);
         builder.header("cache-control", immutable ? "public,max-age=31536000,immutable" : "no-cache");
         if ("HEAD".equalsIgnoreCase(request.method())) {
             builder.header("content-length", bytes.length);
         } else {
-            builder.body(new String(bytes, StandardCharsets.UTF_8));
+            // byte-faithful: the body is served as raw bytes (no charset round-trip), so binary assets
+            // (woff2, png, svg...) reach the browser exactly as stored. The JRE adapter aggregates
+            // OutputStreamPublisher bodies into a counted response, so Content-Length is still sent.
+            builder.bytesBody(out -> {
+                try (out;
+                        final var in = new ByteArrayInputStream(bytes)) {
+                    in.transferTo(out);
+                }
+            });
         }
         return completedFuture(builder.build());
+    }
+
+    /**
+     * Decodes only the escapes that matter for path traversal ({@code %2e} = '.', {@code %2f} = '/',
+     * {@code %5c} = '\' - any case) and folds backslashes into forward slashes. Every other sequence
+     * is left untouched, so an asset whose name contains a literal {@code %} or {@code +} round-trips
+     * unchanged no matter how many times the path was already decoded by the server.
+     */
+    private static String decodeTraversalEscapes(final String raw) {
+        if (raw == null || raw.isBlank() || (raw.indexOf('%') < 0 && raw.indexOf('\\') < 0)) {
+            return raw;
+        }
+        final var sb = new StringBuilder(raw.length());
+        for (int i = 0; i < raw.length(); i++) {
+            final var c = raw.charAt(i);
+            if (c == '%' && i + 2 < raw.length()) {
+                final var hex = raw.substring(i + 1, i + 3).toLowerCase(Locale.ROOT);
+                if (hex.equals("2e") || hex.equals("2f") || hex.equals("5c")) {
+                    sb.append(hex.equals("2e") ? '.' : hex.equals("2f") ? '/' : '\\');
+                    i += 2;
+                    continue;
+                }
+            }
+            sb.append(c);
+        }
+        var out = sb.toString();
+        if (out.indexOf('\\') >= 0) {
+            out = out.replace('\\', '/');
+        }
+        return out;
+    }
+
+    /**
+     * Resolves {@code .} and {@code ..} path segments to their canonical form: {@code /a/../b} becomes
+     * {@code /b} (safe), while {@code /../../etc/passwd} becomes {@code /etc/passwd} whose leading
+     * {@code /..} is preserved as a literal {@code ..} segment caught by the caller's check.
+     * Returns {@code null} when the path escapes above the root ({@code /..}).
+     */
+    private static String normalizePath(final String decoded) {
+        if (decoded == null || decoded.isBlank()) {
+            return decoded;
+        }
+        final var segments = new ArrayDeque<String>();
+        for (final var segment : decoded.split("/")) {
+            if (segment.isEmpty() || ".".equals(segment)) {
+                continue;
+            }
+            if ("..".equals(segment)) {
+                if (segments.isEmpty()) {
+                    return null; // /.. escapes above the root: reject
+                }
+                segments.pollLast();
+            } else {
+                segments.addLast(segment);
+            }
+        }
+        return "/" + String.join("/", segments);
     }
 
     private static String contentType(final String resource) {

@@ -105,10 +105,84 @@ export function hasOpenInlineSpan(src: string): boolean {
  * `** BUILD SUCCESS **` → `**BUILD SUCCESS**` and `** 1 (jre placement):**` → `**1 (jre placement):**`.
  * Only the interior whitespace is stripped: the lead anchor and the delimiters are preserved, so valid
  * adjacent bold spans and the spaces between them are never altered.
+ *
+ * <p>On top of the whitespace fix, bare {@code *} and {@code _} on code-like lines (a heredoc,
+ * SQL/JSON/command echo the model reproduced verbatim) are backslash-escaped so they render
+ * literally instead of pairing into an emphasis across a softbreak - e.g. {@code part_*.csv.gz}
+ * and {@code COUNT(*)} on two lines of the same paragraph used to hide both stars. Only lines
+ * that clearly look like code are touched: prose emphasis (a lone {@code *} between words) is
+ * never rewritten.
  */
 export function normalizeMarkdown(src: string): string {
   if (!src) return src;
-  return src.replace(SPACED_STRONG, (_m, lead, open, _lead, inner, _trail) => `${lead}${open}${inner}${open}`);
+  return escapeCodeLikeStars(src.replace(SPACED_STRONG, (_m, lead, open, _lead, inner, _trail) => `${lead}${open}${inner}${open}`));
+}
+
+// A line that looks like code the model echoed verbatim: SQL statements (keywords are matched
+// uppercase-only, so English prose like "from the table" or "with him as advisor" is never
+// claimed), a JSON/command payload ({"command":..., <<'...', python3...), or a `cat >` redirection.
+// Lines inside a fenced block are skipped separately (their asterisks are already literal).
+const CODE_LIKE_LINE =
+  /(?:SELECT\b|INSERT\b|UPDATE\b|DELETE\s+FROM\b|CREATE\b|ALTER\b|DROP\b|WITH\b\s+\w+\s+AS\b|FROM\s+\w+|COUNT\s*\(|<<['"]|\{\s*"command"|\bpython3?\b|\bcat\s+>)/;
+
+/**
+ * Escapes bare {@code *} and {@code _} unescaped on code-like lines (CommonMark would otherwise
+ * pair them into an emphasis, often across a softbreak of a multi-line heredoc/JSON echo). Fenced
+ * code blocks are left untouched - their content is already literal. Backslash escapes already
+ * present are preserved.
+ */
+function escapeCodeLikeStars(src: string): string {
+  let inFence = false;
+  let fenceChar = '';
+  let fenceLen = 0;
+  return src
+    .split('\n')
+    .map((line) => {
+      if (inFence) {
+        // closing fence: up to 3 leading spaces, a run of the SAME char >= opener length, trailing ws
+        const m = /^ {0,3}(`+|~+)\s*$/.exec(line);
+        if (m && m[1][0] === fenceChar && m[1].length >= fenceLen) {
+          inFence = false;
+        }
+        return line;
+      }
+      const fence = FENCE_RUN.exec(line);
+      if (fence) {
+        inFence = true;
+        fenceChar = fence[1][0];
+        fenceLen = fence[1].length;
+        return line; // the fence line itself stays untouched
+      }
+      if (!CODE_LIKE_LINE.test(line)) {
+        return line;
+      }
+      // escape a bare * or _ that is not already escaped and not inside an inline code span
+      let buf = '';
+      let inlineCode = false;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        if (c === '\\') {
+          buf += c;
+          if (i + 1 < line.length) {
+            buf += line[i + 1];
+            i++;
+          }
+          continue;
+        }
+        if (c === '`') {
+          inlineCode = !inlineCode;
+          buf += c;
+          continue;
+        }
+        if (!inlineCode && (c === '*' || c === '_')) {
+          buf += '\\' + c;
+          continue;
+        }
+        buf += c;
+      }
+      return buf;
+    })
+    .join('\n');
 }
 
 // Echoed compact-seam ref tags the model may reproduce verbatim in its stream ("@N@", "@bN@",

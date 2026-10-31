@@ -171,7 +171,9 @@ public class WebJsonRpc {
                             + " pagination. excludeFromTail is how many of the most recent events the client already holds"
                             + " (the snapshot tail plus anything loaded so far); the returned list is the chunk of up to"
                             + " windowBlocks events immediately before that, plus the new cumulative loaded count the"
-                            + " client should treat as the refreshed cursor.")
+                            + " client should treat as the refreshed cursor. The full replay is cached per session and"
+                            + " only rebuilt when the persisted message count changes, so paginating a long session is"
+                            + " O(window) per page after the first.")
     public Map<String, Object> loadEarlier(
             @JsonRpcParam(required = true, documentation = "Session id.") final String sessionId,
             @JsonRpcParam(
@@ -179,13 +181,34 @@ public class WebJsonRpc {
                             documentation =
                                     "How many of the most recent replayed events are already loaded client-side (exclusive cursor).")
                     final int excludeFromTail) {
-        final var events = WebReplay.replay(sessionId, sessionStore.load(sessionId));
+        final var events = replayedCache(sessionId);
         final var total = events.size();
         final var end = Math.max(0, total - excludeFromTail);
         final var from = Math.max(0, end - webConf.windowBlocks());
         final var slice = events.subList(from, end);
         return Map.of("events", slice, "loaded", total - from);
     }
+
+    /** Full replay of a session's persisted history, cached per session id and invalidated when the store grows. */
+    private List<WebEventDto> replayedCache(final String sessionId) {
+        final var current = sessionStore.count(sessionId);
+        final var cached = replayCache.get(sessionId);
+        if (cached != null && cached.count() == current) {
+            return cached.events();
+        }
+        final var events = WebReplay.replay(sessionId, sessionStore.load(sessionId));
+        // bound the cache: a session dropped from the map is simply rebuilt on its next pagination click
+        if (replayCache.size() > 64) {
+            replayCache.clear();
+        }
+        replayCache.put(sessionId, new CachedReplay(current, events));
+        return events;
+    }
+
+    private record CachedReplay(int count, List<WebEventDto> events) {}
+
+    private final java.util.concurrent.ConcurrentHashMap<String, CachedReplay> replayCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     @JsonRpc(value = "sessions.create", documentation = "Creates a new empty session and returns its id.")
     public Map<String, String> createSession() {
