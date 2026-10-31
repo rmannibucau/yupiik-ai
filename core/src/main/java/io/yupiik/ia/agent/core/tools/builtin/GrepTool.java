@@ -82,7 +82,12 @@ public class GrepTool implements EmbeddedTool {
                                 Schemas.str(
                                         "Java regular expression to search; escape literal parentheses as `\\(` and `\\)`. "
                                                 + "Use literal=true for a plain phrase, especially one containing parentheses."),
-                        "path", Schemas.str("Base directory or file, default `.`."),
+                        "path",
+                                Schemas.str("Base directory, file, or several space-separated locations, default `.`. "
+                                        + "When the whole string exists on disk (even a path containing spaces) "
+                                        + "it is searched verbatim; otherwise it is split on spaces and each "
+                                        + "token is searched. A JSON array of paths is also accepted, each "
+                                        + "element searched verbatim."),
                         "include", Schemas.str("Glob filter on file names, eg. `*.java`."),
                         "literal",
                                 Schemas.bool(
@@ -119,65 +124,121 @@ public class GrepTool implements EmbeddedTool {
                 ? "NOTE: pattern was adjusted (escaped unbalanced parentheses) to be a valid Java regex; "
                         + "prefer writing balanced escapes yourself, or set `literal: true` for a plain phrase.\n"
                 : "";
-        final var base = context.resolvePath(
-                arg(args, "path") == null ? "." : arg(args, "path"),
-                configuration == null ? null : configuration.resolveProjectDir());
+        final var roots = resolveRoots(args.get("path"), context);
         final var include = arg(args, "include");
         final var includeMatcher =
                 include == null ? null : FileSystems.getDefault().getPathMatcher("glob:" + include);
         final var limitArg = optInt(args, "limit", -1);
         final var max = Math.clamp(limitArg > 0 ? limitArg : optInt(args, "maxResults", 100), 1, 1000);
-        final var ignore = FileIgnore.of(FileIgnore.gitRoot(base), null);
         final var matches = new ArrayList<String>();
         final var filesScanned = new int[] {0};
         final var capped = new boolean[] {false};
-        try {
-            if (Files.isRegularFile(base)) {
-                searchFile(base, regex, includeMatcher, matches, max, filesScanned);
-            } else {
-                Files.walkFileTree(base, new SimpleFileVisitor<>() {
-                    @Override
-                    public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs) {
-                        if (!dir.equals(base) && skip(dir, ignore)) {
+        final var errors = new ArrayList<String>();
+        for (final var base : roots) {
+            final var ignore = FileIgnore.of(FileIgnore.gitRoot(base), null);
+            try {
+                if (Files.isRegularFile(base)) {
+                    searchFile(base, regex, includeMatcher, matches, max, filesScanned);
+                } else if (!Files.exists(base)) {
+                    errors.add("Cannot search " + base + ": no such file or directory");
+                } else {
+                    Files.walkFileTree(base, new SimpleFileVisitor<>() {
+                        @Override
+                        public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs) {
+                            if (!dir.equals(base) && skip(dir, ignore)) {
+                                return FileVisitResult.SKIP_SUBTREE;
+                            }
+                            return FileVisitResult.CONTINUE;
+                        }
+
+                        @Override
+                        public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) {
+                            if (matches.size() >= max) {
+                                capped[0] = true;
+                                return FileVisitResult.TERMINATE;
+                            }
+                            if (!skip(file, ignore)
+                                    && (includeMatcher == null || includeMatcher.matches(file.getFileName()))) {
+                                searchFile(file, regex, includeMatcher, matches, max, filesScanned);
+                            }
+                            return matches.size() >= max ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
+                        }
+
+                        @Override
+                        public FileVisitResult visitFileFailed(final Path file, final IOException exc) {
+                            // ignore not allowed folders/files so the tool doesn't fail
                             return FileVisitResult.SKIP_SUBTREE;
                         }
-                        return FileVisitResult.CONTINUE;
-                    }
-
-                    @Override
-                    public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) {
-                        if (matches.size() >= max) {
-                            capped[0] = true;
-                            return FileVisitResult.TERMINATE;
-                        }
-                        if (!skip(file, ignore)
-                                && (includeMatcher == null || includeMatcher.matches(file.getFileName()))) {
-                            searchFile(file, regex, includeMatcher, matches, max, filesScanned);
-                        }
-                        return matches.size() >= max ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
-                    }
-
-                    @Override
-                    public FileVisitResult visitFileFailed(final Path file, final IOException exc) {
-                        // ignore not allowed folders/files so the tool doesn't fail
-                        return FileVisitResult.SKIP_SUBTREE;
-                    }
-                });
+                    });
+                }
+            } catch (final IOException e) {
+                errors.add("Cannot search " + base + ": " + e.getMessage());
             }
-        } catch (final IOException e) {
-            return ToolResult.error("Cannot search " + base + ": " + e.getMessage());
+            if (matches.size() >= max) {
+                capped[0] = true;
+                break;
+            }
         }
         if (matches.isEmpty()) {
+            if (!errors.isEmpty()) {
+                return ToolResult.error(adjustedNote + String.join("\n", errors));
+            }
             return ToolResult.ok(adjustedNote + "No match (" + filesScanned[0] + " files scanned)");
         }
         final var sb = new StringBuilder(adjustedNote).append(matches.size()).append(" match(es)\n");
         for (final var m : matches) {
             sb.append(m).append('\n');
         }
+        for (final var e : errors) {
+            sb.append("-- ").append(e).append('\n');
+        }
         if (capped[0] || matches.size() >= max) {
             sb.append("... results capped at ").append(max).append('\n');
         }
         return ToolResult.ok(sb.toString());
+    }
+
+    /**
+     * Resolves the {@code path} argument into one or more search roots. A whole string that exists
+     * on disk (a directory or a file, possibly containing spaces) is kept verbatim; any other string
+     * is split on whitespace and each token searched, so several space-separated locations work while
+     * an existing path containing a space is never mangled. A JSON array is accepted defensively and
+     * each of its elements is one explicit path (never split). Blank/absent falls back to {@code "."}.
+     */
+    private List<Path> resolveRoots(final Object raw, final ToolContext context) {
+        final var fallback = configuration == null ? null : configuration.resolveProjectDir();
+        final var tokens = new ArrayList<String>();
+        if (raw instanceof List<?> list) {
+            // explicit boundaries: each element is a single path, spaces preserved
+            for (final var item : list) {
+                final var p = item == null ? "." : item.toString().strip();
+                if (!p.isBlank() && !p.equals(".")) {
+                    tokens.add(p);
+                }
+            }
+        } else {
+            final var rawPath = raw == null ? "." : raw.toString().strip();
+            if (!rawPath.isEmpty() && !rawPath.equals(".")) {
+                final var whole = context.resolvePath(rawPath, fallback);
+                if (Files.exists(whole)) {
+                    // an existing path (file or directory) may legitimately contain spaces: verbatim
+                    tokens.add(rawPath);
+                } else {
+                    tokens.addAll(List.of(rawPath.split("\\s+")));
+                }
+            }
+        }
+        if (tokens.isEmpty()) {
+            return List.of(context.resolvePath(".", fallback));
+        }
+        final var roots = new ArrayList<Path>();
+        for (final var token : tokens) {
+            final var root = context.resolvePath(token, fallback);
+            if (!roots.contains(root)) {
+                roots.add(root);
+            }
+        }
+        return roots;
     }
 
     private static boolean skip(final Path p, final FileIgnore ignore) {

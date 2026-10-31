@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
@@ -116,6 +117,100 @@ class GrepToolTest {
 
         assertFalse(out.success(), "an unrepairable pattern must error: " + out.output());
         assertTrue(out.output().contains("literal: true"), "the error must steer toward literal matching: " + out);
+    }
+
+    @Test
+    void spaceSeparatedPathsSearchAllRoots() throws IOException {
+        write(root.resolve("a/One.java"), "needle one\n");
+        write(root.resolve("a/No.java"), "nothing\n");
+        write(root.resolve("b/Two.java"), "needle two\n");
+
+        final var out = tool.execute(Map.of("pattern", "needle", "path", root.resolve("a") + " " + root.resolve("b")))
+                .output();
+
+        assertTrue(out.contains("One.java"), "first root must be searched:\n" + out);
+        assertTrue(out.contains("Two.java"), "second root must be searched:\n" + out);
+        assertFalse(out.contains("No.java"), "only matches must be reported:\n" + out);
+    }
+
+    @Test
+    void fileAndDirectoryMixedInOneSpaceSeparatedPath() throws IOException {
+        write(root.resolve("README.adoc"), "needle readme\n");
+        write(root.resolve("src/main/App.java"), "needle app\n");
+
+        final var out = tool.execute(Map.of(
+                        "pattern", "needle", "path", root.resolve("README.adoc") + " " + root.resolve("src/main")))
+                .output();
+
+        assertTrue(out.contains("README.adoc"), "the file token must be searched:\n" + out);
+        assertTrue(out.contains("App.java"), "the directory token must be searched:\n" + out);
+    }
+
+    @Test
+    void existingPathContainingSpacesIsKeptVerbatim() throws IOException {
+        write(root.resolve("my dir/App.java"), "needle in dir\n");
+        write(root.resolve("my notes.txt"), "needle in file\n");
+
+        final var dirOut = tool.execute(Map.of(
+                        "pattern", "needle", "path", root.resolve("my dir").toString()))
+                .output();
+        assertTrue(
+                dirOut.contains("App.java"),
+                "an existing directory with a space must be searched verbatim:\n" + dirOut);
+
+        final var fileOut = tool.execute(Map.of(
+                        "pattern",
+                        "needle",
+                        "path",
+                        root.resolve("my notes.txt").toString()))
+                .output();
+        assertTrue(
+                fileOut.contains("my notes.txt"),
+                "an existing file with a space must be searched verbatim:\n" + fileOut);
+    }
+
+    @Test
+    void missingRootsAreReportedPerRoot() {
+        final var out =
+                tool.execute(Map.of("pattern", "needle", "path", root.resolve("nope1") + " " + root.resolve("nope2")));
+
+        assertFalse(out.success(), "missing roots must error rather than silently return no match: " + out.output());
+        assertTrue(out.output().contains("nope1"), out.output());
+        assertTrue(out.output().contains("nope2"), out.output());
+        assertTrue(out.output().contains("no such file or directory"), out.output());
+    }
+
+    @Test
+    void capsResultsAcrossMultipleRoots() throws IOException {
+        write(root.resolve("a/F1.txt"), "hit\n");
+        write(root.resolve("a/F2.txt"), "hit\n");
+        write(root.resolve("b/F3.txt"), "hit\n");
+        write(root.resolve("b/F4.txt"), "hit\n");
+
+        final var out = tool.execute(Map.of(
+                        "pattern", "hit",
+                        "path", root.resolve("a") + " " + root.resolve("b"),
+                        "maxResults", "2"))
+                .output();
+
+        assertTrue(out.contains("2 match(es)"), out);
+        assertTrue(out.contains("results capped at 2"), out);
+    }
+
+    @Test
+    void arrayOfPathsIsAcceptedVerbatim() throws IOException {
+        write(root.resolve("a/One.java"), "needle one\n");
+        write(root.resolve("b/Two.java"), "needle two\n");
+
+        final var out = tool.execute(Map.of(
+                        "pattern",
+                        "needle",
+                        "path",
+                        List.of(root.resolve("a").toString(), root.resolve("b").toString())))
+                .output();
+
+        assertTrue(out.contains("One.java"), "first array element must be searched:\n" + out);
+        assertTrue(out.contains("Two.java"), "second array element must be searched:\n" + out);
     }
 
     private static void write(final Path file, final String content) throws IOException {
