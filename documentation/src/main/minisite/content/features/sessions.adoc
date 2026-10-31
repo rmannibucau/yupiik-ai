@@ -36,6 +36,28 @@ layout (`sessions/<id>.jsonl`, root `todos-<key>.json`,
 `plans/<title>-<id>.plan.md`, `snapshots/<id>.snap`) remains readable as a
 read-only fallback; nothing is migrated or moved.
 
+== Session housekeeping
+
+At every startup (and periodically while a shell runs) yca sweeps the session
+storage:
+
+- *Expired sessions* are deleted once their last write is older than
+  `yca.sessions.retentionDays` (0 deletes unconditionally, negative disables
+  retention). Retention is about *abandoned* sessions: the session resolved for
+  the current process, and every session written in the last 24 hours, is never
+  deleted on age, so a long-lived background session is not dropped while it is
+  still being appended to.
+- *Empty sessions* (a transcript holding nothing more than the initial user
+  prompt, or nothing at all) are deleted on the same sweep - an empty session is
+  always disposable, whatever its age.
+- *Aged sessions* are gzipped once their last write is older than
+  `yca.sessions.compressDays` (their `.jsonl.gz` stays readable and resumable).
+
+Sessions are append-only: a `replace` (compaction/prune flush) first writes a
+`.bak` sibling and refuses to overwrite a session that holds content with an
+empty history, so a transient storage read error can never wipe a good
+transcript. Entry timestamps are preserved across a `replace`.
+
 == Per-tab provider and model
 
 The provider and the model are *per session*: in the TUI every tab selects its
