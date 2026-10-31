@@ -647,7 +647,10 @@ public class ConversationTranscript {
                 } else {
                     transcript.append("\n\n");
                 }
-                transcript.append(visible).append('\n');
+                // the final message is authoritative but is never persisted raw: a flash-class model
+                // can echo a bare "@N" anchor (without its closing '@') directly in the final
+                // payload and it must not freeze into the durable transcript
+                transcript.append(compression.withholdDanglingPrefix(visible)).append('\n');
             }
             thinking.setLength(0);
             inlineThink.reset();
@@ -750,7 +753,11 @@ public class ConversationTranscript {
         if (thinking.isEmpty()) {
             return;
         }
-        final var thought = thinking.toString().strip();
+        // the thinking buffer can carry a leaked bare seam anchor the live render would have
+        // withheld: scrub it on the flush path too so the durable transcript matches what
+        // was visible while it streamed
+        final var thought =
+                compression.withholdDanglingPrefix(thinking.toString()).strip();
         thinking.setLength(0);
         if (thought.isBlank()) {
             return;

@@ -507,6 +507,65 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void incompleteSeamFragmentsNeverRenderInTranscriptFrames() throws Exception {
+        // like echoedSeamFragmentsNeverRenderInTranscriptFrames but the model never closes the
+        // tag: bare anchors (@129, then @1291 fully on its own line) with a tool call in between
+        // must never render, even though they are frozen into the durable transcript mid-block
+        final var shellRegistry = testRegistry();
+        final var sessionId = new AtomicReference<String>();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionIdArg,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                sessionId.set(sessionIdArg);
+                final var sid = sessionIdArg;
+                shellRegistry.onEvent(
+                        new AgentEvent.TextDelta("Good picture forming. Let me look at the tests.\n\n@129", sid));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("0", sid));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("\n\n@1291", sid));
+                shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"git status\"}", sid));
+                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "clean", true, sid));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("done with the turn", sid));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done with the turn", sid));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-incomplete-seam-frame-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        tuiRef.get().dispatch(new PasteEvent("say hi"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("done with the turn");
+        awaitText("ready");
+        final var text = backend.text();
+        assertFalse(text.contains("@129"), "anchor fragment must not render: " + text);
+        assertFalse(text.contains("@1290"), "anchor fragment must not render: " + text);
+        assertFalse(text.contains("@1291"), "anchor fragment must not render: " + text);
+        assertTrue(text.contains("Good picture forming."), text);
+        assertTrue(text.contains("done with the turn"), text);
+        assertTrue(text.contains("git status"), text);
+        quit();
+    }
+
+    @Test
     void rendersSidebarAndAnswer() throws Exception {
         final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {

@@ -838,23 +838,23 @@ class ConversationTranscriptTest {
     }
 
     @Test
-    void flushedPendingTailKeepsWithheldFragmentHidden() {
+    void flushedPendingTailKeepsBareAnchorLineHidden() {
         // when flushPending() freezes the pending tail into the durable transcript
-        // the previously-withheld fragment must not reappear in the flushed text
+        // a leaked bare anchor line (the reported @1290-style leak) must not reappear
+        // in the flushed text even once the tool card is appended after it
         final var compression = new ContextCompression(config());
-        final var messages = List.of(Message.system("system"), Message.user("instruction"));
-        compression.publish(messages);
-        compression.renderRefs(messages);
 
         final var t = new ConversationTranscript();
         t.bindCompression(compression);
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("answer tail @1", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("Good picture forming.\n\n@1290\n\n@1291", "s1"));
         t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
 
         final var md = t.markdown("|", "welcome");
-        assertTrue(md.contains("answer tail"), md);
-        assertFalse(md.contains("@1"), "flushed fragment must stay hidden: " + md);
+        assertTrue(md.contains("Good picture forming."), md);
+        assertTrue(md.contains("ls"), md);
+        assertFalse(md.contains("@1290"), "flushed bare anchor must stay hidden: " + md);
+        assertFalse(md.contains("@1291"), "flushed bare anchor must stay hidden: " + md);
     }
 
     @Test

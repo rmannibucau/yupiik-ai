@@ -107,96 +107,48 @@ class ContextCompressionTest {
     }
 
     @Test
-    void withholdDanglingPrefixHidesOnlyPartialPrefixesOfLiveRefs() {
+    void withholdDanglingPrefixDropsBareAnchorLinesAnywhere() {
+        // the reported leak: two standalone anchors frozen mid-block once the tool block follows
         final var compression = new ContextCompression(config());
-        final var messages = List.of(Message.system("system"), Message.user("instruction"));
-        compression.publish(messages);
-        // refs are assigned by the wire builder, not scraped from message content: the user is @1@
-        compression.renderRefs(messages);
-        // a trailing '@24' (not a live ref) must be kept: it is plain content
-        assertEquals("done\n@24", compression.withholdDanglingPrefix("done\n@24"));
-        // '@1' is a strict prefix of the live '@1@', so the half-arrived fragment is withheld
-        assertEquals("reasoning about step ", compression.withholdDanglingPrefix("reasoning about step @1"));
-        // a complete live ref is removed entirely
-        assertEquals("answer used it", compression.withholdDanglingPrefix("answer @1@ used it"));
+        assertEquals(
+                "Good picture forming.\n\n\n\ntool block",
+                compression.withholdDanglingPrefix("Good picture forming.\n\n@1290\n\n@1291\n\ntool block"));
+        // a trailing bare anchor line is dropped too
+        assertEquals("done", compression.withholdDanglingPrefix("done\n@24"));
+        // leading anchor, block refs and the blocked sentinel are dropped as well
+        assertEquals("real prose", compression.withholdDanglingPrefix("@7\nreal prose"));
+        assertEquals("a\nb", compression.withholdDanglingPrefix("a\n@b7\nb"));
+        assertEquals("a\nb", compression.withholdDanglingPrefix("a\n@blocked\nb"));
+        // CRLF: the anchor line is dropped but the CR of a surviving CRLF line is kept as-is
+        assertEquals("done\r\nrest", compression.withholdDanglingPrefix("done\r\n@1290\r\nrest"));
+        assertEquals("done", compression.withholdDanglingPrefix("done\n  @1290  "));
         assertNull(compression.withholdDanglingPrefix(null));
+        assertEquals("", compression.withholdDanglingPrefix(""));
     }
 
     @Test
-    void withholdDanglingPrefixIgnoresGluedProseBeforeTheFragment() {
-        // the trailing-run scan must not walk back over the prose glued to the
-        // fragment ("answer@1"): only the token part anchored on the last '@' is a
-        // candidate, the prose before it stays visible
+    void withholdDanglingPrefixKeepsRealContentShapes() {
         final var compression = new ContextCompression(config());
-        final var messages = List.of(Message.system("system"), Message.user("instruction"));
-        compression.publish(messages);
-        compression.renderRefs(messages);
-        assertEquals("answer", compression.withholdDanglingPrefix("answer@1"));
-        // without glued prose the same fragment is still withheld
-        assertEquals("answer ", compression.withholdDanglingPrefix("answer @1"));
-    }
-
-    @Test
-    void withholdDanglingPrefixHidesStandaloneMultilineEchoWithLiveRefEvidence() {
-        // a literal newline can split the echoed seam across visual lines
-        // ("@3149\n@"): when the reconstructed token matches a live ref, both the
-        // fragment and its trailing closing delimiter line are display-only noise
-        final var compression = new ContextCompression(config());
-        final var messages = List.of(Message.system("system"), Message.user("instruction"));
-        compression.publish(messages);
-        compression.renderRefs(messages);
-        assertEquals("done\n", compression.withholdDanglingPrefix("done\n@1\n@"));
-        assertEquals("done\n", compression.withholdDanglingPrefix("done\n@1\n\n@"));
-        assertEquals("done\n", compression.withholdDanglingPrefix("done\n@1\r\n@"));
-        // no live ref matches -> real content, untouched (e.g. a fenced '@9\n@' snippet);
-        // only the lone closing '@' is withheld (partial prefix of every ref)
-        assertEquals("done\n@9\n", compression.withholdDanglingPrefix("done\n@9\n@"));
-    }
-
-    @Test
-    void withholdDanglingPrefixNeverMatchesAcrossProse() {
-        // the multiline reconstruction is only for a fragment sitting alone on its
-        // own trailing lines: prose between the fragment and the closing '@' blocks
-        // it, so the prose and the fragment line stay visible; the lone trailing '@' is
-        // withheld by the existing partial-prefix rule (strict prefix of every ref)
-        final var compression = new ContextCompression(config());
-        final var messages = List.of(Message.system("system"), Message.user("instruction"));
-        compression.publish(messages);
-        compression.renderRefs(messages);
-        assertEquals("done\n@1\nreal prose\n", compression.withholdDanglingPrefix("done\n@1\nreal prose\n@"));
-    }
-
-    @Test
-    void compactedMessageRefLeavesTheWithholdWhitelist() {
-        final var compression = new ContextCompression(config());
-        final var system = Message.system("system");
-        final var old = Message.user("old turn");
-        compression.publish(List.of(system, old));
-        compression.renderRefs(List.of(system, old));
-        // @1@ is live now -> its strict prefix '@1' is withheld
-        assertEquals("tail ", compression.withholdDanglingPrefix("tail @1"));
-        // after compaction the message leaves the wire -> @1@ no longer live -> '@1' stays as content
-        final var fresh = Message.assistant("new answer", List.of());
-        compression.publish(List.of(system, fresh));
-        compression.renderRefs(List.of(system, fresh));
+        // at-mentions / annotations lines are letters-only, not anchor tokens: untouched
+        assertEquals("@user", compression.withholdDanglingPrefix("@user"));
+        assertEquals("@RequestMapping", compression.withholdDanglingPrefix("@RequestMapping"));
+        // inline fragments glued to prose are content, not line-leading anchors
+        assertEquals("answer@1", compression.withholdDanglingPrefix("answer@1"));
+        assertEquals("answer @1", compression.withholdDanglingPrefix("answer @1"));
         assertEquals("tail @1", compression.withholdDanglingPrefix("tail @1"));
-        // the newly rendered message gets its own live seam
-        assertEquals("tail ", compression.withholdDanglingPrefix("tail @2"));
-    }
-
-    @Test
-    void seamWhitelistDoesNotFollowTheLiveWorkingList() {
-        final var compression = new ContextCompression(config());
-        final var live = new ArrayList<>(List.of(Message.system("system"), Message.user("instruction")));
-        compression.publish(live);
-        compression.renderRefs(List.copyOf(live));
-        assertEquals("tail ", compression.withholdDanglingPrefix("tail @1"));
-        // the agent keeps mutating the published list in place between rounds; the render whitelist
-        // must stay on the wire snapshot instead of walking that list
-        live.add(Message.assistant("late answer", List.of()));
-        live.clear();
-        live.add(Message.system("system"));
-        assertEquals("tail ", compression.withholdDanglingPrefix("tail @1"));
+        assertEquals("reasoning about step @1", compression.withholdDanglingPrefix("reasoning about step @1"));
+        assertEquals("check @1290 out", compression.withholdDanglingPrefix("check @1290 out"));
+        // lone '@', over-long tokens and non-token suffixes are not anchors
+        assertEquals("@", compression.withholdDanglingPrefix("@"));
+        assertEquals(
+                "@1234567890123456789012345678", compression.withholdDanglingPrefix("@1234567890123456789012345678"));
+        assertEquals("@blockedX", compression.withholdDanglingPrefix("@blockedX"));
+        // '@1' is a bare digit anchor line -> dropped; the lone trailing '@' is content
+        assertEquals("done\n@", compression.withholdDanglingPrefix("done\n@1\n@"));
+        // complete seams are still stripped first (whole-line and inline), and a bare '@9' line
+        // (shape match) is dropped even without any live ref
+        assertEquals("x\ny", compression.withholdDanglingPrefix("x\n@5@\ny"));
+        assertEquals("done\n@", compression.withholdDanglingPrefix("done\n@9\n@"));
     }
 
     @Test

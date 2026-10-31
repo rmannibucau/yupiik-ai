@@ -57,15 +57,6 @@ public final class ContextCompression {
     private static final Pattern ECHOED_REF_INLINE =
             Pattern.compile("(?<![ \t])[ \t]*+@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?");
 
-    /**
-     * Trailing multiline echoed seam: a lone fragment line ({@code @3149} or {@code @b} + digits,
-     * optionally with a trailing {@code [priority]} on the same line), followed only by empty lines
-     * and a closing lone {@code @} line at the very end of the text. Rebuilt as fragment + " " +
-     * priority so it compares against the single-line ref form.
-     */
-    private static final Pattern ECHOED_REF_MULTILINE_TAIL = Pattern.compile(
-            "[ \t]*(@[1-9]\\d*|@b[1-9]\\d*|@blocked)([ \t]+\\[(?:low|medium|high)\\])?[ \t]*\\r?\\n(?:[ \t]*\\r?\\n)*[ \t]*\\r?\\n?@[ \t]*\\r?\\n?\\z");
-
     public enum Status {
         ACTIVE,
         SUPERSEDED,
@@ -924,87 +915,97 @@ public final class ContextCompression {
     }
 
     /**
-     * Render-time view of {@code text} that, in addition to stripping complete echoed seams, also hides
-     * a trailing fragment that is a strict prefix of a live seam ref (e.g. a {@code @2} waiting for the
-     * closing {@code @} that streams in a later chunk). Runs on a copy only - the underlying buffer stays
-     * raw, so {@code flushThinking()}/{@code flushPending()} still assemble the full text and a completed
+     * Render-time view of {@code text} that, in addition to stripping complete echoed seams, also
+     * hides the bare-anchor lines a flash-class model emits as partial echoes (e.g. {@code @1290} or
+     * {@code @b7} without their closing {@code @}) - whether trailing or frozen mid-block once a
+     * tool block follows. Runs on a copy only - the underlying buffer stays raw, so
+     * {@code flushThinking()}/{@code flushPending()} still assemble the full text and a completed
      * tag is stripped normally.
      *
-     * <p>This is evidence-gated to stay safe: the withheld tail must be a strict prefix of a ref the live
-     * conversation actually renders. An arbitrary trailing {@code @123} whose full {@code @123@} is not a
-     * live ref is left untouched, so real content is never removed.
+     * <p>This is deliberately <em>shape</em>-driven, not evidence-gated against {@link #renderedRefs}:
+     * a leaked anchor always refers to a ref the current wire no longer renders (the wire moves on as
+     * compaction happens, or the message left it), so a live-ref whitelist would leave exactly the
+     * anchors this surface exists to hide. The anchor shape is narrow enough to be safe: a line whose
+     * trimmed content starts with {@code @} followed by a short token (1..24 chars) that is all
+     * digits, {@code b} + digits, or the literal {@code blocked}. Real markdown lines (@user,
+     * @RequestMapping), lone {@code @}, over-long tokens, inline/glued fragments ("answer@1") and
+     * fenced prose are untouched.
      *
-     * <p>Lock-free on purpose: the refs come from the immutable {@link #renderedRefs} snapshot, so a
-     * render thread never waits on, or iterates, the agent-owned {@link #published} list.
+     * <p>Lock-free on purpose: it only reads the immutable {@link #renderedRefs} snapshot (or
+     * nothing), never the agent-owned {@link #published} list.
      */
     public String withholdDanglingPrefix(final String text) {
         if (text == null) {
             return null;
         }
-        var stripped = stripEchoedRefs(text);
-        stripped = withholdMultilineEcho(stripped);
-        final var refs = renderedRefs;
-        // take the trailing contiguous run of seam-token characters ([@A-Za-z0-9]); if it is a strict
-        // prefix of a live ref it is the half-arrived part of that seam, so withhold it from the copy.
-        // The run is anchored on the last '@' of the string: prose glued in front of the fragment
-        // ("answer@1") is content, not part of the token, and must stay visible
-        var i = stripped.length();
-        var lastAt = -1;
-        while (i > 0) {
-            final var c = stripped.charAt(i - 1);
-            if (Character.isLetterOrDigit(c)) {
-                i--;
-            } else if (c == '@') {
-                i--;
-                if (lastAt < 0) {
-                    lastAt = i;
-                }
-            } else {
-                break;
-            }
-        }
-        if (i == stripped.length()) {
-            return stripped;
-        }
-        // anchor the candidate on the last '@' so the tail is always '@'-led or pure digits
-        // following one; "answer@1" keeps the prose and only tests "@1"
-        final var tail = stripped.substring(lastAt < 0 ? i : lastAt);
-        for (final var ref : refs) {
-            if (tail.length() < ref.length() && ref.startsWith(tail)) {
-                return stripped.substring(0, lastAt < 0 ? i : lastAt);
-            }
-        }
-        return stripped;
+        return stripBareAnchorLines(stripEchoedRefs(text));
     }
 
     /**
-     * Hides a seam token a model emitted literally split across lines (e.g. {@code @3149\n@}):
-     * a fragment standing alone on its own trailing line, optionally separated from the closing
-     * {@code @} by empty lines, whose reconstruction matches a live ref is display noise. Evidence
-     * -gated: without a live-ref match the text is real content and stays untouched, and prose
-     * between the fragment and the closing {@code @} blocks the reconstruction.
+     * Drops every line that looks like a leaked seam-anchor fragment anywhere in the text - not just
+     * at the tail, so a fragment frozen mid-block (followed by a tool card) is still hidden.
+     * Extremely cheap on purpose: one manual pass over the existing {@code \n} spans, no auxiliary
+     * matcher objects, no per-line regex runs.
      */
-    private String withholdMultilineEcho(final String text) {
-        final var closing = text.lastIndexOf('@');
-        if (closing < 0) {
-            return text;
+    private static String stripBareAnchorLines(final String text) {
+        final var sb = new StringBuilder(text.length());
+        var lineStart = 0;
+        while (lineStart <= text.length()) {
+            final var newline = text.indexOf('\n', lineStart);
+            final var lineEnd = newline < 0 ? text.length() : newline;
+            final var line = text.substring(lineStart, lineEnd);
+            if (!isBareSeamAnchorLine(line)) {
+                if (sb.length() > 0) {
+                    sb.append('\n');
+                }
+                sb.append(line);
+            }
+            if (newline < 0) {
+                break;
+            }
+            lineStart = newline + 1;
         }
-        final var fragment = text.lastIndexOf('@', closing - 1);
-        if (fragment < 0) {
-            return text;
+        return sb.toString();
+    }
+
+    /** Cheap shape test for a leaked seam-anchor line: see {@link #withholdDanglingPrefix}. */
+    private static boolean isBareSeamAnchorLine(final String line) {
+        var i = 0;
+        while (i < line.length() && (line.charAt(i) == ' ' || line.charAt(i) == '\t' || line.charAt(i) == '\r')) {
+            i++; // leading blanks (and CR before LF) are display padding, never part of the token
         }
-        final var lineStart = text.lastIndexOf('\n', fragment - 1) + 1;
-        final var matcher = ECHOED_REF_MULTILINE_TAIL.matcher(text).region(lineStart, text.length());
-        if (!matcher.matches()) {
-            return text;
+        if (i >= line.length() || line.charAt(i) != '@') {
+            return false;
         }
-        // rebuilt as the single-line form; a trailing [priority] is display-only and ignored
-        final var rebuilt = matcher.group(1) + "@";
-        for (final var ref : renderedRefs) {
-            if (rebuilt.equals(ref)) {
-                return text.substring(0, matcher.start(1));
+        i++;
+        final var tokenStart = i;
+        while (i < line.length() && Character.isLetterOrDigit(line.charAt(i))) {
+            i++;
+        }
+        final var tokenEnd = i;
+        while (i < line.length() && (line.charAt(i) == ' ' || line.charAt(i) == '\t' || line.charAt(i) == '\r')) {
+            i++; // trailing blanks are display padding too
+        }
+        if (i != line.length()) {
+            return false; // anything else on the line (prose, punctuation) means real content
+        }
+        final var token = line.substring(tokenStart, tokenEnd);
+        if (token.isEmpty() || token.length() >= 25) {
+            return false;
+        }
+        if (isAllDigits(token)) {
+            return true;
+        }
+        return (token.charAt(0) == 'b' && token.length() > 1 && isAllDigits(token.substring(1)))
+                || token.equals("blocked");
+    }
+
+    private static boolean isAllDigits(final String token) {
+        for (var i = 0; i < token.length(); i++) {
+            if (!Character.isDigit(token.charAt(i))) {
+                return false;
             }
         }
-        return text;
+        return true;
     }
 }
