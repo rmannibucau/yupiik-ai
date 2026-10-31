@@ -1596,6 +1596,163 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void transientWarnNoticeAutoClearsOnNextSuccessfulRequest() throws Exception {
+        // a recoverable WARN notice (mid-stream retry) pins the banner, but a subsequent successful
+        // LlmRequestCompleted proves the retry healed it: the banner must not linger for the session
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-warn-transient-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        frontend.onEvent(new AgentEvent.Notice(
+                AgentEvent.Notice.Level.WARN,
+                "Stream interrupted (broken pipe); retrying (1/3).",
+                null,
+                sessionId,
+                null,
+                null,
+                new IOException("broken pipe")));
+
+        awaitText("✗ Stream interrupted (broken pipe)");
+
+        // the retry then succeeds: the banner must clear itself
+        frontend.onEvent(new AgentEvent.LlmRequestCompleted(new Usage(0, 0, 0), "test-model", 1, sessionId));
+        awaitNoText("✗ Stream interrupted (broken pipe)");
+        awaitText("ready");
+
+        quit();
+    }
+
+    @Test
+    void errorNoticeStaysPinnedUntilDismissed() throws Exception {
+        // an ERROR-level notice (a real give-up) must stay pinned even when a later request succeeds:
+        // only an explicit dismiss (Alt+X, Esc, clicking the ✖) or the next submit clears it
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-error-pinned-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        frontend.onEvent(new AgentEvent.Notice(
+                AgentEvent.Notice.Level.ERROR,
+                "model returned an empty completion (finish_reason=stop); gave up.",
+                null,
+                sessionId,
+                null,
+                null,
+                null));
+
+        awaitText("✗ model returned an empty completion");
+
+        // a successful request must NOT clear a persistent error
+        frontend.onEvent(new AgentEvent.LlmRequestCompleted(new Usage(0, 0, 0), "test-model", 1, sessionId));
+        awaitText("✗ model returned an empty completion");
+
+        // Alt+X dismisses it
+        tuiRef.get().dispatch(KeyEvent.ofChar('x', KeyModifiers.ALT));
+        awaitNoText("✗ model returned an empty completion");
+
+        quit();
+    }
+
+    @Test
+    void errorBannerCloseXIsClickable() throws Exception {
+        // the leading "✖ " of the banner is a click target: a left press dismisses the error
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-error-x-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        shellRegistry
+                .active(sessionId)
+                .frontend()
+                .onEvent(new AgentEvent.Notice(
+                        AgentEvent.Notice.Level.WARN,
+                        "Stream interrupted (broken pipe); retrying (1/3).",
+                        null,
+                        sessionId,
+                        null,
+                        null,
+                        new IOException("broken pipe")));
+
+        awaitText("✗ Stream interrupted (broken pipe)");
+        // the status-slot trailing line carries "✗ Stream interrupted"; the boxed banner is 2 rows
+        // below it (the status line, the box's top border, then the banner text row which holds the
+        // clickable "✖" at the box content col). Locate the banner text row and its ✖ column.
+        final var statusRow = rowOf("✗ Stream interrupted");
+        final var bannerRow = statusRow + 2;
+        final var lines = backend.text().split("\n");
+        final var bannerCol = lines[bannerRow].indexOf("✖");
+
+        // a press on the banner's ✖ itself clears the error
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, bannerCol, bannerRow));
+        awaitTextGone("✗ Stream interrupted (broken pipe)");
+
+        // re-pin: a press further into the banner body (not on the ✖) must NOT dismiss it
+        shellRegistry
+                .active(sessionId)
+                .frontend()
+                .onEvent(new AgentEvent.Notice(
+                        AgentEvent.Notice.Level.WARN,
+                        "Stream interrupted (broken pipe); retrying (2/3).",
+                        null,
+                        sessionId,
+                        null,
+                        null,
+                        new IOException("broken pipe")));
+        awaitText("✗ Stream interrupted (broken pipe)");
+        final var row2 = rowOf("✗ Stream interrupted");
+        final var col2 = lines[row2 + 2].indexOf("✖");
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, col2 + 8, row2 + 2));
+        awaitText("✗ Stream interrupted (broken pipe)");
+
+        quit();
+    }
+
+    @Test
+    void escDismissesErrorBannerInIdleState() throws Exception {
+        // with nothing more specific open, Esc also clears a lingering error banner
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-error-esc-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        shellRegistry
+                .active(sessionId)
+                .frontend()
+                .onEvent(new AgentEvent.Notice(
+                        AgentEvent.Notice.Level.ERROR, "mode switch failed: boom", null, sessionId, null, null, null));
+
+        awaitText("✗ mode switch failed: boom");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitNoText("✗ mode switch failed: boom");
+        awaitText("ready");
+
+        quit();
+    }
+
+    @Test
     void pauseRendersInTrailingInfoSlotAndLeavesLeadingStatusUntouched() throws Exception {
         // provider-imposed delays (throttle/retry backoff) are transient side feedback: they must
         // land in the trailing ⓘ notification slot (right side) and never replace the leading

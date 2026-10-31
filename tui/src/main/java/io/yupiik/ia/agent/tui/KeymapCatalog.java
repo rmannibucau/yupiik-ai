@@ -74,8 +74,9 @@ public final class KeymapCatalog {
                 new Binding("Ctrl+X", "remove queued prompt", "Session", false),
                 new Binding("Ctrl+E", "show last error", "Session", false),
                 new Binding("Ctrl+C", "interrupt / quit", "Session", true),
+                new Binding("Alt+X", "dismiss error banner", "Overlays", false),
                 // overlays
-                new Binding("Esc", "close / cancel", "Overlays", true),
+                new Binding("Esc", "close / cancel / dismiss error", "Overlays", true),
                 new Binding("n/N", "next/previous match", "Overlays", false),
                 new Binding("1/2/3", "deny / allow / always", "Overlays", false));
     }

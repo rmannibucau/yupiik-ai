@@ -1494,11 +1494,29 @@ public class TuiCommand implements Runnable {
             // the trailing error slot (same as the web renders WARN prominently in red), keeping the
             // leading agent state (working) untouched. WARNs were previously only a muted inline
             // transcript line, which made background failures (eg. memory extraction) easy to miss.
-            modelError(state, notice.message(), notice.cause());
+            //
+            // An ERROR-level notice is a permanent failure the user must acknowledge, so it pins the
+            // banner until dismissed (Alt+X / Esc / clicking the ✖) or the next submit. A WARN notice,
+            // by contrast, is often a recoverable, self-healing condition (a mid-stream retry, an
+            // empty-completion retry, a compaction nudge...) that may resolve on the next request:
+            // it is recorded as a transient error so a subsequent successful LlmRequestCompleted
+            // auto-clears it instead of leaving a stale, unclosable banner on screen.
+            final var transient_ = notice.level() == AgentEvent.Notice.Level.WARN;
+            modelError(state, notice.message(), notice.cause(), transient_);
             final var leading = state.model.status();
             state.model.onEvent(event);
             state.model.status(leading);
         } else {
+            // a successful main LLM request proves the recoverable (transient) error is healed: if the
+            // banner came from a retry/self-healing WARN notice, drop it now so it does not linger for
+            // the rest of the session. Persistent errors (ERROR notices, turn failures) are never
+            // auto-cleared here.
+            if (event instanceof AgentEvent.LlmRequestCompleted
+                    && state.errorMessage != null
+                    && state.errorDetail != null
+                    && state.errorDetail.transient_()) {
+                clearError(state);
+            }
             state.model.onEvent(event);
         }
         if (event instanceof AgentEvent.ToolStarted started) {
@@ -1784,6 +1802,12 @@ public class TuiCommand implements Runnable {
                     state.shortcutsScroll = 0;
                     return true;
                 }
+                // error banner: clicking its leading "✖ " dismisses the error
+                if (state.errorCloseRect != null && state.errorCloseRect.contains(mouse.x(), mouse.y())) {
+                    state.selection.clear();
+                    clearError(state);
+                    return true;
+                }
                 // queued prompts: clicking a queued row removes it
                 for (var i = 0; i < state.queueRects.size(); i++) {
                     if (state.queueRects.get(i).contains(mouse.x(), mouse.y())) {
@@ -2023,6 +2047,10 @@ public class TuiCommand implements Runnable {
             state.errorScroll = 0;
             return true;
         }
+        if (key.hasAlt() && key.isCharIgnoreCase('x') && state.errorDetail != null) {
+            clearError(state);
+            return true;
+        }
         if (key.hasCtrl() && key.isCharIgnoreCase('x') && !state.pendingPrompts.isEmpty()) {
             removeQueued(state, state.pendingPrompts.size() - 1);
             return true;
@@ -2078,6 +2106,12 @@ public class TuiCommand implements Runnable {
             }
             if (state.selection.hasSelection()) {
                 state.selection.clear();
+                return true;
+            }
+            // no more-specific overlay open and no selection: Esc also dismisses a lingering error banner,
+            // matching the "Esc closes / cancels" convention from the keymap
+            if (state.errorDetail != null) {
+                clearError(state);
                 return true;
             }
             if (state.model.busy()) {
@@ -6148,6 +6182,8 @@ public class TuiCommand implements Runnable {
 
     private void renderStatus(
             final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state, final boolean narrow) {
+        // reset the error-banner close zone each frame: it is meaningful only while a banner is drawn below
+        state.errorCloseRect = null;
         final var statusColor = Color.hex(
                 activeError(state) ? palette.error() : (state.model.busy() ? palette.warning() : palette.success()));
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
@@ -6320,6 +6356,9 @@ public class TuiCommand implements Runnable {
             frame.renderWidget(errBlock, bannerRect);
             final var inner = errBlock.inner(bannerRect);
             if (!inner.isEmpty()) {
+                // the leading "✖ " glyph is the click-to-dismiss target: register its hit rect so a press
+                // on the banner's close marker clears the error instead of starting a selection
+                state.errorCloseRect = new Rect(inner.x(), inner.y(), CharWidth.of(glyphs.cross()) + 1, inner.height());
                 frame.renderWidget(
                         Paragraph.builder()
                                 .text(Text.from(err))
@@ -7717,10 +7756,21 @@ public class TuiCommand implements Runnable {
         modelError(state, message, null);
     }
 
-    /** Records an error: persisted detail (message + stack) openable with Alt+E; the status strip shows it in red. */
+    /** Records a persistent error: persisted detail (message + stack) openable with Alt+E; the status strip shows it in red. */
     private static void modelError(final UiState state, final String message, final Throwable error) {
+        modelError(state, message, error, false);
+    }
+
+    /**
+     * Records an error: persisted detail (message + stack) openable with Alt+E; the status strip shows it
+     * in red. When {@code transient_} is true the banner is auto-cleared once the next request succeeds
+     * (recoverable retry notices), otherwise it stays until dismissed (Alt+X / Esc / clicking the ✖) or
+     * the next submit - see {@code onEvent}.
+     */
+    private static void modelError(
+            final UiState state, final String message, final Throwable error, final boolean transient_) {
         state.errorMessage = message;
-        state.errorDetail = new UiState.ErrorDetail(message, error == null ? null : stackTraceOf(error));
+        state.errorDetail = new UiState.ErrorDetail(message, error == null ? null : stackTraceOf(error), transient_);
         state.errorScroll = 0;
     }
 
@@ -8873,8 +8923,15 @@ public class TuiCommand implements Runnable {
             }
         }
 
-        /** Persisted detail of the last error (message + optional stack trace) for the Alt+E modal. */
-        private record ErrorDetail(String message, String stack) {}
+        /**
+         * Persisted detail of the last error (message + optional stack trace) for the Alt+E modal.
+         *
+         * @param transient_ true when the error comes from a recoverable, self-healing notice (eg. a
+         *                   mid-stream retry): such a banner is auto-cleared once the next request
+         *                   actually succeeds. Persistent errors (ERROR notices, agent turn failures,
+         *                   SEVERE logs) set it to false and stay until dismissed or the next submit.
+         */
+        private record ErrorDetail(String message, String stack, boolean transient_) {}
 
         /** Screen hit-area of a rendered tool card header (click to collapse/expand, Alt+Up/Down to navigate). */
         private record ToolAnchor(long ordinal, Rect header, int row, boolean runMember) {}
@@ -9105,6 +9162,12 @@ public class TuiCommand implements Runnable {
         private volatile boolean shortcutsOpen;
         private volatile int shortcutsScroll;
         private volatile Rect shortcutRect;
+        /**
+         * Screen rect of the leading ✖ glyph in the error banner (the click-to-dismiss target),
+         * recorded by the render thread so the event thread can hit-test a press and clear the
+         * error. {@code null} while no error banner is drawn.
+         */
+        private volatile Rect errorCloseRect;
         /** Subagents overlay: null when closed, the detail id when showing one subagent, empty for the list. */
         private volatile String subagentsOverlay = null;
 
