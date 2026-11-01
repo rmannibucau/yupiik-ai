@@ -60,8 +60,10 @@ trigger = context window - max(15% of the window, 16000 tokens)
 
 On a 1M-token model the trigger is at `850k` tokens.
 On a 128k-token model it is at `108.8k` tokens.
-The trigger uses the raw context window, not the usable window, because the
-buffer is what leaves room for the completion and for the summarizer overhead.
+The trigger uses the raw context window with a safety buffer that leaves room
+for the completion, then clamps to the usable window (the context window minus
+the declared output-token reserve), so the gauge can never sit above 100%
+without tripping an automatic compaction.
 
 When it fires, yca summarizes the old conversation, keeps a verbatim tail
 (`yca.compaction.tailBudgetTokens`, default `15000`), and replaces the old
@@ -72,6 +74,31 @@ If the provider rejects the request because the input is too large, yca
 compacts once and retries the request; if the retry still overflows, the
 oldest tail messages are spliced to their head and tail
 (`yca.compaction.overflowSpliceChars`, default `500`).
+A transient summarizer failure (5xx/network after retries and the optional
+main-model fallback) skips the pass and keeps the raw context so the next
+automatic compaction retries from a clean state, unless the compaction was
+requested with the `urgent` option below.
+
+=== Manual compaction
+
+`/compact` runs the same compaction on demand:
+
+[source,text]
+----
+/compact [force] [urgent] [keep=<n>]
+----
+
+`force` bypasses the within-budget guard so compaction runs even below the
+thresholds (tighter keep floors, halved tail budget).
+`keep=<n>` raises the verbatim tail floor to at least `n` recent messages
+(0 = the configured default).
+`urgent` opts into a destructive fallback: when the summarizer fails
+transiently after all retries and the optional main-model fallback, an urgent
+compaction truncates the old messages locally instead of skipping the pass, so
+a user explicitly reclaiming context near the window edge is never left stuck
+above the budget by a flaky provider.
+Without `urgent`, a summarizer failure keeps the raw context untouched and
+reports the failure.
 
 [cols="2,1,3",opts=headers]
 |===
