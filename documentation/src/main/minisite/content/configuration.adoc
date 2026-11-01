@@ -25,7 +25,7 @@ Configuration is resolved from, highest priority first:
 [mermaid]
 ....
 flowchart TD
-    A["CLI arguments (--yca-<key> <value>)"] -->
+    A["CLI arguments (--yca-key value)"] -->
     B["project-local ./.yca/configuration.json"] -->
     C["global ~/.yupiik/coding-agent/configuration.json"] -->
     D["system properties (yca.*)"] -->
@@ -513,11 +513,17 @@ xref:features/context.adoc[Context management].
 
 == Global configuration
 
+++++
+include::content/_partials/configuration-filter.adoc[]
+++++
+
 `yca.*` options:
 
 [role="config-list"]
 --
 include::content/_partials/generated/documentation.core.adoc[]
+include::content/_partials/generated/documentation.tui.adoc[]
+include::content/_partials/generated/documentation.web.adoc[]
 --
 
 == Structural code graph doc tree

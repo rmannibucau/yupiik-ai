@@ -1,0 +1,77 @@
+= llm-client-codex
+:minisite-nav-prev-link: llm-client-anthropic.html
+:minisite-nav-prev-label: llm-client-anthropic
+:minisite-breadcrumb: Home[index.html] > Libraries > LLM client > llm-client-codex
+:minisite-keywords: llm, codex, chatgpt, responses, oauth, dialect
+
+Artifact `io.yupiik.llm:llm-client-codex` implements the `Dialect` SPI for the
+ChatGPT-subscription Codex backend (`chatgpt.com/backend-api/codex`). Its
+dependencies mirror the OpenAI module (`llm-client-api` plus `llm-client-openai`
+and the Fusion build), and the annotation processor generates
+`io.yupiik.llm.client.codex.CodexModule`.
+
+== Dialect
+
+The wire format of the Codex backend is exactly the OpenAI Responses API, so a
+single `CodexDialect` extends `OpenAIResponsesDialect` unchanged and only adjusts
+the routing identifier, the chat route and the model catalog source. It targets
+`{base}/responses` (the provider base URL is typically
+`https://chatgpt.com/backend-api/codex/responses`) and exposes the `"codex"`
+dialect name. Streaming, tool calls and reasoning deltas therefore map exactly as
+they do for `/responses`.
+
+Unlike the OpenAI flavors, auth is not a simple Bearer API key: `CodexDialect`
+relies on the ChatGPT-subscription OAuth flow. The module ships the
+device/browser OAuth flow with lazy token refresh and rotation, the
+`CodexTokenStore`, and Codex Agent Identity support for enterprise (3p)
+delegated-access enrollment.
+
+== Models
+
+The model catalog is not served by the public OpenAI `/v1/models` endpoint but
+by the Codex backend at `{base}/models?client_version=N`, in a different shape:
+an object with a `models` array of catalog entries carrying `visibility`,
+`supported_in_api` and `minimal_client_version`. `CodexDialect` filters these
+before exposing them as `LlmModel`s, keeping only the entries that are selectable,
+API-backed and usable with the advertised client version. Costs are zero because
+the subscription is plan-included.
+
+== Getting started
+
+[source,xml]
+----
+<dependency>
+  <groupId>io.yupiik.llm</groupId>
+  <artifactId>llm-client-codex</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+</dependency>
+----
+
+== Usage
+
+Wire a single `CodexDialect`, injecting the shared Fusion `JsonMapper` and
+`ExtendedHttpClient`. The base URL passed to `ProviderSpec` should end in
+`.../codex/responses`; the dialect routes the chat request there and derives the
+model catalog endpoint from it:
+
+[source,java]
+----
+final var mapper = getJsonMapper();
+final var client = getHttpClient();
+
+final var spec = ProviderSpec.of(
+        "https://chatgpt.com/backend-api/codex/responses", "<chatgpt-oauth>");
+final var codex = new CodexDialect(mapper, client, spec);
+System.out.println(codex.name()); // "codex"
+----
+
+During the OAuth flow a bearer token is not yet available; use the module's OAuth
+client (device or browser flow) to enroll and obtain the token that the dialect
+then refreshes lazily.
+
+== yca integration
+
+In yca the codex provider is configured through `flavor: codex` for a provider
+pointing at the Codex base URL, and the `/codex login` command drives the OAuth
+enrollment. See the provider configuration and custom-headers documentation for
+the full setup.

@@ -64,13 +64,6 @@
           <includeProvidedScope>true</includeProvidedScope>
           <customScripts><![CDATA[
 <style>
-#config-filter {
-  width: 100%; box-sizing: border-box;
-  padding: .45em .6em; margin-bottom: .8em;
-  border: 1px solid var(--border-color, #ccc); border-radius: 4px;
-  background: var(--background, #fff); color: currentColor; font: inherit;
-}
-.config-no-match { display: block; font-style: italic; opacity: .8; margin-top: .5em; }
 /* mermaid diagrams: the renderer emits a bare <pre class="mermaid"> (roles are
    dropped by visitMermaid), so center diagrams and let them take the full
    available width via a global rule on the pre and its svg. */
@@ -89,46 +82,9 @@ pre.mermaid svg {
   height: auto;
   margin: 0 auto;
 }
+/* definition-list terms (generated option/command references) */
+dt.hdlist1 { font-weight: 600; }
 </style>
-<script>
-(function () {
-  var section = document.querySelector('#_global_configuration .sectionbody');
-  if (!section || document.getElementById('config-filter')) { return; }
-  var input = document.createElement('input');
-  input.type = 'search';
-  input.id = 'config-filter';
-  input.placeholder = 'Type to filter the options below by key, for example provider, mcp or contextWindow.';
-  input.autocomplete = 'off';
-  section.insertBefore(input, section.firstChild);
-  var polish = function (s) { return (s || '').toLowerCase().replace(/[^a-z0-9.]+/g, ''); };
-  var apply = function () {
-    var q = polish(input.value);
-    document.querySelectorAll('.config-list dl').forEach(function (dl) {
-      var visible = 0;
-      var noMatch = dl.querySelector('.config-no-match');
-      dl.querySelectorAll('dt.hdlist1').forEach(function (dt) {
-        var dd = dt.nextElementSibling;
-        var show = !q || polish(dt.textContent).indexOf(q) !== -1;
-        dt.style.display = show ? '' : 'none';
-        if (dd && dd.tagName === 'DD') { dd.style.display = show ? '' : 'none'; }
-        if (show) { visible++; }
-      });
-      if (visible === 0) {
-        if (!noMatch) {
-          noMatch = document.createElement('p');
-          noMatch.className = 'config-no-match';
-          noMatch.textContent = 'No option matches the filter.';
-          dl.appendChild(noMatch);
-        }
-        noMatch.style.display = '';
-      } else if (noMatch) {
-        noMatch.style.display = 'none';
-      }
-    });
-  };
-  input.addEventListener('input', apply);
-})();
-</script>
 <script>
 // Mermaid diagrams ([mermaid] blocks render to <pre class="mermaid">). The
 // asciidoc renderer only injects its mermaid CDN auto-run script when it emits
@@ -143,14 +99,26 @@ pre.mermaid svg {
       var theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default';
       mermaid.initialize({ startOnLoad: false, theme: theme, securityLevel: 'loose' });
       var blocks = document.querySelectorAll('pre.mermaid');
-      Array.prototype.forEach.call(blocks, function (el) { el.removeAttribute('data-processed'); });
+      Array.prototype.forEach.call(blocks, function (el) {
+        // the minisite theme injects a copy button into every <pre>; it must not
+        // become part of the diagram text mermaid parses.
+        Array.prototype.slice.call(el.querySelectorAll('button.copy-code-button')).forEach(function (b) { b.remove(); });
+        // first pass: keep the pristine diagram source so the theme toggle can re-render.
+        // mermaid replaces the node content with the rendered <svg>, so restore the
+        // original text before mermaid.run or it would parse the SVG markup as a diagram.
+        if (!el.__mermaidSource) { el.__mermaidSource = el.textContent; }
+        el.textContent = el.__mermaidSource;
+        el.removeAttribute('data-processed');
+      });
       mermaid.run({ nodes: Array.prototype.slice.call(blocks) }).catch(function (e) { console.warn('mermaid render error', e); });
     } catch (e) { console.warn('mermaid init error', e); }
   }
   function loadMermaid() {
     if (window.mermaid) { runMermaid(); return; }
     var s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+    s.src = 'https://cdn.jsdelivr.net/npm/mermaid@12.2.0/dist/mermaid.min.js';
+    s.integrity = 'sha256-qKam+AWwdKgmGiglyG+ZyAVKyzs19Qu34kpPnyw8O58=';
+    s.crossOrigin = 'anonymous';
     s.onload = runMermaid;
     s.onerror = function () { console.warn('could not load mermaid'); };
     document.head.appendChild(s);

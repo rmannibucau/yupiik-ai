@@ -349,10 +349,6 @@ yca is a terminal coding agent backed by any OpenAI-compatible endpoint.
       </div>
     </div>
   </div>
-
-      </div>
-    </div>
-  </div>
 </div>
 ++++
 

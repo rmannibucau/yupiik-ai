@@ -1,16 +1,17 @@
 = CLI
 :minisite-index: 150
 :minisite-index-title: CLI
-:minisite-index-description: The tui interactive interface and the run headless command.
+:minisite-index-description: The cli, tui and web interactive frontends and the run headless command.
 :minisite-index-icon: terminal
-:minisite-keywords: cli, tui, run, commands
+:minisite-keywords: cli, tui, web, run, commands
 :minisite-breadcrumb: Home[index.html] > CLI
 :minisite-nav-next-link: cli/index.html
 :minisite-nav-next-label: All commands
 
-yca splits its CLI into two interactive frontends and automation-oriented
-commands. The `cli` and `tui` commands each start a session in front of the same
-agent:
+yca exposes a single agent core through three interactive frontends plus
+automation-oriented commands. The `cli`, `tui` and `web` commands each start a
+session in front of the same agent - same prompts, same tools, same slash
+commands, same session store:
 
 * `cli` is a plain-terminal REPL: streamed ANSI-colored output, sessions, todos,
   approval/feedback gates and slash commands. `Ctrl-C` while a turn runs opens an
@@ -21,6 +22,13 @@ agent:
   is aborted at its next checkpoint - the transcript is not marked as an error.
 * `tui` is a full-screen interface (TamboUI): markdown transcript, token gauges,
   a thinking stream, approval modals and an editable plan (`/editplan`).
+* `web` serves a browser frontend (plus the JSON-RPC/SSE API behind it) on the
+  configured host and port, opening the browser on start by default. The UI
+  keeps one tab per session with the same sidebar as the terminals: model,
+  provider, mode, todos, working directory, git branch, a context usage bar and
+  the provider usage/quota gauges. Slash commands are dispatched through the
+  same server-side path as the terminal frontends, and `web --session a --session
+  b` restores the given sessions in their own tabs on boot.
 
 For automation, `run` executes a single headless prompt and prints the result on
 stdout. `completion bash` generates the bash completion script. `code-graph-index`
@@ -34,7 +42,10 @@ key rendered empty when absent, 2 arguments add the default). Speaker labels
 are UI-only: the LLM keeps its hardcoded `user`/`assistant` roles.
 
 The complete generated reference for every command and its options (including
-`cli.*`, `tui.*` and `run.*`) is on the xref:cli/index.adoc[All commands] page.
+`cli.*`, `tui.*`, `web.*` and `run.*`) is on the xref:cli/index.adoc[All commands]
+page: xref:cli/cli.adoc[cli], xref:cli/tui.adoc[tui], xref:cli/web.adoc[web],
+xref:cli/run.adoc[run], xref:cli/completion-bash.adoc[completion bash] and
+xref:cli/code-graph-index.adoc[code-graph-index].
 
 Example:
 
@@ -48,14 +59,15 @@ java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatja
 TIP: The structural code graph (enabled by default) uses the `javac` API and
 therefore needs a JDK (not a plain JRE). No extra JVM flags are required.
 
-TUI options (`tui.*`), cli options (`cli.*`) and run options (`run.*`) are
-documented on their xref:cli/index.adoc[command pages].
+TUI options (`tui.*`), cli options (`cli.*`), web options (`web.*`) and run
+options (`run.*`) are documented on their xref:cli/index.adoc[command pages].
 
 == Slash commands
 
-Both the `tui` and `cli` interactive sessions expose slash commands. The same
-command name may behave slightly differently in each interface (for example the
-TUI opens a picker when the argument is omitted). The lists below are generated
+Both the `tui` and `cli` interactive sessions expose slash commands; the `web`
+frontend dispatches them through the same server-side path. The same command
+name may behave slightly differently in each interface (for example the TUI
+opens a picker when the argument is omitted). The lists below are generated
 from the application.
 
 include::content/_partials/generated/slash-commands.adoc[]
