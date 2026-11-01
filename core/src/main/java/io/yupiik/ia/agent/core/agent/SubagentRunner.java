@@ -20,6 +20,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
@@ -69,6 +70,7 @@ public class SubagentRunner {
     protected final MavenRepositoryKnowledgeService mavenRepositoryKnowledge;
     protected final Clock clock;
     protected final PrecisionDurationMarkerProvider precisionDurationMarker;
+    protected final BackoffSleeper backoffSleeper;
     protected final ExecutorService executor;
     protected final SubagentRegistry subagentRegistry;
     protected final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
@@ -92,6 +94,7 @@ public class SubagentRunner {
             final ExecutorService executor,
             final SubagentRegistry subagentRegistry,
             final PrecisionDurationMarkerProvider precisionDurationMarker,
+            final BackoffSleeper backoffSleeper,
             final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor,
             final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore) {
         this.chatClient = chatClient;
@@ -111,6 +114,7 @@ public class SubagentRunner {
         this.executor = executor;
         this.subagentRegistry = subagentRegistry;
         this.precisionDurationMarker = precisionDurationMarker;
+        this.backoffSleeper = backoffSleeper;
         this.secretRedactor = secretRedactor;
         this.quotaStore = quotaStore;
     }
@@ -133,6 +137,7 @@ public class SubagentRunner {
         this.executor = null;
         this.subagentRegistry = null;
         this.precisionDurationMarker = null;
+        this.backoffSleeper = null;
         this.secretRedactor = null;
         this.quotaStore = null;
     }
@@ -278,7 +283,13 @@ public class SubagentRunner {
                 secretRedactor);
         final var subagentContextView = new ContextView(configuration.compression());
         final var subagentCompactionCoordinator = new CompactionCoordinator(
-                configuration, chatClient, subagentUsageTracker, providerManager, emitter, state.parentSessionId());
+                configuration,
+                chatClient,
+                subagentUsageTracker,
+                providerManager,
+                emitter,
+                state.parentSessionId(),
+                backoffSleeper);
         final var subagentContextManager =
                 new ContextManager(configuration, subagentUsageTracker, subagentCompactionCoordinator);
 

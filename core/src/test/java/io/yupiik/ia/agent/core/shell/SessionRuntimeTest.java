@@ -25,6 +25,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -80,6 +81,7 @@ class SessionRuntimeTest {
                 null,
                 Clock.systemUTC(),
                 new PrecisionDurationMarkerProvider(),
+                new BackoffSleeper(),
                 null,
                 null,
                 null, // memory production policy

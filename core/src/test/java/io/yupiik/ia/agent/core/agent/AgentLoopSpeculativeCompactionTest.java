@@ -25,6 +25,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
@@ -211,7 +212,9 @@ class AgentLoopSpeculativeCompactionTest {
             }
         };
         final var manager = new ContextManager(
-                config, usage, new CompactionCoordinator(config, client, usage, providers, emitter, "s1"));
+                config,
+                usage,
+                new CompactionCoordinator(config, client, usage, providers, emitter, "s1", new BackoffSleeper()));
         return new AgentLoop(
                 client,
                 new ToolRegistry(null) {

@@ -86,6 +86,7 @@ class SessionRuntimeFactoryTest {
     void noStoreNorConfigReturnsNull() {
         final var factory = new SessionRuntimeFactory(
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
+                null, // backoff sleeper
                 null, null, // memory production policy
                 null, // quota store
                 null, null);
@@ -104,6 +105,7 @@ class SessionRuntimeFactoryTest {
     private static SessionRuntimeFactory factory(final CodingAgentConfiguration config, final SessionStore store) {
         return new SessionRuntimeFactory(
                 null, null, null, config, null, store, null, null, null, null, null, null, null, null, null, null, null,
+                null, // backoff sleeper
                 null, null, // memory production policy
                 null, // quota store
                 null, null);

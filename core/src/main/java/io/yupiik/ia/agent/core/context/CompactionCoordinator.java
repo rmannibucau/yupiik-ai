@@ -102,6 +102,7 @@ public class CompactionCoordinator {
     private final ProviderManager providerManager;
     private final Emitter emitter;
     private final String sessionId;
+    private final BackoffSleeper backoffSleeper;
     private volatile boolean warnedCompactModel;
 
     public CompactionCoordinator(
@@ -110,13 +111,15 @@ public class CompactionCoordinator {
             final UsageTracker usageTracker,
             final ProviderManager providerManager,
             final Emitter emitter,
-            final String sessionId) {
+            final String sessionId,
+            final BackoffSleeper backoffSleeper) {
         this.configuration = configuration;
         this.chatClient = chatClient;
         this.usageTracker = usageTracker;
         this.providerManager = providerManager;
         this.emitter = emitter;
         this.sessionId = sessionId;
+        this.backoffSleeper = backoffSleeper;
     }
 
     protected CompactionCoordinator() {
@@ -126,6 +129,7 @@ public class CompactionCoordinator {
         this.providerManager = null;
         this.emitter = null;
         this.sessionId = null;
+        this.backoffSleeper = new BackoffSleeper();
     }
 
     /**
@@ -901,15 +905,7 @@ public class CompactionCoordinator {
                                 delay,
                                 sessionId));
                     }
-                    if (quiet) {
-                        final var deadline =
-                                System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(delay);
-                        while (!cancelled.getAsBoolean() && System.nanoTime() < deadline) {
-                            sleep(Math.min(50, delay));
-                        }
-                    } else {
-                        sleep(delay);
-                    }
+                    backoffSleeper.sleep(delay);
                 }
             }
             if (part == null || part.isBlank()) {
@@ -1235,14 +1231,6 @@ public class CompactionCoordinator {
             exp = Math.max(exp, perRequestMs);
         }
         return exp + ThreadLocalRandom.current().nextLong(Math.max(1, exp / 4));
-    }
-
-    private static void sleep(final long millis) {
-        try {
-            Thread.sleep(millis);
-        } catch (final InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     /**

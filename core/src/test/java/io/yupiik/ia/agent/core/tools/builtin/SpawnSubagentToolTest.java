@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.agent.SubagentRunner;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.session.SessionEntry;
@@ -113,8 +114,9 @@ class SpawnSubagentToolTest {
                 null,
                 registry,
                 new PrecisionDurationMarkerProvider(),
-                null, // quota store
-                null) {
+                new BackoffSleeper(),
+                null, // secret redactor
+                null) { // quota store
             @Override
             public void runAsync(
                     final SubagentRegistry.SubagentState state,
@@ -250,8 +252,9 @@ class SpawnSubagentToolTest {
                         null,
                         reg,
                         new PrecisionDurationMarkerProvider(),
-                        null, // quota store
-                        null) {
+                        new BackoffSleeper(),
+                        null, // secret redactor
+                        null) { // quota store
                     @Override
                     public void runAsync(
                             final SubagentRegistry.SubagentState state,
@@ -316,8 +319,9 @@ class SpawnSubagentToolTest {
                         null,
                         reg,
                         new PrecisionDurationMarkerProvider(),
-                        null, // quota store
-                        null) {
+                        new BackoffSleeper(),
+                        null, // secret redactor
+                        null) { // quota store
                     @Override
                     public void runAsync(
                             final SubagentRegistry.SubagentState state,
@@ -387,8 +391,9 @@ class SpawnSubagentToolTest {
                         null,
                         reg,
                         new PrecisionDurationMarkerProvider(),
-                        null, // quota store
-                        null) {
+                        new BackoffSleeper(),
+                        null, // secret redactor
+                        null) { // quota store
                     @Override
                     public void runAsync(
                             final SubagentRegistry.SubagentState state,
@@ -432,8 +437,9 @@ class SpawnSubagentToolTest {
                         null,
                         reg,
                         new PrecisionDurationMarkerProvider(),
-                        null, // quota store
-                        null) {
+                        new BackoffSleeper(),
+                        null, // secret redactor
+                        null) { // quota store
                     @Override
                     public void runAsync(
                             final SubagentRegistry.SubagentState state,

@@ -64,7 +64,7 @@ class SpeculativeCompactionTest {
         final var cfg = TestConfigs.codingAgent(entries);
         final var pm = new ProviderManager(cfg, mapper);
         final var usage = new UsageTracker(pm, chat, null, Clock.systemUTC());
-        final var coordinator = new CompactionCoordinator(cfg, chat, usage, pm, emitter, "s1");
+        final var coordinator = new CompactionCoordinator(cfg, chat, usage, pm, emitter, "s1", new BackoffSleeper());
         return new Fixture(coordinator, new ContextManager(cfg, usage, coordinator), usage);
     }
 

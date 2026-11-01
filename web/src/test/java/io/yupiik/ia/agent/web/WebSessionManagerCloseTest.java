@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -84,6 +85,7 @@ class WebSessionManagerCloseTest {
                 null,
                 Clock.systemUTC(),
                 new PrecisionDurationMarkerProvider(),
+                new BackoffSleeper(),
                 null,
                 null,
                 null,

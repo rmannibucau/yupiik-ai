@@ -248,7 +248,8 @@ class BackgroundModelRoutingTest {
                 new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                 providerManager(cfg),
                 null,
-                "s1");
+                "s1",
+                new BackoffSleeper());
         // the session (tab 1) runs on 'main'
         final var result = coordinator.compact(
                 longHistory(), true, null, 0, () -> false, new ChatSettings("main", null, null, null));
@@ -271,7 +272,8 @@ class BackgroundModelRoutingTest {
                 new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                 providerManager(cfg),
                 null,
-                "s1");
+                "s1",
+                new BackoffSleeper());
         // session on 'cheap' with an explicit model: the summarizer must reuse it, not the process default
         final var result = coordinator.compact(
                 longHistory(), true, null, 0, () -> false, new ChatSettings("cheap", "deepseek-v4-flash", null, null));

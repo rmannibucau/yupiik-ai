@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
@@ -92,6 +93,7 @@ class WebSessionManagerBtwTest {
                 null,
                 Clock.systemUTC(),
                 new PrecisionDurationMarkerProvider(),
+                new BackoffSleeper(),
                 null,
                 null,
                 null, // memory production policy

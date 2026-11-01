@@ -80,6 +80,15 @@ class AdaptiveCompactionTest {
         return new ProviderManager(cfg, mapper);
     }
 
+    private BackoffSleeper noOpSleeper() {
+        return new BackoffSleeper() {
+            @Override
+            public boolean sleep(final long millis) {
+                return true;
+            }
+        };
+    }
+
     private CompactionCoordinator coordinator(final CodingAgentConfiguration cfg, final ChatClient chat) {
         return new CompactionCoordinator(
                 cfg,
@@ -87,7 +96,8 @@ class AdaptiveCompactionTest {
                 new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                 providerManager(cfg),
                 null,
-                "s1");
+                "s1",
+                noOpSleeper());
     }
 
     /** A history whose old part is heavy and the retained tail is tiny: compaction must summarize the old part. */
@@ -166,7 +176,7 @@ class AdaptiveCompactionTest {
 
     @Test
     void nullConfigFallsBackToDefaults() {
-        final var coordinator = new CompactionCoordinator(null, null, null, null, null, "s1");
+        final var coordinator = new CompactionCoordinator(null, null, null, null, null, "s1", noOpSleeper());
         assertEquals(12_000, coordinator.effectiveChunkCap(), "null config must use the legacy floor");
         assertEquals(6_000, coordinator.effectiveDigestCap());
         assertEquals(2_000, coordinator.effectiveToolOutputChars());

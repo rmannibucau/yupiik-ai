@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
@@ -91,6 +92,7 @@ class WebSessionManagerFeedbackGateTest {
                 null,
                 Clock.systemUTC(),
                 new PrecisionDurationMarkerProvider(),
+                new BackoffSleeper(),
                 null,
                 null,
                 null, // memory production policy

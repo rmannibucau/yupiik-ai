@@ -89,7 +89,8 @@ class ContextManagerTest {
                         new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
                         providerManager(cfg),
                         null,
-                        "s1"));
+                        "s1",
+                        new BackoffSleeper()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 3; i++) {
@@ -123,7 +124,8 @@ class ContextManagerTest {
                         new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                         providerManager(cfg),
                         null,
-                        "s1"));
+                        "s1",
+                        new BackoffSleeper()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 5; i++) {
@@ -169,7 +171,8 @@ class ContextManagerTest {
                         new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                         providerManager(cfg),
                         null,
-                        "s1"));
+                        "s1",
+                        new BackoffSleeper()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 5; i++) {
@@ -214,7 +217,8 @@ class ContextManagerTest {
                         new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                         providerManager(cfg),
                         null,
-                        "s1"));
+                        "s1",
+                        new BackoffSleeper()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 5; i++) {
@@ -262,7 +266,8 @@ class ContextManagerTest {
                         new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                         providerManager(cfg),
                         null,
-                        "s1"));
+                        "s1",
+                        new BackoffSleeper()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 7; i++) {
@@ -319,7 +324,8 @@ class ContextManagerTest {
                         new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                         providerManager(cfg),
                         null,
-                        "s1"));
+                        "s1",
+                        new BackoffSleeper()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 5; i++) {
@@ -360,7 +366,9 @@ class ContextManagerTest {
         };
         final var tracker = new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC());
         final var manager = new ContextManager(
-                cfg, tracker, new CompactionCoordinator(cfg, chat, tracker, providerManager(cfg), null, "s1"));
+                cfg,
+                tracker,
+                new CompactionCoordinator(cfg, chat, tracker, providerManager(cfg), null, "s1", new BackoffSleeper()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 9; i++) {
@@ -386,7 +394,8 @@ class ContextManagerTest {
                         new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
                         providerManager(cfg),
                         null,
-                        "s1"));
+                        "s1",
+                        new BackoffSleeper()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 3; i++) {
@@ -701,7 +710,8 @@ class ContextManagerTest {
                         new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                         providerManager(cfg),
                         null,
-                        "s1"));
+                        "s1",
+                        new BackoffSleeper()));
     }
 
     private static ChatClient chatReturning(final String digest) {

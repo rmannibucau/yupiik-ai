@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.agent.TodoPromptResolver;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
@@ -76,6 +77,7 @@ public class SessionRuntimeFactory {
     private final Emitter emitter;
     private final Clock clock;
     private final PrecisionDurationMarkerProvider precisionDurationMarker;
+    private final BackoffSleeper backoffSleeper;
     private final ExecutorService executor;
     private final BashRulesRegistry bashRulesRegistry;
     private final MemoryProductionPolicy memoryProductionPolicy;
@@ -100,6 +102,7 @@ public class SessionRuntimeFactory {
             final Emitter emitter,
             final Clock clock,
             final PrecisionDurationMarkerProvider precisionDurationMarker,
+            final BackoffSleeper backoffSleeper,
             final ExecutorService executor,
             final BashRulesRegistry bashRulesRegistry,
             final MemoryProductionPolicy memoryProductionPolicy,
@@ -122,6 +125,7 @@ public class SessionRuntimeFactory {
         this.emitter = emitter;
         this.clock = clock;
         this.precisionDurationMarker = precisionDurationMarker;
+        this.backoffSleeper = backoffSleeper;
         this.executor = executor;
         this.bashRulesRegistry = bashRulesRegistry;
         this.memoryProductionPolicy = memoryProductionPolicy;
@@ -142,8 +146,8 @@ public class SessionRuntimeFactory {
         todos.load();
         final var status = new StatusReporter();
         final var contextView = new ContextView(configuration.compression());
-        final var compactionCoordinator =
-                new CompactionCoordinator(configuration, chatClient, usage, providerManager, emitter, sessionId);
+        final var compactionCoordinator = new CompactionCoordinator(
+                configuration, chatClient, usage, providerManager, emitter, sessionId, backoffSleeper);
         final var contextManager = new ContextManager(configuration, usage, compactionCoordinator);
         final var memoryCompactor =
                 new MemoryCompactor(chatClient, configuration, memoryStore, providerManager, usage, emitter, sessionId);
@@ -284,6 +288,7 @@ public class SessionRuntimeFactory {
         this.mapper = null;
         this.emitter = null;
         this.clock = null;
+        this.backoffSleeper = new BackoffSleeper();
         this.executor = null;
         this.precisionDurationMarker = null;
         this.bashRulesRegistry = null;

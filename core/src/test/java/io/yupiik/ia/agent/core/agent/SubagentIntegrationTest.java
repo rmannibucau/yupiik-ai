@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -470,6 +471,7 @@ class SubagentIntegrationTest {
                     delegate.executor,
                     delegate.subagentRegistry,
                     delegate.precisionDurationMarker,
+                    delegate.backoffSleeper,
                     null,
                     delegate.quotaStore);
         }
@@ -603,8 +605,9 @@ class SubagentIntegrationTest {
                 executor,
                 reg,
                 new PrecisionDurationMarkerProvider(),
-                null, // quota store
-                null);
+                new BackoffSleeper(),
+                null, // secret redactor
+                null); // quota store
         return new TestSubagentRunner(baseRunner);
     }
 
