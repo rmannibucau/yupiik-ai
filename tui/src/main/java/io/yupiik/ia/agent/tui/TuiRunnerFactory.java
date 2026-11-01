@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import dev.tamboui.terminal.BackendFactory;
 import dev.tamboui.tui.TuiConfig;
 import dev.tamboui.tui.TuiRunner;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -27,15 +28,13 @@ import java.time.Duration;
 @ApplicationScoped
 public class TuiRunnerFactory {
     /**
-     * Any-motion mouse tracking ({@code ESC[?1003h}), enabled here so the tab-bar hover
-     * tooltip receives MOVE events. TamboUI's own mouse capture only uses
-     * {@code ?1000h}/{@code ?1002h}/{@code ?1015h}/{@code ?1006h}, so it has no idea
-     * {@code ?1003h} is on and never disables it - without a matching {@link #MOUSE_MOTION_DISABLE}
-     * the terminal keeps reporting every mouse move after the TUI exits and the shell
-     * prints the SGR reports ({@code ESC[<35;5;12M}) as garbage.
+     * Any-motion mouse tracking ({@code ESC[?1003h}), enabled with
+     * {@code TuiConfig.Builder.mouseMotion(true)} so the tab-bar hover tooltip receives
+     * MOVE events. TamboUI then owns the enable/disable protocol ({@code ?1000h/1002h/1003h/
+     * 1015h/1006h} on, the matching {@code ?...l} on exit) and a wrapped
+     * {@link MouseReportCoalescingBackend} re-assembles a report split by a parser timeout,
+     * so no mouse bytes ever leak into the prompt.
      */
-    static final String MOUSE_MOTION_ENABLE = "\u001b[?1003h";
-
     static final String MOUSE_MOTION_DISABLE = "\u001b[?1003l";
 
     public TuiRunner create(final TuiCommand.TuiConf conf) throws Exception {
@@ -43,8 +42,13 @@ public class TuiRunnerFactory {
     }
 
     public TuiRunner create(final TuiCommand.TuiConf conf, final boolean hideCursor) throws Exception {
+        // TamboUI's backend creation is public and returns the JLine backend (or whatever is
+        // registered on the classpath); wrapping it re-assembles split SGR mouse reports at the
+        // byte level so neither the parser nor the input loop ever emits their printable tail.
         final var runner = TuiRunner.create(TuiConfig.builder()
+                // TamboUI's native mouse capture with any-motion: ?1000h/?1002h/?1003h/?1015h/?1006h
                 .mouseCapture(true)
+                .mouseMotion(true)
                 // bracketed paste (ESC[?2004h): ctrl+shift+v / middle-click pastes arrive as a
                 // single PasteEvent preserving newlines instead of a keystroke burst
                 .bracketedPaste(true)
@@ -55,14 +59,9 @@ public class TuiRunnerFactory {
                 .pollTimeout(Duration.ofMillis(100))
                 .bindings(conf.bindings().toBindings())
                 .hideCursor(hideCursor)
+                .backend(new MouseReportCoalescingBackend(
+                        BackendFactory.create(MouseReportCoalescingBackend.class.getClassLoader())))
                 .build());
-        // tamboui only enables ?1000h/?1002h (button/press tracking): motion (MOVE) events
-        // are what drive the tab-bar hover tooltip, so additionally enable ?1003h
-        // (any-motion tracking). Terminals without it simply never report MOVE events.
-        // The matching ?1003l is sent by TuiCommand when the TUI exits (clean and abrupt
-        // paths), because tamboui's own cleanup() only disables the modes it enabled.
-        runner.backend().writeRaw(MOUSE_MOTION_ENABLE);
-        runner.backend().flush();
         return runner;
     }
 }

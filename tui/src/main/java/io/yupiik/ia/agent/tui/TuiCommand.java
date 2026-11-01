@@ -267,117 +267,6 @@ public class TuiCommand implements Runnable {
     private final boolean formatToolOutput;
     private volatile CodeTheme codeTheme = CodeTheme.ONE_DARK;
 
-    /** How long a partially-accumulated SGR mouse tail is kept while looking for the closing {@code M}/{@code m}. */
-    static final long SGR_TAIL_TTL_MILLIS = 500;
-    /** After a flushed (broken) tail, a new SGR-shaped run within this window re-arms the guard without a fresh ESC/UNKNOWN. */
-    static final long SGR_TAIL_REARM_WINDOW_MILLIS = 250;
-    /** Upper bound on an accumulated mouse tail: {@code [<999;999;999m} is 15 chars; 16 leaves room for wider coordinates. */
-    static final int SGR_TAIL_MAX_ACC = 16;
-
-    /**
-     * Guards the prompt-like text inputs against the printable tail of an SGR extended-mouse
-     * report ({@code ESC[<button;column;rowM}, {@code m} for release) that TamboUI's EventParser
-     * can split under load: when a 50ms peek/read times out mid-report the parser consumes a
-     * prefix and emits a standalone ESCAPE or an UNKNOWN key, leaving the rest of the report
-     * ({@code [<35;23;35M}, {@code ;23;35M}, {@code 35M}, lone {@code M}...) to arrive as ordinary
-     * CHARACTER keys in a later batch. Those bytes form exactly the suffix of
-     * {@code [<button;column;rowM/m} after the consumer prefix, so while the guard is armed it
-     * holds incoming characters that extend the suffix-shape and drops the completed report;
-     * anything else (or a stall longer than the TTL) is flushed through as normal typing, so no
-     * genuine keystroke is ever lost.
-     * <p>
-     * The guard is armed by {@link #onKey(Event, TuiRunner, UiState)} when it sees an UNKNOWN or a
-     * standalone ESCAPE event (the two parser abort artifacts) and is applied at the three
-     * character-insert sites: the main input, the {@code /ask} feedback free-text area, and the
-     * Ctrl+F search bar. It never sees PasteEvents (those keep the {@link #rollbackSgrMouseTail}
-     * safety net) nor deliberate edit actions such as yank.
-     */
-    private boolean sgrTailArmed;
-
-    private String sgrTailAcc = "";
-    private long sgrTailLastMatchMillis;
-    private long sgrTailLastBreakMillis = Long.MIN_VALUE;
-    /** Test hook: overrides {@link #SGR_TAIL_TTL_MILLIS} when set (the headless harness dispatches synchronously, so 0 makes the TTL expire immediately). */
-    long sgrTailTtlOverrideMillis = -1;
-
-    /** An in-progress SGR tail suffix (anything before the closing {@code M}/{@code m}); the {@code ;} may trail while more digits are expected. */
-    private static final Pattern SGR_TAIL_HOLD = Pattern.compile("^\\[?<?;?\\d*(;?\\d*){0,2};?$");
-    /** A complete SGR tail: {@code [<button;column;rowM/m} with the leading {@code [} / {@code <} / early fields optional (already consumed by TamboUI) - 1 to 3 digit fields, ending in {@code M}/{@code m}. */
-    private static final Pattern SGR_TAIL_COMPLETE = Pattern.compile("^(?:\\[?<?;?\\d+(?:;\\d+){0,2}[Mm]|\\[?<?[Mm])$");
-
-    /** True when {@code ch} can start an SGR tail continuation (the leftover shapes all start with {@code [}, {@code <}, a digit or {@code ;}). */
-    private static boolean sgrTailStarts(final String ch) {
-        if (ch.isEmpty()) {
-            return false;
-        }
-        final var c = ch.charAt(0);
-        return c == '[' || c == '<' || c == ';' || (c >= '0' && c <= '9');
-    }
-
-    private long sgrTailTtl() {
-        return sgrTailTtlOverrideMillis >= 0 ? sgrTailTtlOverrideMillis : SGR_TAIL_TTL_MILLIS;
-    }
-
-    private void sgrTailArm() {
-        sgrTailAcc = "";
-        sgrTailArmed = true;
-        sgrTailLastMatchMillis = clock.millis();
-    }
-
-    /**
-     * Feeds one typed character into the armed tail guard.
-     *
-     * @param ch the character the input site is about to insert
-     * @return the text the site MUST insert (the flushed continuation of an abandoned tail, or
-     *     {@code ch} itself when the guard is not holding anything), or {@code null} when the
-     *     character was absorbed into a held (or completed-and-dropped) mouse tail.
-     */
-    private String sgrTailFeed(final String ch) {
-        final var now = clock.millis();
-        if (sgrTailArmed) {
-            if (now - sgrTailLastMatchMillis >= sgrTailTtl()) {
-                // a tail that stalled mid-report: flush the partial prefix as ordinary text
-                // (same as the pre-guard behavior for a truncated report, nothing is lost)
-                sgrTailArmed = false;
-                sgrTailLastBreakMillis = now;
-                final var out = sgrTailAcc + ch;
-                sgrTailAcc = "";
-                return out;
-            }
-            final var candidate = sgrTailAcc + ch;
-            final var complete = candidate.length() <= SGR_TAIL_MAX_ACC
-                    && SGR_TAIL_COMPLETE.matcher(candidate).matches();
-            if (complete
-                    || (candidate.length() <= SGR_TAIL_MAX_ACC
-                            && SGR_TAIL_HOLD.matcher(candidate).matches())) {
-                sgrTailAcc = candidate;
-                sgrTailLastMatchMillis = now;
-                if (complete) {
-                    // complete mouse-report tail: discard it entirely, nothing was ever inserted
-                    sgrTailAcc = "";
-                    sgrTailArmed = false;
-                }
-                return null;
-            }
-            // grammar break (or over-length): the user typed real text after the abort event - flush
-            sgrTailArmed = false;
-            sgrTailLastBreakMillis = now;
-            final var out = sgrTailAcc + ch;
-            sgrTailAcc = "";
-            return out;
-        }
-        // not armed: re-arm immediately if the user just flushed within the re-arm window and
-        // this char starts a tail shape (a report split across two abort events, e.g. the
-        // leftover of one report followed by the ESC of the next)
-        if (now - sgrTailLastBreakMillis <= SGR_TAIL_REARM_WINDOW_MILLIS && sgrTailStarts(ch)) {
-            sgrTailArmed = true;
-            sgrTailAcc = ch;
-            sgrTailLastMatchMillis = now;
-            return null;
-        }
-        return ch;
-    }
-
     private static final int MAX_RESUME_LIST = 25;
     private static final int RESUME_SUMMARY_WIDTH = 80;
     /** Inline preview lines kept in a tool card; the rest lives behind the expand link / Ctrl+O. */
@@ -1454,12 +1343,8 @@ public class TuiCommand implements Runnable {
             case CHAR -> {
                 if (!key.hasCtrl() && !key.hasAlt()) {
                     final var cp = key.codePoint();
-                    final var ch =
-                            cp > Character.MAX_VALUE ? new String(Character.toChars(cp)) : String.valueOf((char) cp);
-                    final var insert = sgrTailFeed(ch);
-                    if (insert != null) {
-                        area.insert(insert);
-                    }
+                    area.insert(
+                            cp > Character.MAX_VALUE ? new String(Character.toChars(cp)) : String.valueOf((char) cp));
                 }
             }
             default -> {}
@@ -1475,44 +1360,10 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    /**
-     * SGR extended-mouse report tail as it can appear in the prompt buffer:
-     * {@code ESC[<button;column;rowM} (or {@code m} for a release). The leading
-     * ESC is optional here because it is consumed separately by the escape race
-     * that delivers the tail as printable text.
-     * {@code button >= 64} is a wheel, {@code 32..35} a press/drag/hover; all
-     * collapse to the same {@code digits;digits;digits} shape.
-     */
-    private static final Pattern SGR_MOUSE_TAIL = Pattern.compile("\\u001b?\\[<\\d+;\\d+;\\d+[Mm]$");
     /** The {@code (<file>:<start>-<end>)} reference {@code read_symbol} prints in its output header. */
     private static final Pattern READ_SYMBOL_FILE = Pattern.compile("\\(([^()\\s]+(?::[^()\\s]+)*):\\d+(?:-\\d+)?\\)");
     /** A {@code read}/{@code read_symbol} body line: {@code "%6d\t"} gutter followed by content. */
     private static final Pattern NUMBERED_OUTPUT_LINE = Pattern.compile("^(\\s*\\d+\\t)(.*)$");
-
-    /**
-     * Paste-path-only fallback scrub: removes a stray SGR mouse-report tail from the end of a
-     * text area, leaving the pre-mouse text untouched. The TUI turns on {@code ?1003h}
-     * (any-motion tracking, see {@link TuiRunnerFactory}) so every mouse move over the prompt
-     * streams {@code ESC[<cb;cx;cyM}; when the leading ESC is read alone (TamboUI's escape
-     * timeout expiring under render load), the remaining printable {@code [<35;23;35M} is
-     * delivered as ordinary CHARACTER keys and would be typed into the prompt. The
-     * {@link #sgrTailFeed(String) SgrTailGuard} now suppresses those characters pre-insert at
-     * the three typing sites; this method remains only as a second layer for bracketed-paste
-     * content (a {@link PasteEvent}), which bypasses the CHARACTER filter and can carry report
-     * junk previously saved into the clipboard. It removes only the fully-formed
-     * {@code [<button;column;rowM/m} shape at the very end of the buffer, so pasted user text
-     * ending in a literal {@code [<...} digit field is left untouched unless it closes with
-     * {@code M}/{@code m}.
-     */
-    private static void rollbackSgrMouseTail(final TextAreaState area) {
-        final var text = area.text();
-        final var matcher = SGR_MOUSE_TAIL.matcher(text);
-        if (matcher.find()) {
-            final var end = matcher.start();
-            area.setText(end == 0 ? "" : text.substring(0, end));
-            area.moveCursorToEnd();
-        }
-    }
 
     /**
      * Interrupts the running turn: sets the flag (the loop stops the stream, kills in-flight tools,
@@ -1798,27 +1649,16 @@ public class TuiCommand implements Runnable {
     }
 
     private boolean onKey(final Event event, final TuiRunner runner, final UiState state) {
-        // a mouse report split by TamboUI's escape timeout arrives as a standalone ESCAPE (when
-        // only the leading ESC was consumed) or an UNKNOWN key (when ESC[ / ESC[< was consumed);
-        // either arms the SGR-tail guard so the printable suffix that follows is held and dropped
-        // instead of being typed into the prompt. The arm never consumes the event itself.
-        if (event instanceof final KeyEvent keyEvent
-                && (keyEvent.code() == KeyCode.UNKNOWN
-                        || (keyEvent.code() == KeyCode.ESCAPE && !keyEvent.hasCtrl() && !keyEvent.hasAlt()))) {
-            sgrTailArm();
-        }
         if (event instanceof final PasteEvent paste) {
             // normalize CRLF/CR so multiline pastes render and submit cleanly
             final var text = paste.text().replace("\r\n", "\n").replace("\r", "\n");
             if (state.feedbackPrompt != null) {
                 final var area = feedbackInput(state.feedbackPrompt);
                 area.insert(text);
-                rollbackSgrMouseTail(area);
                 return true;
             }
             beforeEdit(state);
             state.input.insert(text);
-            rollbackSgrMouseTail(state.input);
             return true;
         }
         if (event instanceof TickEvent) {
@@ -2403,14 +2243,10 @@ public class TuiCommand implements Runnable {
             case CHAR -> {
                 if (!key.hasCtrl()) {
                     final var cp = key.codePoint();
-                    final var ch =
-                            cp > Character.MAX_VALUE ? new String(Character.toChars(cp)) : String.valueOf((char) cp);
-                    final var insert = sgrTailFeed(ch);
-                    if (insert != null) {
-                        beforeEdit(state);
-                        state.input.insert(insert);
-                        liveComplete(state);
-                    }
+                    beforeEdit(state);
+                    state.input.insert(
+                            cp > Character.MAX_VALUE ? new String(Character.toChars(cp)) : String.valueOf((char) cp));
+                    liveComplete(state);
                 }
             }
             default -> {
@@ -7200,13 +7036,10 @@ public class TuiCommand implements Runnable {
         }
         if (!key.hasCtrl() && !key.hasAlt() && key.codePoint() >= 32) {
             final var cp = key.codePoint();
-            final var ch = cp > Character.MAX_VALUE ? new String(Character.toChars(cp)) : String.valueOf((char) cp);
-            final var insert = sgrTailFeed(ch);
-            if (insert != null) {
-                state.search.query(state.search.query() + insert);
-                state.search.recompute(state.flatRows);
-                jumpToCurrentMatch(state);
-            }
+            state.search.query(state.search.query()
+                    + (cp > Character.MAX_VALUE ? new String(Character.toChars(cp)) : String.valueOf((char) cp)));
+            state.search.recompute(state.flatRows);
+            jumpToCurrentMatch(state);
             return true;
         }
         return true;
