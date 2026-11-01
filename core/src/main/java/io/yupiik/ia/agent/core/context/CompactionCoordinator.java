@@ -935,19 +935,12 @@ public class CompactionCoordinator {
                                     null));
                         }
                         try {
-                            final var fallbackRequest = new ChatCompletionRequest(
-                                    mainModel,
-                                    List.of(Message.system(systemPrompt), Message.user(prompt)),
-                                    template.temperature(),
-                                    template.topP(),
-                                    false,
-                                    null,
-                                    template.toolChoice(),
-                                    template.maxTokens(),
-                                    template.reasoningEffort(),
-                                    template.others(),
-                                    template.sessionId(),
-                                    template.settings());
+                            // rebuild the request for the main model instead of copying the compact
+                            // model's template: summaryRequest re-resolves the model reference, applies
+                            // the conversation-model tuning (a dedicated compact model's tuning would
+                            // otherwise size maxTokens/topP/reasoning for the smaller model) and keeps
+                            // the session identity (settings/session-id) on the fallback call
+                            final var fallbackRequest = summaryRequest(mainModel, systemPrompt, prompt, settings);
                             final var res = chatClient.chat(fallbackRequest, null, cancelled);
                             calls++;
                             if (usageTracker != null) {
