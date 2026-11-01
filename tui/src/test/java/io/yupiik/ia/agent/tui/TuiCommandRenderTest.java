@@ -4144,6 +4144,51 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void subagentCompletedDetailRendersReportCard() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var mapper = formatMapper;
+        final var configuration = subagentConfiguration();
+        final var subagentRegistry = new SubagentRegistry(configuration, new ProviderManager(configuration, mapper));
+        final var command = command(
+                shellRegistry,
+                stubAgentLoop(),
+                true,
+                newUsageTracker(),
+                new TodoStore(configuration, mapper),
+                Clock.systemUTC(),
+                subagentRegistry);
+        uiThread = new Thread(command, "tui-subagents-completed-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a completed tracked subagent with an effective identity, artifacts and a fence summary
+        final var sessionId = sid(shellRegistry);
+        final var sub =
+                subagentRegistry.start(sessionId, "do the thing", "child").orElseThrow();
+        subagentRegistry.setTranscriptIdentity(sub.id(), "provider-x", "gpt-5.5");
+        final var summary = "## Findings\n- item one\n\n```java\nvar x = 1;\n```\n";
+        subagentRegistry.complete(
+                sub.id(), SubagentRegistry.SubagentResult.success(summary, "full conv", java.util.List.of("a.java")));
+        shellRegistry.onEvent(
+                new AgentEvent.SubagentCompleted(summary, true, false, sessionId, sub.id(), "child", "gpt-5.5"));
+
+        // the detail view renders the report card above the live capture
+        tuiRef.get().dispatch(new PasteEvent("/subagents " + sub.id()));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("model: gpt-5.5");
+        awaitText("status: succeeded");
+        awaitText("artifacts: a.java");
+        awaitText("Findings");
+        awaitText("item one");
+        awaitText("var x = 1;");
+        awaitText("full transcript");
+
+        quit();
+    }
+
+    @Test
     void modelPickerScrollsBeyondTheVisibleWindow() throws Exception {
         final var shellRegistry = testRegistry();
         final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());

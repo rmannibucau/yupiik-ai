@@ -403,9 +403,18 @@ public sealed interface AgentEvent {
      * A sub-agent was spawned under the parent session: the parent transcript
      * records a marker so the user knows work is progressing off-screen
      * (details are visible through {@code /subagents}).
+     *
+     * @param model the effective model name when already resolved, {@code null} otherwise (the routing
+     *              is usually resolved after the spawn, so started events carry {@code null}; the
+     *              completion carries the resolved model)
      */
-    record SubagentStarted(String task, String sessionId, String subagentId, String subagentName)
-            implements AgentEvent {}
+    record SubagentStarted(String task, String sessionId, String subagentId, String subagentName, String model)
+            implements AgentEvent {
+        public SubagentStarted(
+                final String task, final String sessionId, final String subagentId, final String subagentName) {
+            this(task, sessionId, subagentId, subagentName, null);
+        }
+    }
 
     /**
      * A sub-agent finished (success, failure or cancellation). The parent transcript records a
@@ -421,7 +430,8 @@ public sealed interface AgentEvent {
             boolean cancelled,
             String sessionId,
             String subagentId,
-            String subagentName)
+            String subagentName,
+            String model)
             implements AgentEvent {
 
         public SubagentCompleted(
@@ -430,7 +440,17 @@ public sealed interface AgentEvent {
                 final String sessionId,
                 final String subagentId,
                 final String subagentName) {
-            this(summary, success, false, sessionId, subagentId, subagentName);
+            this(summary, success, false, sessionId, subagentId, subagentName, null);
+        }
+
+        public SubagentCompleted(
+                final String summary,
+                final boolean success,
+                final boolean cancelled,
+                final String sessionId,
+                final String subagentId,
+                final String subagentName) {
+            this(summary, success, cancelled, sessionId, subagentId, subagentName, null);
         }
     }
 

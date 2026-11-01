@@ -133,6 +133,41 @@ class AnsiShellFrontendTest {
     }
 
     @Test
+    void subagentStartedAndCompletedRenderReadableLines() {
+        final var frontend = frontend(false, true, true);
+        frontend.beginTurn();
+
+        frontend.onEvent(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child"));
+        assertTrue(
+                err.toString(StandardCharsets.UTF_8).contains("[child] [subagent] started: do the thing"),
+                "started must render a one-line status: " + err);
+
+        frontend.onEvent(new AgentEvent.SubagentCompleted(
+                "all done\n- item one\n- item two", true, false, "s1", "sub-1", "child", "gpt-5.5"));
+        final var out = err.toString(StandardCharsets.UTF_8);
+        assertTrue(
+                out.contains("[child] [subagent] completed (gpt-5.5) — all done"),
+                "completed must render with model + first line: " + out);
+    }
+
+    @Test
+    void subagentFailedAndCancelledRenderDistinctLines() {
+        final var frontend = frontend(false, true, true);
+        frontend.beginTurn();
+
+        frontend.onEvent(new AgentEvent.SubagentCompleted("boom", false, false, "s1", "sub-1", "child", "gpt-5.5"));
+        assertTrue(
+                err.toString(StandardCharsets.UTF_8).contains("[child] [subagent] failed (gpt-5.5) — boom"),
+                "failed must render an error line: " + err);
+
+        frontend.onEvent(
+                new AgentEvent.SubagentCompleted("Sub-agent cancelled", false, true, "s1", "sub-2", "other", null));
+        assertTrue(
+                err.toString(StandardCharsets.UTF_8).contains("[other] [subagent] cancelled — Sub-agent cancelled"),
+                "cancelled must render a dim line: " + err);
+    }
+
+    @Test
     void suspendTerminatesOpenThoughtLineBeforeCard() {
         final var frontend = frontend(false, true, true);
         frontend.beginTurn();

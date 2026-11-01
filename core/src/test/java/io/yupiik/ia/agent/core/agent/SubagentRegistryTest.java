@@ -153,6 +153,22 @@ class SubagentRegistryTest {
     }
 
     @Test
+    void identityOfReturnsTheRecordedEffectiveIdentity() {
+        final var registry = new SubagentRegistry(config(Map.of()), providerManager(4));
+        final var state = registry.start("parent", "task").orElseThrow();
+        // unknown before the runner resolved the routing
+        assertTrue(registry.identityOf(state.id()).isEmpty());
+        registry.setTranscriptIdentity(state.id(), "provider-x", "gpt-5.5");
+        final var identity = registry.identityOf(state.id());
+        assertTrue(identity.isPresent(), "the effective identity must be readable after recording");
+        assertEquals("provider-x", identity.get().provider());
+        assertEquals("gpt-5.5", identity.get().model());
+        // null/blank ids are never a hit
+        assertTrue(registry.identityOf(null).isEmpty());
+        assertTrue(registry.identityOf("").isEmpty());
+    }
+
+    @Test
     void listActiveReturnsAllActive() {
         final var registry = new SubagentRegistry(config(Map.of()), providerManager(4));
         registry.start("parent", "t1");

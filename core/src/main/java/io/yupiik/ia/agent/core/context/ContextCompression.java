@@ -56,6 +56,22 @@ public final class ContextCompression {
 
     private static final Pattern ECHOED_REF_INLINE =
             Pattern.compile("(?<![ \t])[ \t]*+@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?");
+    /**
+     * Glued seam-marker shape for the evidence-gated strip: an {@code @} at a word boundary
+     * (not preceded by a letter/digit, so emails and identifiers like {@code a@b} are exempt),
+     * optional blanks, then a letter-initial word that embeds a ref-id digit-run. The marker is
+     * what flash-class models leak when they autocomplete a seam tag from the surrounding wire
+     * content ("@EntCompactionTruncates10632" instead of "@10632@"); the word itself is real
+     * content and must survive - only the {@code @} is removed.
+     */
+    private static final Pattern GLUED_SEAM_WORD = Pattern.compile("(?<![A-Za-z0-9])@([ \\t]*)([A-Za-z][A-Za-z0-9]*)");
+
+    /**
+     * Minimum digit-run length for the evidence-gated glued-seam strip: short runs ("step 12",
+     * "issue #42") are far too common in real prose to gate on, while the observed leaks embed a
+     * 3-5 digit ref id (125, 10632, 12504) and compaction refs are monotonically large in practice.
+     */
+    static final int MIN_GLUED_SEAM_DIGITS = 3;
 
     public enum Status {
         ACTIVE,
@@ -112,6 +128,17 @@ public final class ContextCompression {
 
     public boolean enabled() {
         return configuration != null && configuration.enabled();
+    }
+
+    /**
+     * Highest reference that was ever assigned to a message (monotonic: refs are assigned once and
+     * never reused, see {@link #refOf}), plus one. Every id in {@code [1, maxAssignedRef())} has
+     * been assigned at some point; {@link #publish} pruning shrinks the live mapping but never this
+     * high-water mark, so it is the complete, bounded evidence set for the glued-seam strip.
+     * Lock-free on purpose: render surfaces may call it from any thread.
+     */
+    public int maxAssignedRef() {
+        return nextRef.get();
     }
 
     public CompressConfiguration configuration() {
@@ -908,10 +935,65 @@ public final class ContextCompression {
             return null;
         }
         // whole echo lines first (the observed failure mode was a wall of consecutive tag lines),
-        // then any inline tags that survived (e.g. a tag glued to prose on one line)
-        return ECHOED_REF_INLINE
+        // then any inline tags that survived (e.g. a tag glued to prose on one line), then the
+        // evidence-gated glued-marker strip: a flash-class model autocompleting a leaked '@' with
+        // the surrounding wire content produces "@EntCompactionTruncates10632" instead of
+        // "@10632@"; only the '@' is removed, the word (real content) survives.
+        final var afterLineInline = ECHOED_REF_INLINE
                 .matcher(ECHOED_REF_LINE.matcher(text).replaceAll(""))
                 .replaceAll("");
+        final var matcher = GLUED_SEAM_WORD.matcher(afterLineInline);
+        final var maxRef = maxAssignedRef();
+        final var sb = new StringBuilder(afterLineInline.length());
+        var last = 0;
+        var stripped = false;
+        while (matcher.find()) {
+            if (gluedSeamWordMatchesAssignedRef(matcher.group(2), maxRef)) {
+                // keep the word (it is real content), drop only the leaked '@' but preserve the
+                // separating blanks ("@ man12504que" -> " man12504que")
+                sb.append(afterLineInline, last, matcher.start())
+                        .append(afterLineInline, matcher.start() + 1, matcher.end());
+                last = matcher.end();
+                stripped = true;
+            }
+        }
+        if (!stripped) {
+            return afterLineInline;
+        }
+        return sb.append(afterLineInline, last, afterLineInline.length()).toString();
+    }
+
+    /**
+     * True when the word right after a leaked {@code @} embeds a digit-run of at least
+     * {@link #MIN_GLUED_SEAM_DIGITS} digits that equals an ever-assigned ref id. Any digit-run of
+     * the word is considered, so both the suffix form ("@EntCompactionTruncates10632") and the
+     * mid-word form ("@ man12504que") are caught; shorter runs ("@step12", "@m125") are far too
+     * common in real prose to gate on.
+     */
+    private static boolean gluedSeamWordMatchesAssignedRef(final String word, final int maxRef) {
+        var i = 0;
+        while (i < word.length()) {
+            if (Character.isDigit(word.charAt(i))) {
+                final var start = i;
+                while (i < word.length() && Character.isDigit(word.charAt(i))) {
+                    i++;
+                }
+                final var digits = word.substring(start, i);
+                if (digits.length() >= MIN_GLUED_SEAM_DIGITS) {
+                    try {
+                        final var ref = Integer.parseInt(digits);
+                        if (ref >= 1 && ref < maxRef) {
+                            return true;
+                        }
+                    } catch (final NumberFormatException nfe) {
+                        // over-long digit-run (e.g. a 28-digit pinned token) can never be a ref
+                    }
+                }
+            } else {
+                i++;
+            }
+        }
+        return false;
     }
 
     /**
@@ -990,14 +1072,21 @@ public final class ContextCompression {
             return false; // anything else on the line (prose, punctuation) means real content
         }
         final var token = line.substring(tokenStart, tokenEnd);
-        if (token.isEmpty() || token.length() >= 25) {
+        if (token.isEmpty()) {
             return false;
         }
-        if (isAllDigits(token)) {
+        // value-based bound instead of the historical length carve-out: refs are ints, so a digit
+        // run longer than 10 (Integer.MAX_VALUE) can never be a real ref - the pinned 28-digit
+        // '@1234567890123456789012345678' shape survives *because it is not a ref*, exactly like a
+        // 28-char arbitrary token used to. 'blocked' (7) and 'b'+10 digits (11) still fit.
+        final var digits = token.charAt(0) == 'b' ? token.substring(1) : token;
+        if (token.equals("blocked")) {
             return true;
         }
-        return (token.charAt(0) == 'b' && token.length() > 1 && isAllDigits(token.substring(1)))
-                || token.equals("blocked");
+        if (digits.isEmpty() || digits.length() > 10 || !isAllDigits(digits)) {
+            return false;
+        }
+        return token.charAt(0) == 'b' || isAllDigits(token);
     }
 
     private static boolean isAllDigits(final String token) {

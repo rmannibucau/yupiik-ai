@@ -752,10 +752,63 @@ class ConversationTranscriptTest {
         t.onEvent(new AgentEvent.SubagentCompleted("done", true, "s1", "sub-1", "child"));
         final var md = t.transcript().toString();
         assertTrue(md.contains("> subagent `child` started: do the thing"), md);
-        assertTrue(md.contains("> subagent `child` completed: done"), md);
+        assertTrue(md.contains("> subagent `child` completed"), md);
+        assertTrue(md.contains("> full report: /subagents sub-1"), md);
         assertFalse(md.contains("child reasoning"), md);
         assertFalse(md.contains("child answer"), md);
         assertFalse(md.contains("bash"), md);
+    }
+
+    @Test
+    void subagentCompletedEmbedsTheFullSummaryAsMarkdownBody() {
+        final var t = new ConversationTranscript();
+        final var summary = "## Findings\n"
+                + "- item one\n"
+                + "- item two\n"
+                + "\n"
+                + "```java\n"
+                + "var x = 1;\n"
+                + "```\n"
+                + "done";
+        t.onEvent(new AgentEvent.SubagentCompleted(summary, true, false, "s1", "sub-9", "explorer", "gpt-5.5"));
+        final var md = t.transcript().toString();
+        // the header carries the effective model
+        assertTrue(md.contains("> subagent `explorer` completed — model `gpt-5.5`"), md);
+        // the body is embedded raw (no blockquote prefix) so the markdown renderer highlights it
+        assertTrue(md.contains("## Findings"), md);
+        assertTrue(md.contains("- item one"), md);
+        assertTrue(md.contains("```java"), md);
+        assertTrue(md.contains("var x = 1;"), md);
+        // the pointer line closes the report
+        assertTrue(md.contains("> full report: /subagents sub-9"), md);
+        // the body lines must not be quoted: a line starting with '>' would render as a quote
+        final var after = md.substring(md.indexOf("## Findings"));
+        assertFalse(
+                after.lines().anyMatch(l -> l.startsWith("> ") && l.contains("item")), "body must be unquoted: " + md);
+    }
+
+    @Test
+    void subagentCompletedSummaryLineMatchingASpeakerMarkerIsShielded() {
+        final var t = new ConversationTranscript();
+        // a summary line equal to the assistant marker would split the pane into a new turn
+        t.onEvent(new AgentEvent.SubagentCompleted(
+                "findings\n\n**Assistant**\n\nrest", false, true, "s1", "sub-2", "child"));
+        final var md = t.transcript().toString();
+        // the marker-like line is shielded with a non-breaking space so the TUI never opens a turn
+        assertTrue(md.contains("\u00A0**Assistant**"), md);
+        assertTrue(md.contains("findings"), md);
+        assertTrue(md.contains("rest"), md);
+    }
+
+    @Test
+    void subagentCompletedCapsAVeryLongSummary() {
+        final var t = new ConversationTranscript();
+        final var huge = "word\n".repeat(3000); // 15000 chars, way past the 4000 cap
+        t.onEvent(new AgentEvent.SubagentCompleted(huge, true, "s1", "sub-3", "child"));
+        final var md = t.transcript().toString();
+        assertTrue(md.endsWith("> full report: /subagents sub-3\n"), "pointer line must close the report");
+        assertTrue(md.length() < 6000, "body must be capped: " + md.length());
+        assertTrue(md.contains("..."), "truncation marker must be present");
     }
 
     @Test
@@ -855,6 +908,68 @@ class ConversationTranscriptTest {
         assertTrue(md.contains("ls"), md);
         assertFalse(md.contains("@1290"), "flushed bare anchor must stay hidden: " + md);
         assertFalse(md.contains("@1291"), "flushed bare anchor must stay hidden: " + md);
+    }
+
+    @Test
+    void partialSeamAtFlushIsRequeuedAndCompletedByTheNextDelta() {
+        // a seam tag split across a flush boundary: the trailing "@1250" (no closing @) must not
+        // freeze into the durable transcript AND must not duplicate when the full content resumes
+        final var compression = new ContextCompression(config());
+        final var t = new ConversationTranscript();
+        t.bindCompression(compression);
+
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("answer @1250", "s1"));
+        // a tool call flushes the pending tail mid-stream (the seam is still incomplete)
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
+        var md = t.markdown("|", "welcome");
+        assertTrue(md.contains("answer"), md);
+        assertFalse(md.contains("@1250"), "partial seam half must not freeze: " + md);
+
+        // the closing half arrives after the tool block and the turn ends
+        t.onEvent(new AgentEvent.ToolFinished("bash", "ok", true, "s1"));
+        t.onEvent(new AgentEvent.TextDelta("4@ done", "s1"));
+        t.onEvent(new AgentEvent.TurnDone("answer @12504@ done", "s1"));
+        md = t.markdown("|", "welcome");
+        // the re-queued first half + the second half re-form the complete tag in the pending
+        // buffer, which the render scrub removes: nothing but the real content survives
+        assertFalse(md.contains("@1250"), "re-formed seam must be scrubbed: " + md);
+        assertFalse(md.contains("@12504@"), "complete seam must be scrubbed: " + md);
+        assertTrue(md.contains("answer"), md);
+        assertTrue(md.contains("done"), md);
+        // the fragment was never persisted, so the final content is not duplicated
+        assertEquals(1, occurrences(md, "done"), "the final content must appear exactly once: " + md);
+    }
+
+    @Test
+    void incompleteSeamAtFlushDiesNaturallyAtTurnEnd() {
+        // when the second half of a split tag never arrives (turn ends, or a TextReset clears the
+        // pending tail), the re-queued fragment must be dropped without persisting anything
+        final var compression = new ContextCompression(config());
+        final var t = new ConversationTranscript();
+        t.bindCompression(compression);
+
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("answer @1250", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "ok", true, "s1"));
+        // the authoritative final content supersedes the streamed tail (no second half)
+        t.onEvent(new AgentEvent.TurnDone("answer done", "s1"));
+
+        final var md = t.markdown("|", "welcome");
+        assertFalse(md.contains("@1250"), "never-completed seam must not persist: " + md);
+        assertTrue(md.contains("answer"), md);
+        assertTrue(md.contains("done"), md);
+    }
+
+    private static int occurrences(final String text, final String needle) {
+        var count = 0;
+        var at = 0;
+        while ((at = text.indexOf(needle, at)) >= 0) {
+            count++;
+            at += needle.length();
+        }
+        return count;
     }
 
     @Test

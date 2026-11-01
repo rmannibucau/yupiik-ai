@@ -36,6 +36,21 @@ export type Block =
       // distinct from both a success and a hard failure
       pending?: boolean;
       toolOrdinal?: number;
+    }
+  | {
+      // A spawned sub-agent card: 'running' while the child works (async, outlives the parent
+      // turn), finalized by its own subagent-completed (never by a turn boundary). The final
+      // summary renders as markdown; the model is the effective one resolved by the runner.
+      kind: 'subagent';
+      // 'running' while live, then 'done' (success), 'failed' or 'cancelled' from the completion.
+      state: 'running' | 'done' | 'failed' | 'cancelled';
+      subagentId: string;
+      name: string;
+      // the spawn task, present while running
+      task?: string;
+      // the final report summary
+      summary?: string;
+      model?: string;
     };
 
 const EMPTY_TOOL_STACK: number[] = [];
@@ -251,6 +266,47 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
         toolBlock.output = (ev.data?.output as string) ?? '';
         toolBlock.success = ev.data?.success !== false;
         toolBlock.pending = ev.data?.pending === true;
+      }
+    } else if (ev.type === 'subagent-started') {
+      settle();
+      blocks.push({
+        kind: 'subagent',
+        state: 'running',
+        subagentId: ev.subagentId ?? '',
+        name: (ev.data?.subagentName as string) || ev.subagentId || '',
+        task: ev.message ?? '',
+      });
+    } else if (ev.type === 'subagent-completed') {
+      settle();
+      const id = ev.subagentId ?? '';
+      const finalState = ev.data?.cancelled === true ? 'cancelled' : ev.data?.success === false ? 'failed' : 'done';
+      // finalize the running card of the same sub-agent (a child can outlive several parent
+      // turns); when the started event rotated out of the tail (replay/TAIL_LIMIT) or was lost,
+      // push a finalized card so the report is never silently dropped
+      let target = -1;
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        const b = blocks[i];
+        if (b && b.kind === 'subagent' && b.subagentId === id) {
+          target = i;
+          break;
+        }
+      }
+      const summary = ev.message ?? '';
+      const model = (ev.data?.model as string) || undefined;
+      if (target >= 0) {
+        const b = blocks[target] as Extract<Block, { kind: 'subagent' }>;
+        b.state = finalState;
+        b.summary = summary;
+        if (model) b.model = model;
+      } else {
+        blocks.push({
+          kind: 'subagent',
+          state: finalState,
+          subagentId: id,
+          name: (ev.data?.subagentName as string) || id,
+          summary,
+          model,
+        });
       }
     } else if (ev.type === 'user') {
       settle();

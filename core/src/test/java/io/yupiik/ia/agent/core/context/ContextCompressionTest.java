@@ -104,6 +104,63 @@ class ContextCompressionTest {
         assertEquals("no refs here", compression.stripEchoedRefs("no refs here"));
         assertEquals("keeps at-word mention @user", compression.stripEchoedRefs("keeps at-word mention @user"));
         assertNull(compression.stripEchoedRefs(null));
+        // the observed failure mode: a leaked '@' autocompleted with the wire content which ends
+        // with the ref id. Only the '@' is removed - the word is real content and survives.
+        final var withRef = new ContextCompression(null);
+        for (var i = 0; i < 10631; i++) {
+            withRef.refOf(Message.user("m" + i));
+        }
+        withRef.refOf(Message.user("last"));
+        assertEquals("EntCompactionTruncates10632", withRef.stripEchoedRefs("@EntCompactionTruncates10632"));
+        // the same word WITHOUT any assigned ref (fresh instance high-water 0) is untouched
+        assertEquals(
+                "@EntCompactionTruncates10632",
+                new ContextCompression(null).stripEchoedRefs("@EntCompactionTruncates10632"));
+    }
+
+    @Test
+    void gluedSeamStripIsEvidenceGatedOnAssignedRefsAndKeepsTheWord() {
+        final var compression = new ContextCompression(null);
+        // assign refs up to 12504 (monotonic, cheap: fresh Message identities, no wire render)
+        for (var i = 0; i < 12503; i++) {
+            compression.refOf(Message.user("m" + i));
+        }
+        compression.refOf(Message.user("last"));
+        assertEquals(12504, compression.maxAssignedRef() - 1, "last assigned ref must be 12504");
+        // the leaked glued form: '@' + word ending with the ref id -> only '@' removed
+        assertEquals(
+                "LocallyWhenTheSummarizer125FailsTransiently",
+                compression.stripEchoedRefs("@LocallyWhenTheSummarizer125FailsTransiently"));
+        // mid-word embedding with the ref id as a digit-run of the word: only the '@' is dropped,
+        // the space and the word (real content) survive
+        assertEquals(" man12504que", compression.stripEchoedRefs("@ man12504que"));
+        // a NEVER-assigned ref id (fresh instance) keeps the '@'
+        assertEquals(
+                "@LocallyWhenTheSummarizer125FailsTransiently",
+                new ContextCompression(null).stripEchoedRefs("@LocallyWhenTheSummarizer125FailsTransiently"));
+        // a digit-run shorter than the 3-digit threshold is not a seam even when it equals a live ref
+        compression.refOf(Message.user("m12"));
+        assertEquals("@step12", compression.stripEchoedRefs("@step12"));
+        // a 3-digit run equals a live ref (125 was assigned above) -> the '@' is stripped
+        assertEquals("m125", compression.stripEchoedRefs("@m125"));
+    }
+
+    @Test
+    void gluedSeamStripPreservesRealContentShapes() {
+        final var compression = new ContextCompression(null);
+        compression.refOf(Message.user("m1"));
+        compression.refOf(Message.user("m2"));
+        // pinned shapes that must survive every layer
+        assertEquals("@user", compression.stripEchoedRefs("@user"));
+        assertEquals("@RequestMapping", compression.stripEchoedRefs("@RequestMapping"));
+        assertEquals("answer@1", compression.stripEchoedRefs("answer@1"));
+        assertEquals("tail @1", compression.stripEchoedRefs("tail @1"));
+        assertEquals("check @1290 out", compression.stripEchoedRefs("check @1290 out"));
+        assertEquals("@", compression.stripEchoedRefs("@"));
+        assertEquals("@1234567890123456789012345678", compression.stripEchoedRefs("@1234567890123456789012345678"));
+        assertEquals("@blockedX", compression.stripEchoedRefs("@blockedX"));
+        // an email-like address is not a seam
+        assertEquals("mail@example.com", compression.stripEchoedRefs("mail@example.com"));
     }
 
     @Test

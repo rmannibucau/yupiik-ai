@@ -27,6 +27,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BiFunction;
+import java.util.regex.Pattern;
 
 /**
  * UI-less conversation state shared by the shells: transcript, streaming
@@ -50,6 +51,16 @@ public class ConversationTranscript {
 
     private static final long DEFAULT_MAX_HISTORY_CHARACTERS = 10_000_000L;
     private static final int MAX_EMBEDDED_TOOL_CHARS = 4000;
+    /**
+     * Trailing partial-ref fragment of a split seam tag at the very end of the flushed text:
+     * the first half ("@1250", "@b7", lone "@") of a split tag the streamer cut mid-tag. Only
+     * matched at a token boundary (caller checks the preceding char), so "email@x" is never
+     * eaten. The fragment is re-queued into {@code pending} to complete on the next delta; the
+     * mirror half ("4@") needs no rule here because it can only arrive in the same buffer that
+     * already holds the re-queued first half, forming the complete "@12504@" tag that the normal
+     * scrub removes.
+     */
+    private static final Pattern TRAILING_SEAM_FRAGMENT = Pattern.compile("@(?:[1-9]\\d*|b[1-9]\\d*)?$");
 
     private final StringBuilder transcript = new StringBuilder();
     private final StringBuilder pending = new StringBuilder();
@@ -692,7 +703,12 @@ public class ConversationTranscript {
             touch();
         } else if (event
                 instanceof
-                AgentEvent.SubagentStarted(String task, String sessionId, String subagentId, String subagentName)) {
+                AgentEvent.SubagentStarted(
+                        String task,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName,
+                        var _)) {
             // marker only: the subagent stream itself is captured separately (no inline
             // mixing of two model voices in one pane - see /subagents)
             final var label = subagentName == null || subagentName.isBlank() ? subagentId : subagentName;
@@ -711,17 +727,29 @@ public class ConversationTranscript {
                         boolean cancelled,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        String model)) {
             final var label = subagentName == null || subagentName.isBlank() ? subagentId : subagentName;
             transcript
                     .append("\n\n> subagent `")
                     .append(label)
                     .append("` ")
                     .append(success ? "completed" : cancelled ? "cancelled" : "failed");
-            if (summary != null && !summary.isBlank()) {
-                transcript.append(": ").append(firstLine(summary));
+            if (model != null && !model.isBlank()) {
+                transcript.append(" — model `").append(model.replace("`", "'")).append('`');
             }
             transcript.append('\n');
+            if (summary != null && !summary.isBlank()) {
+                // the body is the raw summary rendered as real markdown (the TUI splits it back
+                // into thought/tool/plain regions and the markdown renderer highlights it, fences
+                // included), so it must not carry the blockquote prefix: only the header and the
+                // pointer line are quoted, the body sits between them on plain lines
+                transcript
+                        .append('\n')
+                        .append(shieldSpeakerMarkers(userMarker(), assistantMarker(), capSummary(summary)))
+                        .append('\n');
+            }
+            transcript.append("\n> full report: /subagents ").append(subagentId).append('\n');
             touch();
         }
     }
@@ -803,10 +831,20 @@ public class ConversationTranscript {
         if (pending.isEmpty()) {
             return;
         }
-        final var text = pending.toString().stripTrailing();
+        final var raw = pending.toString().stripTrailing();
         pending.setLength(0);
-        if (text.isBlank()) {
+        if (raw.isBlank()) {
             return;
+        }
+        // a seam tag can split across a flush boundary (the streamer emits "@1250" then "4@ done"):
+        // withholding the trailing partial-ref fragment into pending lets the next delta compose
+        // the complete tag, which the normal scrub then removes. Freezing it here would persist
+        // the fragment AND duplicate it when the authoritative TurnDone content supersedes the
+        // streamed tail (streamed not being a prefix of the final content).
+        final var split = splitTrailingSeamFragment(raw);
+        final var text = split.text();
+        if (split.fragment() != null) {
+            pending.append(split.fragment());
         }
         // the flush freezes the tail into the durable transcript: strip complete echoed seams
         // AND withhold a trailing half-arrived seam fragment, exactly like the live render did,
@@ -823,6 +861,24 @@ public class ConversationTranscript {
         transcript.append(sanitized).append('\n');
         touch();
     }
+
+    /** Trailing partial-ref fragment to keep pending, or {@code null} when the text has none.
+     * Matches the first half of a split tag ("@1250", "@b7", lone "@") and its mirror half
+     * ("4@") at the very end of the text, provided it starts at a token boundary so real content
+     * ("email@x", "version 2@") is never eaten. */
+    private static SplitTrailing splitTrailingSeamFragment(final String text) {
+        final var matcher = TRAILING_SEAM_FRAGMENT.matcher(text);
+        if (!matcher.find()) {
+            return new SplitTrailing(text, null);
+        }
+        final var start = matcher.start();
+        if (start > 0 && !Character.isWhitespace(text.charAt(start - 1))) {
+            return new SplitTrailing(text, null);
+        }
+        return new SplitTrailing(text.substring(0, start), matcher.group());
+    }
+
+    private record SplitTrailing(String text, String fragment) {}
 
     public synchronized String markdown(final String spinner, final String fallback) {
         // hot path: nothing changed since the last build -> reuse the cached string
@@ -1399,6 +1455,72 @@ public class ConversationTranscript {
         final var idx = text.indexOf('\n');
         final var line = idx < 0 ? text : text.substring(0, idx);
         return line.length() > 120 ? line.substring(0, 120) + "..." : line;
+    }
+
+    /**
+     * Caps the sub-agent report body to a pane-safe size, cutting on a line boundary so a partial
+     * markdown fence is never left open by the truncation. A trailing {@code \n...} marks the
+     * truncation; the full report stays reachable through {@code /subagents <id>}.
+     */
+    private static String capSummary(final String summary) {
+        final var cap = 4000;
+        if (summary.length() <= cap) {
+            return summary;
+        }
+        final var cut = summary.lastIndexOf('\n', cap);
+        return summary.substring(0, cut > cap / 2 ? cut : cap).stripTrailing() + "\n...";
+    }
+
+    /**
+     * A raw sub-agent report body is embedded into the parent transcript as plain markdown between
+     * the quoted header/pointer lines. A body line holding nothing but a speaker marker
+     * ({@code **You**} / {@code **Assistant**}, timestamped variants included) would be interpreted
+     * by the TUI turn splitter as a turn boundary and split the pane, so such lines are shielded
+     * with a leading non-breaking space to keep them literal.
+     */
+    private static String shieldSpeakerMarkers(
+            final String userMarker, final String assistantMarker, final String text) {
+        final var lines = text.split("\n", -1);
+        final var sb = new StringBuilder(text.length() + 16);
+        for (int i = 0; i < lines.length; i++) {
+            if (i > 0) {
+                sb.append('\n');
+            }
+            final var line = lines[i];
+            if (isSpeakerMarkerLine(line, userMarker) || isSpeakerMarkerLine(line, assistantMarker)) {
+                sb.append('\u00A0').append(line);
+            } else {
+                sb.append(line);
+            }
+        }
+        return sb.toString();
+    }
+
+    /** True when a line holds nothing but the given speaker marker, timestamped variant included. */
+    private static boolean isSpeakerMarkerLine(final String line, final String marker) {
+        if (marker == null || line == null) {
+            return false;
+        }
+        final var stripped = line.strip();
+        if (stripped.equals(marker)) {
+            return true;
+        }
+        if (stripped.startsWith("**[") && stripped.endsWith("**")) {
+            final var close = stripped.indexOf(']');
+            if (close > 2) {
+                return unwrapFences(stripped.substring(close + 1).stripLeading())
+                        .equals(unwrapFences(marker));
+            }
+        }
+        return false;
+    }
+
+    /** Strips the {@code **} fences of a marker line; returns the raw line when not fenced. */
+    private static String unwrapFences(final String marker) {
+        if (marker == null || marker.length() < 4 || !marker.startsWith("**") || !marker.endsWith("**")) {
+            return marker;
+        }
+        return marker.substring(2, marker.length() - 2);
     }
 
     /**

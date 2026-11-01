@@ -169,6 +169,9 @@ public class AnsiShellFrontend implements ShellFrontend {
     /** Rebinds the seam-scrub source once the owning session runtime is available (live refs). */
     public void bindCompression(final ContextCompression value) {
         this.compression = value != null ? value : new ContextCompression(null);
+        // the line renderer shares the same evidence source, so a leaked glued marker
+        // ("@Ent...10632") is stripped from streamed answer text as well, not only the thinking
+        this.textBuffer.bindCompression(this.compression);
     }
 
     public MarkdownColorizer colorizer() {
@@ -527,6 +530,42 @@ public class AnsiShellFrontend implements ShellFrontend {
                 AgentEvent.Status(String message, String sessionId, String subagentId, String subagentName)) {
             status(prefix + message);
         } else if (event
+                instanceof
+                AgentEvent.SubagentStarted(
+                        String task,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName,
+                        var _)) {
+            stopSpinner();
+            closeThinkingRound();
+            printlnErr(
+                    MarkdownColorizer.status(prefix + "[subagent] started: " + ConversationTranscript.firstLine(task)));
+        } else if (event
+                instanceof
+                AgentEvent.SubagentCompleted(
+                        String summary,
+                        boolean success,
+                        boolean cancelled,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName,
+                        String model)) {
+            stopSpinner();
+            closeThinkingRound();
+            final var state = success ? "completed" : cancelled ? "cancelled" : "failed";
+            final var modelSuffix = model == null || model.isBlank() ? "" : " (" + model + ")";
+            final var detail =
+                    summary == null || summary.isBlank() ? "" : " — " + ConversationTranscript.firstLine(summary);
+            final var line = prefix + "[subagent] " + state + modelSuffix + detail;
+            if (success) {
+                printlnErr(MarkdownColorizer.success(line));
+            } else if (cancelled) {
+                printlnErr(MarkdownColorizer.dim(line));
+            } else {
+                printlnErr(MarkdownColorizer.error(line));
+            }
+        } else if (event
                 instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {
             error(prefix + message);
         } else if (event instanceof final AgentEvent.UsageUpdated u) {
@@ -575,6 +614,13 @@ public class AnsiShellFrontend implements ShellFrontend {
             subagentId = id;
             subagentName = name;
         } else if (event instanceof AgentEvent.Status(var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.SubagentStarted(var _, var _, String id, String name, var _)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event
+                instanceof AgentEvent.SubagentCompleted(var _, var _, var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
         } else if (event instanceof AgentEvent.Error(var _, var _, String id, String name)) {

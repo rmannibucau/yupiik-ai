@@ -176,14 +176,26 @@ public record WebEventDto(
                                 t.throughput() == null ? 0 : t.throughput().outputTokens(),
                         "reasoningTokens",
                                 t.throughput() == null ? 0 : t.throughput().reasoningTokens());
-            case AgentEvent.SubagentStarted t ->
-                Map.of(
-                        "subagentId", t.subagentId() == null ? "" : t.subagentId(),
-                        "subagentName", t.subagentName() == null ? "" : t.subagentName());
-            case AgentEvent.SubagentCompleted t ->
-                Map.of(
-                        "success", t.success(),
-                        "cancelled", t.cancelled());
+            case AgentEvent.SubagentStarted t -> {
+                final var data = new LinkedHashMap<String, Object>();
+                data.put("subagentId", t.subagentId() == null ? "" : t.subagentId());
+                data.put("subagentName", t.subagentName() == null ? "" : t.subagentName());
+                if (t.model() != null) {
+                    data.put("model", t.model());
+                }
+                yield data;
+            }
+            case AgentEvent.SubagentCompleted t -> {
+                final var data = new LinkedHashMap<String, Object>();
+                data.put("success", t.success());
+                data.put("cancelled", t.cancelled());
+                data.put("subagentId", t.subagentId() == null ? "" : t.subagentId());
+                data.put("subagentName", t.subagentName() == null ? "" : t.subagentName());
+                if (t.model() != null) {
+                    data.put("model", t.model());
+                }
+                yield data;
+            }
             case AgentEvent.SubagentDelivered t ->
                 Map.of(
                         "success", t.success(),

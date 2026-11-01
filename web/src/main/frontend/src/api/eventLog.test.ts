@@ -77,8 +77,8 @@ describe('eventsToBlocks', () => {
     ]);
     // the notice block is its own card; the assistant reply starts a fresh text block
     expect(blocks.map((b) => b.kind)).toEqual(['notice', 'text']);
-    expect(blocks[0].content).toContain('https://auth.openai.com/authorize');
-    expect(blocks[1].content).toBe('Signed in. Here is the answer.');
+    expect((blocks[0] as { content: string }).content).toContain('https://auth.openai.com/authorize');
+    expect((blocks[1] as { content: string }).content).toBe('Signed in. Here is the answer.');
   });
 
   it('keeps a transcript notice when the turn finishes (turn-done never overwrites it)', () => {
@@ -89,8 +89,57 @@ describe('eventsToBlocks', () => {
     ]);
     // turn-done consolidates only the trailing 'text' block; the login notice is preserved untouched
     expect(blocks.map((b) => b.kind)).toEqual(['notice', 'text']);
-    expect(blocks[0].content).toContain('https://auth.openai.com/authorize');
-    expect(blocks[1].content).toBe('Authorized. Running now.');
+    expect((blocks[0] as { content: string }).content).toContain('https://auth.openai.com/authorize');
+    expect((blocks[1] as { content: string }).content).toBe('Authorized. Running now.');
+  });
+
+  it('subagent-started pushes a running card finalized by subagent-completed (summary + model)', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'subagent-started', sessionId: 's1', subagentId: 'sub-1', message: 'do the thing', data: { subagentName: 'child', subagentId: 'sub-1' } }),
+      ev({ type: 'subagent-completed', sessionId: 's1', subagentId: 'sub-1', message: '## done\n- a\n- b', data: { success: true, cancelled: false, subagentId: 'sub-1', model: 'gpt-5.5' } }),
+    ]);
+    expect(blocks.map((b) => b.kind)).toEqual(['subagent']);
+    const card = blocks[0] as Extract<typeof blocks[0], { kind: 'subagent' }>;
+    expect(card).toMatchObject({
+      kind: 'subagent',
+      state: 'done',
+      subagentId: 'sub-1',
+      name: 'child',
+      task: 'do the thing',
+      summary: '## done\n- a\n- b',
+      model: 'gpt-5.5',
+    });
+  });
+
+  it('subagent-completed without a started (replay tail rotation) pushes a finalized card', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'subagent-completed', sessionId: 's1', subagentId: 'sub-9', message: 'already done', data: { success: true, cancelled: false, model: 'gpt-5.5' } }),
+    ]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ kind: 'subagent', state: 'done', subagentId: 'sub-9', summary: 'already done', model: 'gpt-5.5' });
+  });
+
+  it('subagent-completed failure and cancellation set their own states', () => {
+    const failed = eventsToBlocks([
+      ev({ type: 'subagent-started', sessionId: 's1', subagentId: 'a', message: 't', data: { subagentName: 'one' } }),
+      ev({ type: 'subagent-completed', sessionId: 's1', subagentId: 'a', message: 'boom', data: { success: false, cancelled: false } }),
+    ]);
+    expect(failed[0]).toMatchObject({ kind: 'subagent', state: 'failed' });
+
+    const cancelled = eventsToBlocks([
+      ev({ type: 'subagent-started', sessionId: 's1', subagentId: 'b', message: 't', data: { subagentName: 'two' } }),
+      ev({ type: 'subagent-completed', sessionId: 's1', subagentId: 'b', message: 'stopped', data: { success: false, cancelled: true } }),
+    ]);
+    expect(cancelled[0]).toMatchObject({ kind: 'subagent', state: 'cancelled' });
+  });
+
+  it('turn-done never settles a running subagent card (async children outlive the parent turn)', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'subagent-started', sessionId: 's1', subagentId: 'sub-1', message: 'still working', data: { subagentName: 'child' } }),
+      ev({ type: 'turn-done', sessionId: 's1', message: 'parent answer' }),
+    ]);
+    expect(blocks.map((b) => b.kind)).toEqual(['subagent', 'text']);
+    expect(blocks[0]).toMatchObject({ kind: 'subagent', state: 'running' });
   });
 });
 
@@ -151,7 +200,7 @@ describe('eventsToBlocks - replayed full-text supersedes the streamed tail (neve
       ev({ type: 'tool-finished', sessionId: 's1', message: 'bash', data: { ordinal: 1, output: 'ok', success: true } }),
       ev({ type: 'text-delta', sessionId: 's1', message: 'Round two final answer.' }),
     ]);
-    const texts = blocks.filter((b) => b.kind === 'text').map((b) => b.content);
+    const texts = blocks.filter((b): b is { kind: 'text'; content: string } => b.kind === 'text').map((b) => b.content);
     expect(texts).toEqual(['Round one outcome.', 'Round two final answer.']);
   });
 
@@ -354,7 +403,7 @@ describe('eventsToBlocks - turn-done supersedes the streamed tail (never appends
       ev({ type: 'text-delta', sessionId: 's1', message: r2 }),
       ev({ type: 'turn-done', sessionId: 's1', message: r2 }),
     ]);
-    const texts = blocks.filter((b) => b.kind === 'text').map((b) => b.content);
+    const texts = blocks.filter((b): b is { kind: 'text'; content: string } => b.kind === 'text').map((b) => b.content);
     expect(texts).toEqual([r1, r2]);
   });
 

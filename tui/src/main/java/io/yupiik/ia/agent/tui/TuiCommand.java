@@ -6938,8 +6938,45 @@ public class TuiCommand implements Runnable {
         final var rows = new ArrayList<Line>();
         if (detail) {
             final var captured = subagentRegistry.transcriptOf(state.subagentsOverlay);
-            subagentRegistry
-                    .get(state.subagentsOverlay)
+            final var subOpt = subagentRegistry.get(state.subagentsOverlay);
+            // a finished sub-agent gets a report card above the live capture: effective model,
+            // colored status, artifacts and the final summary rendered as markdown
+            if (subOpt.isPresent() && subOpt.get().isDone() && subOpt.get().result() != null) {
+                final var sub = subOpt.get();
+                final var result = sub.result();
+                subagentRegistry
+                        .identityOf(state.subagentsOverlay)
+                        .map(SubagentRegistry.TranscriptIdentity::model)
+                        .filter(m -> m != null && !m.isBlank())
+                        .ifPresent(m -> rows.add(Line.from(Span.styled("model: " + m, muted))));
+                final var statusStyle =
+                        switch (result.status()) {
+                            case SUCCEEDED -> Style.EMPTY.fg(Color.hex(palette.success()));
+                            case CANCELLED -> muted;
+                            case BUDGET_EXHAUSTED -> Style.EMPTY.fg(Color.hex(palette.warning()));
+                            case FAILED -> Style.EMPTY.fg(Color.hex(palette.error()));
+                        };
+                rows.add(Line.from(Span.styled(
+                        "status: "
+                                + result.status()
+                                        .name()
+                                        .toLowerCase(Locale.ROOT)
+                                        .replace('_', ' '),
+                        statusStyle)));
+                if (!result.artifacts().isEmpty()) {
+                    rows.add(Line.from(Span.styled("artifacts: " + String.join(", ", result.artifacts()), muted)));
+                }
+                rows.add(Line.empty());
+                final var summary = result.summary() != null ? result.summary() : result.error();
+                if (summary != null && !summary.isBlank()) {
+                    final var contentWidth = Math.max(1, inner.width() - 2);
+                    appendModalRegion(rows, summary, contentWidth, textStyle);
+                    rows.add(Line.empty());
+                }
+                rows.add(Line.from(Span.styled("--- full transcript ---", muted)));
+                rows.add(Line.empty());
+            }
+            subOpt.filter(s -> !(s.isDone() && s.result() != null))
                     .map(SubagentRegistry.SubagentState::model)
                     .filter(m -> m != null && !m.isBlank())
                     .ifPresent(m -> rows.add(Line.from(Span.styled("model: " + m, muted))));
@@ -6978,10 +7015,24 @@ public class TuiCommand implements Runnable {
             for (final var sub : list) {
                 final var label = sub.name() != null ? sub.name() : sub.id();
                 final var status = sub.isDone() ? (sub.isCancelled() ? "cancelled" : "completed") : "running";
-                final var model = sub.model() == null || sub.model().isBlank() ? "" : "  [" + sub.model() + "]";
+                final var effective = subagentRegistry
+                        .identityOf(sub.id())
+                        .map(SubagentRegistry.TranscriptIdentity::model)
+                        .filter(m -> m != null && !m.isBlank())
+                        .orElseGet(() -> sub.model() == null || sub.model().isBlank() ? "" : sub.model());
+                final var model = effective.isBlank() ? "" : "  [" + effective + "]";
                 rows.add(Line.from(
                         Span.styled(label, accent),
-                        Span.styled("  [" + status + "]", sub.isDone() ? muted : accent),
+                        Span.styled(
+                                "  [" + status + "]",
+                                sub.isDone()
+                                        ? (sub.isCancelled()
+                                                ? muted
+                                                : sub.result() != null
+                                                                && sub.result().success()
+                                                        ? Style.EMPTY.fg(Color.hex(palette.success()))
+                                                        : Style.EMPTY.fg(Color.hex(palette.error())))
+                                        : accent),
                         Span.styled(model, muted),
                         Span.styled("  " + TuiInputSupport.firstLine(summarize(sub)), muted)));
             }

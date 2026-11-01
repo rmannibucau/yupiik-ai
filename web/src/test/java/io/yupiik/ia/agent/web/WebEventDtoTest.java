@@ -62,6 +62,26 @@ class WebEventDtoTest {
     }
 
     @Test
+    void subagentEventsCarryIdentityAndModel() {
+        final var started = WebEventDto.of(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child"));
+        assertEquals("subagent-started", started.type());
+        assertEquals("do the thing", started.message());
+        assertEquals("sub-1", started.data().get("subagentId"));
+        assertEquals("child", started.data().get("subagentName"));
+        assertEquals(null, started.data().get("model"), "the model is unresolved at spawn");
+
+        final var completed = WebEventDto.of(
+                new AgentEvent.SubagentCompleted("done", true, false, "s1", "sub-1", "child", "gpt-5.5"));
+        assertEquals("subagent-completed", completed.type());
+        assertEquals("done", completed.message());
+        assertEquals(true, completed.data().get("success"));
+        assertEquals(false, completed.data().get("cancelled"));
+        assertEquals("sub-1", completed.data().get("subagentId"));
+        assertEquals("child", completed.data().get("subagentName"));
+        assertEquals("gpt-5.5", completed.data().get("model"), "the effective model must ride the payload");
+    }
+
+    @Test
     void usageUpdatedExposesLiveCompletionAndReasoningTokens() {
         final var dto = WebEventDto.of(new AgentEvent.UsageUpdated(
                 new Usage(10, 120, 130, 0, 0, 40, 0),

@@ -17,6 +17,8 @@ package io.yupiik.ia.agent.core.cli;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import io.yupiik.ia.agent.core.context.ContextCompression;
+import io.yupiik.ia.agent.core.llm.Message;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -87,5 +89,47 @@ class StreamTextBufferTest {
         assertEquals("\nreal prose\n", buffer.append("@b21@ [high]\nreal prose\n"));
         assertEquals("x y\n", buffer.append("x @blocked@ y\n"));
         assertEquals("kept @user\n", buffer.append("kept @user\n"));
+    }
+
+    @Test
+    void bindCompressionEnablesTheEvidenceGatedGluedSeamStrip() {
+        final var lines = new ArrayList<String>();
+        final var buffer = new StreamTextBuffer(line -> {
+            lines.add(line);
+            return line;
+        });
+        final var compression = new ContextCompression(null);
+        for (var i = 0; i < 12503; i++) {
+            compression.refOf(Message.user("m" + i));
+        }
+        compression.refOf(Message.user("last"));
+        buffer.bindCompression(compression);
+
+        // without the bind this would render verbatim (fresh compressor has no assigned refs)
+        assertEquals("EntCompactionTruncates10632\n", buffer.append("@EntCompactionTruncates10632\n"));
+        assertEquals(List.of("EntCompactionTruncates10632"), lines);
+        // an unbound buffer (no assigned refs) keeps the '@' verbatim
+        final var fresh = new StreamTextBuffer(line -> line);
+        assertEquals("@EntCompactionTruncates10632\n", fresh.append("@EntCompactionTruncates10632\n"));
+    }
+
+    @Test
+    void mirrorHalfOfASplitSeamIsHiddenCompletely() {
+        // "@1250" was already re-queued by the transcript flush; the mirror "4@" alone has no
+        // word of its own and must not render its digits - it drains as an empty line
+        final var buffer = new StreamTextBuffer(line -> line);
+        assertEquals("\n", buffer.append("4@\n"));
+        assertEquals("", buffer.flush());
+    }
+
+    @Test
+    void flushDoesNotEmitABlankLineWhenTheOnlyContentWasWithheld() {
+        // a whole-line seam drains as a blank line, but the FINAL flush of a lone withheld
+        // fragment must not append an empty line
+        final var buffer = new StreamTextBuffer(line -> line);
+        buffer.append("@1250");
+        assertEquals("", buffer.flush());
+        buffer.append("@1290");
+        assertEquals("", buffer.flush());
     }
 }

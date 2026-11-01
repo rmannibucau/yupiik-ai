@@ -1760,6 +1760,48 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
       : globalCollapsed
     : false;
   const toggleCard = () => setUserOverride((o) => (collapsed ? 'expanded' : o === 'expanded' ? 'collapsed' : 'collapsed'));
+  if (block.kind === 'subagent') {
+    const running = block.state === 'running';
+    const failed = block.state === 'failed';
+    const cancelled = block.state === 'cancelled';
+    const borderColor = running
+      ? 'var(--yca-accent)'
+      : failed
+      ? 'rgba(255, 85, 85, 0.5)'
+      : cancelled
+      ? 'var(--yca-muted)'
+      : 'var(--yca-border)';
+    return (
+      <div
+        className="rounded border px-3 py-1 text-[15px]"
+        style={{ borderColor, background: 'var(--yca-panel)', borderRadius: 'var(--yca-radius-sm)' }}
+      >
+        <div className="mb-1 flex items-center gap-2">
+          <span className="font-mono text-sm" style={{ color: 'var(--yca-accent)' }}>subagent</span>
+          <span className="font-mono text-sm">{block.name}</span>
+          <span
+            className="rounded px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wide"
+            style={{
+              color: running ? 'var(--yca-accent)' : failed ? '#ff5555' : cancelled ? 'var(--yca-muted)' : '#46F72F',
+              background: 'var(--yca-panel)',
+            }}
+          >
+            {block.state}
+          </span>
+          {block.model ? (
+            <span className="text-xs" style={{ color: 'var(--yca-muted)' }}>model: {block.model}</span>
+          ) : null}
+        </div>
+        {running ? (
+          block.task ? (
+            <div className="text-[13px] opacity-70" style={{ color: 'var(--yca-muted)' }}>{block.task}</div>
+          ) : null
+        ) : block.summary ? (
+          <Markdown content={block.summary} writing={false} />
+        ) : null}
+      </div>
+    );
+  }
   if (block.kind === 'thought') {
     return (
       <div className="rounded border-l-2 px-3 py-1 text-[15px] opacity-60" style={{ borderColor: 'var(--yca-muted)', borderRadius: 'var(--yca-radius-sm)' }}>

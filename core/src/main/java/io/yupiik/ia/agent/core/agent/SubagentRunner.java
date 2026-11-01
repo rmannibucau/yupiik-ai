@@ -178,7 +178,8 @@ public class SubagentRunner {
                             result.cancelled(),
                             state.parentSessionId(),
                             state.id(),
-                            name));
+                            name,
+                            modelOf(state)));
                     deliverToParent(state, result.summary(), result.success(), result.cancelled());
                 } catch (final Exception e) {
                     final var message = "Subagent failed: " + e.getMessage();
@@ -189,7 +190,7 @@ public class SubagentRunner {
                                     ? SubagentRegistry.SubagentResult.cancelled("")
                                     : SubagentRegistry.SubagentResult.error(message, ""));
                     emitter.emit(new AgentEvent.SubagentCompleted(
-                            message, false, wasCancelled, state.parentSessionId(), state.id(), name));
+                            message, false, wasCancelled, state.parentSessionId(), state.id(), name, modelOf(state)));
                     deliverToParent(state, message, false, wasCancelled);
                 }
             });
@@ -197,10 +198,18 @@ public class SubagentRunner {
             final var message = "Subagent could not be scheduled: " + e.getMessage();
             final var result = SubagentRegistry.SubagentResult.error(message, "");
             subagentRegistry.complete(state.id(), result);
-            emitter.emit(
-                    new AgentEvent.SubagentCompleted(message, false, false, state.parentSessionId(), state.id(), name));
+            emitter.emit(new AgentEvent.SubagentCompleted(
+                    message, false, false, state.parentSessionId(), state.id(), name, modelOf(state)));
             deliverToParent(state, message, false, false);
         }
+    }
+
+    /** The effective model of a sub-agent once its runner resolved the routing, or {@code null} before that. */
+    private String modelOf(final SubagentRegistry.SubagentState state) {
+        return subagentRegistry
+                .identityOf(state.id())
+                .map(SubagentRegistry.TranscriptIdentity::model)
+                .orElse(null);
     }
 
     /**

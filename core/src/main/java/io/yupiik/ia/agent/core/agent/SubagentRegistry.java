@@ -218,6 +218,18 @@ public class SubagentRegistry {
     }
 
     /**
+     * The effective (provider, model) a sub-agent runs on, previously recorded through
+     * {@link #setTranscriptIdentity} by its runner once the model routing was resolved.
+     * Empty when unknown (sub-agent not started yet, identity not resolved, or transcript dropped).
+     */
+    public Optional<TranscriptIdentity> identityOf(final String subagentId) {
+        if (subagentId == null || subagentId.isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(transcriptIdentities.get(subagentId));
+    }
+
+    /**
      * The per-subagent transcript capture for the given id, lazily created. This
      * instance folds the subagent-tagged events (they are dropped from the parent
      * transcript) so the TUI can render the child conversation through
