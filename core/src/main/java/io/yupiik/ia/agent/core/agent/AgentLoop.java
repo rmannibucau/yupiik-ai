@@ -42,6 +42,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
+import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -61,7 +62,6 @@ import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.llm.client.ContextWindowExceededException;
-import io.yupiik.llm.client.LlmHttpFailureException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningDelta;
@@ -108,13 +108,6 @@ public class AgentLoop {
     private static final String WRITE_MARKER = "\u0000write";
 
     private static final String REDUNDANT_MARKER = "\u0000seen:";
-
-    /**
-     * Upper bound on the assistant tool call ids a single block can carry before {@link
-     * #repairInterruptedToolCalls} stops tracking them: beyond this a corrupted/oversized assistant block
-     * is impossible to heal anyway, so the repair conservatively leaves it untouched rather than blowing up.
-     */
-    private static final int MAX_REPAIR_PENDING_TOOL_IDS = 256;
 
     /**
      * One-shot nudge injected before the exploration-plateau hard stop (plateauFeedback nudge_1 /
@@ -225,6 +218,7 @@ public class AgentLoop {
     private final TodoStore todoStore;
     private final ExecutorService executor;
     private final UserFeedbackService userFeedbackService;
+    private final ToolCallPairingRepair pairingRepair;
     private final String subagentId;
     private final String subagentName;
     /** Null means this is a regular agent turn; a non-null set is a subagent execution ceiling. */
@@ -562,7 +556,8 @@ public class AgentLoop {
                 null,
                 null,
                 null,
-                new PrecisionDurationMarkerProvider());
+                new PrecisionDurationMarkerProvider(),
+                null);
     }
 
     AgentLoop(
@@ -617,13 +612,14 @@ public class AgentLoop {
                 subagentId,
                 subagentName,
                 null,
-                new PrecisionDurationMarkerProvider());
+                new PrecisionDurationMarkerProvider(),
+                null);
     }
 
     protected AgentLoop() {
         this(
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null);
     }
 
     /**
@@ -660,7 +656,8 @@ public class AgentLoop {
             final String subagentId,
             final String subagentName,
             final UserFeedbackService userFeedbackService,
-            final PrecisionDurationMarkerProvider precisionDurationMarker) {
+            final PrecisionDurationMarkerProvider precisionDurationMarker,
+            final ToolCallPairingRepair pairingRepair) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -690,6 +687,7 @@ public class AgentLoop {
         this.subagentId = subagentId;
         this.subagentName = subagentName;
         this.userFeedbackService = userFeedbackService;
+        this.pairingRepair = pairingRepair != null ? pairingRepair : new ToolCallPairingRepair(sessionStore, clock);
     }
 
     /**
@@ -1825,7 +1823,7 @@ public class AgentLoop {
                     // turn dying. Bounded to one repair per turn so a non-tool 400 can never spin. The
                     // signature check is owned by ModelRoundProcessor (single source of truth) and, for the
                     // streaming path, already short-circuits the generic retry budget before it reaches here.
-                    if (!toolPairingRepaired && isToolPairingRejection(e)) {
+                    if (!toolPairingRepaired && ToolCallPairingRepair.isPairingRejection(e)) {
                         toolPairingRepaired = true;
                         emit(
                                 notice(
@@ -3477,7 +3475,8 @@ public class AgentLoop {
         for (final var message : messages) {
             if ("tool".equals(message.role()) && message.toolCallId() != null) {
                 final var content = String.valueOf(message.content());
-                if (!content.startsWith("[tool result lost:")) { // repairInterruptedToolCalls markers
+                if (!content.startsWith(
+                        ToolCallPairingRepair.TOOL_RESULT_LOST_MARKER)) { // repairInterruptedToolCalls markers
                     landedResults.add(message.toolCallId());
                 }
             }
@@ -3987,42 +3986,6 @@ public class AgentLoop {
     }
 
     /**
-     * Whether a request failure is a strict tool-pairing rejection (Azure / litellm "An assistant message
-     * with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The following
-     * tool_call_ids did not have response messages: ..."). This is the caller-side (history-owner) companion
-     * to {@link ModelRoundProcessor#isToolCallPairingRejected(LlmHttpFailureException)}, which owns the
-     * retry-policy decision. Keep the {@code LLM request failed (400)} prefix gate on the message so a
-     * non-400 transport failure is never misclassified, then delegate the signature narrowing to the shared
-     * matcher for the http-failure body, falling back to a message-only check when the failure does not carry
-     * a body.
-     *
-     * @param failure the thrown low-level request failure (the 400 propagates to the loop as an
-     *     {@link IOException}, possibly a {@link LlmHttpFailureException} carrying the provider body).
-     * @return whether the failure is a tool-call pairing rejection that the interrupted-tool repair can fix.
-     */
-    private static boolean isToolPairingRejection(final Throwable failure) {
-        // prefer the typed failure: the status code is authoritative and never depends on
-        // message formatting ("LLM request failed (400)" is a bare prefix heuristic)
-        if (failure instanceof LlmHttpFailureException httpFailure) {
-            return httpFailure.status() == 400 && ModelRoundProcessor.isToolCallPairingRejected(httpFailure);
-        }
-        final var message = failure == null ? null : failure.getMessage();
-        if (message == null || !message.startsWith("LLM request failed (400)")) {
-            return false;
-        }
-        if (failure instanceof LlmHttpFailureException httpFailure
-                && ModelRoundProcessor.isToolCallPairingRejected(httpFailure)) {
-            return true;
-        }
-        final var lowerTxt = message.toLowerCase(Locale.ROOT);
-        return lowerTxt.contains("tool_calls")
-                && (lowerTxt.contains("must be followed")
-                        || lowerTxt.contains("no response message")
-                        || lowerTxt.contains("did not have")
-                        || lowerTxt.contains("without tool messages"));
-    }
-
-    /**
      * Heals history where an assistant {@code tool_use} never got a CONTIGUOUS answer (the turn ended
      * mid-tool via cancel/interrupt/error, or a non-tool message - a user prompt, notice, compaction
      * marker - was interposed between the assistant call and its result). Anthropic requires every
@@ -4047,99 +4010,13 @@ public class AgentLoop {
         if (messages == null || messages.isEmpty()) {
             return;
         }
-        // An assistant tool call is only "answered" when its result arrives CONTIGUOUSLY (the very next
-        // tool messages, before any non-tool message) - the exact rule the OpenAI/Azure and Anthropic wire
-        // backstops and their strict validators enforce. A response (or a lost-result marker) that landed
-        // ANYWHERE in history but is separated from its assistant call by an interposed assistant/user/
-        // notice message does NOT satisfy the contiguity rule: the assistant call gets a synthetic
-        // lost-result marker placed IMMEDIATELY after its block, and the stray response is dropped.
-        // Azure enforces BOTH directions of this adjacency ("an assistant message with 'tool_calls' must be
-        // followed by tool messages responding to each 'tool_call_id'" AND "messages with role 'tool' must
-        // be a response to a preceding message with 'tool_calls'"), so the healed history must carry
-        // exactly one response per call id, in the contiguous position.
-        //
-        // The heal is per-OCCURRENCE and streaming: each assistant block opens a pending set of its own
-        // call ids; the contiguous run of tool messages immediately following it claims those ids; any
-        // tool message that does NOT claim a pending id is an orphan (a stray marker or a result whose
-        // assistant block was interposed away) and is dropped; ids still pending when a non-tool message
-        // (or the end of the history) is reached get their marker inserted right there, before whatever
-        // interposes. Stray markers elsewhere no longer suppress the heal.
-        final var persistedIds = new LinkedHashSet<String>();
-        // ids that already carried a response somewhere in the pre-repair history: the marker(s) they
-        // carried may be strays (dropped by this pass), but their session entry already exists, so the
-        // healed id must NOT be persisted again - appending would add a new orphan marker at the tail of
-        // the append-only session on every resume.
-        final var persisted = new HashSet<String>();
-        for (final var message : messages) {
-            if ("tool".equals(message.role()) && message.toolCallId() != null) {
-                persisted.add(message.toolCallId());
-            }
+        final var result = pairingRepair.repairAndPersist(sessionId, messages);
+        if (result.changed()) {
+            emit(status("repaired " + result.healed() + " interrupted tool call(s) whose result never landed"
+                    + (result.droppedOrphans() == 0
+                            ? ""
+                            : ", dropped " + result.droppedOrphans() + " orphan tool response(s)")));
         }
-        final var repaired = new ArrayList<Message>(messages.size() + 8);
-        final var text = "[tool result lost: the model's tool call was interrupted before it could complete this turn]";
-        var droppedOrphans = 0;
-        var healed = 0;
-        var changed = false;
-        var pending = new LinkedHashSet<String>();
-        for (final var message : messages) {
-            if (!"tool".equals(message.role())) {
-                // a non-tool message (a newer assistant reply, a user prompt, a notice, the end of the
-                // history) closes the previous assistant block's contiguous run: ids still awaiting a
-                // result there are healed with a marker right before whatever now follows.
-                if (!pending.isEmpty()) {
-                    for (final var id : pending) {
-                        repaired.add(Message.tool(id, text, true));
-                        changed = true;
-                        if (persisted.add(id)) {
-                            healed++;
-                            sessionStore.append(
-                                    sessionId,
-                                    SessionEntry.of(
-                                            clock.millis(), "tool", text, null, id, null, Map.of("is_error", true)));
-                        }
-                    }
-                    pending = new LinkedHashSet<>();
-                }
-                repaired.add(message);
-                if ("assistant".equals(message.role()) && message.toolCalls() != null) {
-                    for (final var call : message.toolCalls()) {
-                        if (call != null && call.id() != null && pending.size() < MAX_REPAIR_PENDING_TOOL_IDS) {
-                            pending.add(call.id());
-                        }
-                    }
-                }
-                continue;
-            }
-            if (pending.remove(message.toolCallId())) {
-                repaired.add(message);
-            } else {
-                // orphan response: no contiguous assistant tool_calls claim it - Azure/litellm reject
-                // "messages with role 'tool' must be a response to a tool call", so it must not reach
-                // the wire (a marker for the same id, if needed, is inserted at its assistant block).
-                droppedOrphans++;
-                changed = true;
-            }
-        }
-        for (final var id : pending) {
-            repaired.add(Message.tool(id, text, true));
-            changed = true;
-            if (persisted.add(id)) {
-                healed++;
-                sessionStore.append(
-                        sessionId,
-                        SessionEntry.of(clock.millis(), "tool", text, null, id, null, Map.of("is_error", true)));
-            }
-        }
-        if (!changed) {
-            return;
-        }
-        messages.clear();
-        messages.addAll(repaired);
-        // only a TRUE first-time heal (the id carried no response anywhere before this repair) persists a
-        // marker: an id whose stray marker existed already and was just dropped must not get a fresh tail
-        // entry, or every resume would append another orphan marker at the end of the append-only session.
-        emit(status("repaired " + healed + " interrupted tool call(s) whose result never landed"
-                + (droppedOrphans == 0 ? "" : ", dropped " + droppedOrphans + " orphan tool response(s)")));
     }
 
     /**

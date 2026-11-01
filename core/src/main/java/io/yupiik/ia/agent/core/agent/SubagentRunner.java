@@ -311,7 +311,8 @@ public class SubagentRunner {
                 state.id(),
                 subagentName,
                 parentContext == null ? null : parentContext.feedback(),
-                precisionDurationMarker);
+                precisionDurationMarker,
+                null);
         // The sub-agent runs on its own dedicated AgentLoop, so its model selection is per-run:
         // inherit the parent tab's provider/model/variant/sampling selection so a child spawned from
         // tab B runs on B's provider, not the process default. An explicit model (spawn_subagent

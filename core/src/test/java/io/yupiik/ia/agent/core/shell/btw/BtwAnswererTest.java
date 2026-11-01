@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.MarkupToolCallScanner;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -140,7 +141,8 @@ class BtwAnswererTest {
                 providerManager,
                 Clock.systemUTC(),
                 NOOP,
-                null);
+                null,
+                new ToolCallPairingRepair(sessionStore, Clock.systemUTC()));
     }
 
     /**
@@ -356,6 +358,29 @@ class BtwAnswererTest {
         assertEquals(2, sessionStore.size("s1"));
         assertEquals(1L, usageTracker.auxiliaryRequests());
         assertEquals(3L, usageTracker.auxiliaryPromptTokens());
+    }
+
+    @Test
+    void answersWhenHistoryStartsWithOrphanToolResult() throws Exception {
+        // the persisted session's tail can start mid-tool-round (a cancelled turn before /btw ran):
+        // an orphan tool result at the head of the slice would reach Azure/litellm as a hard 400
+        // ("messages with role 'tool' must be a response to a preceding message with 'tool_calls'").
+        // The repair must drop the orphan in memory (never persist - /btw is a read-only side channel).
+        sessionStore.replace(
+                "s1",
+                List.of(
+                        Message.user("hi"),
+                        Message.assistant("hello", List.of()),
+                        Message.tool("c1", "orphan result")));
+        final var answer = answerer.ask("what did I say?", "s1", usageTracker, () -> false, null)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertEquals("hello there", answer.text());
+        // the orphan is gone from the wire, and the session store was NOT written by the repair
+        final var body = bodies.getLast();
+        assertFalse(body.contains("orphan result"), body);
+        assertEquals(3, sessionStore.size("s1"));
+        assertEquals(1L, usageTracker.auxiliaryRequests());
     }
 
     @SuppressWarnings("unchecked")

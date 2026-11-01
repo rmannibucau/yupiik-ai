@@ -2289,6 +2289,7 @@ class TuiCommandRenderTest {
                         null,
                         null,
                         null,
+                        null,
                         null),
                 tabManager,
                 subagentRegistry,

@@ -31,11 +31,13 @@ import io.yupiik.ia.agent.core.events.ToolUsePreEvent;
 import io.yupiik.ia.agent.core.events.hooks.EventContextBuilder;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
+import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -129,6 +131,7 @@ public class BtwAnswerer {
     private final Clock clock;
     private final Emitter emitter;
     private final EventContextBuilder eventContextBuilder;
+    private final ToolCallPairingRepair pairingRepair;
     private final Deque<BtwExchange> exchanges = new ConcurrentLinkedDeque<>();
     private volatile ChatClient dedicatedClient;
     private volatile ChatSettings dedicatedSettings;
@@ -145,7 +148,8 @@ public class BtwAnswerer {
             final ProviderManager providerManager,
             final Clock clock,
             final Emitter emitter,
-            final EventContextBuilder eventContextBuilder) {
+            final EventContextBuilder eventContextBuilder,
+            final ToolCallPairingRepair pairingRepair) {
         this.chatClient = chatClient;
         this.sessionStore = sessionStore;
         this.configuration = configuration;
@@ -158,6 +162,7 @@ public class BtwAnswerer {
         this.clock = clock;
         this.emitter = emitter;
         this.eventContextBuilder = eventContextBuilder;
+        this.pairingRepair = pairingRepair;
     }
 
     public record BtwExchange(String question, String answer) {}
@@ -237,10 +242,17 @@ public class BtwAnswerer {
             throws IOException, InterruptedException {
         final var conf = configuration();
         final var bounded = tail(sessionStore.load(sessionId), conf.maxHistoryMessages());
-        final var messages = new ArrayList<Message>(bounded.size() + 2);
+        // The persisted session has the agent loop's pairing repair applied per resume, but a /btw slice
+        // can start mid-tool-round (orphan tool result at head, or an unpaired assistant tool_calls block
+        // before a later paired block): the wire backstops trust everything before their verification
+        // start, so a broken pairing in the slice reaches Azure/litellm as a hard 400. Heal the slice
+        // in memory (never persist - /btw is a read-only side channel into the session) before sending.
+        final var repairedTail =
+                pairingRepair != null ? pairingRepair.repair(bounded).messages() : bounded;
+        final var messages = new ArrayList<Message>(repairedTail.size() + 2);
         final var systemText = systemPrompt != null ? systemPrompt.build(null, null) : TOOL_LESS_SYSTEM_PROMPT;
         messages.add(Message.system(systemText));
-        messages.addAll(bounded);
+        messages.addAll(repairedTail);
         final var usingSessionPrompt = systemPrompt != null;
         messages.add(Message.user(userPrompt(conf, question, usingSessionPrompt)));
         final var model = conf.model() == null || conf.model().isBlank() ? null : conf.model();
@@ -259,27 +271,44 @@ public class BtwAnswerer {
                         requestSettings == null ? sessionSettings : requestSettings.inheritFrom(sessionSettings);
             }
             var retried = false;
+            var pairRetried = false;
             String raw = "";
             for (var round = 0; round < 2; round++) {
                 if (cancelled.getAsBoolean()) {
                     throw new InterruptedException("cancelled");
                 }
-                final var res = target.client()
-                        .chat(
-                                new ChatCompletionRequest(
-                                                model,
-                                                messages,
-                                                null,
-                                                null,
-                                                false,
-                                                wireBtwTools(),
-                                                null,
-                                                conf.maxTokens() > 0 ? conf.maxTokens() : null,
-                                                null,
-                                                null)
-                                        .withSessionId(sessionId)
-                                        .withSettings(requestSettings),
-                                cancelled);
+                final ChatResult res;
+                try {
+                    res = target.client()
+                            .chat(
+                                    new ChatCompletionRequest(
+                                                    model,
+                                                    messages,
+                                                    null,
+                                                    null,
+                                                    false,
+                                                    wireBtwTools(),
+                                                    null,
+                                                    conf.maxTokens() > 0 ? conf.maxTokens() : null,
+                                                    null,
+                                                    null)
+                                            .withSessionId(sessionId)
+                                            .withSettings(requestSettings),
+                                    cancelled);
+                } catch (final IOException e) {
+                    // Azure / litellm strict validators reject an assistant tool_calls with no contiguous
+                    // tool result - the exact shape a /btw slice can carry when it starts mid-tool-round.
+                    // Repair the outgoing messages in memory and retry EXACTLY ONCE with the healed
+                    // payload; a second pairing failure (or any other failure) propagates as before.
+                    if (!pairRetried && ToolCallPairingRepair.isPairingRejection(e)) {
+                        pairRetried = true;
+                        final var repaired = pairingRepair.repair(messages);
+                        messages.clear();
+                        messages.addAll(repaired.messages());
+                        continue;
+                    }
+                    throw e;
+                }
                 if (usage != null) {
                     usage.recordAuxiliary(res.usage());
                 }
@@ -325,6 +354,7 @@ public class BtwAnswerer {
                 ? List.<Tool>of()
                 : toolRegistry.toWireTools(t -> t.category() == ToolCategory.READ || t.category() == ToolCategory.BASH);
         var retried = false;
+        var pairRetried = false;
         String raw = "";
         final var attemptedTools = new LinkedHashSet<String>();
         for (var round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -336,22 +366,37 @@ public class BtwAnswerer {
                 requestSettings =
                         requestSettings == null ? sessionSettings : requestSettings.inheritFrom(sessionSettings);
             }
-            final var res = target.client()
-                    .chat(
-                            new ChatCompletionRequest(
-                                            model,
-                                            messages,
-                                            null,
-                                            null,
-                                            false,
-                                            tools,
-                                            "auto",
-                                            conf.maxTokens() > 0 ? conf.maxTokens() : null,
-                                            null,
-                                            null)
-                                    .withSessionId(sessionId)
-                                    .withSettings(requestSettings),
-                            cancelled);
+            final ChatResult res;
+            try {
+                res = target.client()
+                        .chat(
+                                new ChatCompletionRequest(
+                                                model,
+                                                messages,
+                                                null,
+                                                null,
+                                                false,
+                                                tools,
+                                                "auto",
+                                                conf.maxTokens() > 0 ? conf.maxTokens() : null,
+                                                null,
+                                                null)
+                                        .withSessionId(sessionId)
+                                        .withSettings(requestSettings),
+                                cancelled);
+            } catch (final IOException e) {
+                // same pairing rejection as the tool-less path: the tooled loop appends assistant
+                // tool_calls + results, but a broken pairing can also arrive from the inherited slice
+                // (orphan tool result at head). Repair and retry exactly once.
+                if (!pairRetried && ToolCallPairingRepair.isPairingRejection(e)) {
+                    pairRetried = true;
+                    final var repaired = pairingRepair.repair(messages);
+                    messages.clear();
+                    messages.addAll(repaired.messages());
+                    continue;
+                }
+                throw e;
+            }
             if (usage != null) {
                 usage.recordAuxiliary(res.usage());
             }
