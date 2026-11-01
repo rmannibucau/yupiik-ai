@@ -22,12 +22,15 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import io.yupiik.ia.agent.core.context.CompactionResult;
+import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -46,11 +49,13 @@ import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 
 class AgentSessionServiceTest {
@@ -559,6 +564,53 @@ class AgentSessionServiceTest {
         assertNotNull(result);
         assertFalse(result.applied());
         assertEquals("nothing to compact", result.message());
+    }
+
+    @Test
+    void compactPropagatesForceUrgentAndKeepLastToTheContextManager() {
+        final var captured = new ArrayList<Object[]>();
+        final var contextManager = new ContextManager() {
+            @Override
+            public CompactionResult compact(
+                    final List<Message> messages,
+                    final boolean force,
+                    final String focus,
+                    final int keepLastOverride,
+                    final boolean urgent,
+                    final BooleanSupplier cancelled,
+                    final ChatSettings settings) {
+                captured.add(new Object[] {force, focus, keepLastOverride, urgent});
+                return new CompactionResult(messages, CompactionResult.Mode.SUMMARY, "");
+            }
+        };
+        final var store = new SessionStore() {
+            @Override
+            public List<Message> load(final String id) {
+                return List.of(Message.user("hi"));
+            }
+        };
+        final var service = service(store);
+        final var runtime = new SessionRuntime(
+                new AgentLoop() {
+                    @Override
+                    public ChatSettings chatSettings() {
+                        return ChatSettings.EMPTY;
+                    }
+                },
+                new PermissionService(cfg()),
+                null,
+                null,
+                null,
+                null,
+                contextManager,
+                promptBuilder());
+        final var result = service.compact("s1", true, true, 7, runtime);
+        assertTrue(result.applied());
+        assertEquals(1, captured.size());
+        assertEquals(Boolean.TRUE, captured.get(0)[0], "force must reach the context manager");
+        assertNull(captured.get(0)[1], "no focus hint from the slash command");
+        assertEquals(7, captured.get(0)[2], "keep=<n> must reach the context manager");
+        assertEquals(Boolean.TRUE, captured.get(0)[3], "urgent must reach the context manager");
     }
 
     @Test

@@ -25,11 +25,13 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -734,6 +736,45 @@ class ContextManagerTest {
                 16_000,
                 manager.compactionTriggerTokens(),
                 "small reserve: buffer trigger (32k - 16k floor) is unchanged");
+    }
+
+    @Test
+    void urgentCompactionTruncatesLocallyWhenTheSummarizerFailsTransiently() {
+        final var cfg = config(
+                6,
+                128_000,
+                Map.of(
+                        "yca.compaction.tailBudgetTokens", "1",
+                        "yca.compaction.summarizerChunkChars", "4000",
+                        "yca.llm.retriesMaxAttempts", "2",
+                        "yca.pruning.toolOutputMaxChars", "500"));
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                throw new IOException("upstream 500");
+            }
+        };
+        final var manager = manager(cfg, chat);
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 8; i++) {
+            messages.add(Message.user("old step " + i + " " + "x".repeat(1_000)));
+            messages.add(Message.assistant("ack " + i, null));
+        }
+        messages.add(Message.user("current task"));
+        // a normal forced compaction honours the non-destructive contract: transient failure -> skip
+        assertEquals(CompactionResult.Mode.NONE, manager.compact(messages, true).mode());
+        // an urgent compaction opts out: it falls back to the destructive local truncation
+        final var urgent = manager.compact(messages, true, null, 0, true, () -> false, ChatSettings.EMPTY);
+        assertEquals(CompactionResult.Mode.TRUNCATE, urgent.mode(), "urgent must truncate, not skip");
+        assertTrue(urgent.changed(), "urgent compaction must actually reclaim context");
+        assertTrue(
+                urgent.error() != null && urgent.error().contains("upstream 500"),
+                "the truncation must still surface the summarizer failure: " + urgent.error());
     }
 
     private ContextManager manager(final CodingAgentConfiguration cfg, final ChatClient chat) {

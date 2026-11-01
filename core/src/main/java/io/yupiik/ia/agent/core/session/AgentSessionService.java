@@ -364,12 +364,27 @@ public class AgentSessionService {
      * shows a false success).
      */
     public CompactionApplied compact(final String sessionId, final boolean force, final SessionRuntime runtime) {
+        return compact(sessionId, force, false, 0, runtime);
+    }
+
+    /**
+     * {@link #compact(String, boolean, SessionRuntime)} with an {@code urgent} flag (falls back to a
+     * destructive local truncation when the summarizer fails transiently, instead of skipping the
+     * pass - see {@code ContextManager.compact(..., urgent, ...)}) and a {@code keepLast} verbatim
+     * tail floor override. Used by the {@code /compact [force] [urgent] [keep=<n>]} slash command.
+     */
+    public CompactionApplied compact(
+            final String sessionId,
+            final boolean force,
+            final boolean urgent,
+            final int keepLast,
+            final SessionRuntime runtime) {
         final var history = sessionStore.load(sessionId);
         if (history.isEmpty()) {
             return new CompactionApplied(false, "nothing to compact", null);
         }
-        final var result =
-                runtime.contextManager().compact(history, force, null, 0, () -> false, runtime.chatSettings());
+        final var result = runtime.contextManager()
+                .compact(history, force, null, keepLast, urgent, () -> false, runtime.chatSettings());
         if (!result.changed()) {
             return new CompactionApplied(false, "context already within budget", null);
         }

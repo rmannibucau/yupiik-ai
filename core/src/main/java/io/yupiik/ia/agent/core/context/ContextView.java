@@ -54,10 +54,17 @@ public class ContextView {
      * @param keepLast optional minimum number of recent messages to keep verbatim (0 = default)
      * @param requestedBy tool name that requested the operation, or {@code "user"} for shell-triggered operations
      * @param force bypass the within-budget guard so compaction runs even below the thresholds
+     * @param urgent user-requested compaction that falls back to destructive local truncation when
+     *               the summarizer fails transiently instead of skipping the pass (opt-in)
      */
-    public record Directive(String action, String focus, int keepLast, String requestedBy, boolean force) {
+    public record Directive(
+            String action, String focus, int keepLast, String requestedBy, boolean force, boolean urgent) {
         public Directive(String action, String focus, int keepLast, String requestedBy) {
-            this(action, focus, keepLast, requestedBy, false);
+            this(action, focus, keepLast, requestedBy, false, false);
+        }
+
+        public Directive(String action, String focus, int keepLast, String requestedBy, boolean force) {
+            this(action, focus, keepLast, requestedBy, force, false);
         }
     }
 

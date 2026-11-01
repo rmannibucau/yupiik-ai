@@ -67,10 +67,10 @@ public class MaintainCommands implements SlashCommandSet {
                 SlashCommand.of(
                         new SlashCommandSpec(
                                 "/compact",
-                                "[force]",
-                                "compact the context window (/compact [force])",
+                                "[force] [urgent] [keep=<n>]",
+                                "compact the context window (/compact [force] [urgent] [keep=<n>])",
                                 SlashGroup.MAINTAIN),
-                        List.of("force"),
+                        ArgCompletion.options("force", "urgent", "keep="),
                         SlashAction.sync(this::compact)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -115,16 +115,16 @@ public class MaintainCommands implements SlashCommandSet {
     }
 
     private ShellOutcome compact(final String arg, final ShellEnv env) {
-        final var trimmed = arg == null ? "" : arg.strip();
-        if (!trimmed.isEmpty() && !trimmed.equalsIgnoreCase("force")) {
-            return ShellOutcome.status("usage: /compact [force]");
+        final var parsed = parseCompact(arg);
+        if (parsed == null) {
+            return ShellOutcome.status("usage: /compact [force] [urgent] [keep=<n>]");
         }
         if (env.session().busy()) {
             // deferred: the loop applies the operation at the next safe checkpoint, at most one per turn
             final var queued = env.session()
                     .runtime()
                     .loop()
-                    .requestUserContextOperation("compact", null, 0, trimmed.equalsIgnoreCase("force"));
+                    .requestUserContextOperation("compact", null, parsed.keepLast(), parsed.force(), parsed.urgent());
             return ShellOutcome.status(
                     queued
                             ? "compaction scheduled - applied at the next agent checkpoint"
@@ -133,7 +133,9 @@ public class MaintainCommands implements SlashCommandSet {
         try {
             final var result = agentSessionService.compact(
                     env.session().sessionId(),
-                    trimmed.equalsIgnoreCase("force"),
+                    parsed.force(),
+                    parsed.urgent(),
+                    parsed.keepLast(),
                     env.session().runtime());
             if (result.applied() && result.error() != null) {
                 return ShellOutcome.status(result.message() + "\n" + result.error());
@@ -143,6 +145,43 @@ public class MaintainCommands implements SlashCommandSet {
             return ShellOutcome.error("compact failed: " + e.getMessage());
         }
     }
+
+    /**
+     * Parses the {@code /compact} arguments ({@code force}, {@code urgent}, {@code keep=<n>}),
+     * space-separated in any order. Returns {@code null} on an unknown/ill-formed token so the
+     * caller can surface the usage line.
+     */
+    private static CompactOptions parseCompact(final String arg) {
+        var force = false;
+        var urgent = false;
+        var keepLast = 0;
+        if (arg == null || arg.isBlank()) {
+            return new CompactOptions(force, urgent, keepLast);
+        }
+        for (final var token : arg.strip().split("\\s+")) {
+            final var t = token.toLowerCase(Locale.ROOT);
+            if ("force".equals(t)) {
+                force = true;
+            } else if ("urgent".equals(t)) {
+                urgent = true;
+            } else if (t.startsWith("keep=")) {
+                try {
+                    keepLast =
+                            Integer.parseInt(token.substring("keep=".length()).strip());
+                    if (keepLast < 0) {
+                        return null;
+                    }
+                } catch (final NumberFormatException e) {
+                    return null;
+                }
+            } else {
+                return null;
+            }
+        }
+        return new CompactOptions(force, urgent, keepLast);
+    }
+
+    private record CompactOptions(boolean force, boolean urgent, int keepLast) {}
 
     private ShellOutcome snapshot(final String arg, final ShellEnv env) {
         try {

@@ -429,6 +429,25 @@ public class CompactionCoordinator {
             final int keepLastOverride,
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
+        return compact(messages, force, focus, keepLastOverride, false, cancelled, settings);
+    }
+
+    /**
+     * Compacts a context, with an {@code urgent} flag: a manual, user-requested compaction that
+     * trades the non-destructive contract for guaranteed progress. When the summarizer fails
+     * transiently (after all retries and the optional main-model fallback), a normal compaction
+     * skips the pass and keeps the raw context; an urgent one falls back to the destructive local
+     * truncation instead, so a user explicitly asking to reclaim context near the window edge is
+     * never left stuck above the budget by a flaky provider.
+     */
+    public CompactionResult compact(
+            final List<Message> messages,
+            final boolean force,
+            final String focus,
+            final int keepLastOverride,
+            final boolean urgent,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings) {
         Objects.requireNonNull(cancelled, "cancelled");
         if (hookVetoed()) {
             return new CompactionResult(messages, Mode.NONE, "compaction vetoed by hook");
@@ -491,8 +510,10 @@ public class CompactionCoordinator {
         }
         // a transient summarizer failure (5xx/network after all retries and the optional main-model
         // fallback) must not destructively truncate a heavy context: skip the pass and keep the raw
-        // messages so the next automatic compaction can retry from a clean state
-        if (outcome.transientFailure() && !outcome.sizeError()) {
+        // messages so the next automatic compaction can retry from a clean state. An urgent
+        // user-requested compaction opts out of this contract and falls through to the destructive
+        // truncation below so it always reclaims context.
+        if (outcome.transientFailure() && !outcome.sizeError() && !urgent) {
             final var failureMessage =
                     outcome.error() == null || outcome.error().isBlank() ? "Summary failed" : outcome.error();
             LOGGER.log(SessionAwareLogRecord.of(

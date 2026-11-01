@@ -170,6 +170,25 @@ public class ContextManager {
         return coordinator.compact(messages, force, focus, keepLastOverride, cancelled, settings);
     }
 
+    /**
+     * {@link #compact(List, boolean, String, int, BooleanSupplier, ChatSettings)} with an urgent
+     * flag: a manual user-requested compaction that falls back to a destructive local truncation
+     * when the summarizer fails transiently, instead of skipping the pass and keeping the raw
+     * context. Opt-in only (the {code /compact urgent} slash command); automatic compaction never
+     * uses it so the non-destructive contract is preserved.
+     */
+    public CompactionResult compact(
+            final List<Message> messages,
+            final boolean force,
+            final String focus,
+            final int keepLastOverride,
+            final boolean urgent,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings) {
+        resetSpeculation();
+        return coordinator.compact(messages, force, focus, keepLastOverride, urgent, cancelled, settings);
+    }
+
     /** One tighter, bounded retry after automatic compaction leaves usage above its trigger. */
     public CompactionResult compactForRecovery(
             final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {

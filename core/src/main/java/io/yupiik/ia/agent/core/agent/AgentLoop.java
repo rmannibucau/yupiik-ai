@@ -2401,10 +2401,19 @@ public class AgentLoop {
      */
     public boolean requestUserContextOperation(
             final String action, final String focus, final int keepLast, final boolean force) {
+        return requestUserContextOperation(action, focus, keepLast, force, false);
+    }
+
+    /**
+     * {@link #requestUserContextOperation(String, String, int, boolean)} with an {@code urgent}
+     * flag propagated to the queued directive (see {@link ContextView.Directive#urgent()}).
+     */
+    public boolean requestUserContextOperation(
+            final String action, final String focus, final int keepLast, final boolean force, final boolean urgent) {
         if (contextView == null) {
             return false;
         }
-        return contextView.request(new ContextView.Directive(action, focus, keepLast, "user", force));
+        return contextView.request(new ContextView.Directive(action, focus, keepLast, "user", force, urgent));
     }
 
     private void applyToolDirective(
@@ -2419,6 +2428,7 @@ public class AgentLoop {
                         directive.force(),
                         directive.focus(),
                         directive.keepLast(),
+                        directive.urgent(),
                         () -> false,
                         chatSettings);
         if (!result.changed()) {

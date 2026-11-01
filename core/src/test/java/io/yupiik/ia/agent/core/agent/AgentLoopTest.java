@@ -4269,6 +4269,18 @@ class AgentLoopTest {
                     final int keepLast,
                     final BooleanSupplier cancelled,
                     final ChatSettings settings) {
+                return compact(messages, force, focus, keepLast, false, cancelled, settings);
+            }
+
+            @Override
+            public CompactionResult compact(
+                    final List<Message> messages,
+                    final boolean force,
+                    final String focus,
+                    final int keepLast,
+                    final boolean urgent,
+                    final BooleanSupplier cancelled,
+                    final ChatSettings settings) {
                 compactRuns.incrementAndGet();
                 return new CompactionResult(
                         List.of(
