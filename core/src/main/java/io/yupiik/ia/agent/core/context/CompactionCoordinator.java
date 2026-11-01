@@ -30,6 +30,7 @@ import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.llm.client.ContextWindowExceededException;
+import io.yupiik.llm.client.LlmHttpFailureException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -888,6 +889,14 @@ public class CompactionCoordinator {
                     // signal the caller to halve the chunk cap and retry from scratch
                     return new Outcome("", label + " summarizer input exceeds the context window", calls, true, false);
                 } catch (final IOException e) {
+                    if (isSizeCaused(e)) {
+                        // a server-side "context window exceeded / max_tokens" rejection (400/413) is the
+                        // HTTP mirror of ContextWindowExceededException: the chunk is too large for the
+                        // model, so signal the caller to halve the chunk cap rather than burn the retry
+                        // budget and skip keep-raw on a deterministic sizing problem
+                        return new Outcome(
+                                "", label + " summarizer input exceeds the context window", calls, true, false);
+                    }
                     error = label + " summarizer failed: " + e.getMessage();
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -965,6 +974,13 @@ public class CompactionCoordinator {
                             return new Outcome(
                                     "", label + " summarizer input exceeds the context window", calls, true, false);
                         } catch (final IOException e) {
+                            if (isSizeCaused(e)) {
+                                // the main model has a (possibly smaller) window too: a sizing rejection
+                                // here is deterministic and must halve the chunk cap, not fall through to
+                                // the transient skip
+                                return new Outcome(
+                                        "", label + " summarizer input exceeds the context window", calls, true, false);
+                            }
                             error = label + " summarizer failed also on " + mainModel + ": " + e.getMessage();
                         } catch (final InterruptedException e) {
                             Thread.currentThread().interrupt();
@@ -1071,6 +1087,39 @@ public class CompactionCoordinator {
      * {@link ContextWindowExceededException}), which triggers the chunk-cap halving restart.
      */
     private record Outcome(String summary, String error, int calls, boolean sizeError, boolean transientFailure) {}
+
+    /**
+     * Whether an {@link IOException} from the summarizer call is a context-sizing rejection rather
+     * than a transient infrastructure failure. Server-side window rejections surface as
+     * {@link LlmHttpFailureException} with a 400/413 status and a body naming a context-length or
+     * token budget ("context_length_exceeded", "maximum context length", "max_tokens", "please
+     * reduce your prompt", ...). These are deterministic: the chunk is too large for the model's
+     * window, so they must drive the chunk-cap halving restart just like a client-side
+     * {@link ContextWindowExceededException} - not be retried and then skipped keep-raw, which is
+     * what left a heavy context stuck above its budget when the compact model refused oversized
+     * chunks.
+     */
+    private static boolean isSizeCaused(final IOException e) {
+        if (!(e instanceof final LlmHttpFailureException httpFailure)) {
+            return false;
+        }
+        final var status = httpFailure.status();
+        if (status != 400 && status != 413) {
+            return false;
+        }
+        final var body = httpFailure.body();
+        if (body == null || body.isBlank()) {
+            return false;
+        }
+        final var lower = body.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("context_length")
+                || lower.contains("context length")
+                || lower.contains("context window")
+                || lower.contains("max_tokens")
+                || lower.contains("max tokens")
+                || lower.contains("too large")
+                || lower.contains("reduce your prompt");
+    }
 
     /** The consecutive leading {@code system}-role entries: the web project marker (if any) and the compaction marker. */
     private static List<Message> leadingSystemMessages(final List<Message> messages) {

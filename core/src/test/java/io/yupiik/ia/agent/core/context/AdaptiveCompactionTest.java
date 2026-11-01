@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.ContextWindowExceededException;
+import io.yupiik.llm.client.LlmHttpFailureException;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -481,6 +482,74 @@ class AdaptiveCompactionTest {
         assertEquals(
                 history, result.messages(), "when compaction is skipped the raw context must be preserved verbatim");
         assertTrue(result.error().contains("skipped"), "the result must surface the skip reason: " + result.error());
+    }
+
+    /**
+     * A server-side 400 with a context-length body is the HTTP mirror of a client-side
+     * {@link ContextWindowExceededException}: it must halve the chunk cap and retry, not burn the
+     * retry budget and skip keep-raw (which is what stuck a heavy context above its budget).
+     */
+    @Test
+    void httpContextLengthRejectionHalvesTheCapAndRetriesToSuccess() {
+        final var calls = new ArrayList<Integer>();
+        final var cfg = config(
+                128_000,
+                Map.of(
+                        "yca.compaction.summarizerChunkChars", "4000",
+                        "yca.compaction.summarizerMinChunkChars", "1000"));
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                calls.add(promptOf(request).length());
+                if (calls.size() == 1) {
+                    // the first attempt is rejected by the server as over the model's context length
+                    throw new LlmHttpFailureException(400, "This model's maximum context length is X tokens.", null);
+                }
+                return new ChatResult(Message.assistant("digest: recovered", null), Usage.EMPTY);
+            }
+        };
+        final var manager = new ContextManager(
+                cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()), coordinator(cfg, chat));
+        final var result = manager.compact(oldHeavyHistory(60, 200), true);
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+        assertTrue(calls.size() >= 2, "one 400 + a retry with the halved cap: " + calls.size() + " calls");
+        assertTrue(
+                calls.get(1) < calls.get(0),
+                "the retried chunk must be smaller after the context-length 400 (first=" + calls.get(0) + ", retry="
+                        + calls.get(1) + ")");
+    }
+
+    /** A 5xx LlmHttpFailureException stays transient: it never halves, it retries then skips keep-raw. */
+    @Test
+    void httpServerErrorSkipsKeepRawWithoutHalving() {
+        final var attempts = new AtomicInteger();
+        final var cfg = config(
+                128_000,
+                Map.of(
+                        "yca.compaction.summarizerChunkChars", "4000",
+                        "yca.llm.retriesMaxAttempts", "2"));
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                attempts.incrementAndGet();
+                throw new LlmHttpFailureException(500, "Internal Server Error", null);
+            }
+        };
+        final var history = oldHeavyHistory(6, 4_000);
+        final var manager = new ContextManager(
+                cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()), coordinator(cfg, chat));
+        final var result = manager.compact(history, true);
+        assertEquals(CompactionResult.Mode.NONE, result.mode(), "5xx must skip, not halve/truncate");
+        assertEquals(2, attempts.get(), "5xx uses the configured retries, no halving");
+        assertEquals(history, result.messages(), "a skipped compaction must keep the raw context verbatim");
     }
 
     /** With fallbackToMainModel enabled (global toggle), a transient 5xx retries once on the main model. */
