@@ -238,7 +238,10 @@ class TuiCommandRenderTest {
         }
         awaitText("hello");
 
-        // the ESC-sliced printable tail of an SGR hover/move report
+        // the ESC-sliced printable tail of an SGR hover/move report: the leading ESC was read
+        // alone by TamboUI (escape timeout under load), which emits a standalone ESCAPE or an
+        // UNKNOWN key and arms the SgrTailGuard before the printable suffix arrives
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.UNKNOWN));
         for (final var c : "[<35;23;35M".toCharArray()) {
             tuiRef.get().dispatch(KeyEvent.ofChar(c));
         }

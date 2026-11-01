@@ -609,6 +609,165 @@ class TuiCommandHeadlessTest {
         }
     }
 
+    @Test
+    void sgrTailGuardSuppressesCompleteMouseTail() throws Exception {
+        final var command = newUiCommand(container, deps);
+        final var feed = TuiCommand.class.getDeclaredMethod("sgrTailFeed", String.class);
+        feed.setAccessible(true);
+
+        // arm + full tail: every char is absorbed, nothing is returned to insert
+        TuiCommand.class.getDeclaredMethod("sgrTailArm").setAccessible(true);
+        // (arm via reflection; the e2e tests below cover arming through real UNKNOWN/ESCAPE events)
+        invoke(command, "sgrTailArm");
+        for (final var c : new String[] {"[", "<", "35", ";", "23", ";", "35", "M"}) {
+            assertEquals(null, feed.invoke(command, c), "mouse tail chars must be absorbed while armed");
+        }
+        // after the closing M the guard is disarmed: normal typing flows
+        assertEquals("x", feed.invoke(command, "x"), "a char after the completed tail must pass through");
+
+        // every leftover shape is covered by the suffix grammar
+        for (final var tail : new String[] {"[<35;23;35M", "<35;23;35m", ";23;35M", "35M", "M", "5;3M"}) {
+            invoke(command, "sgrTailArm");
+            for (int i = 0; i < tail.length(); i++) {
+                assertEquals(
+                        null,
+                        feed.invoke(command, String.valueOf(tail.charAt(i))),
+                        "tail '" + tail + "' char must be absorbed");
+            }
+            assertEquals("y", feed.invoke(command, "y"), "tail '" + tail + "' must fully disarm");
+        }
+    }
+
+    @Test
+    void sgrTailGuardFlushesOnGrammarBreakAndReArmsWithinWindow() throws Exception {
+        final var command = newUiCommand(container, deps);
+        final var feed = TuiCommand.class.getDeclaredMethod("sgrTailFeed", String.class);
+        feed.setAccessible(true);
+        invoke(command, "sgrTailArm");
+
+        // ESC-arm, then '[' then 'x' - 'x' breaks the shape: flush "[x" as one edit
+        assertEquals(null, feed.invoke(command, "["));
+        assertEquals("[x", feed.invoke(command, "x"), "a break must flush the held prefix plus the char");
+
+        // within the re-arm window the next grammar-start char re-arms and holds
+        assertEquals(null, feed.invoke(command, ";"), "a grammar-start char right after a break must re-arm");
+        assertEquals(null, feed.invoke(command, "3"));
+        assertEquals(null, feed.invoke(command, "5"));
+        assertEquals(null, feed.invoke(command, "M"), "the re-armed tail must complete and be dropped");
+        assertEquals("z", feed.invoke(command, "z"), "after the completed re-armed tail typing flows");
+    }
+
+    @Test
+    void sgrTailGuardTtlExpiryFlushesPartialTail() throws Exception {
+        final var command = newUiCommand(container, deps);
+        final var feed = TuiCommand.class.getDeclaredMethod("sgrTailFeed", String.class);
+        feed.setAccessible(true);
+        invoke(command, "sgrTailArm");
+        // absorb the first two chars under the default TTL, then force an immediate expiry
+        assertEquals(null, feed.invoke(command, "["));
+        assertEquals(null, feed.invoke(command, "<"));
+        final var ttl = TuiCommand.class.getDeclaredField("sgrTailTtlOverrideMillis");
+        ttl.setAccessible(true);
+        ttl.setLong(command, 0L);
+        // the next feed sees an expired TTL and flushes the partial prefix + char
+        assertEquals("[<3", feed.invoke(command, "3"), "an expired TTL must flush the partial tail");
+    }
+
+    @Test
+    void sgrTailGuardLeavesNormalTypingUntouched() throws Exception {
+        final var command = newUiCommand(container, deps);
+        final var feed = TuiCommand.class.getDeclaredMethod("sgrTailFeed", String.class);
+        feed.setAccessible(true);
+        for (final var c : new String[] {"h", "e", "l", "l", "o", " ", "w", "o", "r", "l", "d"}) {
+            assertEquals(c, feed.invoke(command, c), "unarmed typing must pass through unchanged");
+        }
+    }
+
+    private static void invoke(final Object target, final String method) throws Exception {
+        final var m = TuiCommand.class.getDeclaredMethod(method);
+        m.setAccessible(true);
+        m.invoke(target);
+    }
+
+    // --- e2e: the guard wired into the real TUI input paths ---
+
+    @Test
+    void sgrMouseTailDoesNotTypeIntoThePromptViaUnknownArm() throws Exception {
+        final var command = newUiCommand(container, deps);
+        uiThread = new Thread(command::run, "tui-headless-sgr-unknown");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        for (final var c : "hello".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitText("hello");
+
+        // TamboUI consumed ESC[< under load and emitted an UNKNOWN key: the guard arms, and the
+        // printable suffix that follows must be entirely suppressed
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.UNKNOWN));
+        for (final var c : "[<35;23;35M".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitTextGone("35;23;35M");
+        awaitText("hello");
+
+        // genuine typing still works right after the suppressed sweep
+        for (final var c : " world".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitText("hello world");
+
+        tuiRef.get().quit();
+    }
+
+    @Test
+    void sgrMouseTailDoesNotTypeIntoTheSearchBar() throws Exception {
+        final var command = newUiCommand(container, deps);
+        uiThread = new Thread(command::run, "tui-headless-sgr-search");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // open the Ctrl+F find bar
+        tuiRef.get().dispatch(KeyEvent.ofChar('f', KeyModifiers.CTRL));
+
+        // an UNKNOWN key (ESC[< consumed by TamboUI under load) arms the guard: the printable
+        // suffix that follows must never reach the search query
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.UNKNOWN));
+        for (final var c : "[<12;34;56M".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitTextGone("12;34;56");
+
+        // genuine search typing still works right after the suppressed report
+        tuiRef.get().dispatch(KeyEvent.ofChar('z'));
+        awaitText("z");
+
+        tuiRef.get().quit();
+    }
+
+    @Test
+    void sgrMouseTailPasteFallbackStillScrubs() throws Exception {
+        final var command = newUiCommand(container, deps);
+        uiThread = new Thread(command::run, "tui-headless-sgr-paste");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // bracketed paste carries a trailing mouse tail saved earlier: the paste-path scrub
+        // (kept as the fallback) must still remove it
+        tuiRef.get().dispatch(new PasteEvent("hello [<35;23;35M"));
+        awaitText("hello");
+        awaitTextGone("35;23;35M");
+
+        tuiRef.get().quit();
+    }
+
     private static TuiDeps lookupDeps(final RuntimeContainer container) {
         try (final var depsInstance = container.lookup(TuiDeps.class)) {
             return depsInstance.instance();
