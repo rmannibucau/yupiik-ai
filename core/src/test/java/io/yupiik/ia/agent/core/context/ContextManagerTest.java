@@ -700,6 +700,42 @@ class ContextManagerTest {
                 "the summarizer system prompt must describe the role");
     }
 
+    @Test
+    void compactionTriggerIsClampedToTheUsableWindowForLargeOutputReserves() {
+        // azure_gpt-5.5-like: a 500k window declaring a 128k output cap leaves only 372k usable, yet
+        // the raw opencode-style buffer trigger is window - max(15%, 16k) = 425k, above the usable
+        // window. The clamp must pull the trigger down to the usable window so the gauge cannot
+        // cross 100% without ever tripping an automatic compaction.
+        final var cfg = config(
+                6,
+                500_000,
+                Map.of(
+                        "yca.provider.providers.0.outputTokens", "128000",
+                        "yca.compaction.bufferPercent", "15",
+                        "yca.compaction.bufferMinTokens", "16000"));
+        final var manager = manager(cfg, null);
+        final var usable = manager.usableWindowTokens();
+        assertEquals(372_000, usable, "500k window minus a 128k output reserve");
+        assertEquals(372_000, manager.compactionTriggerTokens(), "the trigger must never exceed the usable window");
+    }
+
+    @Test
+    void compactionTriggerKeepsTheBufferWhenTheOutputReserveIsSmall() {
+        // with a default reserve below the buffer floor the raw trigger already sits under the usable
+        // window, so the clamp is a no-op and opencode parity is preserved
+        final var cfg = config(
+                6,
+                32_000,
+                Map.of(
+                        "yca.compaction.bufferPercent", "15",
+                        "yca.compaction.bufferMinTokens", "16000"));
+        final var manager = manager(cfg, null);
+        assertEquals(
+                16_000,
+                manager.compactionTriggerTokens(),
+                "small reserve: buffer trigger (32k - 16k floor) is unchanged");
+    }
+
     private ContextManager manager(final CodingAgentConfiguration cfg, final ChatClient chat) {
         return new ContextManager(
                 cfg,

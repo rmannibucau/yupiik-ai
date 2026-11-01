@@ -79,8 +79,11 @@ public class ContextManager {
 
     /**
      * The prompt token count that triggers the next automatic compaction: the legacy percentage of the
-     * usable window when {@code thresholdPercent > 0}, else the opencode-style buffer trigger. Also used
-     * by the anti-thrash notice and the usage status so every surface reports the same wall.
+     * usable window when {@code thresholdPercent > 0}, else the opencode-style buffer trigger clamped so
+     * it never lies above the usable window (context window minus the completion headroom). A large
+     * declared output cap would otherwise push the buffer trigger beyond what the input may actually
+     * occupy, letting the context gauge cross 100% without ever tripping an automatic compaction. Also
+     * used by the anti-thrash notice and the usage status so every surface reports the same wall.
      *
      * @return the trigger in estimated prompt tokens, or {@link Integer#MAX_VALUE} when compaction is disabled.
      */
@@ -95,8 +98,10 @@ public class ContextManager {
         if (c.thresholdPercent() > 0) {
             return (int) Math.ceil(usageTracker.usableWindow() * c.thresholdPercent() / 100.0);
         }
-        return ContextBudget.compactionTrigger(
-                usageTracker.contextWindowTokenCount().value(), c.bufferPercent(), c.bufferMinTokens());
+        return Math.min(
+                ContextBudget.compactionTrigger(
+                        usageTracker.contextWindowTokenCount().value(), c.bufferPercent(), c.bufferMinTokens()),
+                usageTracker.usableWindow());
     }
 
     /** Hard prompt-input limit, excluding output headroom and including external tool-schema tokens at call sites. */
