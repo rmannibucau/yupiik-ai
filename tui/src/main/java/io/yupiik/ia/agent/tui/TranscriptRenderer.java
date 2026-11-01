@@ -53,9 +53,9 @@ final class TranscriptRenderer {
     // bounded so a long session (a new key per region switch) never grows the
     // footprint. The append-only delta path deliberately skips this cache: growing
     // prefixes are moving targets that would churn (and blow up) the entries.
-    private final Map<Key, List<Line>> prefixCache = Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
+    private final Map<Key, Rendered> prefixCache = Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
         @Override
-        protected boolean removeEldestEntry(final Map.Entry<Key, List<Line>> eldest) {
+        protected boolean removeEldestEntry(final Map.Entry<Key, Rendered> eldest) {
             return size() > MAX_CACHED_PREFIXES;
         }
     });
@@ -66,14 +66,33 @@ final class TranscriptRenderer {
     // Only ever touched by the render thread, but kept volatile so concurrent readers
     // never observe a torn half-updated state.
     private volatile String lastPrefix;
-    private volatile List<Line> lastPrefixLines;
+    private volatile Rendered lastPrefixLines;
     private volatile int lastWidth = -1;
     private volatile Style lastBase;
     private volatile MarkdownStyles lastStyles;
 
+    /** A rendered line list plus the per-row copy kind of each line (same size). */
+    record Rendered(List<Line> lines, List<SelectionState.RowKind> kinds) {
+        private static final Rendered EMPTY = new Rendered(List.of(), List.of());
+
+        private static List<SelectionState.RowKind> kindsOf(final List<Line> lines) {
+            return java.util.Collections.nCopies(lines.size(), SelectionState.RowKind.HARD);
+        }
+    }
+
     List<Line> renderRegion(final String source, final int width, final Style base, final MarkdownStyles styles) {
+        return renderRegionWithKinds(source, width, base, styles).lines();
+    }
+
+    /**
+     * Same as {@link #renderRegion(String, int, Style, MarkdownStyles)} but also returns the
+     * per-row copy kinds propagated from {@link MarkdownLines#renderWithKinds}, kept aligned
+     * with the lines through the same prefix caching, streaming-delta and blank-row logic.
+     */
+    Rendered renderRegionWithKinds(
+            final String source, final int width, final Style base, final MarkdownStyles styles) {
         if (source == null || source.isEmpty()) {
-            return List.of();
+            return Rendered.EMPTY;
         }
         final var safe = lastSafeNewline(source);
         final var prefix = source.substring(0, safe);
@@ -81,16 +100,16 @@ final class TranscriptRenderer {
         final var prefixLines = prefixLines(prefix, width, base, styles);
         if (suffix.isEmpty()) {
             // defensive copy: cached lines must never be mutated by the caller
-            return new ArrayList<>(prefixLines);
+            return new Rendered(new ArrayList<>(prefixLines.lines()), new ArrayList<>(prefixLines.kinds()));
         }
-        final var combined = new ArrayList<Line>(prefixLines.size() + 16);
-        combined.addAll(prefixLines);
-        appendBlocks(
-                combined,
-                renderToList(suffix, width, base, styles),
-                boundaryBlanks(prefix, suffix) > 0,
-                !suffix.isBlank());
-        return combined;
+        final var combined = new ArrayList<Line>(prefixLines.lines().size() + 16);
+        combined.addAll(prefixLines.lines());
+        final var combinedKinds =
+                new ArrayList<SelectionState.RowKind>(prefixLines.kinds().size() + 16);
+        combinedKinds.addAll(prefixLines.kinds());
+        final var suffixRendered = renderToList(suffix, width, base, styles);
+        appendBlocks(combined, combinedKinds, suffixRendered, boundaryBlanks(prefix, suffix) > 0, !suffix.isBlank());
+        return new Rendered(combined, combinedKinds);
     }
 
     /**
@@ -121,12 +140,34 @@ final class TranscriptRenderer {
      */
     static void appendBlocks(
             final List<Line> out, final List<Line> rendered, final boolean blankRowBetween, final boolean openBlock) {
-        final var blank = (blankRowBetween && !rendered.isEmpty()) || (openBlock && rendered.isEmpty());
+        appendBlocks(
+                out,
+                null,
+                new TranscriptRenderer.Rendered(rendered, Rendered.kindsOf(rendered)),
+                blankRowBetween,
+                openBlock);
+    }
+
+    /** Kinds-aware core of {@link #appendBlocks(List, List, boolean, boolean)}. */
+    static void appendBlocks(
+            final List<Line> out,
+            final List<SelectionState.RowKind> outKinds,
+            final Rendered rendered,
+            final boolean blankRowBetween,
+            final boolean openBlock) {
+        final var blank = (blankRowBetween && !rendered.lines().isEmpty())
+                || (openBlock && rendered.lines().isEmpty());
         if (blank && !out.isEmpty() && !isBlankRow(out.get(out.size() - 1))) {
             out.add(Line.empty());
+            if (outKinds != null) {
+                outKinds.add(SelectionState.RowKind.HARD);
+            }
         }
-        if (!rendered.isEmpty()) {
-            out.addAll(rendered);
+        if (!rendered.lines().isEmpty()) {
+            out.addAll(rendered.lines());
+            if (outKinds != null) {
+                outKinds.addAll(rendered.kinds());
+            }
         }
     }
 
@@ -181,10 +222,9 @@ final class TranscriptRenderer {
         return count;
     }
 
-    private List<Line> prefixLines(
-            final String prefix, final int width, final Style base, final MarkdownStyles styles) {
+    private Rendered prefixLines(final String prefix, final int width, final Style base, final MarkdownStyles styles) {
         if (prefix.isEmpty()) {
-            return List.of();
+            return Rendered.EMPTY;
         }
         final var sameParams = width == lastWidth && lastBase != null && lastBase.equals(base) && styles == lastStyles;
         if (lastPrefixLines != null && sameParams) {
@@ -196,43 +236,48 @@ final class TranscriptRenderer {
                 // append-only streaming: only the delta (the lines added since the
                 // previous frame) is markdown-parsed; the rest was already rendered.
                 final var delta = prefix.substring(lastPrefix.length());
-                final var result = new ArrayList<Line>(lastPrefixLines.size() + 8);
-                result.addAll(lastPrefixLines);
-                appendBlocks(result, renderToList(delta, width, base, styles), boundaryBlanks(lastPrefix, delta) > 0);
-                remember(prefix, result, width, base, styles);
-                return result;
+                final var result = new ArrayList<Line>(lastPrefixLines.lines().size() + 8);
+                result.addAll(lastPrefixLines.lines());
+                final var resultKinds = new ArrayList<SelectionState.RowKind>(
+                        lastPrefixLines.kinds().size() + 8);
+                resultKinds.addAll(lastPrefixLines.kinds());
+                final var deltaRendered = renderToList(delta, width, base, styles);
+                appendBlocks(result, resultKinds, deltaRendered, boundaryBlanks(lastPrefix, delta) > 0, false);
+                final var rendered = new Rendered(result, resultKinds);
+                remember(prefix, rendered, width, base, styles);
+                return rendered;
             }
         }
         // region switch or width/base/styles change: full render through the bounded cache
         final var key = new Key(prefix, width, base, styles);
-        var lines = prefixCache.get(key);
-        if (lines == null) {
-            lines = renderToList(prefix, width, base, styles);
-            prefixCache.put(key, lines);
+        var rendered = prefixCache.get(key);
+        if (rendered == null) {
+            rendered = renderToList(prefix, width, base, styles);
+            prefixCache.put(key, rendered);
         }
-        remember(prefix, lines, width, base, styles);
-        return lines;
+        remember(prefix, rendered, width, base, styles);
+        return rendered;
     }
 
     private void remember(
             final String prefix,
-            final List<Line> lines,
+            final Rendered rendered,
             final int width,
             final Style base,
             final MarkdownStyles styles) {
         lastPrefix = prefix;
-        lastPrefixLines = lines;
+        lastPrefixLines = rendered;
         lastWidth = width;
         lastBase = base;
         lastStyles = styles;
     }
 
-    private List<Line> renderToList(
-            final String source, final int width, final Style base, final MarkdownStyles styles) {
+    private Rendered renderToList(final String source, final int width, final Style base, final MarkdownStyles styles) {
         if (source == null || source.isEmpty()) {
-            return List.of();
+            return Rendered.EMPTY;
         }
-        return markdownLines.render(source, width, base, styles);
+        final var result = markdownLines.renderWithKinds(source, width, base, styles);
+        return new Rendered(result.lines(), result.kinds());
     }
 
     /**

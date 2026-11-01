@@ -581,4 +581,42 @@ class MarkdownLinesTest {
     private static List<String> plain(final List<Line> lines) {
         return lines.stream().map(Line::rawContent).toList();
     }
+
+    @Test
+    void renderWithKindsMarksSoftWrappedContinuations() {
+        final var result = renderer.renderWithKinds(
+                "the quick brown fox jumps over the lazy dog", 12, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        assertEquals(4, result.lines().size());
+        assertEquals(SelectionState.RowKind.HARD, result.kinds().get(0));
+        assertEquals(SelectionState.RowKind.SOFT_CONT, result.kinds().get(1));
+        assertEquals(SelectionState.RowKind.SOFT_CONT, result.kinds().get(2));
+        assertEquals(SelectionState.RowKind.SOFT_CONT, result.kinds().get(3));
+    }
+
+    @Test
+    void renderWithKindsKeepsHoldOnANarrowSingleWord() {
+        // a single word narrower than the width must stay HARD
+        final var result = renderer.renderWithKinds("hello", 12, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        assertEquals(1, result.lines().size());
+        assertEquals(SelectionState.RowKind.HARD, result.kinds().get(0));
+    }
+
+    @Test
+    void wrapCodeWithKindsMarksCharSplits() {
+        final var lines = List.of(Line.from(Span.styled("abcdefghij", Style.EMPTY)));
+        final var result = MarkdownLines.wrapCodeWithKinds(lines, 3);
+        assertEquals(4, result.lines().size());
+        assertEquals(SelectionState.RowKind.HARD, result.kinds().get(0));
+        assertEquals(SelectionState.RowKind.CHAR_SPLIT, result.kinds().get(1));
+        assertEquals(SelectionState.RowKind.CHAR_SPLIT, result.kinds().get(2));
+        assertEquals(SelectionState.RowKind.CHAR_SPLIT, result.kinds().get(3));
+    }
+
+    @Test
+    void wrapCodeWithKindsSingleLineIsHard() {
+        final var lines = List.of(Line.from(Span.styled("abc", Style.EMPTY)));
+        final var result = MarkdownLines.wrapCodeWithKinds(lines, 10);
+        assertEquals(1, result.lines().size());
+        assertEquals(SelectionState.RowKind.HARD, result.kinds().get(0));
+    }
 }

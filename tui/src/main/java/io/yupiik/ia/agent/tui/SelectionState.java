@@ -43,6 +43,40 @@ import java.util.List;
 final class SelectionState {
     private static final long CLICK_WINDOW_NANOS = 500_000_000L;
 
+    /**
+     * How a rendered row contributes to the copied text. {@code HARD} rows are their own
+     * clipboard line. {@code SOFT_CONT} rows are the continuation of the row above them
+     * broken at a word boundary (prose soft wrap): they rejoin with a single space.
+     * {@code CHAR_SPLIT} rows continue the row above them mid-token (over-wide URLs/tokens,
+     * wrapped code lines): they rejoin with nothing so the token is restored. {@code HEADER}
+     * rows are decorative turn headers whose trailing rule run is trimmed on copy and which
+     * never rejoin their neighbours.
+     */
+    enum RowKind {
+        HARD,
+        SOFT_CONT,
+        CHAR_SPLIT,
+        HEADER
+    }
+
+    /**
+     * The frozen render state a selection copies from: the cell grid, the bordered-widget
+     * content regions, the per-row {@link RowKind} of each grid row (or {@code null} when
+     * unknown, meaning every row is {@code HARD}), the chat content column clamp applied to
+     * non-boxed rows ({@code leftClip} first content column, {@code rightClip} last content
+     * column, both {@code -1} to disable) and the chat zone rect the clamp belongs to.
+     * Immutable so a press can capture it once and drag/copy stay consistent even while the
+     * render thread publishes a newer frame.
+     */
+    record SelectionFrame(
+            String[][] grid, List<CopyBox> boxes, RowKind[] rows, int leftClip, int rightClip, Rect chatZone) {
+        SelectionFrame {
+            if (boxes == null) {
+                boxes = List.of();
+            }
+        }
+    }
+
     private int anchorX = -1;
     private int anchorY = -1;
     private int focusX = -1;
@@ -51,6 +85,8 @@ final class SelectionState {
     private long lastClickNanos;
     private int lastClickX = -1;
     private int lastClickY = -1;
+    /** The frame captured at press time: drag and copy never see a newer frame. */
+    private SelectionFrame frame;
 
     /**
      * The pane the press was resolved in, or null to select the whole frame.
@@ -79,6 +115,16 @@ final class SelectionState {
      * @param zones the candidate panes, most specific first (see the caller for the order)
      */
     void press(final int rawX, final int rawY, final String[][] grid, final List<Rect> zones) {
+        press(rawX, rawY, new SelectionFrame(grid, null, null, -1, -1, null), zones);
+    }
+
+    /**
+     * Same as {@link #press(int, int, String[][], List)} but captures the given frame (grid,
+     * boxes, row kinds and clip columns) so a later {@link #copy()} reads exactly what the
+     * user pressed on, whatever the render thread publishes meanwhile.
+     */
+    void press(final int rawX, final int rawY, final SelectionFrame newFrame, final List<Rect> zones) {
+        final var grid = newFrame == null ? new String[0][0] : newFrame.grid();
         final var height = grid.length;
         if (height == 0 || grid[0].length == 0) {
             clear();
@@ -87,6 +133,7 @@ final class SelectionState {
         final var width = grid[0].length;
         final var x = Math.clamp(rawX, 0, width - 1);
         final var y = Math.clamp(rawY, 0, height - 1);
+        frame = newFrame;
         zone = zone(zones, x, y);
         final var now = System.nanoTime();
         if (now - lastClickNanos <= CLICK_WINDOW_NANOS && y == lastClickY && Math.abs(x - lastClickX) <= 1) {
@@ -116,7 +163,19 @@ final class SelectionState {
      * when the selection was started with a double/triple click.
      */
     void drag(final int rawX, final int rawY, final String[][] grid) {
-        if (!hasSelection() || grid.length == 0 || grid[0].length == 0) {
+        drag(rawX, rawY);
+    }
+
+    /**
+     * Extends the current selection to the given cell, resolved against the frame captured
+     * at press time (never the current, possibly newer, screen).
+     */
+    void drag(final int rawX, final int rawY) {
+        if (!hasSelection() || frame == null) {
+            return;
+        }
+        final var grid = frame.grid();
+        if (grid.length == 0 || grid[0].length == 0) {
             return;
         }
         final var width = grid[0].length;
@@ -144,6 +203,7 @@ final class SelectionState {
         focusY = -1;
         clickCount = 0;
         zone = null;
+        frame = null;
     }
 
     /**
@@ -192,11 +252,26 @@ final class SelectionState {
      * @return the selected text, possibly empty, or null when nothing is selected
      */
     String copy(final String[][] grid) {
-        return copy(grid, List.of());
+        return copy(new SelectionFrame(grid, null, null, -1, -1, null));
+    }
+
+    String copy(final String[][] grid, final List<CopyBox> boxes) {
+        return copy(new SelectionFrame(grid, boxes, null, -1, -1, null));
     }
 
     /**
-     * Extracts the selected text from the last rendered frame snapshot:
+     * Extracts the selected text from the frame captured at press time: the grid, the
+     * {@link CopyBox} regions and the per-row {@link RowKind}s are the ones the user saw
+     * when the mouse went down, so a render tick mid-drag can never change what is copied.
+     *
+     * @return the selected text, possibly empty, or null when nothing is selected
+     */
+    String copy() {
+        return frame == null ? null : copy(frame);
+    }
+
+    /**
+     * Extracts the selected text from the given frame snapshot:
      * trailing whitespace is stripped from each row and trailing empty rows
      * are dropped.
      * <p>
@@ -213,24 +288,35 @@ final class SelectionState {
      * skipped and an interior row is clipped to their content columns, so box
      * framing (walls, corners, titles, padding) never reaches the clipboard
      * while interior indentation is preserved.
+     * <p>
+     * {@link RowKind}s drive the copy layout: a {@code SOFT_CONT} row is joined
+     * to the row above it with a single space, a {@code CHAR_SPLIT} row with
+     * nothing (an over-wide token or a wrapped code line is restored), a
+     * {@code HEADER} row gets its trailing rule run trimmed and never joins its
+     * neighbours, and a {@code HARD} row starts a new line. Row kinds are only
+     * honoured inside the chat zone (the pane that publishes them); elsewhere
+     * every row is {@code HARD}.
      *
-     * @param grid the last rendered frame snapshot, may be empty
-     * @param boxes the boxed widget content regions drawn in the frame
+     * @param source the frozen frame captured at press time
      * @return the selected text, possibly empty, or null when nothing is selected
      */
-    String copy(final String[][] grid, final List<CopyBox> boxes) {
+    private String copy(final SelectionFrame source) {
+        final var grid = source.grid();
         if (!hasSelection() || grid.length == 0 || grid[0].length == 0) {
             return null;
         }
         final var width = grid[0].length;
         final var bounds = bounds(width);
         final var rows = new ArrayList<String>(bounds.toY() - bounds.fromY() + 1);
+        final var inChat = source.chatZone() != null && source.chatZone().equals(zone);
+        var previousKind = RowKind.HARD;
+        var previousBlank = true;
         for (var y = bounds.fromY(); y <= bounds.toY() && y < grid.length; y++) {
             final var span = span(bounds, width, y);
             if (span == null) {
                 continue;
             }
-            final var copyBox = boxes == null ? null : coveringBox(boxes, y);
+            final var copyBox = coveringBox(source.boxes(), y);
             if (copyBox != null && (y == copyBox.ruleTop() || y == copyBox.ruleBottom())) {
                 continue;
             }
@@ -242,19 +328,58 @@ final class SelectionState {
                 if (endX < startX) {
                     continue;
                 }
+            } else if (inChat) {
+                // the chat pane is open on the left (mode gutter + role bar) and the
+                // conversation block has no left wall; the right wall is the pane border
+                // and must never be copied either. Boxed rows are already clipped above.
+                startX = Math.max(startX, source.leftClip());
+                endX = Math.min(endX, source.rightClip());
+                if (endX < startX) {
+                    continue;
+                }
             }
             final var row = new StringBuilder(Math.max(0, endX - startX + 1));
             for (var x = startX; x <= endX; x++) {
                 row.append(grid[y][x]);
             }
-            final var stripped = row.toString().stripTrailing();
-            rows.add(stripped);
+            var stripped = row.toString().stripTrailing();
+            final var kind = source.rows() != null && y < source.rows().length ? source.rows()[y] : RowKind.HARD;
+            if (kind == RowKind.HEADER) {
+                stripped = trimHeaderRules(stripped);
+            }
+            final var isContinuation = !previousBlank
+                    && previousKind != RowKind.HEADER
+                    && kind != RowKind.HEADER
+                    && (kind == RowKind.SOFT_CONT || kind == RowKind.CHAR_SPLIT);
+            if (isContinuation) {
+                final var last = rows.removeLast();
+                rows.add(last + (kind == RowKind.SOFT_CONT ? " " : "") + stripped);
+            } else {
+                rows.add(stripped);
+            }
+            previousKind = kind;
+            previousBlank = stripped.isEmpty();
         }
         while (!rows.isEmpty() && rows.getLast().isEmpty()) {
             rows.removeLast();
         }
         return String.join("\n", rows);
     }
+
+    /** Trims the trailing rule-glyph run of a turn header row (metadata-gated, never glyph-guessed on content). */
+    private static String trimHeaderRules(final String row) {
+        var end = row.length();
+        while (end > 0 && RULE_GLYPHS.indexOf(row.charAt(end - 1)) >= 0) {
+            end--;
+        }
+        // a space (or any whitespace) between the label and the rules is decoration too
+        while (end > 0 && Character.isWhitespace(row.charAt(end - 1))) {
+            end--;
+        }
+        return end == row.length() ? row : row.substring(0, end);
+    }
+
+    private static final String RULE_GLYPHS = "─-═━┄┅┈┉";
 
     /** The first box whose vertical span holds the given row, or null. */
     private static CopyBox coveringBox(final List<CopyBox> boxes, final int y) {

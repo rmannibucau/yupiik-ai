@@ -1882,11 +1882,11 @@ public class TuiCommand implements Runnable {
                     final var caret = inputCaretAt(state, mouse.x(), mouse.y());
                     applyCursor(state, caret.row(), caret.col());
                 }
-                state.selection.press(mouse.x(), mouse.y(), state.screenGrid, copyZones(state));
+                state.selection.press(mouse.x(), mouse.y(), state.selectionFrame, copyZones(state));
                 return true;
             }
             if (mouse.kind() == MouseEventKind.DRAG && mouse.isLeftButton()) {
-                state.selection.drag(mouse.x(), mouse.y(), state.screenGrid);
+                state.selection.drag(mouse.x(), mouse.y());
                 return true;
             }
             if (mouse.isRelease() && mouse.isLeftButton()) {
@@ -2299,11 +2299,16 @@ public class TuiCommand implements Runnable {
      * avoid accidental clipboard overwrites.
      */
     private void copySelection(final TuiRunner runner, final UiState state) {
-        final var text = state.selection.copy(state.screenGrid, state.copyBoxes);
+        final var text = state.selection.copy();
         if (text == null || text.length() <= 1 || text.isBlank()) {
             return;
         }
-        copyText(runner, state, text);
+        // leaked compaction seam anchors must never reach the clipboard either
+        final var sanitized = state.model.compression().withholdDanglingPrefix(text);
+        if (sanitized == null || sanitized.isBlank()) {
+            return;
+        }
+        copyText(runner, state, sanitized);
     }
 
     /**
@@ -3959,10 +3964,12 @@ public class TuiCommand implements Runnable {
         // thinking streams inline in the conversation panel (dimmed, thin left bar),
         // gated by showThinking, so no dedicated stacked panel is needed anymore
         renderTranscript(chat, frame, state);
-        // the copy-safe zone is the chat body: chat already excludes the accent gutter
-        // (column 0) and the sidebar/todos; +2 skips the per-region role bar (every line
-        // starts with the 2-cell "│ "/"┃ " bar, the pane wall is gone)
-        state.copyZone = new Rect(chat.x() + 2, chat.y(), Math.max(1, chat.width() - 2), Math.max(1, chat.height()));
+        // the copy-safe chat zone covers the mode gutter (column 0) and the per-region
+        // role bar (every line starts with the 2-cell "│ "/"┃ " bar, the pane wall is
+        // gone) so ANY press on a chat-area column resolves to the chat pane instead of
+        // falling back to whole-frame copy; the chrome columns themselves are excluded
+        // by chatContentLeft/chatContentRight published with the frame.
+        state.copyZone = new Rect(chat.x() - 1, chat.y(), Math.max(1, chat.width() + 1), Math.max(1, chat.height()));
         var bottomIndex = 2;
         if (queueRows > 0) {
             renderQueue(root.get(bottomIndex++), frame, state);
@@ -4022,10 +4029,17 @@ public class TuiCommand implements Runnable {
         }
         renderToast(frame, state);
         // published before the highlight so both passes resolve a press against
-        // the very same pane set
+        // the very same pane set; the frame freezes grid + boxes + row kinds together
         state.paneZones = List.copyOf(frameZones);
-        state.selection.highlight(frame.buffer());
         state.screenGrid = SelectionState.snapshot(frame.buffer());
+        state.selectionFrame = new SelectionState.SelectionFrame(
+                state.screenGrid,
+                state.copyBoxes,
+                state.rowKinds,
+                state.chatContentLeft,
+                state.chatContentRight,
+                state.copyZone);
+        state.selection.highlight(frame.buffer());
     }
 
     /**
@@ -4548,6 +4562,8 @@ public class TuiCommand implements Runnable {
         state.toolFooterLinks = links;
         var chunkTop = 0;
         final var copyBoxes = new ArrayList<SelectionState.CopyBox>();
+        final var kinds = new SelectionState.RowKind[frame.height()];
+        java.util.Arrays.fill(kinds, SelectionState.RowKind.HARD);
         for (final var chunk : chunks) {
             final var top = chunkTop - viewOffset;
             chunkTop += chunk.height();
@@ -4566,8 +4582,26 @@ public class TuiCommand implements Runnable {
                 copyBoxes.add(
                         copyBox(new Rect(content.x(), inner.y() + top, content.width(), chunk.height()), chunk.box()));
             }
+            // publish per-screen-row copy kinds for this chunk's visible slice, keyed by
+            // absolute screen row so a scroll mid-drag cannot shift a kind onto another
+            // line. Boxed chunks have no kinds (the CopyBox geometry already handles their
+            // interior; a 1-cell rule row is never copied).
+            final var localKinds = chunk.rowKinds();
+            if (localKinds != null && !chunk.boxed()) {
+                for (var r = Math.max(0, skip); r < Math.min(chunk.height(), skip + visibleH); r++) {
+                    final var screenY = inner.y() + visibleTop + (r - skip);
+                    if (screenY >= 0 && screenY < kinds.length) {
+                        kinds[screenY] = localKinds[Math.min(r, localKinds.length - 1)];
+                    }
+                }
+            }
         }
         state.copyBoxes = List.copyOf(copyBoxes);
+        state.rowKinds = kinds;
+        // the chat content columns: role bars at content.x()/content.x()+1 are excluded on the
+        // left, the conversation right wall (content.right()-1) on the right
+        state.chatContentLeft = content.x() + 2;
+        state.chatContentRight = content.right() - 2;
         // search match highlighting: reversed strips over matched rows, same buffer
         // trick as the scrollbar indicator (no span surgery needed)
         if (state.hoverToolCard >= 0) {
@@ -4625,7 +4659,15 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private record RenderedChunk(int height, IntFunction<dev.tamboui.widget.Widget> supplier, BoxChrome box) {
+    private record RenderedChunk(
+            int height,
+            IntFunction<dev.tamboui.widget.Widget> supplier,
+            BoxChrome box,
+            SelectionState.RowKind[] rowKinds) {
+        RenderedChunk(final int height, final IntFunction<dev.tamboui.widget.Widget> supplier, final BoxChrome box) {
+            this(height, supplier, box, null);
+        }
+
         dev.tamboui.widget.Widget widget(final int skip) {
             return supplier.apply(skip);
         }
@@ -5158,8 +5200,10 @@ public class TuiCommand implements Runnable {
                             : turn.text().substring(markerEnd + 1).stripLeading();
                     final var bar = turn.user() ? userBar() : outputBar();
                     final var roleMarkdown = turn.user() ? userMarkdownStyles : assistantMarkdownStyles;
-                    final var lines = new ArrayList<>(
-                            withBar(transcriptRenderer.renderRegion(body, width, Style.EMPTY, roleMarkdown), bar));
+                    final var rendered =
+                            transcriptRenderer.renderRegionWithKinds(body, width, Style.EMPTY, roleMarkdown);
+                    final var lines = new ArrayList<>(withBar(rendered.lines(), bar));
+                    final var kinds = new ArrayList<>(rendered.kinds());
                     if (turn.labelled()) {
                         // the header keeps the same bar so the left border stays continuous and
                         // the rule reads flush with the panel edge like every content line. The
@@ -5171,10 +5215,12 @@ public class TuiCommand implements Runnable {
                                         ? (turn.user() ? state.model.userLabel() : state.model.assistantLabel())
                                         : turn.label();
                         lines.add(0, Line.from(bar).append(turnHeader(turn.user(), width, headerLabel)));
+                        kinds.add(0, SelectionState.RowKind.HEADER);
                         // spacer row above the header: two turns must never read as one
                         lines.add(0, Line.from(bar));
+                        kinds.add(0, SelectionState.RowKind.HARD);
                     }
-                    addMarkdownChunk(out, lines, rows);
+                    addMarkdownChunk(out, lines, kinds, rows);
                     anySegment = true;
                 }
             } else {
@@ -5182,14 +5228,16 @@ public class TuiCommand implements Runnable {
                 final var lang = seg.language();
                 final var text = syntaxHighlighter.highlight(lang, seg.text());
                 // wrap at box inner width minus the code block's horizontal padding
-                final var wrapped = MarkdownLines.wrapCode(text.lines(), Math.max(1, width - 4));
-                final var wrappedText = Text.from(wrapped);
+                final var wrapped = MarkdownLines.wrapCodeWithKinds(text.lines(), Math.max(1, width - 4));
+                final var wrappedText = Text.from(wrapped.lines());
                 final var boxed = codeBlock(lang);
                 final var innerH = Math.max(wrappedText.height(), 1);
                 state.lastCodeBlock = seg.text();
-                for (final var line : wrapped) {
+                for (final var line : wrapped.lines()) {
                     rows.add(plainText(line));
                 }
+                // boxed chunks get no row kinds (the CopyBox geometry handles their interior);
+                // only the border rows are excluded from kinds and never copied anyway
                 out.add(new RenderedChunk(
                         innerH + 2,
                         skip -> Paragraph.builder()
@@ -5205,6 +5253,14 @@ public class TuiCommand implements Runnable {
     }
 
     private void addMarkdownChunk(final List<RenderedChunk> out, final List<Line> lines, final List<String> rows) {
+        addMarkdownChunk(out, lines, null, rows);
+    }
+
+    private void addMarkdownChunk(
+            final List<RenderedChunk> out,
+            final List<Line> lines,
+            final List<SelectionState.RowKind> kinds,
+            final List<String> rows) {
         final var innerH = Math.max(lines.size(), 1);
         final var text = Text.from(lines);
         for (final var line : lines) {
@@ -5217,7 +5273,8 @@ public class TuiCommand implements Runnable {
                         .overflow(Overflow.CLIP)
                         .scroll(Math.clamp(innerH - 1, 0, skip))
                         .build(),
-                null));
+                null,
+                kinds == null ? null : kinds.toArray(SelectionState.RowKind[]::new)));
     }
 
     /** Concatenated span contents of a line (used for transcript search). */
@@ -7060,11 +7117,11 @@ public class TuiCommand implements Runnable {
         state.hoverQuotaRect = null;
         state.hoverContextSize = null;
         if (mouse.isPress() && mouse.isLeftButton()) {
-            state.selection.press(mouse.x(), mouse.y(), state.screenGrid, copyZones(state));
+            state.selection.press(mouse.x(), mouse.y(), state.selectionFrame, copyZones(state));
             return true;
         }
         if (mouse.kind() == MouseEventKind.DRAG && mouse.isLeftButton()) {
-            state.selection.drag(mouse.x(), mouse.y(), state.screenGrid);
+            state.selection.drag(mouse.x(), mouse.y());
             return true;
         }
         if (mouse.isRelease() && mouse.isLeftButton()) {
@@ -9005,6 +9062,14 @@ public class TuiCommand implements Runnable {
 
         private final SelectionState selection = new SelectionState();
         private volatile String[][] screenGrid = new String[0][0];
+        /** The frozen frame a selection copies from, published once per render tick. */
+        private volatile SelectionState.SelectionFrame selectionFrame;
+        /** Per-screen-row copy kinds ({@code HARD} when unknown), published by the transcript render. */
+        private volatile SelectionState.RowKind[] rowKinds = new SelectionState.RowKind[0];
+        /** Copyable chat content columns (role bars and walls excluded), or -1 when unknown. */
+        private volatile int chatContentLeft = -1;
+
+        private volatile int chatContentRight = -1;
         private volatile Rect copyZone;
         private volatile Rect inputZone;
         /**

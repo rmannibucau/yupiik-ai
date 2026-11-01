@@ -95,18 +95,34 @@ public final class MarkdownLines {
      * @return the final lines, each not wider than {@code width}
      */
     public List<Line> render(final String markdown, final int width, final Style base, final MarkdownStyles styles) {
+        return renderWithKinds(markdown, width, base, styles).lines();
+    }
+
+    /** {@link #render} result: the lines plus the per-row {@link SelectionState.RowKind} of each line. */
+    public record RenderResult(List<Line> lines, List<SelectionState.RowKind> kinds) {}
+
+    /**
+     * Same as {@link #render(String, int, Style, MarkdownStyles)} but also returns the per-row
+     * copy kind: a line that continues the previous one at a word boundary is
+     * {@link SelectionState.RowKind#SOFT_CONT}, one that continues mid-token (over-wide URL/token,
+     * wrapped code line) is {@link SelectionState.RowKind#CHAR_SPLIT}, everything else is
+     * {@link SelectionState.RowKind#HARD}. The kinds array has exactly one entry per returned line.
+     */
+    public RenderResult renderWithKinds(
+            final String markdown, final int width, final Style base, final MarkdownStyles styles) {
         final var out = new ArrayList<Line>();
+        final var kinds = new ArrayList<SelectionState.RowKind>();
         final var codeStyle =
                 styles.codeBlock() == null ? base : styles.codeBlock().patch(base);
         for (final var segment : splitSegments(escapeCodeLike(markdown))) {
             if (segment.block()) {
-                emitLiteral(segment.text(), codeStyle, width, out);
+                emitLiteral(segment.text(), codeStyle, width, out, kinds);
             } else {
                 final var root = parser.parse(segment.text());
-                renderNode(root, Prefix.NONE, base, styles, width, false, out);
+                renderNode(root, Prefix.NONE, base, styles, width, false, out, kinds);
             }
         }
-        return out;
+        return new RenderResult(List.copyOf(out), List.copyOf(kinds));
     }
 
     /**
@@ -363,11 +379,22 @@ public final class MarkdownLines {
      * remainder on the next row.
      */
     public static List<Line> wrapCode(final List<Line> lines, final int width) {
+        return wrapCodeWithKinds(lines, width).lines();
+    }
+
+    /**
+     * Same as {@link #wrapCode(List, int)} but also returns the per-row copy kind: the first
+     * row of a logical code line is {@link SelectionState.RowKind#HARD}, each wrap continuation
+     * row is {@link SelectionState.RowKind#CHAR_SPLIT} (the wrap is character-exact, so the copy
+     * must rejoin it with nothing to restore the line).
+     */
+    public static RenderResult wrapCodeWithKinds(final List<Line> lines, final int width) {
         final var out = new ArrayList<Line>();
+        final var kinds = new ArrayList<SelectionState.RowKind>();
         for (final var line : lines) {
-            appendCodeLine(line.spans(), Math.max(1, width), out);
+            appendCodeLine(line.spans(), Math.max(1, width), out, kinds);
         }
-        return out;
+        return new RenderResult(List.copyOf(out), List.copyOf(kinds));
     }
 
     /**
@@ -375,15 +402,19 @@ public final class MarkdownLines {
      * or collapsing a character. An empty span list still emits a (blank) row so
      * blank lines inside code blocks survive.
      */
-    private static void appendCodeLine(final List<Span> spans, final int width, final List<Line> out) {
+    private static void appendCodeLine(
+            final List<Span> spans, final int width, final List<Line> out, final List<SelectionState.RowKind> kinds) {
         var cur = new ArrayList<Span>();
         var curWidth = 0;
+        var first = true;
         for (final var span : spans) {
             var text = span.content() == null ? "" : span.content();
             while (!text.isEmpty()) {
                 final var room = width - curWidth;
                 if (room <= 0) {
                     out.add(Line.from(cur));
+                    kinds.add(first ? SelectionState.RowKind.HARD : SelectionState.RowKind.CHAR_SPLIT);
+                    first = false;
                     cur = new ArrayList<>();
                     curWidth = 0;
                     continue;
@@ -395,6 +426,7 @@ public final class MarkdownLines {
             }
         }
         out.add(Line.from(cur));
+        kinds.add(first ? SelectionState.RowKind.HARD : SelectionState.RowKind.CHAR_SPLIT);
     }
 
     private static void renderNode(
@@ -404,25 +436,28 @@ public final class MarkdownLines {
             final MarkdownStyles styles,
             final int width,
             final boolean breakWords,
-            final List<Line> out) {
+            final List<Line> out,
+            final List<SelectionState.RowKind> kinds) {
         if (node instanceof Paragraph p) {
-            emitInline(p, prefix, base, styles, width, breakWords, out);
+            emitInline(p, prefix, base, styles, width, breakWords, out, kinds);
         } else if (node instanceof Heading h) {
             // base wins where it carries an explicit style (e.g. a dimmed fg for thoughts),
             // the heading decorations still apply on top
-            emitInline(h, prefix, styles.heading(h.getLevel()).patch(base), styles, width, breakWords, out);
+            emitInline(h, prefix, styles.heading(h.getLevel()).patch(base), styles, width, breakWords, out, kinds);
         } else if (node instanceof FencedCodeBlock c) {
             emitLiteral(
                     codeLiteral(c.getLiteral()),
                     styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
                     width,
-                    out);
+                    out,
+                    kinds);
         } else if (node instanceof IndentedCodeBlock c) {
             emitLiteral(
                     codeLiteral(c.getLiteral()),
                     styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
                     width,
-                    out);
+                    out,
+                    kinds);
         } else if (node instanceof HtmlBlock h) {
             // HtmlBlock stores its content in getLiteral() (no Text children): rendering
             // the old Text-only walk (textOf) silently dropped whole blocks and inline code
@@ -431,17 +466,19 @@ public final class MarkdownLines {
                     literal == null || literal.isBlank() ? inlineText(h) : literal,
                     styles.html() == null ? base : styles.html().patch(base),
                     width,
-                    out);
+                    out,
+                    kinds);
         } else if (node instanceof BlockQuote q) {
             final var markerStyle = styles.blockquote() == null ? Style.EMPTY : styles.blockquote();
             final var marker = Span.styled(styles.blockquotePrefix(), markerStyle.patch(base));
             final var nested =
                     Prefix.with(concat(prefix.first(), List.of(marker)), concat(prefix.cont(), List.of(marker)));
-            renderChildren(q, nested, base, styles, width, breakWords, out);
+            renderChildren(q, nested, base, styles, width, breakWords, out, kinds);
         } else if (node instanceof BulletList l) {
             for (final var child : children(l)) {
                 if (child instanceof ListItem li) {
-                    renderListItem(li, prefix, bulletMarker(li, styles, base), base, styles, width, breakWords, out);
+                    renderListItem(
+                            li, prefix, bulletMarker(li, styles, base), base, styles, width, breakWords, out, kinds);
                 }
             }
         } else if (node instanceof OrderedList l) {
@@ -450,7 +487,7 @@ public final class MarkdownLines {
                 if (child instanceof ListItem li) {
                     final var marker = Span.styled(
                             index++ + String.valueOf(l.getDelimiter()) + " ", listMarkerStyle(styles, base));
-                    renderListItem(li, prefix, marker, base, styles, width, breakWords, out);
+                    renderListItem(li, prefix, marker, base, styles, width, breakWords, out, kinds);
                 }
             }
         } else if (node instanceof ThematicBreak) {
@@ -459,10 +496,11 @@ public final class MarkdownLines {
                     : styles.horizontalRule().patch(base);
             final var avail = Math.max(1, width - widthOf(prefix.first()));
             out.add(Line.from(concat(prefix.first(), List.of(Span.styled("─".repeat(avail), style)))));
+            kinds.add(SelectionState.RowKind.HARD);
         } else if (node instanceof TableBlock table) {
-            renderTable(table, prefix, base, styles, width, out);
+            renderTable(table, prefix, base, styles, width, out, kinds);
         } else {
-            renderChildren(node, prefix, base, styles, width, breakWords, out);
+            renderChildren(node, prefix, base, styles, width, breakWords, out, kinds);
         }
     }
 
@@ -501,15 +539,17 @@ public final class MarkdownLines {
             final MarkdownStyles styles,
             final int width,
             final boolean breakWords,
-            final List<Line> out) {
+            final List<Line> out,
+            final List<SelectionState.RowKind> kinds) {
         var renderedAny = false;
         for (final var child : children(node)) {
             // blank source lines between block siblings must survive: markdown
             // only separates blocks with blank lines, so render one too
             if (renderedAny && !out.isEmpty() && !isBlankLine(out.get(out.size() - 1))) {
                 out.add(Line.empty());
+                kinds.add(SelectionState.RowKind.HARD);
             }
-            renderNode(child, prefix, base, styles, width, breakWords, out);
+            renderNode(child, prefix, base, styles, width, breakWords, out, kinds);
             renderedAny = true;
         }
     }
@@ -531,14 +571,15 @@ public final class MarkdownLines {
             final MarkdownStyles styles,
             final int width,
             final boolean breakWords,
-            final List<Line> out) {
+            final List<Line> out,
+            final List<SelectionState.RowKind> kinds) {
         final var indent = Span.styled(" ".repeat(marker.width()), Style.EMPTY);
         final var first = Prefix.with(concat(prefix.first(), List.of(marker)), concat(prefix.cont(), List.of(indent)));
         final var rest = Prefix.with(concat(prefix.cont(), List.of(indent)), concat(prefix.cont(), List.of(indent)));
         var blockIndex = 0;
         for (final var child : children(li)) {
             if (!(child instanceof TaskListItemMarker)) {
-                renderNode(child, blockIndex++ == 0 ? first : rest, base, styles, width, breakWords, out);
+                renderNode(child, blockIndex++ == 0 ? first : rest, base, styles, width, breakWords, out, kinds);
             }
         }
     }
@@ -550,12 +591,13 @@ public final class MarkdownLines {
             final MarkdownStyles styles,
             final int width,
             final boolean breakWords,
-            final List<Line> out) {
+            final List<Line> out,
+            final List<SelectionState.RowKind> kinds) {
         final var content = new ArrayList<Span>();
         for (final var child : children(block)) {
-            inline(child, prefix, base, styles, width, content, out);
+            inline(child, prefix, base, styles, width, content, out, kinds);
         }
-        appendWrapped(content, breakWords, width, prefix, out);
+        appendWrapped(content, breakWords, width, prefix, out, kinds);
     }
 
     private static void inline(
@@ -565,7 +607,8 @@ public final class MarkdownLines {
             final MarkdownStyles styles,
             final int width,
             final List<Span> content,
-            final List<Line> out) {
+            final List<Line> out,
+            final List<SelectionState.RowKind> kinds) {
         if (node instanceof Text t) {
             content.add(Span.styled(t.getLiteral(), base));
         } else if (node instanceof Code c) {
@@ -578,7 +621,7 @@ public final class MarkdownLines {
             content.add(Span.styled(c.getLiteral(), code));
         } else if (node instanceof Emphasis) {
             for (final var child : children(node)) {
-                inline(child, prefix, base.patch(styles.emphasis()), styles, width, content, out);
+                inline(child, prefix, base.patch(styles.emphasis()), styles, width, content, out, kinds);
             }
         } else if (node instanceof StrongEmphasis) {
             // the strong accent fills in only when the region carries no explicit
@@ -586,11 +629,11 @@ public final class MarkdownLines {
             // (thinking/tool output) it stays bold but keeps the region tone
             final var strong = styles.strong() == null ? Style.EMPTY.bold() : styles.strong();
             for (final var child : children(node)) {
-                inline(child, prefix, strong.patch(base), styles, width, content, out);
+                inline(child, prefix, strong.patch(base), styles, width, content, out, kinds);
             }
         } else if (node instanceof Strikethrough) {
             for (final var child : children(node)) {
-                inline(child, prefix, base.patch(styles.strikethrough()), styles, width, content, out);
+                inline(child, prefix, base.patch(styles.strikethrough()), styles, width, content, out, kinds);
             }
         } else if (node instanceof Link link) {
             final var style = styles.link() == null ? base : base.patch(styles.link());
@@ -602,22 +645,22 @@ public final class MarkdownLines {
                             ? style
                             : style.hyperlink(link.getDestination());
             for (final var child : children(link)) {
-                inline(child, prefix, linkBase, styles, width, content, out);
+                inline(child, prefix, linkBase, styles, width, content, out, kinds);
             }
         } else if (node instanceof Image image) {
             for (final var child : children(image)) {
-                inline(child, prefix, base, styles, width, content, out);
+                inline(child, prefix, base, styles, width, content, out, kinds);
             }
         } else if (node instanceof HtmlInline h) {
             content.add(Span.styled(h.getLiteral(), styles.html() == null ? base : base.patch(styles.html())));
         } else if (node instanceof TaskListItemMarker) {
             // rendered by bulletMarker for the whole item; nothing to emit here
         } else if (node instanceof SoftLineBreak || node instanceof HardLineBreak) {
-            appendWrapped(content, false, width, prefix, out);
+            appendWrapped(content, false, width, prefix, out, kinds);
             content.clear();
         } else {
             for (final var child : children(node)) {
-                inline(child, prefix, base, styles, width, content, out);
+                inline(child, prefix, base, styles, width, content, out, kinds);
             }
         }
     }
@@ -632,12 +675,18 @@ public final class MarkdownLines {
         return literal != null && literal.endsWith("\n") ? literal.substring(0, literal.length() - 1) : literal;
     }
 
-    private static void emitLiteral(final String literal, final Style style, final int width, final List<Line> out) {
+    private static void emitLiteral(
+            final String literal,
+            final Style style,
+            final int width,
+            final List<Line> out,
+            final List<SelectionState.RowKind> kinds) {
         if (literal == null || literal.isEmpty()) {
             return;
         }
         for (final var row : literal.split("\n", -1)) {
-            appendCodeLine(row.isEmpty() ? List.of() : List.of(Span.styled(row, style)), Math.max(1, width), out);
+            appendCodeLine(
+                    row.isEmpty() ? List.of() : List.of(Span.styled(row, style)), Math.max(1, width), out, kinds);
         }
     }
 
@@ -677,7 +726,8 @@ public final class MarkdownLines {
             final Style base,
             final MarkdownStyles styles,
             final int width,
-            final List<Line> out) {
+            final List<Line> out,
+            final List<SelectionState.RowKind> kinds) {
         List<TableRenderer.Cell> headCells = null;
         final var bodyRows = new ArrayList<List<TableRenderer.Cell>>();
         for (final var block : children(table)) {
@@ -697,6 +747,12 @@ public final class MarkdownLines {
             }
         }
         out.addAll(TABLE_RENDERER.render(headCells, bodyRows, width, prefix.first(), prefix.cont(), base));
+        if (kinds != null) {
+            // table rows are never soft continuations of each other
+            for (var i = 0; i < out.size(); i++) {
+                kinds.add(SelectionState.RowKind.HARD);
+            }
+        }
     }
 
     private static List<TableRenderer.Cell> cellsOf(final TableRow row, final Style base, final MarkdownStyles styles) {
@@ -882,9 +938,22 @@ public final class MarkdownLines {
             final int width,
             final Prefix prefix,
             final List<Line> out) {
+        appendWrapped(content, breakWords, width, prefix, out, null);
+    }
+
+    private static void appendWrapped(
+            final List<Span> content,
+            final boolean breakWords,
+            final int width,
+            final Prefix prefix,
+            final List<Line> out,
+            final List<SelectionState.RowKind> kinds) {
         final var words = words(content);
         if (words.isEmpty()) {
             out.add(Line.from(new ArrayList<>(prefix.first())));
+            if (kinds != null) {
+                kinds.add(SelectionState.RowKind.HARD);
+            }
             return;
         }
         final var first = prefix.first();
@@ -897,12 +966,17 @@ public final class MarkdownLines {
             final var wordWidth = widthOf(word);
             final var avail = width - widthOf(prefixNow);
             if (cur.isEmpty() && (breakWords || isUrl(word)) && wordWidth > avail) {
-                splitLongWord(word, prefixNow, avail, out);
+                splitLongWord(word, prefixNow, avail, out, kinds);
                 isFirst = false;
                 break;
             }
             if (!cur.isEmpty() && curWidth + 1 + wordWidth > avail) {
                 out.add(Line.from(concat(prefixNow, cur)));
+                if (kinds != null) {
+                    // the first emitted row has no predecessor: HARD; any later row is a
+                    // word-boundary continuation of the one above it
+                    kinds.add(isFirst ? SelectionState.RowKind.HARD : SelectionState.RowKind.SOFT_CONT);
+                }
                 isFirst = false;
                 cur = new ArrayList<>();
                 curWidth = 0;
@@ -916,6 +990,9 @@ public final class MarkdownLines {
         }
         if (!cur.isEmpty()) {
             out.add(Line.from(concat(isFirst ? first : cont, cur)));
+            if (kinds != null) {
+                kinds.add(isFirst ? SelectionState.RowKind.HARD : SelectionState.RowKind.SOFT_CONT);
+            }
         }
     }
 
@@ -947,6 +1024,15 @@ public final class MarkdownLines {
      */
     private static void splitLongWord(
             final List<Span> word, final List<Span> prefix, final int width, final List<Line> out) {
+        splitLongWord(word, prefix, width, out, null);
+    }
+
+    private static void splitLongWord(
+            final List<Span> word,
+            final List<Span> prefix,
+            final int width,
+            final List<Line> out,
+            final List<SelectionState.RowKind> kinds) {
         final var chars = new ArrayList<Span>(); // one styled span per non-space character
         for (final var s : word) {
             final var c = s.content();
@@ -971,6 +1057,9 @@ public final class MarkdownLines {
                 row.add(chars.get(i));
             }
             out.add(Line.from(row));
+            if (kinds != null) {
+                kinds.add(first ? SelectionState.RowKind.HARD : SelectionState.RowKind.CHAR_SPLIT);
+            }
             at += cap;
             first = false;
         }

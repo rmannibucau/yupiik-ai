@@ -488,4 +488,109 @@ class SelectionStateTest {
         assertEquals("b", grid[0][1]);
         assertEquals(2, grid[0].length);
     }
+
+    @Test
+    void pressOnChatGutterColumnsResolvesTheChatZoneNotTheWholeFrame() {
+        final var selection = new SelectionState();
+        // col 0 = mode gutter, col 1-2 = role bar, cols 3+ = chat content; the whole
+        // frame also contains a sidebar at cols 10+ (outside the chat zone)
+        final var grid = SelectionState.grid(List.of("┃│  hello side", "┃│  world side"));
+        final var chat = new Rect(0, 0, 10, 2);
+        // press on the gutter column itself: must resolve to the chat zone and clip to it,
+        // never fall back to the whole frame (which would pull in the sidebar)
+        selection.press(0, 0, grid, List.of(chat));
+        selection.drag(14, 1, grid);
+        assertEquals("┃│  hello\n┃│  world", selection.copy(grid));
+    }
+
+    @Test
+    void frameKindsRejoinSoftWrappedRowsWithASpace() {
+        final var selection = new SelectionState();
+        final var grid = SelectionState.grid(List.of("the quick brown ", "fox jumps over ", "the lazy dog"));
+        final var kinds = new SelectionState.RowKind[] {
+            SelectionState.RowKind.HARD, SelectionState.RowKind.SOFT_CONT, SelectionState.RowKind.SOFT_CONT
+        };
+        final var frame = new SelectionState.SelectionFrame(
+                grid, null, kinds, 0, grid[0].length - 1, new Rect(0, 0, grid[0].length, 3));
+        selection.press(0, 0, frame, List.of(frame.chatZone()));
+        selection.drag(grid[0].length - 1, 2);
+        assertEquals("the quick brown fox jumps over the lazy dog", selection.copy());
+    }
+
+    @Test
+    void frameKindsRejoinCharSplitRowsWithNothing() {
+        final var selection = new SelectionState();
+        // a long token hard-split across two rows: the continuation joins with nothing
+        final var grid = SelectionState.grid(List.of("https://exa", "mple.com"));
+        final var kinds = new SelectionState.RowKind[] {SelectionState.RowKind.HARD, SelectionState.RowKind.CHAR_SPLIT};
+        final var frame = new SelectionState.SelectionFrame(
+                grid, null, kinds, 0, grid[0].length - 1, new Rect(0, 0, grid[0].length, 2));
+        selection.press(0, 0, frame, List.of(frame.chatZone()));
+        selection.drag(grid[0].length - 1, 1);
+        // the split fragment joins with nothing (restores the token, no injected space)
+        assertEquals("https://example.com", selection.copy());
+    }
+
+    @Test
+    void headerKindsTrimTrailingRulesAndNeverRejoin() {
+        final var selection = new SelectionState();
+        final var grid = SelectionState.grid(List.of("── my header ─────────", "content line"));
+        final var kinds = new SelectionState.RowKind[] {SelectionState.RowKind.HEADER, SelectionState.RowKind.HARD};
+        final var frame = new SelectionState.SelectionFrame(
+                grid, null, kinds, 0, grid[0].length - 1, new Rect(0, 0, grid[0].length, 2));
+        selection.press(0, 0, frame, List.of(frame.chatZone()));
+        selection.drag(grid[0].length - 1, 1);
+        // the rule run is trimmed; the header stays its own line, never joined to content
+        assertEquals("── my header\ncontent line", selection.copy());
+    }
+
+    @Test
+    void blankRowsBreakRejoin() {
+        final var selection = new SelectionState();
+        final var grid = SelectionState.grid(List.of("alpha ", "beta", "", "gamma"));
+        final var kinds = new SelectionState.RowKind[] {
+            SelectionState.RowKind.HARD,
+            SelectionState.RowKind.SOFT_CONT,
+            SelectionState.RowKind.HARD,
+            SelectionState.RowKind.HARD
+        };
+        final var frame = new SelectionState.SelectionFrame(
+                grid, null, kinds, 0, grid[0].length - 1, new Rect(0, 0, grid[0].length, 4));
+        selection.press(0, 0, frame, List.of(frame.chatZone()));
+        selection.drag(grid[0].length - 1, 3);
+        assertEquals("alpha beta\n\ngamma", selection.copy());
+    }
+
+    @Test
+    void snapshotFreezesThePressedFrame() {
+        final var selection = new SelectionState();
+        final var grid = SelectionState.grid(List.of("one", "two"));
+        final var frame = new SelectionState.SelectionFrame(grid, null, null, -1, -1, null);
+        selection.press(0, 0, frame, null);
+        selection.drag(2, 1);
+        // the copy resolves against the frame captured at press time
+        assertEquals("one\ntwo", selection.copy());
+        // a brand-new press with a different frame switches the captured snapshot
+        selection.press(
+                0,
+                0,
+                new SelectionState.SelectionFrame(
+                        SelectionState.grid(List.of("NEW", "DATA")), null, null, -1, -1, null),
+                null);
+        selection.drag(2, 1);
+        assertEquals("NEW\nDATA", selection.copy());
+    }
+
+    @Test
+    void chatContentColumnsStripRoleBarsAndRightWall() {
+        final var selection = new SelectionState();
+        // col 0 = mode gutter, cols 1-2 = role bar "│ ", col 4 = right wall '│'
+        final var grid = SelectionState.grid(List.of("┃│  hi │", "┃│  yo │"));
+        final var chat = new Rect(0, 0, 7, 2);
+        // content columns are 3..5 (leftClip 3, rightClip 5)
+        final var frame = new SelectionState.SelectionFrame(grid, null, null, 3, 5, chat);
+        selection.press(3, 0, frame, List.of(chat));
+        selection.drag(6, 1);
+        assertEquals(" hi\n yo", selection.copy());
+    }
 }
