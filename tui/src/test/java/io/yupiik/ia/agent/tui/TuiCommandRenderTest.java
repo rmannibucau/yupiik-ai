@@ -1167,6 +1167,40 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void completionTabOnEmptySegmentInsertsHighlightedCandidate() throws Exception {
+        // Regression: with the caret in an EMPTY argument segment (e.g. "/model " plus a trailing
+        // space, so the cursor sits in a zero-width token), TAB must apply the highlighted candidate
+        // instead of refusing the degenerate span and dismissing the popup without entering anything.
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-completion-empty-tab-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // "/model" then a space opens the argument popup with an empty current segment
+        for (final var c : "/model ".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitText("> m01"); // the popup lists the models, first highlighted
+
+        // TAB applies the highlighted candidate into the empty segment at the caret
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB));
+        awaitText("/model m01");
+
+        // the caret lands right after the inserted token, not before it
+        final var modelLineCol = columnOfLineContaining("/model m01");
+        awaitCursorAt(modelLineCol + "/model m01".length());
+
+        // a second TAB stays idempotent (no duplicate, no swap)
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB));
+        awaitText("/model m01");
+        assertFalse(backend.text().contains("/model m02"), "second Tab must not apply m02:\n" + backend.text());
+
+        quit();
+    }
+
+    @Test
     void completionEscDismissesAndSecondEnterSubmits() throws Exception {
         // Esc on an open popup dismisses it without touching the line; with the popup
         // gone, Enter then submits the raw line (instead of accepting a candidate)

@@ -2823,11 +2823,12 @@ public class TuiCommand implements Runnable {
         final var line = state.input.getLine(row);
         final var start = suggestion.replaceStart();
         final var end = suggestion.replaceEnd();
-        // a degenerate span (start >= end, or out of the current line) can only
+        // a degenerate span (start > end, or out of the current line) can only
         // duplicate text on re-application (e.g. a stale suggestion applied after
         // the input moved on): refuse to mutate the line instead of producing
-        // "yoyolo"-style duplicates
-        if (start < 0 || end > line.length() || start >= end) {
+        // "yoyolo"-style duplicates. start == end is legitimate: the current segment
+        // is empty (caret at a trailing space), so the candidate is a pure insertion.
+        if (start < 0 || end > line.length() || start > end) {
             return;
         }
         final var newValue = line.substring(0, start) + replacement + line.substring(end);
@@ -2856,7 +2857,7 @@ public class TuiCommand implements Runnable {
         final var line = state.input.getLine(row);
         final var start = suggestion.replaceStart();
         final var end = suggestion.replaceEnd();
-        if (start < 0 || end > line.length() || start >= end) {
+        if (start < 0 || end > line.length() || start > end) {
             // a degenerate span would be refused by replaceInput too; nothing to apply
             return false;
         }

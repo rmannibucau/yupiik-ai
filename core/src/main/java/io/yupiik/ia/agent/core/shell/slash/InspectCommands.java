@@ -66,6 +66,10 @@ public class InspectCommands implements SlashCommandSet {
                         ArgCompletion.from("tool", ArgCompletion.Env::tools),
                         SlashAction.sync(this::tools)),
                 SlashCommand.of(
+                        new SlashCommandSpec(
+                                "/executing-tools", null, "list the tools currently executing", SlashGroup.INSPECT),
+                        SlashAction.sync(this::executingTools)),
+                SlashCommand.of(
                         new SlashCommandSpec("/todos", null, "show the todo list", SlashGroup.INSPECT),
                         SlashAction.sync(this::todos)));
     }
@@ -149,6 +153,24 @@ public class InspectCommands implements SlashCommandSet {
             }
         }
         return ShellOutcome.transcript(sb.toString());
+    }
+
+    private ShellOutcome executingTools(final String arg, final ShellEnv env) {
+        final var running = env.transcript().runningToolsSnapshot();
+        if (running.isEmpty()) {
+            return ShellOutcome.status("(no tool executing)");
+        }
+        final var rows = running.stream()
+                .map(tool -> {
+                    final var command =
+                            tool.command() == null || tool.command().isBlank() ? tool.name() : tool.command();
+                    final var label = tool.ordinal() > 0 ? "#" + tool.ordinal() : "";
+                    return List.of(
+                            SlashRegistry.cell(tool.name()), SlashRegistry.cell(command), SlashRegistry.cell(label));
+                })
+                .toList();
+        return ShellOutcome.transcript(
+                "**Executing tools**\n\n" + SlashRegistry.table(List.of("tool", "command", "ordinal"), rows));
     }
 
     private ShellOutcome todos(final String arg, final ShellEnv env) {

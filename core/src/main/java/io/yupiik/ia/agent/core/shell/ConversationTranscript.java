@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -1349,6 +1350,28 @@ public class ConversationTranscript {
     public String runningToolCommand() {
         final var newest = newestRunningTool();
         return newest == null ? null : newest.command;
+    }
+
+    /**
+     * An immutable snapshot of one in-flight tool execution: its name, the
+     * command label (bash command when the tool runs one, else the tool name),
+     * the {@code #N} ordinal and the elapsed wall-clock milliseconds.
+     */
+    public record RunningToolInfo(String name, String command, long ordinal, long elapsedMs) {}
+
+    /**
+     * Snapshot of every tool currently executing (most recently started first),
+     * defensive-copied so callers never touch the live buffers. Empty when no
+     * tool is in flight.
+     */
+    public synchronized List<RunningToolInfo> runningToolsSnapshot() {
+        final var now = System.nanoTime();
+        return runningTools.values().stream()
+                .flatMap(Collection::stream)
+                .map(t -> new RunningToolInfo(
+                        t.name, t.command, t.ordinal, Math.max(0, (now - t.startedNanos) / 1_000_000L)))
+                .sorted(Comparator.comparingLong(RunningToolInfo::ordinal).reversed())
+                .toList();
     }
 
     /** The most recently started pending tool, for the status/spinner display. */
