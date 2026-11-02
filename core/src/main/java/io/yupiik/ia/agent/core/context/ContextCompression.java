@@ -63,6 +63,13 @@ public final class ContextCompression {
      */
     static final int MIN_GLUED_SEAM_DIGITS = 3;
 
+    /**
+     * Upper bound on the user-turn refs surfaced by the {@code compress} unknown-ref observer and the
+     * hard compression nudge guidance, keeping the bounded helper line (and the persisted tool fallback)
+     * cheap. Oldest refs are listed first, so a large session never dumps its whole history to the model.
+     */
+    static final int MAX_GUIDANCE_REFS = 16;
+
     public enum Status {
         ACTIVE,
         SUPERSEDED,
@@ -111,6 +118,14 @@ public final class ContextCompression {
      * read it from any thread without touching {@link #published}.
      */
     private volatile Set<String> renderedRefs = Set.of("");
+    /**
+     * Optional subscriber notified when a {@code compress} call skipped at least one range because its
+     * refs were not in the live conversation (the ref-lookup skip). Receives the bounded, guaranteed-
+     * valid user-turn ref list so a flash-class model that guessed wrong refs can be shown the real
+     * ones without bloating the persisted transcript. Render-surface agnostic: {@link ContextCompression}
+     * never mixes with a UI; the TUI/web subscribe through it.
+     */
+    private volatile java.util.function.Consumer<List<Integer>> onUnknownRefs;
 
     public ContextCompression(final CompressConfiguration configuration) {
         this.configuration = configuration;
@@ -176,6 +191,28 @@ public final class ContextCompression {
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Registers a listener invoked when a {@code compress} call skipped at least one range because its
+     * refs were not in the live conversation. The listener receives the bounded, guaranteed-valid
+     * user-turn ref list (see {@link #compressibleUserTurnRefs()}). A null value clears the listener.
+     */
+    public void onUnknownRefs(final java.util.function.Consumer<List<Integer>> listener) {
+        this.onUnknownRefs = listener;
+    }
+
+    /**
+     * Symmetric counter of {@link #realUserMessages()} applied to digest-only transcripts: a user
+     * message whose content is a previous {@code <compacted-context>} digest cannot anchor a compress
+     * range and is excluded from the ref guidance.
+     */
+    private static boolean isDigestOnlyUserMessage(final Message message) {
+        if (message == null || !"user".equals(message.role())) {
+            return false;
+        }
+        final var content = message.content() instanceof String s ? s : String.valueOf(message.content());
+        return content.startsWith("<compacted-context>") || content.startsWith("<pruned-context>");
     }
 
     /**
@@ -370,6 +407,10 @@ public final class ContextCompression {
         final var resolved = new ArrayList<ResolvedRange>(ranges.size());
         final var nudges = new ArrayList<String>();
         final var skipped = new ArrayList<String>();
+        // how many ranges failed purely because their refs were not in the live conversation; when any
+        // range fails this way the observer (if any) is handed the valid user-turn ref list so a
+        // flash-class model that guessed wrong refs can see the real ones without bloating the transcript
+        var refLookupSkips = 0;
         for (final var range : ranges) {
             if (range == null || range.startId() == null || range.endId() == null) {
                 skipped.add("range without both startId and endId (message refs like @12@)");
@@ -384,6 +425,7 @@ public final class ContextCompression {
             final var start = indexOf(published, startRef, 0);
             final var end = indexOf(published, endRef, start);
             if (start < 0 || end < 0 || end < start) {
+                refLookupSkips++;
                 skipped.add("range " + range.startId() + ".." + range.endId()
                         + ": not in the live conversation or is reversed");
                 continue;
@@ -497,6 +539,13 @@ public final class ContextCompression {
             }
             resolved.add(new ResolvedRange(
                     effectiveStartRef, effectiveEndRef, range.summary() == null ? "" : range.summary()));
+        }
+
+        // a flash-class model that guessed refs no longer in the live conversation gets the real,
+        // guaranteed-valid user-turn ref list so it can correct in one round instead of guessing again
+        final var refListener = onUnknownRefs;
+        if (refLookupSkips > 0 && refListener != null) {
+            refListener.accept(compressibleUserTurnRefs());
         }
 
         final var created = new ArrayList<String>();
@@ -814,6 +863,81 @@ public final class ContextCompression {
             }
         }
         return -1;
+    }
+
+    /**
+     * The bounded, guaranteed-valid set of user-turn start references a {@code compress} range may
+     * currently anchor on, oldest-first and capped at {@link #MAX_GUIDANCE_REFS}. Only real user
+     * messages are listed (never the volatile session-state tail, never a {@code <compacted-context>}
+     * digest), and refs already covered by {@code turnProtection} or by an ACTIVE compression block
+     * are excluded so every {@code startId} shown passes the compress validation. Used by the
+     * {@code compress} tool's unknown-ref observer and by the hard compression nudge so a flash-class
+     * model stops guessing stale refs. Empty when nothing is currently safe to compress.
+     */
+    public List<Integer> compressibleUserTurnRefs() {
+        lock.lock();
+        try {
+            final var out = new ArrayList<Integer>(MAX_GUIDANCE_REFS);
+            collectCompressibleUserTurnRefs(out, MAX_GUIDANCE_REFS);
+            return out;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Total number of currently compressible user-turn starts (unbounded), so a caller that truncates
+     * the bounded guidance can report exactly how many refs were omitted rather than guessing.
+     */
+    public int compressibleUserTurnCount() {
+        lock.lock();
+        try {
+            return collectCompressibleUserTurnRefs(new ArrayList<>(), Integer.MAX_VALUE);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Appends up to {@code max} oldest-first refs of the currently compressible user-turn starts to
+     * {@code sink} and returns how many were appended. Excludes the volatile session-state tail and
+     * {@code <compacted-context>} digests, refs covered by {@code turnProtection} and refs inside an
+     * ACTIVE compression block, so every returned ref passes the compress validation. Caller holds the
+     * lock.
+     */
+    private int collectCompressibleUserTurnRefs(final List<Integer> sink, final int max) {
+        if (!enabled() || published == null || max <= 0) {
+            return 0;
+        }
+        final var protectedFrom = configuration.turnProtection() && configuration.turnProtectionTurns() > 0
+                ? protectedTurnStart(configuration.turnProtectionTurns())
+                : -1;
+        final var activeBlocks =
+                blocks.stream().filter(b -> b.status() == Status.ACTIVE).toList();
+        var collected = 0;
+        for (var i = 0; i < published.size() && collected < max; i++) {
+            final var message = published.get(i);
+            if (message == null || !"user".equals(message.role())) {
+                continue;
+            }
+            if (isVolatileTail(message) || isDigestOnlyUserMessage(message)) {
+                continue;
+            }
+            // turnProtection shields a suffix: everything from the last-protected user turn onward
+            // (the protectedTurnStart index, matching compressLocked's effectiveEnd >= protectedFrom
+            // guard) is off-limits, so only the older, unprotected history stays eligible.
+            if (protectedFrom >= 0 && i >= protectedFrom) {
+                continue;
+            }
+            final var ref = refOf(message);
+            final var covered = activeBlocks.stream().anyMatch(b -> ref >= b.startRef() && ref <= b.endRef());
+            if (covered) {
+                continue;
+            }
+            sink.add(ref);
+            collected++;
+        }
+        return collected;
     }
 
     private void markAbsorbed(final Block block) {

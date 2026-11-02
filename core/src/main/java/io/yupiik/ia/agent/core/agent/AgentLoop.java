@@ -2321,6 +2321,7 @@ public class AgentLoop {
                 + systemPromptBuilder.sessionStateDelta()
                 + contextUsageLine(messages, toolsTokens)
                 + nudgeBlock(messages, toolsTokens)
+                + compressionRefGuidance(messages, tier)
                 + snapshotBlock(sessionId)
                 + "</session-state>";
         // dedup: skip when the newest state tail already carries exactly this state
@@ -4460,6 +4461,40 @@ public class AgentLoop {
                     + "and its recent messages verbatim and do not block on it.</nudge>";
         }
         return "";
+    }
+
+    /**
+     * Bounded, guaranteed-valid user-turn ref guidance appended to the volatile session-state tail
+     * next to the strong compression nudge. Surfaces the exact refs a {@code compress} range may
+     * currently anchor on (oldest-first, capped), so a flash-class model stops guessing stale refs and
+     * correctly compresses on the first attempt. Rendered only when the hard tier fires ({@code tier == 2});
+     * an empty eligible set surfaces the ACP-derived "nothing left to safely compress" escalation
+     * instead of a bare ref list, and the case repeats deterministically every hard nudge rather than
+     * silently vanishing (the feedback-loop failure ACP documented in PR #207).
+     */
+    String compressionRefGuidance(final List<Message> messages, final int tier) {
+        final var compression = configuration.compression();
+        if (compression == null || !compression.enabled() || contextView == null || tier != 2) {
+            return "";
+        }
+        final var refs = contextView.compression().compressibleUserTurnRefs();
+        if (refs.isEmpty()) {
+            return "\ncompressible user-turn starts: none - nothing left to safely compress; do not retry "
+                    + "the same ranges, run /compact or start a new session.";
+        }
+        final var sb = new StringBuilder("\ncompressible user-turn starts: ");
+        for (var i = 0; i < refs.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append('@').append(refs.get(i)).append('@');
+        }
+        final var omitted = contextView.compression().compressibleUserTurnCount() - refs.size();
+        if (omitted > 0) {
+            sb.append(" (+").append(omitted).append(" omitted)");
+        }
+        sb.append(" - start on one, end just before the next user message.");
+        return sb.toString();
     }
 
     /** Legacy prune/compaction nudge for the pruning opt-in (disabled by default). */

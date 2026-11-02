@@ -172,6 +172,33 @@ public class AnsiShellFrontend implements ShellFrontend {
         // the line renderer shares the same evidence source, so a leaked glued marker
         // ("@Ent...10632") is stripped from streamed answer text as well, not only the thinking
         this.textBuffer.bindCompression(this.compression);
+        // fallback for a flash-class model that still guesses a stale ref despite the hard-nudge
+        // guidance: when the compress tool skips ranges because their refs are not in the live
+        // conversation, surface the same bounded, guaranteed-valid user-turn start list on stderr so
+        // the operator (and the user) can see the real refs without growing the persisted transcript.
+        this.compression.onUnknownRefs(refs -> printErr(compressionRefFallbackLine(refs)));
+    }
+
+    /** Bounded user-turn start refs for the compress unknown-ref fallback, mirroring the tail guidance. */
+    private String compressionRefFallbackLine(final List<Integer> refs) {
+        final var count = this.compression.compressibleUserTurnCount();
+        if (refs == null || refs.isEmpty()) {
+            return "compress: guessed refs are not in the live conversation and nothing is left to safely compress;"
+                    + " run /compact or start a new session.\n";
+        }
+        final var sb = new StringBuilder("compress: refs are not in the live conversation; valid user-turn starts: ");
+        for (var i = 0; i < refs.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append('@').append(refs.get(i)).append('@');
+        }
+        final var omitted = count - refs.size();
+        if (omitted > 0) {
+            sb.append(" (+").append(omitted).append(" omitted)");
+        }
+        sb.append(" - start on one, end just before the next user message.\n");
+        return sb.toString();
     }
 
     public MarkdownColorizer colorizer() {
