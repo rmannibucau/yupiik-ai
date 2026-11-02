@@ -4717,8 +4717,8 @@ class AgentLoopTest {
                 true,
                 Map.of(
                         "yca.compression.enabled", "true",
-                        "yca.compression.minContextLimit", "0",
-                        "yca.compression.maxContextLimit", "50",
+                        "yca.compression.contextLimit.min", "0",
+                        "yca.compression.contextLimit.max", "50",
                         "yca.compression.nudgeFrequency", "2",
                         "yca.llm.explorationNudgeRounds", "0"));
         final var contextView = new ContextView(config.compression());
@@ -4763,13 +4763,13 @@ class AgentLoopTest {
                 true,
                 Map.of(
                         "yca.compression.enabled", "true",
-                        "yca.compression.minContextLimit", "0",
-                        "yca.compression.maxContextLimit", "50",
+                        "yca.compression.contextLimit.min", "0",
+                        "yca.compression.contextLimit.max", "50",
                         "yca.compression.nudgeFrequency", "3",
                         "yca.compression.summaryBuffer", "false",
                         "yca.llm.explorationNudgeRounds", "0"));
         final var contextView = new ContextView(config.compression());
-        final var manager = new ManageContextTool(config, mapper);
+        final var manager = new ManageContextTool(config, mapper, null);
         final var history =
                 List.of(Message.user("closed work with result"), Message.assistant("completed successfully", null));
         loop(

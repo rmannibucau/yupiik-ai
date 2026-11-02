@@ -82,7 +82,7 @@ class BackgroundModelRoutingTest {
         if (compactModel != null) {
             entries.put("yca.model.compact.name", compactModel);
         }
-        entries.put("yca.compaction.tailBudgetTokens", "1");
+        entries.put("yca.compaction.tail.budgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "1");
         return TestConfigs.codingAgent(entries);
     }
@@ -116,7 +116,7 @@ class BackgroundModelRoutingTest {
         if (cheapMemory != null) {
             entries.put("yca.provider.providers.1.backgroundModelOverrides.memory.name", cheapMemory);
         }
-        entries.put("yca.compaction.tailBudgetTokens", "1");
+        entries.put("yca.compaction.tail.budgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "1");
         return TestConfigs.codingAgent(entries);
     }

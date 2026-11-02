@@ -20,6 +20,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ContextLimit;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
@@ -1685,13 +1686,11 @@ public class AgentLoop {
                 if (!compactionGateEscalated
                         && usageTracker.effectiveContext(messages, toolsTokens)
                                 >= contextManager.compactionTriggerTokens()) {
-                    final var gateConfig = configuration.compaction();
+                    final var gate = contextManager.resolvedGate(runSettings);
                     // per-session/per-provider overrides win over the global gate budgets (a session or
                     // provider on a flakier route can raise its own gate ceiling without affecting others)
-                    final var resolvedAttempts = contextManager.resolvedGateMaxAttempts(runSettings);
-                    final var resolvedDuration = contextManager.resolvedGateMaxDurationMs(runSettings);
-                    final var maxAttempts = resolvedAttempts > 0 ? resolvedAttempts : gateConfig.gateMaxAttempts();
-                    final var maxDurationMs = resolvedDuration > 0 ? resolvedDuration : gateConfig.gateMaxDurationMs();
+                    final var maxAttempts = gate.maxAttempts();
+                    final var maxDurationMs = gate.maxDurationMs();
                     if (gateStartedAtNanos == 0) {
                         gateStartedAtNanos = precisionDurationMarker.now();
                     }
@@ -2481,6 +2480,21 @@ public class AgentLoop {
      * null when no {@link ContextView} is wired. */
     public ContextCompression compression() {
         return contextView == null ? null : contextView.compression();
+    }
+
+    /** The resolved working-context limits for the session's provider selection, never null. */
+    private ContextLimit resolvedContextLimit() {
+        if (providerManager != null) {
+            // Prefer the merged (per-provider over global over default) limits when the provider
+            // manager can resolve them. A provider manager without a backing configuration cannot,
+            // so fall back to this loop's own global config-sourced limits instead.
+            final var fromProvider = providerManager.resolvedContextLimit(chatSettings);
+            if (fromProvider != null && (fromProvider.min() != null || fromProvider.max() != null)) {
+                return fromProvider;
+            }
+        }
+        final var compression = configuration.compression();
+        return compression == null ? new ContextLimit(null, null) : compression.contextLimit();
     }
 
     /** Scrub via the shared compression when wired, else a disposable scrubber. */
@@ -4405,7 +4419,7 @@ public class AgentLoop {
         final var compression = configuration.compression();
         if (compression != null && compression.enabled() && contextView != null) {
             final var window = usageTracker.contextWindowTokenCount().value();
-            final var targets = contextView.compression().targets(window);
+            final var targets = contextView.compression().targets(window, resolvedContextLimit());
             final var raw = usageTracker.effectiveContext(messages, toolsTokens);
             final var effective = contextView.compression().effectiveTokens(messages, raw);
             final var percent = Math.round(usageTracker.contextPercent(effective) / 5d) * 5;
@@ -4441,7 +4455,7 @@ public class AgentLoop {
             final var effective = contextView.compression().effectiveTokens(messages, raw);
             final var targets = contextView
                     .compression()
-                    .targets(usageTracker.contextWindowTokenCount().value());
+                    .targets(usageTracker.contextWindowTokenCount().value(), resolvedContextLimit());
             final var percent = Math.round(usageTracker.contextPercent(effective));
             return "\n<nudge>The working context reached ~" + effective + " tokens, above the "
                     + targets.effectiveMax() + " working-context target (~" + percent + "% of model capacity). "
@@ -4454,7 +4468,7 @@ public class AgentLoop {
             final var effective = contextView.compression().effectiveTokens(messages, raw);
             final var targets = contextView
                     .compression()
-                    .targets(usageTracker.contextWindowTokenCount().value());
+                    .targets(usageTracker.contextWindowTokenCount().value(), resolvedContextLimit());
             return "\n<nudge>Working context is ~" + effective + " tokens (compress at " + targets.baseMin()
                     + " / must at " + targets.effectiveMax() + "). If a chapter is genuinely closed, call "
                     + "`compress` on its range now and write an exhaustive summary; keep the current task "
@@ -4546,7 +4560,7 @@ public class AgentLoop {
         }
         final var targets = contextView
                 .compression()
-                .targets(usageTracker.contextWindowTokenCount().value());
+                .targets(usageTracker.contextWindowTokenCount().value(), resolvedContextLimit());
         if (targets.baseMin() <= 0 && targets.baseMax() <= 0) {
             return 0;
         }

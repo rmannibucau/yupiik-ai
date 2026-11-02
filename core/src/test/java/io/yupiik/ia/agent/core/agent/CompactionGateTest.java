@@ -22,6 +22,7 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.GateConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextManager;
@@ -133,13 +134,10 @@ class CompactionGateTest {
         }
 
         @Override
-        public int resolvedGateMaxAttempts(final ChatSettings settings) {
-            return gateMaxAttempts;
-        }
-
-        @Override
-        public long resolvedGateMaxDurationMs(final ChatSettings settings) {
-            return gateMaxDurationMs;
+        public GateConfiguration resolvedGate(final ChatSettings settings) {
+            return new GateConfiguration(
+                    gateMaxAttempts >= 0 ? gateMaxAttempts : GateConfiguration.DEFAULT_MAX_ATTEMPTS,
+                    gateMaxDurationMs >= 0 ? (int) gateMaxDurationMs : GateConfiguration.DEFAULT_MAX_DURATION_MS);
         }
 
         @Override
@@ -378,7 +376,7 @@ class CompactionGateTest {
         entries.put("yca.provider.providers.0.model", "test-model");
         entries.put("yca.provider.providers.0.contextWindow", "128000");
         entries.put("yca.compaction.thresholdPercent", "20");
-        entries.put("yca.compaction.speculativeStartPercent", "1");
+        entries.put("yca.compaction.speculative.startPercent", "1");
         entries.put("yca.pruning.enabled", "false");
         entries.put("yca.pruning.keepRecent", "2");
         entries.put("yca.llm.maxIterations", "3");

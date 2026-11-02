@@ -71,7 +71,7 @@ class AdaptiveCompactionTest {
         entries.put("yca.provider.providers.0.api", "auto");
         entries.put("yca.provider.providers.0.contextWindow", String.valueOf(window));
         entries.put("yca.provider.providers.0.timeoutSeconds", "120");
-        entries.put("yca.compaction.tailBudgetTokens", "1");
+        entries.put("yca.compaction.tail.budgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "1");
         entries.putAll(extra);
         return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
@@ -147,7 +147,7 @@ class AdaptiveCompactionTest {
         entries.put("yca.provider.providers.1.api", "auto");
         entries.put("yca.provider.providers.1.contextWindow", String.valueOf(compactWindow));
         entries.put("yca.provider.providers.1.timeoutSeconds", "120");
-        entries.put("yca.compaction.tailBudgetTokens", "1");
+        entries.put("yca.compaction.tail.budgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "1");
         entries.putAll(extra);
         return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
@@ -169,7 +169,7 @@ class AdaptiveCompactionTest {
 
     @Test
     void explicitChunkCharsWinsOverTheDerivation() {
-        final var cfg = config(128_000, Map.of("yca.compaction.summarizerChunkChars", "5000"));
+        final var cfg = config(128_000, Map.of("yca.compaction.summarizer.chunkChars", "5000"));
         final var coordinator = coordinator(cfg, null);
         assertEquals(5_000, coordinator.effectiveChunkCap(), "an explicit cap must win over the window derivation");
         assertEquals(2_500, coordinator.effectiveDigestCap(), "digest auto = half the explicit cap");
@@ -188,7 +188,7 @@ class AdaptiveCompactionTest {
 
     @Test
     void chunkCompactHonorsTheEffectiveCap() {
-        final var cfg = config(128_000, Map.of("yca.compaction.summarizerChunkChars", "100"));
+        final var cfg = config(128_000, Map.of("yca.compaction.summarizer.chunkChars", "100"));
         final var coordinator = coordinator(cfg, null);
         final var messages = new ArrayList<Message>();
         for (var i = 0; i < 10; i++) {
@@ -217,8 +217,8 @@ class AdaptiveCompactionTest {
         final var cfg = config(
                 128_000,
                 Map.of(
-                        "yca.compaction.summarizerChunkChars", "4000",
-                        "yca.compaction.summarizerMinChunkChars", "1000"));
+                        "yca.compaction.summarizer.chunkChars", "4000",
+                        "yca.compaction.summarizer.minChunkChars", "1000"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -251,8 +251,8 @@ class AdaptiveCompactionTest {
         final var cfg = config(
                 128_000,
                 Map.of(
-                        "yca.compaction.summarizerChunkChars", "4000",
-                        "yca.compaction.summarizerMinChunkChars", "1000"));
+                        "yca.compaction.summarizer.chunkChars", "4000",
+                        "yca.compaction.summarizer.minChunkChars", "1000"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -279,7 +279,7 @@ class AdaptiveCompactionTest {
         final var cfg = config(
                 128_000,
                 Map.of(
-                        "yca.compaction.summarizerChunkChars", "4000",
+                        "yca.compaction.summarizer.chunkChars", "4000",
                         "yca.compaction.retriesMaxAttempts", "2"));
         final var chat = new ChatClient() {
             @Override
@@ -309,8 +309,8 @@ class AdaptiveCompactionTest {
         final var cfg = config(
                 128_000,
                 Map.of(
-                        "yca.compaction.summarizerChunkChars", "4000",
-                        "yca.compaction.tailBudgetTokens", "1",
+                        "yca.compaction.summarizer.chunkChars", "4000",
+                        "yca.compaction.tail.budgetTokens", "1",
                         "yca.pruning.toolOutputMaxChars", "20000"));
         final var chat = new ChatClient() {
             @Override
@@ -361,8 +361,8 @@ class AdaptiveCompactionTest {
         final var cfg = config(
                 128_000,
                 Map.of(
-                        "yca.compaction.summarizerChunkChars", "4000",
-                        "yca.compaction.summarizerMinChunkChars", "1000"));
+                        "yca.compaction.summarizer.chunkChars", "4000",
+                        "yca.compaction.summarizer.minChunkChars", "1000"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -431,8 +431,8 @@ class AdaptiveCompactionTest {
         final var cfg = config(
                 128_000,
                 Map.of(
-                        "yca.compaction.summarizerChunkChars", "2000",
-                        "yca.compaction.summarizerMinChunkChars", "1000",
+                        "yca.compaction.summarizer.chunkChars", "2000",
+                        "yca.compaction.summarizer.minChunkChars", "1000",
                         "yca.llm.retriesMaxAttempts", "2",
                         "yca.llm.retriesBaseDelayMs", "500",
                         "yca.llm.rateLimitRequestsPerMinute", "0",
@@ -462,7 +462,7 @@ class AdaptiveCompactionTest {
     /** Transient 5xx after all retries keeps the raw context (Mode.NONE), never local-truncates. */
     @Test
     void transientSummarizerFailureSkipsInsteadOfTruncating() {
-        final var cfg = config(128_000, Map.of("yca.compaction.summarizerChunkChars", "2000"));
+        final var cfg = config(128_000, Map.of("yca.compaction.summarizer.chunkChars", "2000"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -495,8 +495,8 @@ class AdaptiveCompactionTest {
         final var cfg = config(
                 128_000,
                 Map.of(
-                        "yca.compaction.summarizerChunkChars", "4000",
-                        "yca.compaction.summarizerMinChunkChars", "1000"));
+                        "yca.compaction.summarizer.chunkChars", "4000",
+                        "yca.compaction.summarizer.minChunkChars", "1000"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -530,7 +530,7 @@ class AdaptiveCompactionTest {
         final var cfg = config(
                 128_000,
                 Map.of(
-                        "yca.compaction.summarizerChunkChars", "4000",
+                        "yca.compaction.summarizer.chunkChars", "4000",
                         "yca.compaction.retriesMaxAttempts", "2"));
         final var chat = new ChatClient() {
             @Override

@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,15 +47,21 @@ public class ManageContextTool implements EmbeddedTool {
 
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
+    private final ProviderManager providerManager;
 
-    public ManageContextTool(final CodingAgentConfiguration configuration, final JsonMapper mapper) {
+    public ManageContextTool(
+            final CodingAgentConfiguration configuration,
+            final JsonMapper mapper,
+            final ProviderManager providerManager) {
         this.configuration = configuration;
         this.mapper = mapper;
+        this.providerManager = providerManager;
     }
 
     protected ManageContextTool() {
         this.configuration = null;
         this.mapper = null;
+        this.providerManager = null;
     }
 
     @Override
@@ -152,7 +159,7 @@ public class ManageContextTool implements EmbeddedTool {
         final var action =
                 String.valueOf(args.getOrDefault("action", "compress")).strip().toLowerCase();
         return switch (action) {
-            case "status" -> status(contextView, usageTracker);
+            case "status" -> status(contextView, usageTracker, context.settings());
             case "compress" -> compress(contextView, args);
             case "decompress" -> decompress(contextView, args);
             case "compact" -> request(contextView, "compact", args);
@@ -164,7 +171,9 @@ public class ManageContextTool implements EmbeddedTool {
     }
 
     private ToolResult status(
-            final ContextView contextView, final io.yupiik.ia.agent.core.context.UsageTracker usageTracker) {
+            final ContextView contextView,
+            final io.yupiik.ia.agent.core.context.UsageTracker usageTracker,
+            final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
         final var compression = contextView.compression();
         final var messages = contextView.messages();
         final var snapshot = contextView.snapshot();
@@ -182,7 +191,10 @@ public class ManageContextTool implements EmbeddedTool {
         out.put("summaryTokens", compression.summaryTokens());
         out.put("percentUsed", usable <= 0 ? 0 : Math.round(effective * 1000.0 / usable) / 10.0);
         if (configuration.compression() != null) {
-            final var targets = compression.targets(window);
+            final var limits = providerManager == null
+                    ? configuration.compression().contextLimit()
+                    : providerManager.resolvedContextLimit(settings);
+            final var targets = compression.targets(window, limits);
             // keep the historical base-limit keys for compatibility, and add the summary-buffer
             // extension so status reconciles exactly with the context-usage line and the nudge.
             out.put("compressAtTokens", targets.baseMin());

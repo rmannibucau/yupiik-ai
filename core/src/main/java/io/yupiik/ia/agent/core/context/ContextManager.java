@@ -15,7 +15,9 @@
  */
 package io.yupiik.ia.agent.core.context;
 
+import io.yupiik.ia.agent.core.configuration.BufferConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.GateConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
@@ -99,12 +101,13 @@ public class ContextManager {
         if (c.thresholdPercent() > 0) {
             return (int) Math.ceil(usageTracker.usableWindow() * c.thresholdPercent() / 100.0);
         }
+        final var b = c.resolvedBuffer();
         return ContextBudget.compactionTrigger(
                 usageTracker.contextWindowTokenCount().value(),
-                c.bufferPercent(),
-                c.bufferMinTokens(),
+                b.percent(),
+                b.minTokens(),
                 usageTracker.usableWindow(),
-                c.triggerSafetyPercent());
+                b.safetyPercent());
     }
 
     /** Hard prompt-input limit, excluding output headroom and including external tool-schema tokens at call sites. */
@@ -114,7 +117,7 @@ public class ContextManager {
 
     /**
      * The automatic-compaction trigger for the session's provider selection: same computation as
-     * {@link #compactionTriggerTokens()} but honors a per-provider {@code compaction.triggerSafetyPercent}
+     * {@link #compactionTriggerTokens()} but honors a per-provider {@code compaction.buffer.safetyPercent}
      * override when configured.
      */
     public int compactionTriggerTokens(final ChatSettings settings) {
@@ -128,24 +131,37 @@ public class ContextManager {
         if (c.thresholdPercent() > 0) {
             return (int) Math.ceil(usageTracker.usableWindow() * c.thresholdPercent() / 100.0);
         }
-        final var overridden = coordinator == null ? -1 : coordinator.resolvedTriggerSafetyPercent(settings);
-        final var safety = overridden > 0 ? overridden : c.triggerSafetyPercent();
+        final var b = coordinator == null ? c.resolvedBuffer() : coordinator.resolvedBuffer(settings);
         return ContextBudget.compactionTrigger(
                 usageTracker.contextWindowTokenCount().value(),
-                c.bufferPercent(),
-                c.bufferMinTokens(),
+                b.percent(),
+                b.minTokens(),
                 usageTracker.usableWindow(),
-                safety);
+                b.safetyPercent());
     }
 
-    /** The per-provider gate attempt budget for the session, or -1 to use the global default. */
-    public int resolvedGateMaxAttempts(final ChatSettings settings) {
-        return coordinator == null ? -1 : coordinator.resolvedGateMaxAttempts(settings);
+    /** The per-provider merged compaction-gate budgets for the session, or the global/defaults when unset. */
+    public GateConfiguration resolvedGate(final ChatSettings settings) {
+        if (coordinator != null) {
+            return coordinator.resolvedGate(settings);
+        }
+        return configuration != null && configuration.compaction() != null
+                ? configuration.compaction().resolvedGate()
+                : new GateConfiguration(
+                        GateConfiguration.DEFAULT_MAX_ATTEMPTS, GateConfiguration.DEFAULT_MAX_DURATION_MS);
     }
 
-    /** The per-provider gate wall-clock budget (ms) for the session, or -1 to use the global default. */
-    public long resolvedGateMaxDurationMs(final ChatSettings settings) {
-        return coordinator == null ? -1 : coordinator.resolvedGateMaxDurationMs(settings);
+    /** The per-provider merged buffer-mode trigger knobs for the session, or the global/defaults when unset. */
+    public BufferConfiguration resolvedBuffer(final ChatSettings settings) {
+        if (coordinator != null) {
+            return coordinator.resolvedBuffer(settings);
+        }
+        return configuration != null && configuration.compaction() != null
+                ? configuration.compaction().resolvedBuffer()
+                : new BufferConfiguration(
+                        BufferConfiguration.DEFAULT_PERCENT,
+                        BufferConfiguration.DEFAULT_MIN_TOKENS,
+                        BufferConfiguration.DEFAULT_SAFETY_PERCENT);
     }
 
     public CompactionResult prune(final List<Message> messages) {
@@ -270,14 +286,16 @@ public class ContextManager {
         return configuration != null
                 && configuration.compaction() != null
                 && configuration.compaction().enabled()
-                && "concurrent".equals(configuration.compaction().speculativePolicy());
+                && configuration.compaction().resolvedSpeculative().concurrent();
     }
 
     public int speculativeWatermarkTokens() {
         final var trigger = compactionTriggerTokens();
         return trigger == Integer.MAX_VALUE
                 ? trigger
-                : (int) ((long) trigger * configuration.compaction().speculativeStartPercent() / 100);
+                : (int) ((long) trigger
+                        * configuration.compaction().resolvedSpeculative().startPercent()
+                        / 100);
     }
 
     /** Best-effort capture; this path is a strict no-op while disabled. */

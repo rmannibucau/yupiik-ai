@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CompressConfiguration;
+import io.yupiik.ia.agent.core.configuration.ContextLimit;
 import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
@@ -34,7 +35,19 @@ class ConversationTranscriptTest {
 
     private static CompressConfiguration config() {
         return new CompressConfiguration(
-                true, "50000", "100000", 15, 5, true, false, false, List.of("my_tool"), false, 4, true, true, 4);
+                true,
+                new ContextLimit("50000", "100000"),
+                15,
+                5,
+                true,
+                false,
+                false,
+                List.of("my_tool"),
+                false,
+                4,
+                true,
+                true,
+                4);
     }
 
     @Test

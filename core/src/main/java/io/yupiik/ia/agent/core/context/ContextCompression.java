@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.context;
 
 import io.yupiik.ia.agent.core.configuration.CompressConfiguration;
+import io.yupiik.ia.agent.core.configuration.ContextLimit;
 import io.yupiik.ia.agent.core.llm.Message;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -731,16 +732,25 @@ public final class ContextCompression {
      * toward real context usage and the compaction guard is untouched, so capacity accounting
      * never weakens.
      */
-    public Targets targets(final int window) {
+    /**
+     * The resolved compression guidance targets for a given provider window, shared by the loop
+     * (context-usage line, nudges) and the {@code compress} tool (status). The base {@code min} /
+     * {@code max} come from the caller-provided {@code limits} (already merged per provider/session:
+     * provider override over global over default); when {@code summaryBuffer} is enabled the hard
+     * target is extended by the active summary tokens, so an already-condensed working set is not
+     * immediately hammered by the strong nudge. The extension is purely a guidance target:
+     * {@link #effectiveTokens}/{@link #savedTokens} still count the summaries toward real context
+     * usage and the compaction guard is untouched, so capacity accounting never weakens.
+     *
+     * @param window the provider context window in tokens.
+     * @param limits the resolved working-context limits (min/max) for the current session/provider.
+     */
+    public Targets targets(final int window, final ContextLimit limits) {
         lock.lock();
         try {
             final var summary = summaryTokens();
-            final var baseMin = configuration == null
-                    ? 0
-                    : configuration.resolveLimit(configuration.minContextLimit(), window, 50000);
-            final var baseMax = configuration == null
-                    ? 0
-                    : configuration.resolveLimit(configuration.maxContextLimit(), window, 100000);
+            final var baseMin = configuration == null ? 0 : limits.resolveMin(window);
+            final var baseMax = configuration == null ? 0 : limits.resolveMax(window);
             final var buffered = configuration != null && configuration.summaryBuffer() && summary > 0;
             return new Targets(window, baseMin, baseMax, buffered ? baseMax + summary : baseMax, summary, buffered);
         } finally {
@@ -748,7 +758,7 @@ public final class ContextCompression {
         }
     }
 
-    /** Resolved compression guidance targets (see {@link #targets(int)}). */
+    /** Resolved compression guidance targets (see {@link #targets(int, ContextLimit)}). */
     public record Targets(
             int window, int baseMin, int baseMax, int effectiveMax, int summaryTokens, boolean summaryBuffer) {}
 

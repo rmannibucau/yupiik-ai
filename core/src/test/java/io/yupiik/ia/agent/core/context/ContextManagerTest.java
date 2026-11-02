@@ -109,7 +109,7 @@ class ContextManagerTest {
     void forceCompactsAHistoryThatWouldOtherwiseStayUntouched() {
         final var digest = "summary: forced";
         // tiny tail budget: without force the keep floor swallows the whole history
-        final var cfg = config(6, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var cfg = config(6, 3_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -160,7 +160,7 @@ class ContextManagerTest {
         // must FOLD: replace the old digest with ONE new digest carrying the previous summary,
         // summarize the tool-churn region away (drop the region) instead of preserving it, so
         // repeated /compact force actually reclaims the middle.
-        final var cfg = config(6, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var cfg = config(6, 3_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -222,7 +222,7 @@ class ContextManagerTest {
     @Test
     void deliveredSubagentBlocksSurviveCompactionAsHighRecallAnchors() {
         final var digest = "summary: things happened";
-        final var cfg = config(6, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var cfg = config(6, 3_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -266,7 +266,7 @@ class ContextManagerTest {
     @Test
     void focusAndKeepLastAreForwardedToTheCompactor() {
         // tiny tail budget + a weighty tail turn (as in the force test) so the compaction actually runs
-        final var cfg = config(6, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var cfg = config(6, 3_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
         final var captured = new ArrayList<List<Message>>();
         final var chat = new ChatClient() {
             @Override
@@ -317,7 +317,7 @@ class ContextManagerTest {
     @Test
     void compactKeepsTheDigestWholeWhenShrinkingTheTailOverflow() throws Exception {
         final var digest = "summary: " + "x".repeat(1_200);
-        final var cfg = config(5, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var cfg = config(5, 3_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -372,8 +372,8 @@ class ContextManagerTest {
                 2,
                 3_000,
                 Map.of(
-                        "yca.compaction.tailBudgetTokens", "1",
-                        "yca.compaction.toolArgumentsCapChars", "30"));
+                        "yca.compaction.tail.budgetTokens", "1",
+                        "yca.compaction.tail.toolArgumentsCapChars", "30"));
         final var captured = new ArrayList<ChatCompletionRequest>();
         final var chat = new ChatClient() {
             @Override
@@ -424,7 +424,7 @@ class ContextManagerTest {
     @Test
     void compactionSummarizerSpendIsTrackedAsAuxiliary() {
         final var digest = "summary: kept";
-        final var cfg = config(5, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var cfg = config(5, 3_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -682,7 +682,7 @@ class ContextManagerTest {
 
     @Test
     void compactNeverSplitsAssistantToolCallFromItsResults() throws Exception {
-        final var cfg = config(5, 16_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var cfg = config(5, 16_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
         final var manager = manager(cfg, chatReturning("digest"));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
@@ -718,7 +718,7 @@ class ContextManagerTest {
 
     @Test
     void compactReplaysTheLastUserMessageWhenTheTailMissesIt() throws Exception {
-        final var cfg = config(2, 32_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var cfg = config(2, 32_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
         final var manager = manager(cfg, chatReturning("digest"));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
@@ -739,7 +739,7 @@ class ContextManagerTest {
 
     @Test
     void compactReanchorsOnThePreviousSummaryAndAsksForTheStructuredTemplate() throws Exception {
-        final var cfg = config(2, 128_000, Map.of("yca.compaction.tailBudgetTokens", "2000"));
+        final var cfg = config(2, 128_000, Map.of("yca.compaction.tail.budgetTokens", "2000"));
         final var captured = new ArrayList<List<Message>>();
         final var manager = manager(cfg, chatRecording("updated digest", captured));
         final var messages = new ArrayList<Message>();
@@ -781,8 +781,8 @@ class ContextManagerTest {
                 500_000,
                 Map.of(
                         "yca.provider.providers.0.outputTokens", "128000",
-                        "yca.compaction.bufferPercent", "15",
-                        "yca.compaction.bufferMinTokens", "16000"));
+                        "yca.compaction.buffer.percent", "15",
+                        "yca.compaction.buffer.minTokens", "16000"));
         final var manager = manager(cfg, null);
         final var usable = manager.usableWindowTokens();
         assertEquals(372_000, usable, "500k window minus a 128k output reserve");
@@ -801,13 +801,13 @@ class ContextManagerTest {
                 500_000,
                 Map.of(
                         "yca.provider.providers.0.outputTokens", "128000",
-                        "yca.compaction.triggerSafetyPercent", "100"));
+                        "yca.compaction.buffer.safetyPercent", "100"));
         final var capped = config(
                 6,
                 500_000,
                 Map.of(
                         "yca.provider.providers.0.outputTokens", "128000",
-                        "yca.compaction.triggerSafetyPercent", "75"));
+                        "yca.compaction.buffer.safetyPercent", "75"));
         assertEquals(372_000, manager(full, null).compactionTriggerTokens(), "100% safety = legacy clamp");
         assertEquals(279_000, manager(capped, null).compactionTriggerTokens(), "75% safety adds headroom");
     }
@@ -820,8 +820,8 @@ class ContextManagerTest {
                 6,
                 32_000,
                 Map.of(
-                        "yca.compaction.bufferPercent", "15",
-                        "yca.compaction.bufferMinTokens", "16000"));
+                        "yca.compaction.buffer.percent", "15",
+                        "yca.compaction.buffer.minTokens", "16000"));
         final var manager = manager(cfg, null);
         assertEquals(
                 16_000,
@@ -848,31 +848,33 @@ class ContextManagerTest {
 
     @Test
     void perProviderCompactionThresholdAndGateOverrideGlobalsPerSession() {
-        // the provider block overrides the global triggerSafetyPercent and gate budgets; the global
+        // the provider block overrides the global buffer.safetyPercent and gate budgets; the global
         // values apply when no per-provider block is set
         final var cfg = config(
                 6,
                 500_000,
                 Map.of(
                         "yca.provider.providers.0.outputTokens", "128000",
-                        "yca.provider.providers.0.compaction.triggerSafetyPercent", "80",
-                        "yca.provider.providers.0.compaction.gateMaxAttempts", "4",
-                        "yca.provider.providers.0.compaction.gateMaxDurationMs", "90000"));
+                        "yca.provider.providers.0.compaction.buffer.safetyPercent", "80",
+                        "yca.provider.providers.0.compaction.gate.maxAttempts", "4",
+                        "yca.provider.providers.0.compaction.gate.maxDurationMs", "90000"));
         final var manager = manager(cfg, null);
         assertEquals(372_000, manager.usableWindowTokens());
         // global default safety is 90 -> 334_800; the provider override 80 -> 297_600
-        assertEquals(297_600, manager.compactionTriggerTokens(null), "provider triggerSafetyPercent must win");
+        assertEquals(297_600, manager.compactionTriggerTokens(null), "provider buffer.safetyPercent must win");
         // an unknown provider id falls back to the default provider (which carries the override) -
         // ProviderManager.provider(id) resolves unknowns to the default, so the override still applies
         assertEquals(
                 297_600,
                 manager.compactionTriggerTokens(new ChatSettings("other-provider", null, null, null)),
                 "unknown provider id resolves to the default provider and its override");
-        assertEquals(4, manager.resolvedGateMaxAttempts(null), "provider gateMaxAttempts must resolve");
-        assertEquals(90_000, manager.resolvedGateMaxDurationMs(null), "provider gateMaxDurationMs must resolve");
+        assertEquals(4, manager.resolvedGate(null).maxAttempts(), "provider gate.maxAttempts must resolve");
+        assertEquals(90_000, manager.resolvedGate(null).maxDurationMs(), "provider gate.maxDurationMs must resolve");
+        assertEquals(80, manager.resolvedBuffer(null).safetyPercent(), "provider buffer.safetyPercent must resolve");
         assertEquals(
                 4,
-                manager.resolvedGateMaxAttempts(new ChatSettings("other-provider", null, null, null)),
+                manager.resolvedGate(new ChatSettings("other-provider", null, null, null))
+                        .maxAttempts(),
                 "unknown provider id falls back to the default provider override");
     }
 
@@ -887,9 +889,9 @@ class ContextManagerTest {
                 500_000,
                 Map.of(
                         "yca.provider.providers.0.outputTokens", "128000",
-                        "yca.compaction.bufferPercent", "15",
-                        "yca.compaction.bufferMinTokens", "16000",
-                        "yca.compaction.tailBudgetTokens", "20000"));
+                        "yca.compaction.buffer.percent", "15",
+                        "yca.compaction.buffer.minTokens", "16000",
+                        "yca.compaction.tail.budgetTokens", "20000"));
         final var tracker = new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC());
         assertEquals(372_000, tracker.usableWindow(), "500k minus 128k output reserve");
         final var chat = chatReturning("digest: heavy history summarized");
@@ -927,8 +929,8 @@ class ContextManagerTest {
                 6,
                 128_000,
                 Map.of(
-                        "yca.compaction.tailBudgetTokens", "1",
-                        "yca.compaction.summarizerChunkChars", "4000",
+                        "yca.compaction.tail.budgetTokens", "1",
+                        "yca.compaction.summarizer.chunkChars", "4000",
                         "yca.llm.retriesMaxAttempts", "2",
                         "yca.pruning.toolOutputMaxChars", "500"));
         final var chat = new ChatClient() {
@@ -962,7 +964,7 @@ class ContextManagerTest {
 
     @Test
     void compactionEmitsProgressAndResultNoticesOnSuccess() {
-        final var cfg = config(6, 128_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var cfg = config(6, 128_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
         final var events = new ArrayList<AgentEvent>();
         final var chat = chatReturning("digest: summarized");
         final var tracker = new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC());

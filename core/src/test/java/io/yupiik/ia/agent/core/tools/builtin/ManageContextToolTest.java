@@ -50,11 +50,15 @@ class ManageContextToolTest {
         return new ToolContext("s1", null, null, null, null, null, null, tracker(), view, Cancellations.NEVER);
     }
 
+    private ProviderManager providerManager() {
+        return new ProviderManager(config(true), mapper);
+    }
+
     @Test
     void statusUsesThePublishedSnapshot() {
         final var view = new ContextView();
         view.publish(new ContextView.Snapshot(12, 5_000, 100_000, 80_000, 62.5, 65, 80));
-        final var tool = new ManageContextTool(config(true), mapper);
+        final var tool = new ManageContextTool(config(true), mapper, providerManager());
         final var result = tool.execute(Map.of("action", "status"), context(view));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("\"messageCount\":12"), result.output());
@@ -64,7 +68,7 @@ class ManageContextToolTest {
     @Test
     void statusWithoutSnapshotReportsWindowOnly() {
         final var view = new ContextView();
-        final var tool = new ManageContextTool(config(true), mapper);
+        final var tool = new ManageContextTool(config(true), mapper, providerManager());
         final var result = tool.execute(Map.of("action", "status"), context(view));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("contextWindow"), result.output());
@@ -75,7 +79,7 @@ class ManageContextToolTest {
     void compactRequestIsAllowedBelowTheFloor() {
         final var view = new ContextView();
         view.publish(new ContextView.Snapshot(4, 500, 100_000, 80_000, 10.0, 65, 80));
-        final var tool = new ManageContextTool(config(true), mapper);
+        final var tool = new ManageContextTool(config(true), mapper, providerManager());
         final var result = tool.execute(Map.of("action", "compact"), context(view));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().startsWith("Compaction scheduled"), result.output());
@@ -86,7 +90,7 @@ class ManageContextToolTest {
     void compactRequestQueuesADirective() {
         final var view = new ContextView();
         view.publish(new ContextView.Snapshot(40, 70_000, 100_000, 80_000, 90.0, 65, 80));
-        final var tool = new ManageContextTool(config(true), mapper);
+        final var tool = new ManageContextTool(config(true), mapper, providerManager());
         final var args = new LinkedHashMap<String, Object>();
         args.put("action", "compact");
         args.put("focus", "keep the migration plan");
@@ -107,7 +111,7 @@ class ManageContextToolTest {
                 Message.user("next task"));
         view.publishMessages(messages);
         view.compression().renderRefs(messages); // assigns stable refs like the agent loop does
-        final var tool = new ManageContextTool(cfg, mapper);
+        final var tool = new ManageContextTool(cfg, mapper, providerManager());
         final var result = tool.execute(
                 Map.of(
                         "action",
@@ -127,7 +131,7 @@ class ManageContextToolTest {
     void secondRequestIsRejectedWhileOneIsPending() {
         final var view = new ContextView();
         view.publish(new ContextView.Snapshot(40, 70_000, 100_000, 80_000, 90.0, 65, 80));
-        final var tool = new ManageContextTool(config(true), mapper);
+        final var tool = new ManageContextTool(config(true), mapper, providerManager());
         assertTrue(view.request(new ContextView.Directive("prune", null, 0, "test")));
         final var result = tool.execute(Map.of("action", "compact"), context(view));
         assertTrue(result.success(), result.output());
@@ -138,7 +142,7 @@ class ManageContextToolTest {
     @Test
     void disabledToolErrors() {
         final var view = new ContextView();
-        final var tool = new ManageContextTool(config(false), mapper);
+        final var tool = new ManageContextTool(config(false), mapper, providerManager());
         final var result = tool.execute(Map.of("action", "status"), context(view));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("disabled"), result.output());

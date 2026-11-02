@@ -37,16 +37,9 @@ public record CompressConfiguration(
         boolean enabled,
 
         @Property(
-                defaultValue = "\"50000\"",
-                documentation =
-                        "Soft context limit (estimated tokens after compression): below it no compression nudge is emitted. Accepts a plain token count or a percentage string like \"40%\".")
-        String minContextLimit,
-
-        @Property(
-                defaultValue = "\"100000\"",
-                documentation =
-                        "Hard context limit (estimated tokens after compression) above which every nudgeFrequency iterations the model is strongly told to compress now. Accepts a plain token count or a percentage string like \"80%\".")
-        String maxContextLimit,
+                documentation = "Soft and hard working-context limits (min/max) of the model-driven compression "
+                        + "(tokens or a percentage of the context window). Defaults: min 50000, max 100000.")
+        ContextLimit contextLimit,
 
         @Property(
                 defaultValue = "15",
@@ -112,21 +105,8 @@ public record CompressConfiguration(
                         "Number of turns after which failed tool-call arguments are purged by the compression pipeline.")
         int purgeFailedToolInputsTurns) {
 
-    /** Resolves a token limit expressed as a plain number or as a percentage of {@code window}. */
-    public int resolveLimit(final String value, final int window, final int fallback) {
-        if (value == null || value.isBlank()) {
-            return fallback;
-        }
-        final var stripped = value.strip();
-        try {
-            if (stripped.endsWith("%")) {
-                final var percent = Double.parseDouble(
-                        stripped.substring(0, stripped.length() - 1).strip());
-                return window <= 0 ? fallback : (int) Math.round(window * Math.clamp(percent, 0, 100) / 100.0);
-            }
-            return Integer.parseInt(stripped);
-        } catch (final NumberFormatException e) {
-            return fallback;
-        }
+    /** The effective soft/hard context limits: the configured record, or the defaults when absent. */
+    public ContextLimit resolvedContextLimit() {
+        return contextLimit == null ? new ContextLimit(null, null) : contextLimit;
     }
 }

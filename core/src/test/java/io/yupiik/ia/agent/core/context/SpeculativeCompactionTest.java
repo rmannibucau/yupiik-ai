@@ -54,11 +54,11 @@ class SpeculativeCompactionTest {
         entries.put("yca.provider.providers.0.apiKey", "");
         entries.put("yca.provider.providers.0.model", "m");
         entries.put("yca.provider.providers.0.contextWindow", "128000");
-        entries.put("yca.compaction.tailBudgetTokens", "1");
+        entries.put("yca.compaction.tail.budgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "2");
-        entries.put("yca.compaction.summarizerChunkChars", "100000");
-        entries.put("yca.compaction.speculativePolicy", "concurrent");
-        entries.put("yca.compaction.speculativeStartPercent", "1");
+        entries.put("yca.compaction.summarizer.chunkChars", "100000");
+        entries.put("yca.compaction.speculative.policy", "concurrent");
+        entries.put("yca.compaction.speculative.startPercent", "1");
         entries.put("yca.llm.retriesMaxAttempts", "1");
         entries.putAll(extra);
         final var cfg = TestConfigs.codingAgent(entries);
@@ -223,16 +223,16 @@ class SpeculativeCompactionTest {
     @Test
     void disabledAndInvalidConfiguration(final JsonMapper mapper) {
         final var calls = new AtomicInteger();
-        try (final var f = fixture(mapper, Map.of("yca.compaction.speculativePolicy", "off"), chat(calls), null)) {
+        try (final var f = fixture(mapper, Map.of("yca.compaction.speculative.policy", "off"), chat(calls), null)) {
             assertFalse(f.manager.maybeLaunchSpeculation(history(), 0, () -> false, null));
             assertEquals(0, calls.get());
         }
         assertThrows(
                 IllegalArgumentException.class,
-                () -> fixture(mapper, Map.of("yca.compaction.speculativePolicy", "unknown"), chat(calls), null));
+                () -> fixture(mapper, Map.of("yca.compaction.speculative.policy", "unknown"), chat(calls), null));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> fixture(mapper, Map.of("yca.compaction.speculativeStartPercent", "100"), chat(calls), null));
+                () -> fixture(mapper, Map.of("yca.compaction.speculative.startPercent", "100"), chat(calls), null));
     }
 
     @Test

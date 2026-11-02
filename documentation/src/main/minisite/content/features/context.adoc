@@ -152,7 +152,7 @@ When the context was already compacted before, the previous summary is fed
 back as `<prior-summary>` and updated in place instead of being re-summarized
 from scratch.
 
-The kept tail is token-budgeted (`yca.compaction.tailBudgetTokens`, 0 = auto:
+The kept tail is token-budgeted (`yca.compaction.tail.budgetTokens`, 0 = auto:
 25% of the usable window clamped to `[2000, 15000]`) and aligned on
 conversation turns: the boundary never splits an assistant tool call from its
 tool results, and `yca.pruning.keepRecent` acts as a floor on the tail size.
@@ -160,18 +160,18 @@ The most recent user message is guaranteed to survive: it is either inside the
 tail or replayed verbatim after the summary.
 
 Tool call arguments are capped before the summarizer input is built
-(`yca.compaction.toolArgumentsCapChars`, default `800`, `0` = keep verbatim):
+(`yca.compaction.tail.toolArgumentsCapChars`, default `800`, `0` = keep verbatim):
 a single bash or JSON argument blob can otherwise dominate the input and
 multiply the rolling-summary LLM calls for no digest value. The exact payload
 stays available in the verbatim tail for recent calls.
 
 The summarizer input is chunked adaptively to the compact model's window. By
-default (`yca.compaction.summarizerChunkChars`, `0` = auto) each summarizer
+default (`yca.compaction.summarizer.chunkChars`, `0` = auto) each summarizer
 call covers a quarter of the compact model's usable window in characters
-(~4 chars/token), floored at `yca.compaction.summarizerMinChunkChars`
+(~4 chars/token), floored at `yca.compaction.summarizer.minChunkChars`
 (default `12000`, the legacy fixed 12k chunk): most compact models therefore
 run in a *single* LLM call instead of ten small ones. The rolling digest kept
-across chunks is capped by `yca.compaction.summarizerDigestChars` (default
+across chunks is capped by `yca.compaction.summarizer.digestChars` (default
 `0` = half the chunk cap), so a merge call always stays inside the window.
 
 When a summarizer call is rejected because the input exceeds the model's real
@@ -188,7 +188,7 @@ If the summarizer eventually fails, compaction degrades to a deterministic
 local truncation (`yca.pruning.toolOutputMaxChars` caps old message content)
 and reports the fallback honestly instead of a fake success. Old tail
 messages that still overflow after compaction are spliced to their head and
-tail (`yca.compaction.overflowSpliceChars`, default `500`).
+tail (`yca.compaction.tail.overflowSpliceChars`, default `500`).
 
 Automatic compaction uses a trigger and a separate provider input limit. The
 normal compaction keeps its configured recent tail; if the resulting prompt is
@@ -202,12 +202,13 @@ the separate bounded overflow-retry path.
 === Trigger safety headroom
 
 The effective compaction trigger is never allowed to sit too close to the hard
-window: `yca.compaction.triggerSafetyPercent` (default `90`) caps the trigger
+window: `yca.compaction.buffer.safetyPercent` (default `90`) caps the trigger
 at that percentage of the usable window, so a large configured output reserve
 cannot push the trigger (and hence the "safe" headroom the gate targets) into
 the last few percent where an over-budget completion would overflow.
 A per-provider override exists under
-`yca.provider.providers[i].compaction.triggerSafetyPercent` (`-1` = inherit).
+`yca.provider.providers[i].compaction.buffer.safetyPercent` (null/absent =
+inherit global).
 The safety cap never equals the usable window at `100`: the trigger keeps a
 buffer over the hard limit.
 
@@ -225,15 +226,15 @@ local spill of pre-digest tool outputs.
 Between attempts the gate backs off (bounded, interruptible), and the whole
 sequence is capped by two budgets:
 
-- `yca.compaction.gateMaxAttempts` (default `12`): how many recovery passes the
+- `yca.compaction.gate.maxAttempts` (default `12`): how many recovery passes the
   gate may run;
-- `yca.compaction.gateMaxDurationMs` (default `300000`): the wall-clock budget
+- `yca.compaction.gate.maxDurationMs` (default `300000`): the wall-clock budget
   of the whole gate.
 
 Both are overridable per provider
-(`yca.provider.providers[i].compaction.gateMaxAttempts` /
-`gateMaxDurationMs`, `-1` = inherit), so a flakier provider can raise its own
-gate ceiling without affecting the others.
+(`yca.provider.providers[i].compaction.gate.maxAttempts` /
+`gate.maxDurationMs`, null/absent = inherit global), so a flakier provider can
+raise its own gate ceiling without affecting the others.
 
 The gate escalates - a pinned `Compaction gate:` error and continuing to
 monitor the hard limit - instead of looping forever when:
@@ -271,7 +272,7 @@ than the conversation without slowing replies on the happy path:
 yca.provider.providers.0.compaction.retriesMaxAttempts=6
 yca.llm.retriesBaseDelayMs=3000
 yca.provider.providers.0.rateLimitRequestsPerMinute=20
-yca.provider.providers.0.compaction.gateMaxAttempts=20
+yca.provider.providers.0.compaction.gate.maxAttempts=20
 ----
 
 The cooperative mode still honors the semaphore and rate-limit throttles, so a
@@ -292,9 +293,9 @@ more small disjoint ranges that cannot be anchored.
 
 === Speculative compaction
 
-`yca.compaction.speculativePolicy=concurrent` (see
+`yca.compaction.speculative.policy=concurrent` (see
 xref:features/compaction.adoc[Compaction and compression]) starts a background
-summary as soon as usage crosses `yca.compaction.speculativeStartPercent`, so
+summary as soon as usage crosses `yca.compaction.speculative.startPercent`, so
 the next turn often adopts a ready candidate instead of stalling on a
 synchronous compact.
 The gate is the safety net underneath: a concurrent candidate that is too

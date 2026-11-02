@@ -21,7 +21,9 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 /**
  * Per-provider overrides of the compaction resilience knobs. A null/non-positive field inherits the
  * global {@link CompactionConfiguration} / {@link LlmConfiguration} value, so an unset block keeps
- * the historical behavior.
+ * the historical behavior. Each group ({@code buffer}, {@code gate}, {@code summarizer},
+ * {@code speculative}, {@code tail}, {@code contextLimit}) is a nullable record whose per-field
+ * management mirrors the global shape: a null field inside a group inherits the global value.
  */
 @JsonModel
 public record ProviderCompactionConfiguration(
@@ -55,21 +57,31 @@ public record ProviderCompactionConfiguration(
         Boolean fallbackToMainModel,
 
         @Property(
-                defaultValue = "-1",
-                documentation =
-                        "Per-provider buffer-mode trigger safety cap (see yca.compaction.triggerSafetyPercent). "
-                                + "Zero or negative (the default) inherits the global value.")
-        int triggerSafetyPercent,
+                documentation = "Per-provider buffer-mode trigger override. Null fields inherit the global "
+                        + "yca.compaction.buffer.* values. See {@link ProviderBufferConfiguration}.")
+        ProviderBufferConfiguration buffer,
 
         @Property(
-                defaultValue = "-1",
-                documentation = "Per-provider compaction-gate attempt budget (see yca.compaction.gateMaxAttempts). "
-                        + "Zero or negative (the default) inherits the global value.")
-        int gateMaxAttempts,
+                documentation = "Per-provider compaction-gate budget override. Null fields inherit the global "
+                        + "yca.compaction.gate.* values. See {@link ProviderGateConfiguration}.")
+        ProviderGateConfiguration gate,
 
         @Property(
-                defaultValue = "-1",
-                documentation =
-                        "Per-provider compaction-gate wall-clock budget in milliseconds "
-                                + "(see yca.compaction.gateMaxDurationMs). Zero or negative (the default) inherits the global value.")
-        int gateMaxDurationMs) {}
+                documentation = "Per-provider verbatim recent-tail override. Null fields inherit the global "
+                        + "yca.compaction.tail.* values. See {@link ProviderTailConfiguration}.")
+        ProviderTailConfiguration tail,
+
+        @Property(
+                documentation = "Per-provider summarizer input-cap override. Null fields inherit the global "
+                        + "yca.compaction.summarizer.* values. See {@link ProviderSummarizerConfiguration}.")
+        ProviderSummarizerConfiguration summarizer,
+
+        @Property(
+                documentation = "Per-provider speculative-compaction override. Null fields inherit the global "
+                        + "yca.compaction.speculative.* values. See {@link ProviderSpeculativeConfiguration}.")
+        ProviderSpeculativeConfiguration speculative,
+
+        @Property(
+                documentation = "Per-provider working-context guidance limit override. Null fields inherit the global "
+                        + "yca.compress.contextLimit.* values. See {@link ProviderContextLimit}.")
+        ProviderContextLimit contextLimit) {}

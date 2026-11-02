@@ -191,14 +191,14 @@ class AgentLoopSpeculativeCompactionTest {
         entries.put("yca.provider.providers.0.model", "test-model");
         entries.put("yca.provider.providers.0.contextWindow", "128000");
         entries.put("yca.compaction.thresholdPercent", "20");
-        entries.put("yca.compaction.tailBudgetTokens", "1");
-        entries.put("yca.compaction.summarizerChunkChars", "200000");
-        entries.put("yca.compaction.speculativeStartPercent", "1");
+        entries.put("yca.compaction.tail.budgetTokens", "1");
+        entries.put("yca.compaction.summarizer.chunkChars", "200000");
+        entries.put("yca.compaction.speculative.startPercent", "1");
         entries.put("yca.pruning.enabled", "false");
         entries.put("yca.pruning.keepRecent", "2");
         entries.put("yca.llm.maxIterations", "3");
         if (concurrent) {
-            entries.put("yca.compaction.speculativePolicy", "concurrent");
+            entries.put("yca.compaction.speculative.policy", "concurrent");
         }
         final var config = TestConfigs.codingAgent(entries);
         final var providers = new ProviderManager(config, mapper);

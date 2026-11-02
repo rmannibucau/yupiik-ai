@@ -17,16 +17,23 @@ package io.yupiik.ia.agent.core.wiring;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.BufferConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ContextLimit;
+import io.yupiik.ia.agent.core.configuration.GateConfiguration;
 import io.yupiik.ia.agent.core.configuration.InBandToolCallsMode;
 import io.yupiik.ia.agent.core.configuration.ModelConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelTuningConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
+import io.yupiik.ia.agent.core.configuration.ProviderCompactionConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderModelConfiguration;
 import io.yupiik.ia.agent.core.configuration.ReasoningFormatMode;
 import io.yupiik.ia.agent.core.configuration.RepairToolCallArgumentsMode;
+import io.yupiik.ia.agent.core.configuration.SpeculativeConfiguration;
+import io.yupiik.ia.agent.core.configuration.SummarizerConfiguration;
+import io.yupiik.ia.agent.core.configuration.TailConfiguration;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import io.yupiik.ia.agent.core.llm.ChatRoutes;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
@@ -121,6 +128,154 @@ public class ProviderManager {
             }
         }
         return defaultProvider();
+    }
+
+    /**
+     * The per-provider compaction block for the session's provider, or null when absent/unresolvable.
+     * Mirrors {@code CompactionCoordinator.compactionOverrides(ChatSettings)}.
+     */
+    private ProviderCompactionConfiguration providerCompaction(final ChatSettings settings) {
+        if (configuration == null) {
+            return null;
+        }
+        final var providerId = settings == null ? null : settings.providerId();
+        final var provider = providerId == null || providerId.isBlank() ? current() : provider(providerId);
+        return provider == null ? null : provider.compaction();
+    }
+
+    /**
+     * Field-level per-provider over global over default merge for an integer knob. The provider
+     * mirrors keep these as nullable {@code Integer}s with a {@code -1} (below-zero) default that
+     * means "inherit": Fusion binds an absent field to that default, so a value below zero always
+     * inherits the global/default instead of silently becoming a zero override.
+     */
+    private static int mergeInt(final Integer local, final Integer global, final int defaultVal) {
+        if (local != null && local >= 0) {
+            return local;
+        }
+        return global == null ? defaultVal : global;
+    }
+
+    /**
+     * Merged compression guidance limits for the session's provider: per-field provider override
+     * over the global {@code yca.compress.contextLimit.*}, with the built-in defaults applied at
+     * {@link ContextLimit#resolveMin(int)}/relative resolution. A null provider override inherits
+     * the global value, and a null global value inherits the default.
+     */
+    public ContextLimit resolvedContextLimit(final ChatSettings settings) {
+        final var global = configuration == null || configuration.compression() == null
+                ? null
+                : configuration.compression().resolvedContextLimit();
+        final var local = providerCompaction(settings);
+        final var over = local == null ? null : local.contextLimit();
+        return new ContextLimit(
+                over != null && over.min() != null ? over.min() : global == null ? null : global.min(),
+                over != null && over.max() != null ? over.max() : global == null ? null : global.max());
+    }
+
+    /** Merged buffer-mode trigger knobs for the session's provider (per-field override over global over default). */
+    public BufferConfiguration resolvedBuffer(final ChatSettings settings) {
+        final var global = configuration == null || configuration.compaction() == null
+                ? null
+                : configuration.compaction().resolvedBuffer();
+        final var over = providerCompaction(settings);
+        final var local = over == null ? null : over.buffer();
+        return new BufferConfiguration(
+                mergeInt(
+                        local == null ? null : local.percent(),
+                        global == null ? null : global.percent(),
+                        BufferConfiguration.DEFAULT_PERCENT),
+                mergeInt(
+                        local == null ? null : local.minTokens(),
+                        global == null ? null : global.minTokens(),
+                        BufferConfiguration.DEFAULT_MIN_TOKENS),
+                mergeInt(
+                        local == null ? null : local.safetyPercent(),
+                        global == null ? null : global.safetyPercent(),
+                        BufferConfiguration.DEFAULT_SAFETY_PERCENT));
+    }
+
+    /** Merged compaction-gate budgets for the session's provider (per-field override over global over default). */
+    public GateConfiguration resolvedGate(final ChatSettings settings) {
+        final var global = configuration == null || configuration.compaction() == null
+                ? null
+                : configuration.compaction().resolvedGate();
+        final var over = providerCompaction(settings);
+        final var local = over == null ? null : over.gate();
+        return new GateConfiguration(
+                mergeInt(
+                        local == null ? null : local.maxAttempts(),
+                        global == null ? null : global.maxAttempts(),
+                        GateConfiguration.DEFAULT_MAX_ATTEMPTS),
+                mergeInt(
+                        local == null ? null : local.maxDurationMs(),
+                        global == null ? null : global.maxDurationMs(),
+                        GateConfiguration.DEFAULT_MAX_DURATION_MS));
+    }
+
+    /** Merged summarizer input caps for the session's provider (per-field override over global over default). */
+    public SummarizerConfiguration resolvedSummarizer(final ChatSettings settings) {
+        final var global = configuration == null || configuration.compaction() == null
+                ? null
+                : configuration.compaction().resolvedSummarizer();
+        final var over = providerCompaction(settings);
+        final var local = over == null ? null : over.summarizer();
+        return new SummarizerConfiguration(
+                mergeInt(
+                        local == null ? null : local.chunkChars(),
+                        global == null ? null : global.chunkChars(),
+                        SummarizerConfiguration.DEFAULT_CHUNK_CHARS),
+                mergeInt(
+                        local == null ? null : local.minChunkChars(),
+                        global == null ? null : global.minChunkChars(),
+                        SummarizerConfiguration.DEFAULT_MIN_CHUNK_CHARS),
+                mergeInt(
+                        local == null ? null : local.digestChars(),
+                        global == null ? null : global.digestChars(),
+                        SummarizerConfiguration.DEFAULT_DIGEST_CHARS),
+                mergeInt(
+                        local == null ? null : local.toolOutputChars(),
+                        global == null ? null : global.toolOutputChars(),
+                        SummarizerConfiguration.DEFAULT_TOOL_OUTPUT_CHARS));
+    }
+
+    /** Merged speculative-compaction knobs for the session's provider (per-field override over global over default). */
+    public SpeculativeConfiguration resolvedSpeculative(final ChatSettings settings) {
+        final var global = configuration == null || configuration.compaction() == null
+                ? null
+                : configuration.compaction().resolvedSpeculative();
+        final var over = providerCompaction(settings);
+        final var local = over == null ? null : over.speculative();
+        return new SpeculativeConfiguration(
+                local != null && local.policy() != null
+                        ? local.policy()
+                        : global == null ? SpeculativeConfiguration.DEFAULT_POLICY : global.policy(),
+                mergeInt(
+                        local == null ? null : local.startPercent(),
+                        global == null ? null : global.startPercent(),
+                        SpeculativeConfiguration.DEFAULT_START_PERCENT));
+    }
+
+    /** Merged verbatim recent-tail knobs for the session's provider (per-field override over global over default). */
+    public TailConfiguration resolvedTail(final ChatSettings settings) {
+        final var global = configuration == null || configuration.compaction() == null
+                ? null
+                : configuration.compaction().resolvedTail();
+        final var over = providerCompaction(settings);
+        final var local = over == null ? null : over.tail();
+        return new TailConfiguration(
+                mergeInt(
+                        local == null ? null : local.budgetTokens(),
+                        global == null ? null : global.budgetTokens(),
+                        TailConfiguration.DEFAULT_BUDGET_TOKENS),
+                mergeInt(
+                        local == null ? null : local.toolArgumentsCapChars(),
+                        global == null ? null : global.toolArgumentsCapChars(),
+                        TailConfiguration.DEFAULT_TOOL_ARGUMENTS_CAP_CHARS),
+                mergeInt(
+                        local == null ? null : local.overflowSpliceChars(),
+                        global == null ? null : global.overflowSpliceChars(),
+                        TailConfiguration.DEFAULT_OVERFLOW_SPLICE_CHARS));
     }
 
     /** Resolve the current provider default model reference to its concrete model name. */

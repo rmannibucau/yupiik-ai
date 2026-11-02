@@ -22,14 +22,14 @@ available for deterministic local clearing.
 [mermaid]
 ....
 flowchart TD
-    A["Stored conversation"] --> B{"yca.compress.enabled?"}
+    A["Stored conversation"] --> B{"yca.compression.enabled?"}
     B -->|"yes"| C["Apply active compressed blocks"]
     B -->|"no"| D["Send stored history"]
     C --> E["Estimate context tokens"]
     D --> E
-    E --> F{"context >= maxContextLimit?"}
+    E --> F{"context >= contextLimit.max?"}
     F -->|"yes"| G["MUST compress nudge"]
-    F -->|"no"| H{"context >= minContextLimit or iteration threshold?"}
+    F -->|"no"| H{"context >= contextLimit.min or iteration threshold?"}
     H -->|"yes"| I["Soft or iteration nudge"]
     H -->|"no"| J["Normal turn"]
     G --> K["Model calls compress"]
@@ -66,14 +66,14 @@ the declared output-token reserve), so the gauge can never sit above 100%
 without tripping an automatic compaction.
 
 When it fires, yca summarizes the old conversation, keeps a verbatim tail
-(`yca.compaction.tailBudgetTokens`, default `15000`), and replaces the old
+(`yca.compaction.tail.budgetTokens`, default `15000`), and replaces the old
 messages in the outgoing request only.
 The summary model resolves through `backgroundModelOverrides.compact`, then
 `yca.model.compact`, then the session model.
 If the provider rejects the request because the input is too large, yca
 compacts once and retries the request; if the retry still overflows, the
 oldest tail messages are spliced to their head and tail
-(`yca.compaction.overflowSpliceChars`, default `500`).
+(`yca.compaction.tail.overflowSpliceChars`, default `500`).
 A transient summarizer failure (5xx/network after retries and the optional
 main-model fallback) skips the pass and keeps the raw context so the next
 automatic compaction retries from a clean state, unless the compaction was
@@ -110,20 +110,25 @@ reports the failure.
 |`true`
 |Enables the deterministic core compaction.
 
-|`yca.compaction.bufferPercent`
+|`yca.compaction.buffer.percent`
 |`15`
 |Safety buffer as a percentage of the context window.
 
-|`yca.compaction.bufferMinTokens`
+|`yca.compaction.buffer.minTokens`
 |`16000`
 |Minimum safety buffer in tokens; it wins on small windows.
+
+|`yca.compaction.buffer.safetyPercent`
+|`90`
+|Percentage of the usable window used to clamp the compaction trigger
+below the hard limit.
 
 |`yca.compaction.thresholdPercent`
 |`0`
 |Legacy override: a positive value is a percentage of the usable window and
 takes precedence over the buffer trigger (`0` = buffer mode).
 
-|`yca.compaction.tailBudgetTokens`
+|`yca.compaction.tail.budgetTokens`
 |`15000`
 |Verbatim tail kept after a compaction; `0` keeps the legacy auto value
 (25% of the usable window, clamped to `[2000, 15000]`).
@@ -290,27 +295,33 @@ ranges, never a whole-session `compact` or blocking active work.
 |Default
 |Purpose
 
-|`yca.compress.minContextLimit`
+|`yca.compression.contextLimit.min`
 |`50000`
 |Soft floor: below it, turn and iteration reminders are off.
 Accepts tokens or a percentage of the context window.
 
-|`yca.compress.maxContextLimit`
+|`yca.compression.contextLimit.max`
 |`100000`
 |Strong working-context floor at which a stronger compression reminder
 fires. Accepts tokens or a percentage.
 
-|`yca.compress.iterationNudgeThreshold`
+|`yca.compression.contextLimit` per-provider (`yca.provider.providers[i].compaction.contextLimit.min`/`.max`)
+|inherits global
+|Per-provider override of the compress context limits; a null (absent)
+field inherits the global value, so one provider can raise its soft/hard
+floors (for example to `250000`) without affecting others.
+
+|`yca.compression.iterationNudgeThreshold`
 |`15`
 |Sends the soft reminder after this many rounds since the last user message.
 
-|`yca.compress.nudgeFrequency`
+|`yca.compression.nudgeFrequency`
 |`5`
 |Repeats the strong reminder every N real LLM request rounds while above the
 limit, and serves as the post-compression cooldown length so a successful
 `compress` is not immediately re-hammered.
 
-|`yca.compress.summaryBuffer`
+|`yca.compression.summaryBuffer`
 |`true`
 |Active summary tokens extend the effective `maxContextLimit`
 (`baseMax + summaryTokens`), so an already-condensed working set is not
@@ -335,35 +346,35 @@ Compression must not lose the information the next turn depends on.
 |Default
 |Effect
 
-|`yca.compress.protectedTools`
+|`yca.compression.protectedTools`
 |`spawn_subagent`, `skill`, `write_todo`
 |Completed outputs of these tools inside the range are appended to the summary.
 
-|`yca.compress.protectUserMessages`
+|`yca.compression.protectUserMessages`
 |`false`
 |When `true`, user messages inside the range are appended verbatim to the
 summary. Protected user messages get a `BLOCKED` reference and cannot be
 included in a range in the first place.
 
-|`yca.compress.protectTags`
+|`yca.compression.protectTags`
 |`false`
 |When `true`, `<protect>...</protect>` blocks are extracted and appended to the
 summary.
 
-|`yca.compress.turnProtection.enabled`
+|`yca.compression.turnProtection.enabled`
 |`false`
 |Refuse ranges that cover the most recent
-`yca.compress.turnProtection.turns` turns (default `4`).
+`yca.compression.turnProtection.turns` turns (default `4`).
 
-|`yca.compress.strategies.deduplication.enabled`
+|`yca.compression.strategies.deduplication.enabled`
 |`true`
 |Before storing the block, identical tool calls inside the unpruned history are
 collapsed to their latest occurrence.
 
-|`yca.compress.strategies.purgeErrors.enabled`
+|`yca.compression.strategies.purgeErrors.enabled`
 |`true`
 |Inputs of failed tool calls older than
-`yca.compress.strategies.purgeErrors.turns` (default `4`) are marked for
+`yca.compression.strategies.purgeErrors.turns` (default `4`) are marked for
 pruning; the error message is preserved.
 |===
 
@@ -391,7 +402,7 @@ trigger. This is the escape hatch and the equivalent of `/compact`.
 
 == Without compression: core-only mode
 
-Set `yca.compress.enabled=false` to disable the DCP-like layer completely:
+Set `yca.compression.enabled=false` to disable the DCP-like layer completely:
 
 * the `compress` tool is not registered;
 * the context-management system prompt is not injected;
@@ -415,9 +426,8 @@ Use it when predictability matters more than the working-context reduction.
     },
     "compaction": {
       "enabled": true,
-      "bufferPercent": 15,
-      "bufferMinTokens": 16000,
-      "tailBudgetTokens": 15000
+      "buffer": { "percent": 15, "minTokens": 16000 },
+      "tail": { "budgetTokens": 15000 }
     }
   }
 }
@@ -500,8 +510,8 @@ strategies run once, in the compression pipeline.
 * **Small windows (`<= 64k`)** - the absolute `50k`/`100k` thresholds are
   above the window, so compression cannot fire before core compaction.
   Either accept core compaction or use percentages, for example
-  `"minContextLimit": "25%"` and `"maxContextLimit": "40%"`, with a smaller
-  `yca.compaction.tailBudgetTokens`.
+  `"contextLimit": { "min": "25%", "max": "40%" }`, with a smaller
+  `yca.compaction.tail.budgetTokens`.
 * **Deterministic-only operation** - disable compression and keep core
   compaction; this is the behavior users coming from opencode without DCP
   expect.
@@ -534,7 +544,7 @@ the block's text because summaries are flattened before they are stored.
 `manage_context` remains readable in old transcripts, but new sessions expose
 `compress` only.
 The old `yca.tools.manageContext.enabled` key is accepted as an alias for
-`yca.compress.enabled` for one minor release, with a deprecation warning.
+`yca.compression.enabled` for one minor release, with a deprecation warning.
 The old 30% floor, whole-context compact and generic prune actions are
 superseded by the range-based `compress`, the `compact` escape hatch and the
 legacy pruning layer respectively.
@@ -549,14 +559,12 @@ legacy pruning layer respectively.
   "yca": {
     "compaction": {
       "enabled": true,
-      "bufferPercent": 15,
-      "bufferMinTokens": 16000,
-      "tailBudgetTokens": 15000
+      "buffer": { "percent": 15, "minTokens": 16000 },
+      "tail": { "budgetTokens": 15000 }
     },
     "compress": {
       "enabled": true,
-      "minContextLimit": 50000,
-      "maxContextLimit": 100000,
+      "contextLimit": { "min": 50000, "max": 100000 },
       "iterationNudgeThreshold": 15,
       "nudgeFrequency": 5,
       "summaryBuffer": true,
@@ -577,9 +585,8 @@ legacy pruning layer respectively.
     },
     "compaction": {
       "enabled": true,
-      "bufferPercent": 15,
-      "bufferMinTokens": 16000,
-      "tailBudgetTokens": 15000
+      "buffer": { "percent": 15, "minTokens": 16000 },
+      "tail": { "budgetTokens": 15000 }
     }
   }
 }
@@ -592,14 +599,12 @@ legacy pruning layer respectively.
 {
   "yca": {
     "compaction": {
-      "bufferPercent": 15,
-      "bufferMinTokens": 16000,
-      "tailBudgetTokens": 4000
+      "buffer": { "percent": 15, "minTokens": 16000 },
+      "tail": { "budgetTokens": 4000 }
     },
     "compress": {
       "enabled": true,
-      "minContextLimit": "25%",
-      "maxContextLimit": "40%",
+      "contextLimit": { "min": "25%", "max": "40%" },
       "iterationNudgeThreshold": 10
     }
   }
@@ -639,16 +644,15 @@ Speculative compaction (opt-in) computes the summary in the background before th
 {
   "yca": {
     "compaction": {
-      "speculativePolicy": "concurrent",
-      "speculativeStartPercent": 80
+      "speculative": { "policy": "concurrent", "startPercent": 80 }
     }
   }
 }
 ----
 
-* `speculativePolicy` is `off` by default: the existing synchronous behavior is preserved, and no background work of any kind is started.
+* `speculative.policy` is `off` by default: the existing synchronous behavior is preserved, and no background work of any kind is started.
   Set it to `concurrent` only when the effective provider/model routing accepts overlapping requests: a single-slot local inference server cannot run a background summarizer without delaying the foreground request, so moving the call earlier would not save latency.
-* `speculativeStartPercent` is the percentage of the automatic compaction trigger at which the background summary starts (1-99, default 80).
+* `speculative.startPercent` is the percentage of the automatic compaction trigger at which the background summary starts (1-99, default 80).
   Example: with a 100k-token trigger and the default 80, speculation launches around 80k estimated prompt tokens.
 
 Guarantees, whichever the configuration:

@@ -17,9 +17,14 @@ package io.yupiik.ia.agent.core.context;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.configuration.BufferConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.GateConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderCompactionConfiguration;
+import io.yupiik.ia.agent.core.configuration.SpeculativeConfiguration;
+import io.yupiik.ia.agent.core.configuration.SummarizerConfiguration;
+import io.yupiik.ia.agent.core.configuration.TailConfiguration;
 import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
 import io.yupiik.ia.agent.core.context.SpeculativeCompaction.Candidate;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -529,7 +534,7 @@ public class CompactionCoordinator {
             // a size-caused failure means the chunk cap is too optimistic for the effective model
             // window: halve it down to the floor and restart from the prior summary (the partial
             // digest was built at the wrong granularity and is discarded)
-            final var floor = Math.max(1, compactCfg.summarizerMinChunkChars());
+            final var floor = Math.max(1, compactCfg.resolvedSummarizer().minChunkChars());
             lastSizeError = outcome.error();
             if (chunkCap <= floor) {
                 break;
@@ -550,7 +555,7 @@ public class CompactionCoordinator {
             out = ensureUnderWindow(
                     out, urgent || force ? usableWindowTokens() : compactionTriggerTokens(), force, digestIndex);
             if (halvings == 0
-                    && configuration.compaction().summarizerChunkChars() == 0
+                    && configuration.compaction().resolvedSummarizer().chunkChars() == 0
                     && compactName(configuration.model().compact()) == null) {
                 emit(AgentEvent.Notice.compacted(
                         "Compacted the context in " + (outcome.calls() >= 1 ? outcome.calls() : 1)
@@ -694,7 +699,7 @@ public class CompactionCoordinator {
     }
 
     private int tailBudgetTokens() {
-        final var configured = configuration.compaction().tailBudgetTokens();
+        final var configured = configuration.compaction().resolvedTail().budgetTokens();
         if (configured > 0) {
             return configured;
         }
@@ -865,7 +870,7 @@ public class CompactionCoordinator {
      * value - the exact payload stays available in the verbatim tail for recent calls.
      */
     private String capArguments(final String arguments) {
-        final var cap = configuration.compaction().toolArgumentsCapChars();
+        final var cap = configuration.compaction().resolvedTail().toolArgumentsCapChars();
         if (cap <= 0 || arguments == null || arguments.isBlank() || arguments.length() <= cap) {
             return arguments;
         }
@@ -1294,22 +1299,81 @@ public class CompactionCoordinator {
         return provider == null ? null : provider.compaction();
     }
 
-    /** Per-provider trigger safety percent, or -1 when unset (inherit the global value). */
-    public int resolvedTriggerSafetyPercent(final ChatSettings settings) {
-        final var overrides = compactionOverrides(settings);
-        return overrides == null ? -1 : overrides.triggerSafetyPercent();
+    /**
+     * The merged buffer-mode trigger knobs for the session's provider (per-provider override over
+     * global over default), or the global group when no provider manager is wired.
+     */
+    public BufferConfiguration resolvedBuffer(final ChatSettings settings) {
+        if (providerManager != null) {
+            return providerManager.resolvedBuffer(settings);
+        }
+        return configuration == null || configuration.compaction() == null
+                ? new BufferConfiguration(
+                        BufferConfiguration.DEFAULT_PERCENT,
+                        BufferConfiguration.DEFAULT_MIN_TOKENS,
+                        BufferConfiguration.DEFAULT_SAFETY_PERCENT)
+                : configuration.compaction().resolvedBuffer();
     }
 
-    /** Per-provider gate attempt budget, or -1 when unset (inherit the global value). */
-    public int resolvedGateMaxAttempts(final ChatSettings settings) {
-        final var overrides = compactionOverrides(settings);
-        return overrides == null ? -1 : overrides.gateMaxAttempts();
+    /**
+     * The merged compaction-gate budgets for the session's provider (per-provider override over
+     * global over default), or the global group when no provider manager is wired.
+     */
+    public GateConfiguration resolvedGate(final ChatSettings settings) {
+        if (providerManager != null) {
+            return providerManager.resolvedGate(settings);
+        }
+        return configuration == null || configuration.compaction() == null
+                ? new GateConfiguration(
+                        GateConfiguration.DEFAULT_MAX_ATTEMPTS, GateConfiguration.DEFAULT_MAX_DURATION_MS)
+                : configuration.compaction().resolvedGate();
     }
 
-    /** Per-provider gate wall-clock budget (ms), or -1 when unset (inherit the global value). */
-    public long resolvedGateMaxDurationMs(final ChatSettings settings) {
-        final var overrides = compactionOverrides(settings);
-        return overrides == null ? -1 : overrides.gateMaxDurationMs();
+    /**
+     * The merged summarizer input caps for the session's provider (per-provider override over
+     * global over default), or the global group when no provider manager is wired.
+     */
+    public SummarizerConfiguration resolvedSummarizer(final ChatSettings settings) {
+        if (providerManager != null) {
+            return providerManager.resolvedSummarizer(settings);
+        }
+        return configuration == null || configuration.compaction() == null
+                ? new SummarizerConfiguration(
+                        SummarizerConfiguration.DEFAULT_CHUNK_CHARS,
+                        SummarizerConfiguration.DEFAULT_MIN_CHUNK_CHARS,
+                        SummarizerConfiguration.DEFAULT_DIGEST_CHARS,
+                        SummarizerConfiguration.DEFAULT_TOOL_OUTPUT_CHARS)
+                : configuration.compaction().resolvedSummarizer();
+    }
+
+    /**
+     * The merged speculative-compaction knobs for the session's provider (per-provider override over
+     * global over default), or the global group when no provider manager is wired.
+     */
+    public SpeculativeConfiguration resolvedSpeculative(final ChatSettings settings) {
+        if (providerManager != null) {
+            return providerManager.resolvedSpeculative(settings);
+        }
+        return configuration == null || configuration.compaction() == null
+                ? new SpeculativeConfiguration(
+                        SpeculativeConfiguration.DEFAULT_POLICY, SpeculativeConfiguration.DEFAULT_START_PERCENT)
+                : configuration.compaction().resolvedSpeculative();
+    }
+
+    /**
+     * The merged verbatim recent-tail knobs for the session's provider (per-provider override over
+     * global over default), or the global group when no provider manager is wired.
+     */
+    public TailConfiguration resolvedTail(final ChatSettings settings) {
+        if (providerManager != null) {
+            return providerManager.resolvedTail(settings);
+        }
+        return configuration == null || configuration.compaction() == null
+                ? new TailConfiguration(
+                        TailConfiguration.DEFAULT_BUDGET_TOKENS,
+                        TailConfiguration.DEFAULT_TOOL_ARGUMENTS_CAP_CHARS,
+                        TailConfiguration.DEFAULT_OVERFLOW_SPLICE_CHARS)
+                : configuration.compaction().resolvedTail();
     }
 
     /*
@@ -1324,23 +1388,33 @@ public class CompactionCoordinator {
     }
 
     private int summarizerChunkChars() {
-        return compactionConfigured() ? configuration.compaction().summarizerChunkChars() : 0;
+        return compactionConfigured()
+                ? configuration.compaction().resolvedSummarizer().chunkChars()
+                : 0;
     }
 
     private int summarizerMinChunkChars() {
-        return compactionConfigured() ? configuration.compaction().summarizerMinChunkChars() : 12_000;
+        return compactionConfigured()
+                ? configuration.compaction().resolvedSummarizer().minChunkChars()
+                : 12_000;
     }
 
     private int summarizerDigestChars() {
-        return compactionConfigured() ? configuration.compaction().summarizerDigestChars() : 0;
+        return compactionConfigured()
+                ? configuration.compaction().resolvedSummarizer().digestChars()
+                : 0;
     }
 
     private int summarizerToolOutputChars() {
-        return compactionConfigured() ? configuration.compaction().summarizerToolOutputChars() : 2_000;
+        return compactionConfigured()
+                ? configuration.compaction().resolvedSummarizer().toolOutputChars()
+                : 2_000;
     }
 
     private int overflowSpliceChars() {
-        return compactionConfigured() ? configuration.compaction().overflowSpliceChars() : 500;
+        return compactionConfigured()
+                ? configuration.compaction().resolvedTail().overflowSpliceChars()
+                : 500;
     }
 
     /**
@@ -1452,10 +1526,10 @@ public class CompactionCoordinator {
         }
         return ContextBudget.compactionTrigger(
                 usageTracker.contextWindowTokenCount().value(),
-                c.bufferPercent(),
-                c.bufferMinTokens(),
+                c.resolvedBuffer().percent(),
+                c.resolvedBuffer().minTokens(),
                 usageTracker.usableWindow(),
-                c.triggerSafetyPercent());
+                c.resolvedBuffer().safetyPercent());
     }
 
     /** The hard usable window (context minus completion headroom); never below the minimum usable window. */
