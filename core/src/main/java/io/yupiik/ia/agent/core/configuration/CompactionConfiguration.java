@@ -73,7 +73,23 @@ public record CompactionConfiguration(
                                 + "Because the coordinator is the single retry authority (the resilience wrapper skips its "
                                 + "own retry loop for summarizer calls), this is the only retry budget compaction pays. "
                                 + "A per-provider compaction.retriesMaxAttempts overrides it; must be >= 1.")
-        int retriesMaxAttempts) {
+        int retriesMaxAttempts,
+
+        @Property(
+                defaultValue = "io.yupiik.ia.agent.core.configuration.CompactionLlmMode.LLM",
+                documentation =
+                        "Compaction LLM mode: \"llm\" (default) uses the LLM summarizer (backgroundModelOverrides.compact, "
+                                + "then yca.model.compact, then the session model) to fold old messages into a digest; "
+                                + "\"no_llm\" never calls an LLM for compaction - automatic, gate, overflow and manual "
+                                + "compactions all run only local strategies (prune, tool-output splice/spill, "
+                                + "dedup/supersede/purge when enabled), so a session never pays a summarizer call. The "
+                                + "local cascade still targets the same compaction trigger and the gate/overflow safety "
+                                + "nets keep working, but history is spliced instead of folded into a digest and grows "
+                                + "monotonically - the right trade for large-window providers that want zero background "
+                                + "spend. \"auto\" resolves to \"llm\". yca.compaction.enabled=false still wins over "
+                                + "this flag. A per-provider providers.<id>.compaction.mode of \"llm\"/\"no_llm\" "
+                                + "overrides this global; \"auto\" (the per-provider default) inherits it.")
+        CompactionLlmMode mode) {
 
     /** The effective buffer-mode knobs, or the defaults when unset. */
     public BufferConfiguration resolvedBuffer() {

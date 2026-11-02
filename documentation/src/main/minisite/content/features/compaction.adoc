@@ -79,6 +79,36 @@ main-model fallback) skips the pass and keeps the raw context so the next
 automatic compaction retries from a clean state, unless the compaction was
 requested with the `urgent` option below.
 
+=== LLM-free compaction mode
+
+When a provider must never pay a summarizer call, set the global
+`yca.compaction.mode=no_llm` or a per-provider
+`providers.<id>.compaction.mode=no_llm`. The mode is a tri-state enum:
+`llm` (default) uses the LLM summarizer, `no_llm` runs only local
+strategies and never calls a model, and `auto` inherits (for the global
+configuration it resolves to `llm`, for a provider block it inherits the
+global value). Compaction then runs only local strategies and
+never calls an LLM:
+
+1. the old tool-output prune (`yca.pruning.*`: shrink to
+   `shrinkOutputChars`, clear to a marker once `minPruneTokens` are
+   reclaimable),
+2. the head+tail splice spill (`yca.compaction.tail.overflowSpliceChars`)
+   toward the same trigger,
+3. a tighter splice (halved cap) when the pass is `urgent`/overflow-driven.
+
+The DCP-style structural strategies (dedup, write superseding, error-input
+purge) run at the compaction checkpoint instead of the pruning checkpoint, so
+they fire at the moment they matter. The compaction gate, the overflow
+recovery and the window clamp keep working exactly as in the LLM path.
+
+Because nothing is folded into a digest, the history grows monotonically
+(spliced messages stay in place rather than being summarized away) - the right
+trade for large-window providers that want zero background spend, and a
+stronger loss on small windows. Speculative compaction is always off under
+`no_llm` (it is LLM-backed by design). `yca.compaction.enabled=false`
+still wins over the mode.
+
 === Manual compaction
 
 `/compact` runs the same compaction on demand:
@@ -132,6 +162,13 @@ takes precedence over the buffer trigger (`0` = buffer mode).
 |`15000`
 |Verbatim tail kept after a compaction; `0` keeps the legacy auto value
 (25% of the usable window, clamped to `[2000, 15000]`).
+
+|`yca.compaction.mode`
+|`"llm"`
+|Compaction LLM mode: `llm` (default) uses the summarizer, `no_llm` runs
+only local strategies (prune, splice, dedup/supersede/purge) and never
+calls a model, `auto` resolves to `llm`. Per-provider override:
+`providers.<id>.compaction.mode` (`auto` inherits the global).
 |===
 
 === Window sizing examples

@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.BufferConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.CompactionLlmMode;
 import io.yupiik.ia.agent.core.configuration.GateConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderCompactionConfiguration;
@@ -511,6 +512,13 @@ public class CompactionCoordinator {
         if (cancelled.getAsBoolean()) {
             return new CompactionResult(messages, Mode.NONE, "cancelled");
         }
+        // LLM-free compaction: the caller (global or per-provider config) opted compaction out of
+        // any summarizer call. Run the local cascade (prune + splice spill, tight only for
+        // urgent/force) instead of the summarizer path below; same trigger/window budgets, same
+        // gate and overflow safety nets keep working because the result lands under the same target.
+        if (ignoreLlm(settings)) {
+            return localCompact(messages, force, urgent, settings);
+        }
         final var prior = previousSummary(messages);
         final var compactCfg = configuration.compaction();
         var chunkCap = effectiveChunkCap(compactModelReference(settings));
@@ -621,6 +629,65 @@ public class CompactionCoordinator {
             return new CompactionResult(messages, Mode.NONE, failureMessage);
         }
         return new CompactionResult(keptTruncated, Mode.TRUNCATE, failureMessage);
+    }
+
+    /**
+     * The LLM-free compaction cascade (used when {@link #ignoreLlm(ChatSettings)} is true): a bounded
+     * sequence of zero-LLM strategies, each reusing the existing reduction machinery, targeting the
+     * same budget as the summarizer path (the compaction trigger for automatic passes, the usable
+     * window for urgent/overflow passes). Never calls the summarizer.
+     *
+     * <p>Pass 1 is the {@link #prune(List)} of old tool outputs (shrink to {@code shrinkOutputChars},
+     * clear to the {@code <pruned-context>} marker once {@code minPruneTokens} are reclaimable) - the
+     * best token-per-information ratio. Pass 2 is the {@link #localSpill(List, int)} head+tail splice
+     * of every over-cap message toward the target - the workhorse. Pass 3 is a tighter splice (halved
+     * cap) only when {@code urgent} or {@code force} (overflow recovery/tightening), mirroring the
+     * tight digest cap of the summarizer path. The mode is the best of the applied passes via the
+     * {@code CLEARED < TRUNCATE < SHRUNK < SUMMARY} ranking (a summary is never produced, so SUMMARY
+     * is unreachable here).
+     */
+    private CompactionResult localCompact(
+            final List<Message> messages, final boolean force, final boolean urgent, final ChatSettings settings) {
+        final var target = urgent || force ? usableWindowTokens() : compactionTriggerTokens();
+        final var applied = new ArrayList<String>(3);
+        var best = Mode.NONE;
+        var list = messages;
+        // Pass 1: old tool-output prune. prune() recomputes its own boundary from keepRecent; keep it
+        // conservative here (same protectTurns/keepRecent as an automatic prune) so the structural
+        // passes that already ran at the checkpoint are not undone by pruning recent turns.
+        final var pruned = prune(list);
+        if (pruned.changed()) {
+            list = pruned.messages();
+            applied.add("prune");
+            best = pruned.mode();
+        }
+        if (usageTracker != null && usageTracker.estimateContext(list) > target) {
+            // Pass 2: the spill workhorse toward the target.
+            final var spilled = localSpill(list, target);
+            if (spilled.changed()) {
+                list = spilled.messages();
+                applied.add("spill");
+                best = spilled.mode();
+            }
+            // Final guarantee, mirroring the summarizer path: whatever the passes left, fit the
+            // target (tight = halved splice cap for urgent/overflow passes, exactly like the
+            // summarizer path's tight digest cap). Nothing to do when already under target.
+            final var fitted = ensureUnderWindow(list, target, urgent || force, -1);
+            if (fitted != list) {
+                list = fitted;
+                applied.add("tighten");
+                best = Mode.SHRUNK;
+            }
+        }
+        if (applied.isEmpty()) {
+            return new CompactionResult(messages, Mode.NONE, "");
+        }
+        final var label = "local-only compaction: " + String.join(", ", applied);
+        if (usageTracker != null) {
+            final var estimate = list;
+            LOGGER.fine(() -> label + " (" + usageTracker.estimateContext(estimate) + " est. tokens)");
+        }
+        return new CompactionResult(list, best, label);
     }
 
     /**
@@ -1587,6 +1654,22 @@ public class CompactionCoordinator {
             return providerId == null ? null : "$" + providerId + "/";
         }
         return (providerId == null ? "" : "$" + providerId + "/") + model;
+    }
+
+    /**
+     * Whether compaction must never call an LLM for the session's provider: the per-provider
+     * {@code compaction.mode} wins when explicitly {@code llm}/{@code no_llm}, else the global
+     * {@code yca.compaction.mode} (whose {@code auto} resolves to the built-in {@code llm}).
+     * Delegates to {@link ProviderManager#resolvedIgnoreLlm(ChatSettings)} so both surfaces agree.
+     */
+    boolean ignoreLlm(final ChatSettings settings) {
+        if (providerManager != null) {
+            return providerManager.resolvedIgnoreLlm(settings);
+        }
+        final var mode = configuration == null || configuration.compaction() == null
+                ? CompactionLlmMode.AUTO
+                : configuration.compaction().mode();
+        return mode == CompactionLlmMode.NO_LLM;
     }
 
     /**

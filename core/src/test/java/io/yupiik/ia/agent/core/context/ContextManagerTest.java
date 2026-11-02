@@ -1060,4 +1060,50 @@ class ContextManagerTest {
     private ProviderManager providerManager(final CodingAgentConfiguration cfg) {
         return new ProviderManager(cfg, mapper);
     }
+
+    @Test
+    void ignoreLlmDisablesSpeculativeCompaction() {
+        // speculative policy is opt-in "concurrent"; under ignoreLlm it must never launch (it is
+        // LLM-backed by design), even when the global policy asks for it
+        final var cfg = config(
+                6,
+                128_000,
+                Map.of(
+                        "yca.compaction.mode", "no_llm",
+                        "yca.compaction.speculative.policy", "concurrent",
+                        "yca.compaction.speculative.startPercent", "80"));
+        final var chat = chatReturning("digest");
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                        providerManager(cfg),
+                        null,
+                        "s1",
+                        new BackoffSleeper()));
+        assertTrue(!manager.speculationEnabled(), "speculation must be off under ignoreLlm");
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 3; i++) {
+            messages.add(Message.user("step " + i));
+        }
+        assertTrue(
+                !manager.maybeLaunchSpeculation(
+                        messages,
+                        0,
+                        () -> false,
+                        new io.yupiik.ia.agent.core.llm.ChatSettings("default", "m", null, null)),
+                "launch must be a no-op under ignoreLlm");
+        assertEquals(
+                null,
+                manager.adoptSpeculation(
+                        messages,
+                        0,
+                        () -> false,
+                        new io.yupiik.ia.agent.core.llm.ChatSettings("default", "m", null, null)),
+                "adoption must be a no-op under ignoreLlm");
+    }
 }

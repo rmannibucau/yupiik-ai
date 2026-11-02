@@ -23,8 +23,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.CompactionLlmMode;
 import io.yupiik.ia.agent.core.configuration.ReasoningFormatMode;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Path;
 import java.util.Map;
@@ -479,5 +481,66 @@ class ProviderManagerTest {
         assertEquals(0.7, variants.get(0).temperature());
         assertEquals(0.9, variants.get(0).topP());
         assertEquals("high", variants.get(1).reasoningEffort());
+    }
+
+    @Test
+    void resolvedCompactionModePerProviderNoLlmOptsInOverGlobalLlm() {
+        final var manager = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "m"),
+                Map.entry("yca.provider.providers.0.compaction.mode", "no_llm")));
+        assertEquals(
+                CompactionLlmMode.NO_LLM,
+                manager.resolvedCompactionMode(new ChatSettings("p0", "m", null, null)),
+                "an explicit per-provider no_llm opts the provider into llm-free compaction");
+        assertTrue(manager.resolvedIgnoreLlm(new ChatSettings("p0", "m", null, null)));
+    }
+
+    @Test
+    void resolvedCompactionModeGlobalNoLlmAppliesWhenPerProviderAbsent() {
+        final var manager = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.compaction.mode", "no_llm"),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "m"),
+                Map.entry("yca.provider.providers.0.compaction.retriesMaxAttempts", "5")));
+        assertEquals(
+                CompactionLlmMode.NO_LLM,
+                manager.resolvedCompactionMode(new ChatSettings("p0", "m", null, null)),
+                "an absent per-provider mode (auto) must inherit the global no_llm");
+        assertTrue(manager.resolvedIgnoreLlm(new ChatSettings("p0", "m", null, null)));
+    }
+
+    @Test
+    void resolvedCompactionModePerProviderLlmOptsOutOfGlobalNoLlm() {
+        final var manager = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.compaction.mode", "no_llm"),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "m"),
+                Map.entry("yca.provider.providers.0.compaction.mode", "llm")));
+        assertEquals(
+                CompactionLlmMode.LLM,
+                manager.resolvedCompactionMode(new ChatSettings("p0", "m", null, null)),
+                "an explicit per-provider llm opts the provider out of the global no_llm");
+        assertTrue(!manager.resolvedIgnoreLlm(new ChatSettings("p0", "m", null, null)));
+    }
+
+    @Test
+    void resolvedCompactionModeDefaultsToLlmWithoutAnyConfiguration() {
+        final var manager = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "m")));
+        assertEquals(
+                CompactionLlmMode.LLM,
+                manager.resolvedCompactionMode(new ChatSettings("p0", "m", null, null)),
+                "no global and no per-provider mode means the built-in llm");
+        assertTrue(!manager.resolvedIgnoreLlm(new ChatSettings("p0", "m", null, null)));
     }
 }

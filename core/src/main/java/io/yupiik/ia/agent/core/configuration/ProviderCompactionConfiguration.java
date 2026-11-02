@@ -62,6 +62,17 @@ public record ProviderCompactionConfiguration(
         ProviderBufferConfiguration buffer,
 
         @Property(
+                defaultValue = "io.yupiik.ia.agent.core.configuration.CompactionLlmMode.AUTO",
+                documentation = "Per-provider compaction LLM mode: \"auto\" (the default) inherits the global "
+                        + "yca.compaction.mode; \"llm\" forces the LLM-backed compaction for this provider "
+                        + "even when the global mode is \"no_llm\"; \"no_llm\" forces the LLM-free compaction "
+                        + "even when the global mode is \"llm\". The tri-state keeps the explicit opt-out of "
+                        + "a global \"no_llm\" expressible (a nullable Boolean cannot: the framework "
+                        + "materializes a default-filled per-provider block, binding an absent Boolean to "
+                        + "false).")
+        CompactionLlmMode mode,
+
+        @Property(
                 documentation = "Per-provider compaction-gate budget override. Null fields inherit the global "
                         + "yca.compaction.gate.* values. See {@link ProviderGateConfiguration}.")
         ProviderGateConfiguration gate,

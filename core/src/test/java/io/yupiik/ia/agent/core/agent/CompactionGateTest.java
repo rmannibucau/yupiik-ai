@@ -225,6 +225,51 @@ class CompactionGateTest {
     }
 
     @Test
+    void llmFreeGateStillEscalatesWithoutAnyLlmCall(final JsonMapper mapper) throws Exception {
+        // under ignoreLlm the checkpoint compact is local-only; when even the local cascade cannot
+        // reclaim (scripted NONE), the gate must still escalate - and never call the LLM (the
+        // recovery here is the real local compact, exercised through the scripted manager).
+        final var tracker = new ScriptedUsageTracker(15_000);
+        final var manager = new ScriptedContextManager(TRIGGER) {
+            @Override
+            public boolean ignoreLlm(final ChatSettings settings) {
+                return true;
+            }
+
+            @Override
+            public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                // the checkpoint itself stays green (like a non-compactable context): the gate is the
+                // only path that runs, exactly like the existing gate tests
+                return false;
+            }
+
+            @Override
+            public CompactionResult compactForRecovery(
+                    final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
+                recoveryCalls++;
+                return new CompactionResult(messages, CompactionResult.Mode.NONE, "");
+            }
+
+            @Override
+            public CompactionResult localSpill(final List<Message> messages, final int targetTokens) {
+                spillCalls++;
+                return new CompactionResult(messages, CompactionResult.Mode.NONE, "");
+            }
+        };
+        final var events = new CopyOnWriteArrayList<AgentEvent>();
+        final var requests = new CopyOnWriteArrayList<List<Message>>();
+        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var loop = newLoop(mapper, newClient(requests), tracker, manager, events, executor, null);
+            loop.run("work", null, "s1", List.of(), () -> false);
+        }
+        final var errors = errorNotices(events);
+        assertEquals(1, errors.size(), "one escalation notice under llmFree: " + events);
+        assertTrue(errors.get(0).startsWith("Compaction gate:"), errors.get(0));
+        assertEquals(1, manager.recoveryCalls, "local-only recovery ran once");
+        assertEquals(1, manager.spillCalls, "local spill ran once after NONE recovery");
+    }
+
+    @Test
     void strongReductionBelowTriggerExitsCleanlyWithoutEscalation(final JsonMapper mapper) throws Exception {
         final var tracker = new ScriptedUsageTracker(6_000);
         final var manager = new ScriptedContextManager(TRIGGER) {

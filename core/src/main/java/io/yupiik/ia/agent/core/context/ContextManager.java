@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.context;
 
 import io.yupiik.ia.agent.core.configuration.BufferConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.CompactionLlmMode;
 import io.yupiik.ia.agent.core.configuration.GateConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -149,6 +150,11 @@ public class ContextManager {
                 ? configuration.compaction().resolvedGate()
                 : new GateConfiguration(
                         GateConfiguration.DEFAULT_MAX_ATTEMPTS, GateConfiguration.DEFAULT_MAX_DURATION_MS);
+    }
+
+    /** Whether compaction must never call an LLM for the session's provider selection (global + per-provider merge). */
+    public boolean ignoreLlm(final ChatSettings settings) {
+        return coordinator != null && coordinator.ignoreLlm(settings);
     }
 
     /** The per-provider merged buffer-mode trigger knobs for the session, or the global/defaults when unset. */
@@ -286,6 +292,7 @@ public class ContextManager {
         return configuration != null
                 && configuration.compaction() != null
                 && configuration.compaction().enabled()
+                && configuration.compaction().mode() != CompactionLlmMode.NO_LLM
                 && configuration.compaction().resolvedSpeculative().concurrent();
     }
 
@@ -304,7 +311,11 @@ public class ContextManager {
             final int extraToolTokens,
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
-        if (!speculationEnabled() || cancelled.getAsBoolean() || usageTracker == null || coordinator == null) {
+        if (!speculationEnabled()
+                || coordinator == null
+                || coordinator.ignoreLlm(settings)
+                || cancelled.getAsBoolean()
+                || usageTracker == null) {
             return false;
         }
         try {
@@ -343,6 +354,10 @@ public class ContextManager {
             final ChatSettings settings) {
         final var manager = speculation;
         if (manager == null || manager.source() == null) {
+            return null;
+        }
+        if (coordinator.ignoreLlm(settings)) {
+            manager.invalidate();
             return null;
         }
         if (cancelled.getAsBoolean()) {

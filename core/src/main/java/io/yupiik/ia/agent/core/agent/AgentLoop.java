@@ -1630,13 +1630,18 @@ public class AgentLoop {
                 var compactedThisTurn = false;
                 final var appliedKinds = new ArrayList<String>(4);
                 var appliedModes = new ArrayList<CompactionResult.Mode>(2);
+                final var llmFree = contextManager.ignoreLlm(runSettings);
                 if (contextManager.pruneNeeded(messages, toolsTokens)) {
-                    appliedKinds.addAll(applyZeroLlmStrategies(messages));
-                    if (!appliedKinds.isEmpty()) {
-                        contextManager.resetSpeculation();
-                        persistContext(sessionId, messages);
-                        usageTracker.clearAnchor();
-                        appliedModes.add(CompactionResult.Mode.CLEARED);
+                    // the DCP-style strategies are the compact-checkpoint's weapon under llmFree
+                    // (see below); at the prune checkpoint they would run twice per checkpoint.
+                    if (!llmFree) {
+                        appliedKinds.addAll(applyZeroLlmStrategies(messages));
+                        if (!appliedKinds.isEmpty()) {
+                            contextManager.resetSpeculation();
+                            persistContext(sessionId, messages);
+                            usageTracker.clearAnchor();
+                            appliedModes.add(CompactionResult.Mode.CLEARED);
+                        }
                     }
                     final var pruned = contextManager.prune(messages);
                     if (pruned.changed()) {
@@ -1649,20 +1654,38 @@ public class AgentLoop {
                     }
                 }
                 if (contextManager.compactNeeded(messages, toolsTokens)) {
-                    // speculative adoption first: a validated candidate avoids the synchronous
-                    // stall; anything it cannot install falls back to the normal path below
-                    final var adopted = contextManager.adoptSpeculation(
-                            messages,
-                            toolsTokens,
-                            () -> closed || cancelled.getAsBoolean(),
-                            useProfileModel ? runSettings : chatSettings);
-                    final var compacted = adopted != null
-                            ? adopted
-                            : contextManager.compact(messages, false, null, 0, cancelled, runSettings);
+                    final CompactionResult compacted;
+                    if (llmFree) {
+                        // LLM-free compaction: no speculation (it is LLM-backed by design), and the
+                        // structural (dedup/supersede/purge) strategies run here, at the moment they
+                        // matter, before the local cascade.
+                        final var structural = applyZeroLlmStrategies(messages);
+                        if (!structural.isEmpty()) {
+                            appliedKinds.addAll(structural);
+                            contextManager.resetSpeculation();
+                            persistContext(sessionId, messages);
+                            usageTracker.clearAnchor();
+                            if (!compactedThisTurn) {
+                                appliedModes.add(CompactionResult.Mode.CLEARED);
+                            }
+                        }
+                        compacted = contextManager.compact(messages, false, null, 0, cancelled, runSettings);
+                    } else {
+                        // speculative adoption first: a validated candidate avoids the synchronous
+                        // stall; anything it cannot install falls back to the normal path below
+                        final var adopted = contextManager.adoptSpeculation(
+                                messages,
+                                toolsTokens,
+                                () -> closed || cancelled.getAsBoolean(),
+                                useProfileModel ? runSettings : chatSettings);
+                        compacted = adopted != null
+                                ? adopted
+                                : contextManager.compact(messages, false, null, 0, cancelled, runSettings);
+                    }
                     if (compacted.changed()) {
                         messages.clear();
                         messages.addAll(compacted.messages());
-                        appliedKinds.add("compact");
+                        appliedKinds.add(llmFree ? "compact-local" : "compact");
                         appliedModes.add(compacted.mode());
                         if (contextView != null) {
                             // the digest replaces the history the blocks pointed at: never re-apply them
@@ -1914,6 +1937,15 @@ public class AgentLoop {
                             AgentEvent.Notice.Level.INFO,
                             "Context window exceeded; compacting and retrying (assumed window reduced to " + shrunken
                                     + " tokens)."));
+                    // LLM-free overflow recovery: give the structural strategies their shot before
+                    // the local cascade (the summarizer never runs under ignoreLlm). Persist
+                    // immediately so their reclaim survives even if the cascade returns NONE.
+                    if (contextManager.ignoreLlm(runSettings)
+                            && !applyZeroLlmStrategies(messages).isEmpty()) {
+                        contextManager.resetSpeculation();
+                        persistContext(sessionId, messages);
+                        usageTracker.clearAnchor();
+                    }
                     final var compacted = contextManager.compactForOverflow(messages, cancelled, runSettings);
                     if (compacted.changed() && !compacted.messages().isEmpty()) {
                         messages.clear();

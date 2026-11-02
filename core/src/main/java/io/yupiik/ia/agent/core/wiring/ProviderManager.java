@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.BufferConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.CompactionLlmMode;
 import io.yupiik.ia.agent.core.configuration.ContextLimit;
 import io.yupiik.ia.agent.core.configuration.GateConfiguration;
 import io.yupiik.ia.agent.core.configuration.InBandToolCallsMode;
@@ -276,6 +277,38 @@ public class ProviderManager {
                         local == null ? null : local.overflowSpliceChars(),
                         global == null ? null : global.overflowSpliceChars(),
                         TailConfiguration.DEFAULT_OVERFLOW_SPLICE_CHARS));
+    }
+
+    /**
+     * Merged compaction LLM mode for the session's provider: an explicit per-provider
+     * {@code compaction.mode} of {@code LLM} or {@code NO_LLM} wins, {@code AUTO} inherits the
+     * global {@code yca.compaction.mode} (whose own {@code AUTO} resolves to {@code LLM}, the
+     * built-in behavior). The tri-state keeps the explicit per-provider opt-out of a global
+     * {@code NO_LLM} expressible (a nullable Boolean cannot, see {@link CompactionLlmMode}).
+     */
+    public CompactionLlmMode resolvedCompactionMode(final ChatSettings settings) {
+        final var global = globalCompactionMode();
+        final var local = providerCompaction(settings);
+        if (local == null || local.mode() == null || local.mode() == CompactionLlmMode.AUTO) {
+            return global;
+        }
+        return local.mode();
+    }
+
+    /**
+     * Whether compaction must never call an LLM for the session's provider:
+     * {@link #resolvedCompactionMode(ChatSettings)} resolved to {@code NO_LLM}.
+     */
+    public boolean resolvedIgnoreLlm(final ChatSettings settings) {
+        return resolvedCompactionMode(settings).llmFree();
+    }
+
+    /** The global {@code yca.compaction.mode}, with {@code AUTO} resolved to the built-in {@code LLM}. */
+    private CompactionLlmMode globalCompactionMode() {
+        final var mode = configuration == null || configuration.compaction() == null
+                ? CompactionLlmMode.AUTO
+                : configuration.compaction().mode();
+        return mode == null || mode == CompactionLlmMode.AUTO ? CompactionLlmMode.LLM : mode;
     }
 
     /** Resolve the current provider default model reference to its concrete model name. */
