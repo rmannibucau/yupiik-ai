@@ -964,8 +964,7 @@ public class CompactionCoordinator {
         var calls = 0;
         if (!quiet) {
             warnOnceWhenNoCompactModel();
-            emit(new AgentEvent.Status(
-                    "compacting (" + label + ", chunk 1/" + chunks.size() + ")...", sessionId, null, null));
+            emit(new AgentEvent.Status(label + " (chunk 1/" + chunks.size() + ")...", sessionId, null, null));
         }
         for (var c = 0; c < chunks.size(); c++) {
             if (cancelled.getAsBoolean()) {
@@ -1000,7 +999,7 @@ public class CompactionCoordinator {
                                             pause.kind() == io.yupiik.ia.agent.core.llm.PauseEvent.Pause.THROTTLE
                                                     ? AgentEvent.Pause.Kind.THROTTLE
                                                     : AgentEvent.Pause.Kind.RETRY,
-                                            "compacting " + label + ": " + pause.message(),
+                                            label + ": " + pause.message(),
                                             pause.durationMs(),
                                             sessionId));
                                 }
@@ -1041,7 +1040,7 @@ public class CompactionCoordinator {
                     if (!quiet) {
                         emit(new AgentEvent.Pause(
                                 AgentEvent.Pause.Kind.RETRY,
-                                "compacting " + label + ": retrying in ~" + (delay / 1000) + "s...",
+                                label + " failed, retrying in ~" + (delay / 1000) + "s...",
                                 delay,
                                 sessionId));
                     }
@@ -1059,8 +1058,7 @@ public class CompactionCoordinator {
                     if (mainModel != null && !mainModel.equals(template.model())) {
                         if (!quiet) {
                             emit(new AgentEvent.Status(
-                                    "compacting " + label + ": summarizer unavailable, retrying on " + mainModel
-                                            + "...",
+                                    label + ": summarizer unavailable, retrying on " + mainModel + "...",
                                     sessionId,
                                     null,
                                     null));
@@ -1085,8 +1083,7 @@ public class CompactionCoordinator {
                                 appendBounded(summary, fallbackPart, digestCap);
                                 if (!quiet && c + 1 < chunks.size()) {
                                     emit(new AgentEvent.Status(
-                                            "compacting (" + label + ", chunk " + (c + 2) + "/" + chunks.size()
-                                                    + ")...",
+                                            label + " (chunk " + (c + 2) + "/" + chunks.size() + ")...",
                                             sessionId,
                                             null,
                                             null));
@@ -1118,10 +1115,7 @@ public class CompactionCoordinator {
             appendBounded(summary, part, digestCap);
             if (!quiet && c + 1 < chunks.size()) {
                 emit(new AgentEvent.Status(
-                        "compacting (" + label + ", chunk " + (c + 2) + "/" + chunks.size() + ")...",
-                        sessionId,
-                        null,
-                        null));
+                        label + " (chunk " + (c + 2) + "/" + chunks.size() + ")...", sessionId, null, null));
             }
         }
         return new Outcome(summary.toString(), "", calls, false, false);
