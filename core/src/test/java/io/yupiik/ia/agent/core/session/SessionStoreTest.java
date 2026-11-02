@@ -417,6 +417,27 @@ class SessionStoreTest {
     }
 
     @Test
+    void gzipRetiresThePreCompressionBackup() throws Exception {
+        final var store = newStore();
+        final var id = store.create();
+        store.append(id, SessionEntry.of(1, "user", "content", null, null));
+        // a replace writes the .bak sibling of the live jsonl
+        store.replace(id, List.of(Message.system("summary"), Message.user("content")));
+        final var bak = store.sessionDir(id).resolve(id + ".jsonl.bak");
+        final var gz = store.sessionDir(id).resolve(id + ".jsonl.gz");
+        assertTrue(Files.exists(bak), "precondition: replace created the .bak sibling");
+        assertFalse(Files.exists(gz), "precondition: not yet compressed");
+
+        // aged past the compress window (15d) but inside retention (30d)
+        setAge(store.path(id), 20);
+        store.cleanup();
+
+        assertTrue(Files.exists(gz), "aged session compressed inside its folder");
+        assertFalse(Files.exists(store.path(id)), "jsonl replaced by the gz twin");
+        assertFalse(Files.exists(bak), "the pre-compression backup is retired once compressed");
+    }
+
+    @Test
     void summaryReturnsFirstUserLine() {
         final var store = newStore();
         final var id = store.create();

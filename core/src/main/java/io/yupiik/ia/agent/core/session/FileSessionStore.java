@@ -212,6 +212,8 @@ public class FileSessionStore implements SessionStore {
         }
         try {
             Files.deleteIfExists(jsonl);
+            // the gz twin supersedes the pre-compression backup: no rollback target remains
+            Files.deleteIfExists(jsonl.resolveSibling(jsonl.getFileName().toString() + ".bak"));
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
