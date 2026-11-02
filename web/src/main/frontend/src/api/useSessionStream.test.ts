@@ -110,6 +110,60 @@ describe('foldStatus - btw side-question folding (latest-wins single slot)', () 
   });
 });
 
+describe('foldStatus - compaction lifecycle flag', () => {
+  const noticeEv = (message: string, data: Record<string, unknown>): WebEvent => ({
+    type: 'notice',
+    sessionId: 's1',
+    message,
+    data,
+  } as WebEvent);
+
+  it('arms compacting on the progress notice and clears it on the result notice', () => {
+    const s = foldStatus([
+      noticeEv('Compaction in progress... (≈ 51234 estimated tokens)', { level: 'INFO', compacting: true }),
+      noticeEv('Compacted: context 68% -> 41%', { level: 'INFO', compacting: false }),
+    ]);
+    expect(s.compacting).toBe(false);
+  });
+
+  it('stays arming while compaction is in flight without a result', () => {
+    const s = foldStatus([
+      noticeEv('Compaction in progress... (≈ 51234 estimated tokens)', { level: 'INFO', compacting: true }),
+    ]);
+    expect(s.compacting).toBe(true);
+  });
+
+  it('a gate escalation clears the compacting flag', () => {
+    const s = foldStatus([
+      noticeEv('Compaction in progress... (≈ 51234 estimated tokens)', { level: 'INFO', compacting: true }),
+      noticeEv('Compaction gate: the context cannot be compacted below the trigger.', {
+        level: 'ERROR',
+        compacting: false,
+      }),
+    ]);
+    expect(s.compacting).toBe(false);
+  });
+
+  it('is orthogonal to the busy flag (no busy frame involved)', () => {
+    const s = foldStatus([noticeEv('Compaction in progress... (≈ 51234 estimated tokens)', { level: 'INFO', compacting: true })]);
+    expect(s.compacting).toBe(true);
+    expect(s.busy).toBeUndefined();
+  });
+
+  it('a turn boundary clears the pinned flag even without a result notice', () => {
+    const s = foldStatus([
+      noticeEv('Compaction in progress... (≈ 51234 estimated tokens)', { level: 'INFO', compacting: true }),
+      ev('turn-cancelled'),
+    ]);
+    expect(s.compacting).toBe(false);
+  });
+
+  it('an unrelated (non-compaction) notice leaves the flag untouched', () => {
+    const s = foldStatus([ev('notice', 'memory extraction done')]);
+    expect(s.compacting).toBeUndefined();
+  });
+});
+
 describe('foldStatus - live per-turn out/reasoning tokens', () => {
   it('reports the per-turn delta from cumulative usage while no turn-metrics yet', () => {
     const s = foldStatus([

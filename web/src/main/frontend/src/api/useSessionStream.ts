@@ -57,6 +57,10 @@ export type SessionStatus = {
   // latest status/notice line
   notice?: { level?: string; message?: string };
   busy?: boolean;
+  // compaction lifecycle: true while a "Compaction in progress..." notice is live (before any
+  // "Compacted:"/"Compaction gate:" result). Orthogonal to busy: compaction runs inside the turn,
+  // so the spinner stays pinned while busy baselines still reset normally at turn start.
+  compacting?: boolean;
   // the current /btw side question (latest-wins single slot): absent/null when no btw is open.
   btw?: { id?: number; running?: boolean; question: string; answer?: string; error?: string; retryable?: boolean };
 };
@@ -514,6 +518,13 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
     } else if (ev.type === 'notice') {
       const d = ev.data ?? {};
       s.notice = { level: (d.level as string) ?? 'INFO', message: (ev.message as string) ?? '' };
+      // compaction lifecycle is a latest-wins flag: the start notice arms it, the result notices
+      // (compacted/gate) clear it, and any non-compaction notice leaves it untouched. It is folded
+      // separately from busy so a compaction running inside a turn keeps the spinner without
+      // disturbing the busy-baseline token accounting.
+      if (typeof d.compacting === 'boolean') {
+        s.compacting = d.compacting;
+      }
     } else if (ev.type === 'btw') {
       // latest-wins single /btw slot: the newest frame (running start, final answer/error, or a
       // clear) wholly replaces the previous btw state. data carries the durable content; the event
@@ -536,11 +547,15 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
     } else if (ev.type === 'turn-done' || ev.type === 'turn-cancelled') {
       s.busy = false;
       lastBusy = false;
+      // a compaction can never outlive its turn: clear the pinned compacting flag so a turn that
+      // ends without a result notice (cancel/interrupt) does not leave the spinner stuck.
+      s.compacting = false;
     } else if (ev.type === 'error') {
       // a turn that errored is no longer running: without this the status bar could stay stuck on
       // "working · Ns" when the loop ends in an error rather than a clean turn-done/turn-cancelled.
       s.busy = false;
       lastBusy = false;
+      s.compacting = false;
     }
   }
   // per-turn live out/reasoning: the cumulative provider usage since the last turn start. Only

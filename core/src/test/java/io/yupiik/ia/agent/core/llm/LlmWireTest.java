@@ -68,6 +68,30 @@ class LlmWireTest {
     }
 
     /**
+     * The O2 retry-mode marker (a reserved {@code others} key set by
+     * {@code ChatCompletionRequest#withRetryMode}) is a transport-only flag: it must be carried on
+     * the request, then stripped before the payload reaches the provider so it can never leak into
+     * the wire {@code extensions}.
+     */
+    @Test
+    void wireNeverContainsTheRetryModeMarker() {
+        final var request = new ChatCompletionRequest(
+                "model", List.of(Message.user("hello")), null, null, null, null, null, null, null, Map.of("user", 1));
+        final var cooperative = request.withRetryMode(RetryMode.COOPERATIVE);
+        // the marker rides the request until the wire boundary
+        org.junit.jupiter.api.Assertions.assertEquals(
+                RetryMode.COOPERATIVE,
+                cooperative.others().get(ChatClient.RETRY_MODE_OTHERS_KEY),
+                "withRetryMode must record the mode on the request");
+        // ... and is stripped on the wire, co-existing keys preserved
+        final var wire = LlmWire.toLlmRequest(cooperative, null);
+        assertFalse(wire.extensions().containsKey(ChatClient.RETRY_MODE_OTHERS_KEY), "marker must not reach the wire");
+        org.junit.jupiter.api.Assertions.assertEquals(1, wire.extensions().get("user"), "unrelated keys are preserved");
+        // absent marker (delegated default) leaves the extensions untouched
+        assertFalse(LlmWire.toLlmRequest(request, null).extensions().containsKey(ChatClient.RETRY_MODE_OTHERS_KEY));
+    }
+
+    /**
      * P4: inline {@code  thinking} blocks (GLM-style / Qwen templates without a dedicated
      * reasoning channel) must be stripped before the assistant message enters the conversation,
      * otherwise the thoughts are persisted and replayed verbatim on the next request, making the

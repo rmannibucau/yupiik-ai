@@ -135,12 +135,49 @@ class ContextBudgetTest {
     }
 
     @Test
-    void usableWindowCanBeAboveTheCompactionTrigger() {
+    void usTriggerCanBeAboveTheCompactionTrigger() {
         final var usable = ContextBudget.usableWindow(window(128_000), output(16_384, true));
         final var trigger = ContextBudget.compactionTrigger(128_000, 15, 16_000);
 
         assertEquals(111_616, usable);
         assertEquals(108_800, trigger);
         assertEquals(2_816, usable - trigger);
+    }
+
+    @Test
+    void compactTriggerSafetyCapNeverLandsOnTheUsableWindow() {
+        // azure-like: 500k window declaring a 128k output cap -> usable 372k; the raw buffer trigger
+        // 425k would clamp exactly onto the usable window without the safety fraction
+        final var raw = ContextBudget.compactionTrigger(500_000, 15, 16_000);
+        assertEquals(425_000, raw);
+        assertEquals(
+                334_800,
+                ContextBudget.compactionTrigger(500_000, 15, 16_000, 372_000, 90),
+                "default 90% safety: trigger = 90% of the usable window, not the usable window itself");
+        assertEquals(
+                279_000,
+                ContextBudget.compactionTrigger(500_000, 15, 16_000, 372_000, 75),
+                "75% safety adds more headroom");
+        assertEquals(
+                372_000,
+                ContextBudget.compactionTrigger(500_000, 15, 16_000, 372_000, 100),
+                "100% safety keeps the legacy clamp (usable window)");
+    }
+
+    @Test
+    void compactTriggerSafetyCapIsANoOpWhenTheRawTriggerAlreadyFits() {
+        // freeinference-like usable window: raw trigger 850k is below the 90% cap (882k)
+        assertEquals(
+                850_000,
+                ContextBudget.compactionTrigger(1_000_000, 15, 16_000, 980_000, 90),
+                "raw trigger unchanged when it already sits under the safety cap");
+        assertEquals(
+                882_000,
+                ContextBudget.compactionTrigger(1_000_000, 0, 0, 980_000, 90),
+                "a trigger above the cap is pulled down to the cap");
+        assertEquals(
+                ContextBudget.MIN_USABLE_WINDOW,
+                ContextBudget.compactionTrigger(0, 15, 16_000, 0, 90),
+                "unknown window stays floored");
     }
 }

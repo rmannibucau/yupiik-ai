@@ -199,6 +199,108 @@ limit, the agent warns once and continues rather than ending the turn after a
 fixed number of compactions. A provider-reported context overflow still uses
 the separate bounded overflow-retry path.
 
+=== Trigger safety headroom
+
+The effective compaction trigger is never allowed to sit too close to the hard
+window: `yca.compaction.triggerSafetyPercent` (default `90`) caps the trigger
+at that percentage of the usable window, so a large configured output reserve
+cannot push the trigger (and hence the "safe" headroom the gate targets) into
+the last few percent where an over-budget completion would overflow.
+A per-provider override exists under
+`yca.provider.providers[i].compaction.triggerSafetyPercent` (`-1` = inherit).
+The safety cap never equals the usable window at `100`: the trigger keeps a
+buffer over the hard limit.
+
+=== The compaction gate
+
+When a turn's checkpoint leaves the context over the trigger even after the
+automatic compact and the tighter forced pass, the agent runs the _compaction
+gate_: a bounded sequence of recovery attempts before the request is sent, so
+it never sends a prompt above the trigger and never blocks the turn forever on
+a non-compactable context.
+
+Each gate attempt first runs an LLM-backed forced-recovery compaction (the
+normal tail budget halved), then - if that produced no progress - an LLM-free
+local spill of pre-digest tool outputs.
+Between attempts the gate backs off (bounded, interruptible), and the whole
+sequence is capped by two budgets:
+
+- `yca.compaction.gateMaxAttempts` (default `12`): how many recovery passes the
+  gate may run;
+- `yca.compaction.gateMaxDurationMs` (default `300000`): the wall-clock budget
+  of the whole gate.
+
+Both are overridable per provider
+(`yca.provider.providers[i].compaction.gateMaxAttempts` /
+`gateMaxDurationMs`, `-1` = inherit), so a flakier provider can raise its own
+gate ceiling without affecting the others.
+
+The gate escalates - a pinned `Compaction gate:` error and continuing to
+monitor the hard limit - instead of looping forever when:
+
+- a recovery pass reclaims nothing at all;
+- two consecutive passes each reclaim less than `5%` of the pre-pass context
+  (the context is not compactable further with the current strategy);
+- the attempt or wall-clock budget is exhausted while still over the trigger.
+
+Escalation never blocks the request: the turn proceeds and watches the
+provider hard limit. A user can always force guaranteed progress with
+`/compact urgent`, which falls back to destructive local truncation when the
+summarizer fails.
+Pressing Esc mid-gate aborts the recovery loop without escalating.
+
+=== Compaction retries: one authority
+
+The compaction summarizer owns its retry loop: it calls the chat client with
+the `COOPERATIVE` retry mode, which asks the client-side resilience wrapper to
+skip its own internal retries (the conversation loop keeps its own
+`yca.llm.retriesMaxAttempts` behavior unchanged).
+There is therefore exactly one retry authority per call, and the compaction
+budget is controlled by `yca.compaction.retriesMaxAttempts` (default `3`),
+overridable per provider
+(`yca.provider.providers[i].compaction.retriesMaxAttempts`), then flattened to
+`yca.llm.retriesMaxAttempts` and floored at `1`.
+The backoff between compaction retries uses the same
+`yca.llm.retriesBaseDelayMs` (and multiplier) as the conversation retries.
+
+For a flaky provider, the compaction summarizer can be given a higher ceiling
+than the conversation without slowing replies on the happy path:
+
+[source,text]
+----
+yca.provider.providers.0.compaction.retriesMaxAttempts=6
+yca.llm.retriesBaseDelayMs=3000
+yca.provider.providers.0.rateLimitRequestsPerMinute=20
+yca.provider.providers.0.compaction.gateMaxAttempts=20
+----
+
+The cooperative mode still honors the semaphore and rate-limit throttles, so a
+slow provider is never hammered by the summarizer retries.
+
+=== Digest-only contexts and repeated /compact
+
+When almost the whole history is a previous `<compacted-context>` digest
+followed by a long tool-churn turn, a normal `/compact` finds nothing real to
+summarize against and would keep returning `NONE`.
+The digest-only rescue cuts at the first safe tool-call/result boundary and
+folds the new summary into the previous digest, so repeated manual compacts
+actually reclaim the churn instead of spinning.
+The `compress` tool reports the same situation explicitly: when the only user
+message left is the compaction digest, its skipped-range guidance points at
+`/compact` ("run /compact to reduce the tool round") instead of asking for
+more small disjoint ranges that cannot be anchored.
+
+=== Speculative compaction
+
+`yca.compaction.speculativePolicy=concurrent` (see
+xref:features/compaction.adoc[Compaction and compression]) starts a background
+summary as soon as usage crosses `yca.compaction.speculativeStartPercent`, so
+the next turn often adopts a ready candidate instead of stalling on a
+synchronous compact.
+The gate is the safety net underneath: a concurrent candidate that is too
+small, or that fails to land below the trigger, still goes through the bounded
+recovery sequence above rather than limping above the trigger.
+
 [#outcome-labels]
 Every in-loop prune/compact records _how_ the context was reduced as an
 outcome label (the `mode` field of the `AgentEvent.Compacted` event and of

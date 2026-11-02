@@ -52,4 +52,24 @@ public record ProviderCompactionConfiguration(
                                 + "failure falls back to the provider's main (conversation) model for one last "
                                 + "attempt. Null (the default) inherits the global yca.compaction.fallbackToMainModel; "
                                 + "true/false override it.")
-        Boolean fallbackToMainModel) {}
+        Boolean fallbackToMainModel,
+
+        @Property(
+                defaultValue = "-1",
+                documentation =
+                        "Per-provider buffer-mode trigger safety cap (see yca.compaction.triggerSafetyPercent). "
+                                + "Zero or negative (the default) inherits the global value.")
+        int triggerSafetyPercent,
+
+        @Property(
+                defaultValue = "-1",
+                documentation = "Per-provider compaction-gate attempt budget (see yca.compaction.gateMaxAttempts). "
+                        + "Zero or negative (the default) inherits the global value.")
+        int gateMaxAttempts,
+
+        @Property(
+                defaultValue = "-1",
+                documentation =
+                        "Per-provider compaction-gate wall-clock budget in milliseconds "
+                                + "(see yca.compaction.gateMaxDurationMs). Zero or negative (the default) inherits the global value.")
+        int gateMaxDurationMs) {}

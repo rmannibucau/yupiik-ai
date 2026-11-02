@@ -969,7 +969,8 @@ public class ChatClient implements AutoCloseable {
         final var ref = explicit != null && !explicit.isBlank()
                 ? explicit
                 : (override != null && !override.isBlank() ? override : (provider == null ? null : provider.model()));
-        final var resolvedModel = providerManager.resolve(ref);
+        final var resolvedModel =
+                providerManager == null ? new ProviderManager.ResolvedModel(null, ref) : providerManager.resolve(ref);
         var routed = request;
         final var routedProviderId = resolvedModel.provider() == null ? null : providerIdOf(resolvedModel.provider());
         if (ref != null && ref.startsWith("$") && routedProviderId != null) {
@@ -1744,7 +1745,42 @@ public class ChatClient implements AutoCloseable {
             final Consumer<PauseEvent> pauseListener,
             final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        return doWithFallback(useModel(request), pauseListener, cancelled, false, null);
+        // the retry-mode marker rides the request's own `others` map (see withRetryMode); it is
+        // stripped before the request reaches the wire / model resolution so it can never leak
+        // into the provider payload. COOPERATIVE skips the wrapper's internal retry loop (the
+        // caller owns retries); DELEGATED (absent) is the default conversation behavior.
+        final var others = request.others();
+        final Object mode = others == null ? null : others.get(RETRY_MODE_OTHERS_KEY);
+        if (mode == null || mode == RetryMode.DELEGATED) {
+            return doWithFallback(useModel(request), pauseListener, cancelled, false, null, false, false, false);
+        }
+        final var stripped = new ChatCompletionRequest(
+                request.model(),
+                request.messages(),
+                request.temperature(),
+                request.topP(),
+                request.stream(),
+                request.tools(),
+                request.toolChoice(),
+                request.maxTokens(),
+                request.reasoningEffort(),
+                stripRetryMode(others),
+                request.sessionId(),
+                request.settings());
+        return doWithFallback(useModel(stripped), pauseListener, cancelled, false, null, false, false, true);
+    }
+
+    /**
+     * Reserved {@code others} key carrying the call's {@link RetryMode} (see
+     * {@link ChatCompletionRequest#withRetryMode(RetryMode)}); stripped in {@link #chat} before the
+     * request reaches model resolution or the wire, so it never leaks into the provider payload.
+     */
+    static final String RETRY_MODE_OTHERS_KEY = "_yca_retry_mode";
+
+    private static Map<String, Object> stripRetryMode(final Map<String, Object> others) {
+        final var out = new LinkedHashMap<>(others);
+        out.remove(RETRY_MODE_OTHERS_KEY);
+        return out;
     }
 
     /**
@@ -2340,7 +2376,7 @@ public class ChatClient implements AutoCloseable {
             final boolean stream,
             final Consumer<LlmStreamEvent> onDelta)
             throws IOException, InterruptedException {
-        return doWithFallback(request, pauseListener, cancelled, stream, onDelta, false, false);
+        return doWithFallback(request, pauseListener, cancelled, stream, onDelta, false, false, false);
     }
 
     private <A> A doWithFallback(
@@ -2351,6 +2387,27 @@ public class ChatClient implements AutoCloseable {
             final Consumer<LlmStreamEvent> onDelta,
             final boolean reasoningAlreadyDropped,
             final boolean argumentsAlreadyRepaired)
+            throws IOException, InterruptedException {
+        return doWithFallback(
+                request,
+                pauseListener,
+                cancelled,
+                stream,
+                onDelta,
+                reasoningAlreadyDropped,
+                argumentsAlreadyRepaired,
+                false);
+    }
+
+    private <A> A doWithFallback(
+            final ChatCompletionRequest request,
+            final Consumer<PauseEvent> pauseListener,
+            final BooleanSupplier cancelled,
+            final boolean stream,
+            final Consumer<LlmStreamEvent> onDelta,
+            final boolean reasoningAlreadyDropped,
+            final boolean argumentsAlreadyRepaired,
+            final boolean cooperative)
             throws IOException, InterruptedException {
         final Consumer<LlmStreamEvent> onDeltaSafe = onDelta == null ? event -> {} : onDelta;
         final var settings = request.settings();
@@ -2373,7 +2430,8 @@ public class ChatClient implements AutoCloseable {
                     LlmWire.toChatResult(LlmWire.join(dialect.chat(
                             LlmWire.toLlmRequest(effective, openaiSessionIdEnabledKeys(provider, flavor)),
                             cancelled,
-                            libraryListener))),
+                            libraryListener,
+                            cooperative))),
                     effective,
                     provider);
         } catch (final DialectNotSupportedException e) {
@@ -2390,7 +2448,8 @@ public class ChatClient implements AutoCloseable {
                     stream,
                     onDelta,
                     reasoningAlreadyDropped,
-                    argumentsAlreadyRepaired);
+                    argumentsAlreadyRepaired,
+                    cooperative);
         } catch (final IOException e) {
             // The Codex backend rejects a request carrying a stale reasoning blob (its encryption keys
             // rotated on the server, or the model changed) with 400 invalid_encrypted_content. Drop the
@@ -2404,7 +2463,8 @@ public class ChatClient implements AutoCloseable {
                         stream,
                         onDelta,
                         true,
-                        argumentsAlreadyRepaired);
+                        argumentsAlreadyRepaired,
+                        cooperative);
             }
             if (!argumentsAlreadyRepaired
                     && provider != null
@@ -2418,7 +2478,14 @@ public class ChatClient implements AutoCloseable {
                 final var repaired = repairHistoryArguments(request, effective.model());
                 if (repaired != request) {
                     return doWithFallback(
-                            repaired, pauseListener, cancelled, stream, onDelta, reasoningAlreadyDropped, true);
+                            repaired,
+                            pauseListener,
+                            cancelled,
+                            stream,
+                            onDelta,
+                            reasoningAlreadyDropped,
+                            true,
+                            cooperative);
                 }
             }
             throw e;

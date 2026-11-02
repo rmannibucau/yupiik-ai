@@ -100,6 +100,36 @@ public final class ContextBudget {
     }
 
     /**
+     * The buffer-mode compaction trigger capped so it never lands at or above the usable window.
+     *
+     * <p>The raw opencode-style trigger is computed against the raw window ({@link #compactionTrigger(int, int, int)}),
+     * then capped at {@code usableWindow * safetyPercent / 100}. Without the cap, a provider declaring a large
+     * absolute output cap (eg. azure-like 500k window with a 128k output cap) pushes the raw trigger above the
+     * usable window and the {@link ContextManager} clamp then lands the trigger exactly on the usable window -
+     * compaction only starts when the gauge is already at 100%. The safety fraction restores real headroom.</p>
+     *
+     * @param window           the raw context window in tokens; non-positive means unknown.
+     * @param bufferPercent    the reserved headroom percentage (15 by default).
+     * @param bufferMinTokens  the reserved headroom floor in tokens (16000 by default).
+     * @param usableWindow     the usable (window minus output reserve) size in tokens; non-positive means unknown.
+     * @param safetyPercent    the fraction of the usable window the trigger may not exceed, in percent (1..100).
+     * @return the trigger in estimated prompt tokens, at least {@link #MIN_USABLE_WINDOW}, never above
+     *         {@code usableWindow * safetyPercent / 100}.
+     */
+    public static int compactionTrigger(
+            final int window,
+            final int bufferPercent,
+            final int bufferMinTokens,
+            final int usableWindow,
+            final int safetyPercent) {
+        final var raw = compactionTrigger(window, bufferPercent, bufferMinTokens);
+        final int usable = usableWindow > 0 ? usableWindow : raw;
+        final var safe = Math.max(1, safetyPercent);
+        final var cap = (int) Math.max(MIN_USABLE_WINDOW, (long) usable * safe / 100L);
+        return Math.min(raw, cap);
+    }
+
+    /**
      * The window minus {@link #outputReserve(TokenCount, TokenCount)}, never below {@link #MIN_USABLE_WINDOW}.
      *
      * @param window               the total context window in tokens (with absolute flag), or non-positive when unknown.

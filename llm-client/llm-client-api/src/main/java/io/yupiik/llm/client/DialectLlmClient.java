@@ -81,6 +81,19 @@ public final class DialectLlmClient implements LlmClient {
         return helper.chat(delegate, request, cancelled, listener);
     }
 
+    /**
+     * Chat with a per-call pause listener and the cooperative (retry-skipping) flag: the concurrency
+     * permit and rate-limit throttle still apply, but transient failures surface immediately so a
+     * caller with its own retry loop becomes the single retry authority.
+     */
+    public CompletionStage<LlmResponse> chat(
+            final LlmRequest request,
+            final BooleanSupplier cancelled,
+            final Consumer<PauseEvent> listener,
+            final boolean skipRetries) {
+        return helper.chat(delegate, request, cancelled, listener, skipRetries);
+    }
+
     @Override
     public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
             final LlmRequest request, final BooleanSupplier cancelled) {

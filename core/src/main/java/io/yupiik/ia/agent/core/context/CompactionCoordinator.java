@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.RetryMode;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
@@ -408,7 +409,21 @@ public class CompactionCoordinator {
             final List<Message> messages, final int from, final int boundary, final String summary) {
         final var out = new ArrayList<Message>();
         out.addAll(messages.subList(0, from));
-        out.add(Message.user(COMPACTED_MARKER + "\n" + summary + "\n</compacted-context>\n\n" + DIGEST_GUIDANCE));
+        // digest-fold: when the summarizable region's only user content is a previous
+        // <compacted-context> digest (a digest-only dead-end: the digest then a long tool-churn
+        // turn), fold the new summary into the previous one and REPLACE the old digest with ONE
+        // digest instead of stacking a second one. The tool-round material is summarized and the
+        // region dropped, so repeated /compact force actually reduces the tool-churn middle.
+        // With the region dropped the new digest sits exactly at `from`, so the digestIndex
+        // protection of ensureUnderWindow stays aligned with the real digest position.
+        final var digestIndex = digestMessageIndex(messages, from, boundary);
+        final var previous = previousSummary(messages);
+        final var body = new StringBuilder();
+        if (digestIndex >= 0 && previous != null && !previous.isBlank()) {
+            body.append("Previous context:\n").append(previous).append("\n\n");
+        }
+        body.append(summary);
+        out.add(Message.user(COMPACTED_MARKER + "\n" + body + "\n</compacted-context>\n\n" + DIGEST_GUIDANCE));
         out.addAll(subagentBlocks(messages.subList(from, boundary)));
         out.addAll(messages.subList(boundary, messages.size()));
         final var lastUser = lastUserMessageIndex(messages);
@@ -416,6 +431,33 @@ public class CompactionCoordinator {
             out.add(Message.user(str(messages.get(lastUser).content())));
         }
         return out;
+    }
+
+    /**
+     * Index of a previous {@code <compacted-context>} digest message within {@code [from, boundary)}.
+     * When the region's only real user content is that digest (no other user turn), returning it lets
+     * {@link #assembleSummary} fold the new summary into the previous one instead of stacking digests.
+     * Returns -1 when there is no digest, or when a real (non-digest) user message exists in the region.
+     */
+    private static int digestMessageIndex(final List<Message> messages, final int from, final int boundary) {
+        var digest = -1;
+        for (var i = from; i < boundary; i++) {
+            final var m = messages.get(i);
+            if (!"user".equals(m.role()) || !(m.content() instanceof String s)) {
+                continue;
+            }
+            if (s.startsWith(COMPACTED_MARKER)) {
+                if (digest < 0) {
+                    digest = i;
+                }
+                continue;
+            }
+            if (s.startsWith("<pruned-context>") || s.startsWith("Your previous reply")) {
+                continue; // structural markers, not a real user turn
+            }
+            return -1; // a real user message in the region: normal stacking path
+        }
+        return digest;
     }
 
     /**
@@ -469,6 +511,13 @@ public class CompactionCoordinator {
         var chunkCap = effectiveChunkCap(compactModelReference(settings));
         var halvings = 0;
         var lastSizeError = (String) null;
+        // user-visible lifecycle feedback: an INFO notice right before the first summarizer call, so
+        // the UI can pin a "compacting..." indicator while the (potentially slow) LLM pass runs
+        if (usageTracker != null) {
+            emit(AgentEvent.Notice.compactionStart(
+                    "Compaction in progress... (\u2248" + usageTracker.estimateContext(messages) + " estimated tokens)",
+                    sessionId));
+        }
         Outcome outcome;
         while (true) {
             final var chunks = chunkCompact(messages.subList(from, boundary), chunkCap);
@@ -496,15 +545,33 @@ public class CompactionCoordinator {
         if (!outcome.summary().isBlank()) {
             List<Message> out = assembleSummary(messages, from, boundary, outcome.summary());
             final var digestIndex = leadingSystem.size();
-            out = ensureUnderWindow(out, force, digestIndex);
+            // an automatic compaction must land BELOW the trigger (real headroom), not just under the
+            // hard usable window; urgent/forced compactions only need to fit the window
+            out = ensureUnderWindow(
+                    out, urgent || force ? usableWindowTokens() : compactionTriggerTokens(), force, digestIndex);
             if (halvings == 0
                     && configuration.compaction().summarizerChunkChars() == 0
                     && compactName(configuration.model().compact()) == null) {
-                emit(new AgentEvent.Notice(
-                        AgentEvent.Notice.Level.INFO,
+                emit(AgentEvent.Notice.compacted(
                         "Compacted the context in " + (outcome.calls() >= 1 ? outcome.calls() : 1)
                                 + " summarizer call(s) using a window-derived chunk size.",
                         sessionId));
+            }
+            // success feedback: the percentage reclaimed, or the token delta when the gain is below
+            // one point (percentages would round to a no-op "0% -> 0%" readout)
+            if (usageTracker != null) {
+                final var afterEstimate = usageTracker.estimateContext(out);
+                final var beforePercent = usageTracker.contextPercent(usageTracker.estimateContext(messages));
+                final var afterPercent = usageTracker.contextPercent(afterEstimate);
+                final var deltaTokens = usageTracker.estimateContext(messages) - afterEstimate;
+                final String compactedMessage;
+                if (deltaTokens > 0 && Math.abs(beforePercent - afterPercent) < 1.0) {
+                    compactedMessage = "Compacted: reclaimed ~" + deltaTokens + " tokens";
+                } else {
+                    compactedMessage = "Compacted: context " + Math.round(beforePercent) + "% -> "
+                            + Math.round(afterPercent) + "%";
+                }
+                emit(AgentEvent.Notice.compacted(compactedMessage, sessionId));
             }
             return new CompactionResult(out, Mode.SUMMARY, "");
         }
@@ -523,12 +590,14 @@ public class CompactionCoordinator {
                     failureMessage + "; compaction skipped, context kept raw (will retry next pass)"));
             emit(new AgentEvent.Notice(
                     AgentEvent.Notice.Level.WARN,
-                    failureMessage + "; compaction skipped, context kept raw (will retry next pass).",
+                    failureMessage + "; compaction skipped, context kept raw (will retry next pass). Run /compact "
+                            + "to retry now, or /compact urgent to force local truncation.",
                     sessionId));
             return new CompactionResult(messages, Mode.NONE, failureMessage + " (compaction skipped)");
         }
         final var truncated = localTruncate(messages, from, boundary);
-        final var keptTruncated = ensureUnderWindow(truncated, force, -1);
+        final var keptTruncated = ensureUnderWindow(
+                truncated, urgent || force ? usableWindowTokens() : compactionTriggerTokens(), force, -1);
         final var failureMessage = (outcome.error() == null || outcome.error().isBlank()
                         ? (lastSizeError != null ? lastSizeError : "Summary failed")
                         : outcome.error())
@@ -540,7 +609,8 @@ public class CompactionCoordinator {
                 failureMessage.isBlank() ? "compaction failed; truncated locally" : failureMessage));
         emit(new AgentEvent.Notice(
                 AgentEvent.Notice.Level.WARN,
-                failureMessage.isBlank() ? "Summary failed; context truncated locally." : failureMessage,
+                (failureMessage.isBlank() ? "Summary failed; context truncated locally." : failureMessage)
+                        + " Run /compact to retry the summarizer, or /compact urgent to force truncation.",
                 sessionId));
         if (keptTruncated.equals(messages)) {
             return new CompactionResult(messages, Mode.NONE, failureMessage);
@@ -558,6 +628,16 @@ public class CompactionCoordinator {
             final List<Message> messages, final int from, final int keepFloor, final boolean halveBudget) {
         final var size = messages.size();
         if (size <= from + keepFloor + 2) {
+            // Digest-only dead-end rescue: when the whole non-system region is a previous
+            // <compacted-context> digest followed by a long tool-churn turn (no real user turn to
+            // summarize against), the strict budget walk would return `from` (Mode.NONE) forever and
+            // repeated /compact force can never reclaim the tool-churn middle. Cut at the first
+            // safeBoundary tool-call/result pair so the fold logic in assembleSummary merges the new
+            // summary into the previous digest. Only applies when a digest is actually present: any
+            // other small history stays a genuine no-op (Mode.NONE untouched).
+            if (digestMessageIndex(messages, from, size) >= 0) {
+                return fallbackSafeBoundary(messages, from, keepFloor);
+            }
             return from;
         }
         var b = size - keepFloor;
@@ -585,6 +665,32 @@ public class CompactionCoordinator {
             }
         }
         return Math.max(from, b);
+    }
+
+    /**
+     * Digest-only dead-end rescue: when the strict budget walk cannot move the boundary past
+     * {@code from} (only a previous {@code <compacted-context>} digest then a long tool-churn turn),
+     * cut at the first safeBoundary tool-call/result pair so repeated {@code /compact} (force)
+     * actually reduces the tool-churn middle instead of returning {@link Mode#NONE} forever. The
+     * fold logic in {@link #assembleSummary} then merges the new digest into the previous one.
+     */
+    private int fallbackSafeBoundary(final List<Message> messages, final int from, final int keepFloor) {
+        final var size = messages.size();
+        if (size <= from + 2) {
+            return from; // too small to cut anything
+        }
+        var boundary = size - keepFloor;
+        if (boundary <= from) {
+            boundary = from + 1;
+        }
+        while (boundary < size && !safeBoundary(messages, boundary)) {
+            boundary++;
+        }
+        if (boundary >= size || boundary <= from) {
+            return from; // no safe pair in the whole list: genuinely non-compactable
+        }
+        // at least the pair [from, boundary) is summarizable (the digest or the tool round)
+        return boundary;
     }
 
     private int tailBudgetTokens() {
@@ -654,23 +760,27 @@ public class CompactionCoordinator {
     }
 
     /**
-     * Guarantees the compacted message list fits under the usable provider context window (the window
-     * minus the completion headroom, see {@code UsageTracker#usableWindow()}). The kept raw messages are
-     * normally preserved verbatim; when the kept tail alone is heavy or the window is small, it is
+     * Guarantees the compacted message list fits under a target budget. The kept raw messages are
+     * normally preserved verbatim; when the kept tail alone is heavy or the target is small, it is
      * progressively spilled: tool outputs are capped, retried until the list is within budget but at least
      * once shrunk. The {@code digestIndex} message (the generated summary) is never spoken to, so the
      * compacted context survives the size-fitting unchanged. This closes the gap where compaction
      * "succeeded" but the output still overflowed.
+     *
+     * @param targetTokens the budget the returned list must not exceed. Automatic compactions pass the
+     *                     compaction trigger (so one pass buys real headroom below the wall and the
+     *                     once-per-turn recovery rarely needs to fire); urgent/overflow compactions pass
+     *                     the usable window (the hard input limit).
      */
-    private List<Message> ensureUnderWindow(final List<Message> out, final boolean tight, final int digestIndex) {
+    private List<Message> ensureUnderWindow(
+            final List<Message> out, final int targetTokens, final boolean tight, final int digestIndex) {
         if (usageTracker == null) {
             return out;
         }
-        final var window = usageTracker.usableWindow();
         var list = out;
         final var cap = tight ? effectiveSpliceChars() / 2 : effectiveSpliceChars();
         for (var guard = 0; guard < 8; guard++) {
-            if (usageTracker.estimateContext(list) <= window) {
+            if (usageTracker.estimateContext(list) <= targetTokens) {
                 break;
             }
             final var next = shrinkTail(list, cap, digestIndex);
@@ -883,7 +993,7 @@ public class CompactionCoordinator {
                             template.sessionId(),
                             template.settings());
                     final var res = chatClient.chat(
-                            request,
+                            request.withRetryMode(RetryMode.COOPERATIVE),
                             pause -> {
                                 if (!quiet) {
                                     emit(new AgentEvent.Pause(
@@ -962,7 +1072,8 @@ public class CompactionCoordinator {
                             // otherwise size maxTokens/topP/reasoning for the smaller model) and keeps
                             // the session identity (settings/session-id) on the fallback call
                             final var fallbackRequest = summaryRequest(mainModel, systemPrompt, prompt, settings);
-                            final var res = chatClient.chat(fallbackRequest, null, cancelled);
+                            final var res = chatClient.chat(
+                                    fallbackRequest.withRetryMode(RetryMode.COOPERATIVE), null, cancelled);
                             calls++;
                             if (usageTracker != null) {
                                 usageTracker.recordAuxiliary(res.usage());
@@ -1166,21 +1277,45 @@ public class CompactionCoordinator {
     private int retries(final ChatSettings settings) {
         final var overrides = compactionOverrides(settings);
         final var configured = overrides != null && overrides.retriesMaxAttempts() > 0
+                // per-provider compaction.retriesMaxAttempts wins
                 ? overrides.retriesMaxAttempts()
-                : (configuration.llm() == null ? 1 : configuration.llm().retriesMaxAttempts());
+                : configuration.compaction() != null
+                                && configuration.compaction().retriesMaxAttempts() > 0
+                        // scoped global yca.compaction.retriesMaxAttempts (conversation keeps
+                        // yca.llm.retriesMaxAttempts)
+                        ? configuration.compaction().retriesMaxAttempts()
+                        : (configuration.llm() == null ? 1 : configuration.llm().retriesMaxAttempts());
         return Math.max(1, configured);
     }
 
     /** The per-provider compaction block for the session's provider, or null when absent/unresolvable. */
     private ProviderCompactionConfiguration compactionOverrides(final ChatSettings settings) {
-        if (providerManager == null || settings == null) {
+        if (providerManager == null) {
             return null;
         }
-        final var providerId = settings.providerId();
+        final var providerId = settings == null ? null : settings.providerId();
         final var provider = providerId == null || providerId.isBlank()
                 ? providerManager.current()
                 : providerManager.provider(providerId);
         return provider == null ? null : provider.compaction();
+    }
+
+    /** Per-provider trigger safety percent, or -1 when unset (inherit the global value). */
+    public int resolvedTriggerSafetyPercent(final ChatSettings settings) {
+        final var overrides = compactionOverrides(settings);
+        return overrides == null ? -1 : overrides.triggerSafetyPercent();
+    }
+
+    /** Per-provider gate attempt budget, or -1 when unset (inherit the global value). */
+    public int resolvedGateMaxAttempts(final ChatSettings settings) {
+        final var overrides = compactionOverrides(settings);
+        return overrides == null ? -1 : overrides.gateMaxAttempts();
+    }
+
+    /** Per-provider gate wall-clock budget (ms), or -1 when unset (inherit the global value). */
+    public long resolvedGateMaxDurationMs(final ChatSettings settings) {
+        final var overrides = compactionOverrides(settings);
+        return overrides == null ? -1 : overrides.gateMaxDurationMs();
     }
 
     /*
@@ -1274,6 +1409,64 @@ public class CompactionCoordinator {
     int effectiveSpliceChars() {
         final var cap = overflowSpliceChars();
         return cap > 0 ? cap : Integer.MAX_VALUE;
+    }
+
+    /**
+     * LLM-free local reduction toward a target: head+tail splices the pre-digest tool outputs so the
+     * estimate drops toward {@code targetTokens}. Never touches the system prompt (index 0), the
+     * digest, or the kept-tail semantics. Returns a {@link Mode#SHRUNK} result when something changed,
+     * {@link Mode#NONE} otherwise.
+     */
+    public CompactionResult localSpill(final List<Message> messages, final int targetTokens) {
+        if (usageTracker == null || messages == null || messages.isEmpty()) {
+            return new CompactionResult(messages == null ? List.of() : messages, Mode.NONE, "");
+        }
+        final var out = List.copyOf(messages);
+        final var digestIndex = leadingSystemMessages(messages).size();
+        final var spilled = shrinkTail(out, effectiveSpliceChars(), digestIndex);
+        if (spilled == out) {
+            return new CompactionResult(out, Mode.NONE, "");
+        }
+        // if a single splice pass is not enough, keep going (bounded) toward the target
+        var list = spilled;
+        for (var guard = 0; guard < 8 && usageTracker.estimateContext(list) > targetTokens; guard++) {
+            final var next = shrinkTail(list, effectiveSpliceChars(), digestIndex);
+            if (next == list) {
+                break;
+            }
+            list = next;
+        }
+        return new CompactionResult(list, Mode.SHRUNK, "local spill");
+    }
+
+    /**
+     * The automatic-compaction trigger in estimated prompt tokens: the opencode-style buffer trigger
+     * capped at a safety fraction of the usable window (see {@link ContextBudget#compactionTrigger(int, int, int, int, int)}).
+     * Mirrors {@code ContextManager#compactionTriggerTokens()} so both surfaces agree; falls back to the
+     * usable window when compaction is disabled or the window is unknown.
+     */
+    int compactionTriggerTokens() {
+        if (usageTracker == null) {
+            return Integer.MAX_VALUE;
+        }
+        final var c = configuration.compaction();
+        if (c == null || !c.enabled()) {
+            return usageTracker.usableWindow();
+        }
+        if (c.thresholdPercent() > 0) {
+            return (int) Math.ceil(usageTracker.usableWindow() * c.thresholdPercent() / 100.0);
+        }
+        return ContextBudget.compactionTrigger(
+                usageTracker.contextWindowTokenCount().value(),
+                c.bufferPercent(),
+                c.bufferMinTokens(),
+                usageTracker.usableWindow(),
+                c.triggerSafetyPercent());
+    }
+
+    /** The hard usable window (context minus completion headroom); never below the minimum usable window. */
+    int usableWindowTokens() {
+        return usageTracker == null ? Integer.MAX_VALUE : usageTracker.usableWindow();
     }
 
     /**

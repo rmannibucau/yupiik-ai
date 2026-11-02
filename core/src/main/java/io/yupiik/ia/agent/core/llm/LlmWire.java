@@ -96,7 +96,7 @@ public final class LlmWire {
     }
 
     static LlmRequest toLlmRequest(final ChatCompletionRequest request) {
-        final Map<String, Object> extensions = request.others() == null ? Map.of() : request.others();
+        final Map<String, Object> extensions = request.others() == null ? Map.of() : stripRetryMode(request.others());
         return new LlmRequest(
                 request.model(),
                 request.messages() == null
@@ -117,6 +117,16 @@ public final class LlmWire {
                 // (freeinference included) is asked to retain the chat server-side.
                 false,
                 extensions);
+    }
+
+    /** The {@code others} map without the reserved retry-mode marker key (see {@link ChatClient#RETRY_MODE_OTHERS_KEY}). */
+    static Map<String, Object> stripRetryMode(final Map<String, Object> others) {
+        if (others == null || others.isEmpty() || !others.containsKey(ChatClient.RETRY_MODE_OTHERS_KEY)) {
+            return others == null ? Map.of() : others;
+        }
+        final var out = new LinkedHashMap<>(others);
+        out.remove(ChatClient.RETRY_MODE_OTHERS_KEY);
+        return out;
     }
 
     /** Converts a core neutral {@link Message} to the {@code llm-client} neutral model. Public so the

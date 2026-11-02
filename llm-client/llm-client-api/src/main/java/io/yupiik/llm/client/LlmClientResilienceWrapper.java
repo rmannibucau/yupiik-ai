@@ -191,10 +191,30 @@ public final class LlmClientResilienceWrapper {
             final LlmRequest request,
             final BooleanSupplier cancelled,
             final Consumer<PauseEvent> listener) {
+        return chat(dialect, request, cancelled, listener, false);
+    }
+
+    /**
+     * Run a non-streaming completion with a pause listener scoped to this call only (see
+     * {@link #chat(Dialect, LlmRequest, BooleanSupplier, Consumer)}), optionally skipping the
+     * internal retry loop.
+     *
+     * @param skipRetries when {@code true} the concurrency permit and rate-limit throttle are
+     *     still acquired, but a transient failure is surfaced to the caller immediately instead
+     *     of being retried with backoff. This is how a caller that owns its own retry loop (the
+     *     context-compaction coordinator) becomes the single retry authority: the wrapper keeps
+     *     concurrency/rate-limit semantics and only the caller decides when to retry.
+     */
+    public CompletionStage<LlmResponse> chat(
+            final Dialect dialect,
+            final LlmRequest request,
+            final BooleanSupplier cancelled,
+            final Consumer<PauseEvent> listener,
+            final boolean skipRetries) {
         final var pause = listener == null ? pauseListener : listener;
         return acquire(pause)
-                .thenCompose(acquired ->
-                        attempt(dialect, request, cancelled, pause).whenComplete((result, error) -> release(acquired)));
+                .thenCompose(acquired -> attempt(dialect, request, cancelled, pause, skipRetries)
+                        .whenComplete((result, error) -> release(acquired)));
     }
 
     /**
@@ -256,9 +276,18 @@ public final class LlmClientResilienceWrapper {
             final LlmRequest request,
             final BooleanSupplier cancelled,
             final Consumer<PauseEvent> listener) {
+        return attempt(dialect, request, cancelled, listener, false);
+    }
+
+    private CompletionStage<LlmResponse> attempt(
+            final Dialect dialect,
+            final LlmRequest request,
+            final BooleanSupplier cancelled,
+            final Consumer<PauseEvent> listener,
+            final boolean skipRetries) {
         final var result = new CompletableFuture<LlmResponse>();
         try {
-            retry(dialect, request, cancelled, 1, listener).whenComplete((response, error) -> {
+            retry(dialect, request, cancelled, 1, listener, skipRetries).whenComplete((response, error) -> {
                 if (error != null) {
                     result.completeExceptionally(unwrap(error));
                 } else {
@@ -277,6 +306,16 @@ public final class LlmClientResilienceWrapper {
             final BooleanSupplier cancelled,
             final int attempt,
             final Consumer<PauseEvent> listener) {
+        return retry(dialect, request, cancelled, attempt, listener, false);
+    }
+
+    private CompletionStage<LlmResponse> retry(
+            final Dialect dialect,
+            final LlmRequest request,
+            final BooleanSupplier cancelled,
+            final int attempt,
+            final Consumer<PauseEvent> listener,
+            final boolean skipRetries) {
         final var result = new CompletableFuture<LlmResponse>();
         final var future = dialect.chat(request, cancelled);
         future.whenComplete((response, error) -> {
@@ -285,9 +324,11 @@ public final class LlmClientResilienceWrapper {
                     final var cause = unwrap(error);
                     boolean retry = false;
                     if (cause instanceof ContextWindowExceededException) {
-                        retry = config.retryOnContextOverflow() && attempt < config.retriesMaxAttempts();
+                        retry = !skipRetries
+                                && config.retryOnContextOverflow()
+                                && attempt < config.retriesMaxAttempts();
                     } else if (!(cause instanceof DialectNotSupportedException)) {
-                        retry = attempt < config.retriesMaxAttempts() && retryable(cause);
+                        retry = !skipRetries && attempt < config.retriesMaxAttempts() && retryable(cause);
                     }
                     if (retry) {
                         concurrencyLimitDetected(cause, listener);

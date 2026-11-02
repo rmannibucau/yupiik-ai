@@ -112,4 +112,26 @@ class WebEventDtoTest {
         assertEquals("compacted", dto.type());
         assertEquals("dedup,prune|CLEARED", dto.message());
     }
+
+    @Test
+    void compactionNoticesCarryTheLifecycleMarker() {
+        // the compaction lifecycle (core A) surfaces to the browser as a compacting flag on the
+        // notice frames: the start notice arms it, the result notices (compacted/gate) clear it.
+        final var start = WebEventDto.of(
+                AgentEvent.Notice.compactionStart("Compaction in progress... (\u2248 51234 estimated tokens)", "s1"));
+        assertEquals("notice", start.type());
+        assertEquals(true, start.data().get("compacting"));
+
+        final var done = WebEventDto.of(AgentEvent.Notice.compacted("Compacted: context 68% -> 41%", "s1"));
+        assertEquals(false, done.data().get("compacting"));
+
+        final var gate = WebEventDto.of(AgentEvent.Notice.compactionGateEscalated(
+                "Compaction gate: the context cannot be compacted below the trigger.", "s1"));
+        assertEquals(false, gate.data().get("compacting"), "an escalation must clear the flag");
+
+        // a non-compaction notice never flips the flag (absent, not false)
+        final var unrelated =
+                WebEventDto.of(new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, "retrying (1/3)", "s1"));
+        assertEquals(null, unrelated.data().get("compacting"));
+    }
 }

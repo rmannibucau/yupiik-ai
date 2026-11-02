@@ -2016,6 +2016,90 @@ class TuiCommandRenderTest {
         quit();
     }
 
+    @Test
+    void compactionNoticesPinAndReleaseTheCompactingNotificationSlot() throws Exception {
+        // the compaction lifecycle feedback (A): a "Compaction in progress..." INFO notice must pin
+        // "ⓘ compacting..." in the notification slot bypassing the 5s TTL, and the "Compacted: ..."
+        // result notice must clear it and show the outcome with the normal TTL.
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-compaction-notice-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        frontend.onEvent(AgentEvent.Notice.compactionStart(
+                "Compaction in progress... (\u2248 51234 estimated tokens)", sessionId));
+
+        awaitText("ⓘ compacting...");
+
+        // the result notice replaces the pinned indicator with the outcome
+        frontend.onEvent(AgentEvent.Notice.compacted("Compacted: context 68% -> 41%", sessionId));
+        awaitText("ⓘ Compacted: context 68% -> 41%");
+        awaitTextGone("ⓘ compacting...");
+
+        quit();
+    }
+
+    @Test
+    void compactionGateNoticeClearsTheCompactingIndicator() throws Exception {
+        // an escalation (Compaction gate:) is a result notice too: it must clear the pinned
+        // indicator and surface the gate message; it must not linger pinned afterwards.
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-compaction-gate-notice-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        frontend.onEvent(AgentEvent.Notice.compactionStart(
+                "Compaction in progress... (\u2248 51234 estimated tokens)", sessionId));
+        awaitText("ⓘ compacting...");
+
+        frontend.onEvent(AgentEvent.Notice.compactionGateEscalated(
+                "Compaction gate: the context cannot be compacted below the trigger. Run /compact urgent "
+                        + "to force local truncation, or reduce the session size. Continuing and monitoring "
+                        + "the provider hard limit.",
+                sessionId));
+        awaitText("✗ Compaction gate: the context cannot be compacted below the trigger");
+        awaitTextGone("ⓘ compacting...");
+
+        quit();
+    }
+
+    @Test
+    void cancelledTurnClearsThePinnedCompactingIndicator() throws Exception {
+        // a turn that ends without a result notice (cancel/interrupt) must clear the pinned indicator:
+        // it can never outlive its turn
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-compaction-cancel-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        frontend.onEvent(AgentEvent.Notice.compactionStart(
+                "Compaction in progress... (\u2248 51234 estimated tokens)", sessionId));
+        awaitText("ⓘ compacting...");
+
+        frontend.onEvent(new AgentEvent.TurnCancelled(sessionId));
+        awaitTextGone("ⓘ compacting...");
+
+        quit();
+    }
+
     private AgentLoop stubAgentLoop() {
         return new AgentLoop() {
             @Override

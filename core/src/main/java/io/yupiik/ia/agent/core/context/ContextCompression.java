@@ -57,16 +57,6 @@ public final class ContextCompression {
     private static final Pattern ECHOED_REF_INLINE =
             Pattern.compile("(?<![ \t])[ \t]*+@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?");
     /**
-     * Glued seam-marker shape for the evidence-gated strip: an {@code @} at a word boundary
-     * (not preceded by a letter/digit, so emails and identifiers like {@code a@b} are exempt),
-     * optional blanks, then a letter-initial word that embeds a ref-id digit-run. The marker is
-     * what flash-class models leak when they autocomplete a seam tag from the surrounding wire
-     * content ("@EntCompactionTruncates10632" instead of "@10632@"); the word itself is real
-     * content and must survive - only the {@code @} is removed.
-     */
-    private static final Pattern GLUED_SEAM_WORD = Pattern.compile("(?<![A-Za-z0-9])@([ \\t]*)([A-Za-z][A-Za-z0-9]*)");
-
-    /**
      * Minimum digit-run length for the evidence-gated glued-seam strip: short runs ("step 12",
      * "issue #42") are far too common in real prose to gate on, while the observed leaks embed a
      * 3-5 digit ref id (125, 10632, 12504) and compaction refs are monotonically large in practice.
@@ -186,6 +176,30 @@ public final class ContextCompression {
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Number of real user messages in the published transcript, excluding the system prompt, the
+     * synthetic session-state tail and the {@code <compacted-context>} digest marker. A transcript
+     * whose only user content is a previous compaction digest cannot anchor a compress range: the
+     * compress tool guidance must then point at {@code /compact} instead of asking for more ranges.
+     */
+    private int realUserMessages() {
+        var count = 0;
+        for (final var message : published) {
+            if (message == null || !"user".equals(message.role())) {
+                continue;
+            }
+            if (isVolatileTail(message)) {
+                continue;
+            }
+            final var content = message.content() instanceof String s ? s : String.valueOf(message.content());
+            if (content.startsWith("<compacted-context>")) {
+                continue;
+            }
+            count++;
+        }
+        return count;
     }
 
     /**
@@ -512,9 +526,15 @@ public final class ContextCompression {
         final var parts = new ArrayList<String>(2);
         parts.add(base);
         if (!skipped.isEmpty()) {
-            parts.add("skipped: " + String.join("; ", skipped)
-                    + ". To free more closed history, send several small disjoint ranges as one array,"
-                    + " each starting on a user-message ref and ending just before the next user message.");
+            // a transcript whose only user content is a previous <compacted-context> digest leaves
+            // the generic "send several small disjoint ranges" guidance misleading: there is no
+            // real user turn to anchor a range on. Point the model at the compaction command that
+            // can actually shrink the digest-only round instead.
+            final var guidance = realUserMessages() < 2
+                    ? "the only user message is the compacted-context digest; run /compact to reduce the tool round"
+                    : "To free more closed history, send several small disjoint ranges as one array,"
+                            + " each starting on a user-message ref and ending just before the next user message.";
+            parts.add("skipped: " + String.join("; ", skipped) + ". " + guidance);
         }
         if (!nudges.isEmpty()) {
             parts.add(String.join("\n", nudges));
@@ -934,6 +954,13 @@ public final class ContextCompression {
         if (text == null) {
             return null;
         }
+        // cheap char gate: every transform below only ever touches text containing '@'
+        // (echo seams and glued-marker leaks all start with it), and when there is none
+        // - the overwhelmingly common case on the streaming render hot path - the input
+        // is returned verbatim (same instance) without allocating a single Matcher.
+        if (text.indexOf('@') < 0) {
+            return text;
+        }
         // whole echo lines first (the observed failure mode was a wall of consecutive tag lines),
         // then any inline tags that survived (e.g. a tag glued to prose on one line), then the
         // evidence-gated glued-marker strip: a flash-class model autocompleting a leaked '@' with
@@ -942,25 +969,73 @@ public final class ContextCompression {
         final var afterLineInline = ECHOED_REF_INLINE
                 .matcher(ECHOED_REF_LINE.matcher(text).replaceAll(""))
                 .replaceAll("");
-        final var matcher = GLUED_SEAM_WORD.matcher(afterLineInline);
-        final var maxRef = maxAssignedRef();
-        final var sb = new StringBuilder(afterLineInline.length());
+        return stripGluedSeamWords(afterLineInline, maxAssignedRef());
+    }
+
+    /**
+     * Char-level replacement for the former {@code GLUED_SEAM_WORD} regex pass: removes the leaked
+     * {@code @} of a glued seam marker ("@EntCompactionTruncates10632" -> "EntCompactionTruncates10632")
+     * while keeping the word (real content). The {@code @} must sit at a word boundary - not preceded
+     * by an ASCII letter/digit, so emails and identifiers like {@code a@b} are exempt - may be followed
+     * by blanks, then a letter-initial ASCII word whose digit-run embeds an assigned ref id. Only the
+     * single {@code @} is dropped; blanks and the word survive ("@ man12504que" -> " man12504que").
+     * <p>Deliberately a plain linear scan (one pass, no regex state machine) because this is the
+     * exact frame the jstack showed hot (Matcher.find() over a multi-megabyte transcript during a
+     * streaming turn); the scan costs O(n) worst-case with a tiny constant and zero allocations
+     * when nothing matches.
+     */
+    private static String stripGluedSeamWords(final String text, final int maxRef) {
+        if (text.indexOf('@') < 0) {
+            return text;
+        }
+        final var sb = new StringBuilder(text.length());
         var last = 0;
         var stripped = false;
-        while (matcher.find()) {
-            if (gluedSeamWordMatchesAssignedRef(matcher.group(2), maxRef)) {
+        var i = 0;
+        while (i < text.length()) {
+            final var c = text.charAt(i);
+            if (c != '@' || (i > 0 && isAsciiAlphanumeric(text.charAt(i - 1)))) {
+                i++;
+                continue;
+            }
+            // '@' at a word boundary (regex lookbehind (?<![A-Za-z0-9]) is ASCII-only): skip
+            // optional blanks, then require a letter-initial word
+            var j = i + 1;
+            while (j < text.length() && (text.charAt(j) == ' ' || text.charAt(j) == '\t')) {
+                j++;
+            }
+            final var wordStart = j;
+            if (j >= text.length() || !isAsciiLetter(text.charAt(j))) {
+                i++;
+                continue;
+            }
+            while (j < text.length() && isAsciiAlphanumeric(text.charAt(j))) {
+                j++;
+            }
+            if (gluedSeamWordMatchesAssignedRef(text.substring(wordStart, j), maxRef)) {
                 // keep the word (it is real content), drop only the leaked '@' but preserve the
                 // separating blanks ("@ man12504que" -> " man12504que")
-                sb.append(afterLineInline, last, matcher.start())
-                        .append(afterLineInline, matcher.start() + 1, matcher.end());
-                last = matcher.end();
+                sb.append(text, last, i).append(text, i + 1, j);
+                last = j;
                 stripped = true;
             }
+            // the regex find() resumes at the end of the full match ('@' + blanks + word); the
+            // word is purely alphanumeric so no further '@' can hide inside the span - skipping
+            // to j in both outcomes is exactly equivalent and cheaper than re-scanning it
+            i = j;
         }
         if (!stripped) {
-            return afterLineInline;
+            return text;
         }
-        return sb.append(afterLineInline, last, afterLineInline.length()).toString();
+        return sb.append(text, last, text.length()).toString();
+    }
+
+    private static boolean isAsciiLetter(final char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    }
+
+    private static boolean isAsciiAlphanumeric(final char c) {
+        return isAsciiLetter(c) || (c >= '0' && c <= '9');
     }
 
     /**

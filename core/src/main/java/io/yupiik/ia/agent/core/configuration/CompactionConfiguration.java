@@ -32,6 +32,24 @@ public record CompactionConfiguration(
         int thresholdPercent,
 
         @Property(
+                defaultValue = "90",
+                documentation =
+                        "Buffer mode safety cap: the compaction trigger never exceeds this percentage of the usable window, so automatic compaction always fires before the context gauge reaches 100%. A large declared output cap can push the raw opencode-style buffer trigger above the usable window; without this cap the trigger clamps exactly onto the usable window and compaction only starts at the very edge. 100 keeps the legacy clamp behavior (trigger equals the usable window); values below 100 add real headroom.")
+        int triggerSafetyPercent,
+
+        @Property(
+                defaultValue = "12",
+                documentation =
+                        "Maximum compaction-summarizer attempts of the automatic compaction gate before it declares the context cannot be compacted further and escalates to a pinned error (see gateMaxDurationMs). 0 disables the gate (the historical warn-once-and-continue behavior).")
+        int gateMaxAttempts,
+
+        @Property(
+                defaultValue = "300000",
+                documentation =
+                        "Wall-clock budget in milliseconds of the automatic compaction gate: once exceeded, even if more attempts remain, the gate escalates to a pinned error telling the user to run /compact urgent. Bounds how long a turn can block on a flaky summarizer. 0 disables the time bound.")
+        int gateMaxDurationMs,
+
+        @Property(
                 defaultValue = "15",
                 documentation =
                         "Buffer mode trigger: compact when the estimated prompt reaches this percentage of the raw context window. Matches opencode's default 15% buffer.")
@@ -122,13 +140,35 @@ public record CompactionConfiguration(
                                 + "retry the summarizer once on the provider's main (conversation) model before giving up "
                                 + "and skipping the compaction. Off by default because the main model is usually costlier; "
                                 + "a per-provider compaction.fallbackToMainModel value overrides this global default.")
-        boolean fallbackToMainModel) {
+        boolean fallbackToMainModel,
+
+        @Property(
+                defaultValue = "3",
+                documentation =
+                        "Retry budget of the compaction summarizer (the coordinator-owned retry loop). Scoped: this "
+                                + "value feeds the compaction retries only; conversation requests keep yca.llm.retriesMaxAttempts. "
+                                + "Because the coordinator is the single retry authority (the resilience wrapper skips its "
+                                + "own retry loop for summarizer calls), this is the only retry budget compaction pays. "
+                                + "A per-provider compaction.retriesMaxAttempts overrides it; must be >= 1.")
+        int retriesMaxAttempts) {
     public CompactionConfiguration {
         if (!"off".equals(speculativePolicy) && !"concurrent".equals(speculativePolicy)) {
             throw new IllegalArgumentException("speculativePolicy must be off or concurrent");
         }
         if (speculativeStartPercent < 1 || speculativeStartPercent > 99) {
             throw new IllegalArgumentException("speculativeStartPercent must be between 1 and 99");
+        }
+        if (triggerSafetyPercent < 1 || triggerSafetyPercent > 100) {
+            throw new IllegalArgumentException("triggerSafetyPercent must be between 1 and 100");
+        }
+        if (gateMaxAttempts < 0) {
+            throw new IllegalArgumentException("gateMaxAttempts must be zero or positive");
+        }
+        if (gateMaxDurationMs < 0) {
+            throw new IllegalArgumentException("gateMaxDurationMs must be zero or positive");
+        }
+        if (retriesMaxAttempts < 1) {
+            throw new IllegalArgumentException("retriesMaxAttempts must be at least 1");
         }
     }
 }

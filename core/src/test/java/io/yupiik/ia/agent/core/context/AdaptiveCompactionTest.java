@@ -280,7 +280,7 @@ class AdaptiveCompactionTest {
                 128_000,
                 Map.of(
                         "yca.compaction.summarizerChunkChars", "4000",
-                        "yca.llm.retriesMaxAttempts", "2"));
+                        "yca.compaction.retriesMaxAttempts", "2"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -531,7 +531,7 @@ class AdaptiveCompactionTest {
                 128_000,
                 Map.of(
                         "yca.compaction.summarizerChunkChars", "4000",
-                        "yca.llm.retriesMaxAttempts", "2"));
+                        "yca.compaction.retriesMaxAttempts", "2"));
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(

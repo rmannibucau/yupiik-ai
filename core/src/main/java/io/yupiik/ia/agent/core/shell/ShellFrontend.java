@@ -117,7 +117,8 @@ public interface ShellFrontend {
                         String sessionId,
                         String subagentId,
                         String subagentName,
-                        Throwable cause)) {
+                        Throwable cause,
+                        var compaction)) {
             notice(level, message);
         } else if (event
                 instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {

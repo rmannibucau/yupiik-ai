@@ -160,10 +160,24 @@ public record WebEventDto(
             }
             case AgentEvent.Pause t ->
                 Map.of("durationMs", t.durationMs(), "kind", t.kind().name());
-            case AgentEvent.Notice t ->
-                t.finishReason() == null
-                        ? Map.of("level", t.level().name())
-                        : Map.of("level", t.level().name(), "finishReason", t.finishReason());
+            case AgentEvent.Notice t -> {
+                final var data = new LinkedHashMap<String, Object>();
+                data.put("level", t.level().name());
+                if (t.finishReason() != null) {
+                    data.put("finishReason", t.finishReason());
+                }
+                // the compaction lifecycle marker: the start notice arms the compacting flag, the
+                // result notices (compacted/gate) clear it; NONE leaves it untouched so a
+                // non-compaction notice can never flip the UI state.
+                switch (t.compaction()) {
+                    case START -> data.put("compacting", true);
+                    case COMPLETED, GATE_ESCALATED -> data.put("compacting", false);
+                    case NONE -> {
+                        // untouched
+                    }
+                }
+                yield data;
+            }
             case AgentEvent.TurnMetrics t ->
                 Map.of(
                         "llmCalls", t.llmCalls(),

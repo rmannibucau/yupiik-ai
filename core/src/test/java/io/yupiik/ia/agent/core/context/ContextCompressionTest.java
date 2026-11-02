@@ -581,6 +581,46 @@ class ContextCompressionTest {
     }
 
     @Test
+    void digestOnlyTranscriptPointsAtCompactInsteadOfMoreRanges() {
+        // a transcript whose only user content is a previous <compacted-context> digest (the
+        // digest-only dead-end: compaction folded the history, then a long tool-churn round) cannot
+        // anchor a compress range. A skipped range must surface the digest diagnostic, not the
+        // generic "send several small disjoint ranges" guidance.
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(
+                Message.system("system"),
+                Message.user("<compacted-context>old digest</compacted-context>"),
+                Message.assistant("tool call", List.of()),
+                Message.tool("call_1", "x".repeat(2_000)),
+                Message.assistant("more churn", List.of()));
+        assignedRefs(compression, messages);
+        final var result = compression.compress("t", List.of(new ContextCompression.Range("3", "3", "cannot snap")));
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("skipped"), result.message());
+        assertTrue(
+                result.message().contains("the only user message is the compacted-context digest"),
+                "the digest diagnostic must replace the generic guidance, got: " + result.message());
+        assertFalse(
+                result.message().contains("send several small disjoint ranges"),
+                "the generic disjoint-ranges guidance must be absent for a digest-only transcript, got: "
+                        + result.message());
+    }
+
+    @Test
+    void normalTranscriptKeepsTheGenericDisjointRangesGuidance() {
+        // control: a transcript with real user messages keeps the generic guidance on a skip.
+        final var compression = new ContextCompression(config());
+        final var messages = simpleConversation();
+        assignedRefs(compression, messages);
+        final var result = compression.compress("t", List.of(new ContextCompression.Range("2", "2", "cannot snap")));
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("skipped"), result.message());
+        assertTrue(
+                result.message().contains("send several small disjoint ranges"),
+                "a normal transcript must keep the disjoint-ranges guidance, got: " + result.message());
+    }
+
+    @Test
     void disabledCompressionRefusesEverything() {
         final var disabled = new CompressConfiguration(
                 false, "50000", "100000", 15, 5, true, false, false, List.of(), false, 4, true, true, 4);

@@ -1469,6 +1469,7 @@ public class TuiCommand implements Runnable {
             // it is recorded as a transient error so a subsequent successful LlmRequestCompleted
             // auto-clears it instead of leaving a stale, unclosable banner on screen.
             final var transient_ = notice.level() == AgentEvent.Notice.Level.WARN;
+            handleCompactionNotice(state, notice);
             modelError(state, notice.message(), notice.cause(), transient_);
             final var leading = state.model.status();
             state.model.onEvent(event);
@@ -1483,6 +1484,9 @@ public class TuiCommand implements Runnable {
                     && state.errorDetail != null
                     && state.errorDetail.transient_()) {
                 clearError(state);
+            }
+            if (event instanceof AgentEvent.Notice compactionNotice) {
+                handleCompactionNotice(state, compactionNotice);
             }
             state.model.onEvent(event);
         }
@@ -1598,6 +1602,14 @@ public class TuiCommand implements Runnable {
             // a cancellation is not an error, only the end of the current turn
             state.turnCompleted = true;
             state.wait = null;
+            // a compaction lifecycle can never outlive its turn: a turn that ends without a
+            // "Compacted:"/"Compaction gate:" notice (cancel, hard interrupt) must clear the
+            // pinned compacting indicator, otherwise the ⓘ slot would stay stuck forever.
+            if (state.compactionActive) {
+                state.compactionActive = false;
+                state.notification = null;
+                state.notificationShownAt = 0;
+            }
             // the interrupt dropped the queues (see interruptTurn): nothing may auto-submit after
             // a cancel, even a prompt re-queued in the race window
             if (!state.interrupted) {
@@ -6291,7 +6303,8 @@ public class TuiCommand implements Runnable {
         final var statusW = Math.max(1, rect.width() - helpW);
         final var notifW = state.notification == null
                         || state.notification.isBlank()
-                        || System.currentTimeMillis() - state.notificationShownAt > NOTIFICATION_TTL_MS
+                        || (!state.compactionActive
+                                && System.currentTimeMillis() - state.notificationShownAt > NOTIFICATION_TTL_MS)
                 ? 0
                 : ("  ⓘ " + state.notification).length();
         final var totalW = new int[] {parts.stream().mapToInt(Span::width).sum()};
@@ -7816,6 +7829,34 @@ public class TuiCommand implements Runnable {
         state.notificationShownAt = System.currentTimeMillis();
     }
 
+    /**
+     * Tracks the compaction lifecycle on the notification slot. A "Compaction in progress..." INFO
+     * notice arms the indicator and pins it in the ⓘ slot, bypassing the 5s TTL while the summarizer
+     * runs; the "Compacted: ..." result notice (INFO) clears it and shows the outcome with the normal
+     * TTL. A "Compaction gate: ..." escalation is an ERROR notice: its full message already lands in
+     * the red ✗ banner, so the ⓘ slot is only cleared (a long ⓘ duplicate would crowd the ✗ out of
+     * the status row). Everything else (WARN/ERROR banner paths) is left alone.
+     */
+    private static void handleCompactionNotice(final UiState state, final AgentEvent.Notice notice) {
+        switch (notice.compaction()) {
+            case START -> {
+                state.compactionActive = true;
+                notify(state, "compacting...");
+            }
+            case GATE_ESCALATED -> {
+                state.compactionActive = false;
+                notify(state, null);
+            }
+            case COMPLETED -> {
+                state.compactionActive = false;
+                notify(state, notice.message());
+            }
+            case NONE -> {
+                // not a compaction lifecycle notice: leave the indicator untouched
+            }
+        }
+    }
+
     /** Status-strip notifications expire after a few seconds so they don't linger as stale noise. */
     private static final long NOTIFICATION_TTL_MS = 5_000L;
 
@@ -9134,6 +9175,13 @@ public class TuiCommand implements Runnable {
 
         /** Millis when {@link #notification} was set; {@code 0} when none is pending. */
         private volatile long notificationShownAt;
+
+        /**
+         * True while a compaction lifecycle is in flight (a "Compaction in progress..." notice was
+         * seen and no "Compacted:"/"Compaction gate:" result yet): pins the compacting indicator in
+         * the ⓘ notification slot, bypassing the TTL, so a long summarizer pass stays visible.
+         */
+        private volatile boolean compactionActive;
 
         /**
          * Full title of the tab the mouse currently hovers (tab bar tooltip), or

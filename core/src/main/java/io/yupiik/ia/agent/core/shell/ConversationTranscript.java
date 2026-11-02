@@ -179,13 +179,32 @@ public class ConversationTranscript {
      */
     private volatile long contentVersion;
 
+    /**
+     * Monotonic counter bumped only on durable {@link #transcript} mutations (flushes, turn/notice
+     * writes, trim, reset, clear, replay, {@link #appendTranscript}) - never on the streaming
+     * buffers (pending/thinking/tool stream). {@code markdown()} caches the scrubbed head against
+     * this version, so a streaming turn (which bumps {@link #contentVersion} on every delta but not
+     * this counter) reuses the already-scrubbed durable head instead of re-scrubbing the whole
+     * transcript on every render tick - the busy-frame CPU hot spot.
+     */
+    private volatile long transcriptVersion;
+
     private long markdownVersion = -1;
     private String markdownSpinner;
     private String markdownCache;
+    /** Scrubbed durable head + the {@link #transcriptVersion} it was built from, see {@link #markdown}. */
+    private long scrubbedHeadVersion = -1;
+
+    private String scrubbedHeadCache;
 
     /** Marks the transcript-markdown inputs as changed so {@code markdown()} rebuilds its cache. */
     private synchronized void touch() {
         contentVersion++;
+    }
+
+    /** Marks the durable {@link #transcript} as changed so {@code markdown()} rebuilds its scrubbed head. */
+    private synchronized void touchTranscript() {
+        transcriptVersion++;
     }
 
     /** True while the last failure was a retryable LLM error; the status clears on the next progress event. */
@@ -498,6 +517,7 @@ public class ConversationTranscript {
                         .append(TOOL_END)
                         .append('\n');
             }
+            touchTranscript();
             touch();
         } else if (event
                 instanceof
@@ -546,6 +566,7 @@ public class ConversationTranscript {
                     .append(" applied (")
                     .append(mode.toLowerCase(Locale.ROOT))
                     .append(")\n");
+            touchTranscript();
             touch();
         } else if (event
                 instanceof
@@ -571,7 +592,8 @@ public class ConversationTranscript {
                         String sessionId,
                         String subagentId,
                         String subagentName,
-                        Throwable cause)) {
+                        Throwable cause,
+                        AgentEvent.Notice.CompactionLifecycle compaction)) {
             final var tag =
                     switch (level) {
                         case ERROR -> "⚠ error";
@@ -579,6 +601,7 @@ public class ConversationTranscript {
                         case INFO -> "ⓘ";
                     };
             transcript.append("\n\n> ").append(tag).append(": ").append(message).append("\n");
+            touchTranscript();
             touch();
             retryableErrorSeen |= isRetryableLlmError(message);
             if (level == AgentEvent.Notice.Level.ERROR) {
@@ -609,6 +632,7 @@ public class ConversationTranscript {
                     .append(text)
                     .append('\n');
             status = "queued prompt integrated";
+            touchTranscript();
             touch();
         } else if (event
                 instanceof
@@ -675,6 +699,7 @@ public class ConversationTranscript {
             answerHeaderWritten = false;
             busy = false;
             status = "ready";
+            touchTranscript();
             touch();
         } else if (event
                 instanceof AgentEvent.TurnCancelled(String sessionId, String subagentId, String subagentName)) {
@@ -687,6 +712,7 @@ public class ConversationTranscript {
             answerHeaderWritten = false;
             busy = false;
             status = "cancelled";
+            touchTranscript();
             touch();
         } else if (event
                 instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {
@@ -700,6 +726,7 @@ public class ConversationTranscript {
             busy = false;
             status = "error: " + message;
             retryableErrorSeen = isRetryableLlmError(message);
+            touchTranscript();
             touch();
         } else if (event
                 instanceof
@@ -718,6 +745,7 @@ public class ConversationTranscript {
                     .append("` started: ")
                     .append(firstLine(task))
                     .append('\n');
+            touchTranscript();
             touch();
         } else if (event
                 instanceof
@@ -750,6 +778,7 @@ public class ConversationTranscript {
                         .append('\n');
             }
             transcript.append("\n> full report: /subagents ").append(subagentId).append('\n');
+            touchTranscript();
             touch();
         }
     }
@@ -805,6 +834,7 @@ public class ConversationTranscript {
                 .append('\n')
                 .append(THOUGHT_END)
                 .append('\n');
+        touchTranscript();
         touch();
     }
 
@@ -859,6 +889,7 @@ public class ConversationTranscript {
             transcript.append(assistantMarker() + "\n\n");
         }
         transcript.append(sanitized).append('\n');
+        touchTranscript();
         touch();
     }
 
@@ -886,7 +917,18 @@ public class ConversationTranscript {
         if (markdownCache != null && markdownVersion == contentVersion && Objects.equals(markdownSpinner, spinner)) {
             return markdownCache;
         }
-        final var sb = new StringBuilder(transcript);
+        // The durable transcript was already scrubbed on each write (flushPending, TurnDone,
+        // flushThinking, ToolFinished, Notice... see touchTranscript() sites), so the scrub is
+        // idempotent for it. The result is cached against transcriptVersion, which only bumps on
+        // durable mutations: during a streaming turn every TextDelta bumps contentVersion (tail
+        // moved) but not transcriptVersion, so the head below is reused frame after frame instead
+        // of re-running withholdDanglingPrefix over the whole multi-megabyte transcript - the
+        // busy-frame CPU hot spot.
+        if (scrubbedHeadVersion != transcriptVersion) {
+            scrubbedHeadCache = compression.withholdDanglingPrefix(transcript.toString());
+            scrubbedHeadVersion = transcriptVersion;
+        }
+        final var sb = new StringBuilder(scrubbedHeadCache);
         if (busy && !pending.isEmpty()) {
             // pending only carries visible text: inline <think> content is already
             // classified into the thinking buffer by the stream splitter. It renders
@@ -898,8 +940,7 @@ public class ConversationTranscript {
                 sb.append(assistantMarker() + "\n\n");
             }
             // the pending tail is sanitized BEFORE the running-tool blocks are appended: a
-            // half-arrived seam fragment must stay hidden even once UI text follows it (the
-            // whole-string trailing-run withhold below cannot see it anymore at that point)
+            // half-arrived seam fragment must stay hidden even once UI text follows it
             sb.append(withholdPendingTail());
         }
         // one running block per pending tool: parallel read-only tools each show
@@ -909,7 +950,10 @@ public class ConversationTranscript {
         // cancel) before the call finishes
         for (final var tool :
                 runningTools.values().stream().flatMap(Collection::stream).toList()) {
-            sb.append("\n\n")
+            // the running block is assembly-local: it embeds tool command/output that was never
+            // scrubbed at write (only the finished capture is), so scrub the assembled block with
+            // the same whole-string pass, preserving exact parity with the pre-split rendering
+            final var block = new StringBuilder("\n\n")
                     .append(TOOL_BEGIN)
                     .append("\n`")
                     .append(spinner)
@@ -918,11 +962,12 @@ public class ConversationTranscript {
                     .append(tool.ordinal() > 0 ? " (#" + tool.ordinal() + ")" : "")
                     .append("`");
             if (!tool.stream.isEmpty()) {
-                sb.append("\n\n```text\n")
+                block.append("\n\n```text\n")
                         .append(tool.stream.toString().stripTrailing())
                         .append("\n```\n");
             }
-            sb.append(TOOL_END).append('\n');
+            block.append(TOOL_END).append('\n');
+            sb.append(compression.withholdDanglingPrefix(block.toString()));
         }
         final var md = sb.toString().strip();
         // the persisted transcript is scrubbed by AgentLoop (stripEchoedRefs) but the live
@@ -930,8 +975,7 @@ public class ConversationTranscript {
         // "@N@" seam would show it on screen while the stored message stays clean. This display
         // surface applies the same deterministic scrub so what is rendered matches what persists,
         // plus the dangling-fragment withhold so a partially-arrived seam never renders.
-        final var scrubbed = compression.withholdDanglingPrefix(md);
-        final var result = scrubbed == null || scrubbed.isBlank() ? fallback : scrubbed;
+        final var result = md.isBlank() ? fallback : md;
         markdownVersion = contentVersion;
         markdownSpinner = spinner;
         markdownCache = result;
@@ -1001,6 +1045,7 @@ public class ConversationTranscript {
         kept = dropDanglingRegion(kept, LOG_BEGIN, LOG_END);
         transcript.setLength(0);
         transcript.append(kept.stripLeading());
+        touchTranscript();
         touch();
     }
 
@@ -1123,6 +1168,7 @@ public class ConversationTranscript {
                 default -> {}
             }
         }
+        touchTranscript();
         touch();
         return transcript.substring(start);
     }
@@ -1133,6 +1179,7 @@ public class ConversationTranscript {
         inlineThink.reset();
         answerHeaderWritten = false;
         appliances.clear();
+        touchTranscript();
         touch();
     }
 
@@ -1147,6 +1194,7 @@ public class ConversationTranscript {
         // turn actually makes progress (the retry), then the auto-clear in
         // onEvent() drops it from the bar
         busy = true;
+        touchTranscript();
         touch();
     }
 
@@ -1186,6 +1234,7 @@ public class ConversationTranscript {
         turnToolsRun = 0;
         turnDurationMs = 0;
         turnThroughput = AgentEvent.Throughput.EMPTY;
+        touchTranscript();
         touch();
     }
 
@@ -1197,6 +1246,7 @@ public class ConversationTranscript {
      */
     public synchronized void appendTranscript(final String markdown) {
         transcript.append(markdown);
+        touchTranscript();
         touch();
     }
 
@@ -1275,9 +1325,11 @@ public class ConversationTranscript {
      */
     public synchronized void bindCompression(final ContextCompression value) {
         this.compression = value != null ? value : new ContextCompression(null);
-        // the pending tail and cache were sanitized against the previous instance's refs:
-        // drop the cached markdown so the next render rebuilds against the new refs
+        // the pending tail, the durable head and the cache were sanitized against the previous
+        // instance's refs: drop them so the next render rebuilds against the new refs
         markdownCache = null;
+        scrubbedHeadCache = null;
+        scrubbedHeadVersion = -1;
     }
 
     /**

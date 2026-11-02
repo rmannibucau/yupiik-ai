@@ -20,7 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
@@ -149,6 +151,72 @@ class ContextManagerTest {
                         .anyMatch(m -> m.content() instanceof String s
                                 && s.contains("When a compacted context is provided, treat it as historical state.")),
                 "the digest must carry the historical-state guidance");
+    }
+
+    @Test
+    void digestOnlyHistoryFoldsIntoOneReplacementDigest() {
+        // the exact user dead-end: a previous <compacted-context> digest (the only user message)
+        // followed by a long tool-churn turn with no real new user turn. Re-forcing compaction
+        // must FOLD: replace the old digest with ONE new digest carrying the previous summary,
+        // summarize the tool-churn region away (drop the region) instead of preserving it, so
+        // repeated /compact force actually reclaims the middle.
+        final var cfg = config(6, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
+                return new ChatResult(Message.assistant("folded-into-previous + new tool work", null), Usage.EMPTY);
+            }
+        };
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                        providerManager(cfg),
+                        null,
+                        "s1",
+                        new BackoffSleeper()));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        // the previous digest as the only real user content
+        messages.add(
+                Message.user("<compacted-context>\nPrevious context: the old work summary.\n</compacted-context>\n\n"
+                        + "When a compacted context is provided, treat it as historical state."));
+        // a long tool-churn turn right after the digest: assistant tool calls with results
+        messages.add(Message.assistant(
+                "let me check", List.of(new ToolCall("t1", "function", new ToolCall.FunctionCall("bash", "{}"), 0))));
+        messages.add(Message.tool("t1", "output1 " + "y".repeat(8_000)));
+        messages.add(Message.assistant(
+                "let me check more",
+                List.of(new ToolCall("t2", "function", new ToolCall.FunctionCall("bash", "{}"), 0))));
+        messages.add(Message.tool("t2", "output2 " + "z".repeat(8_000)));
+
+        final var result = manager.compact(messages, true);
+
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+        final var digests = result.messages().stream()
+                .filter(m -> m.content() instanceof String s && s.contains("<compacted-context>"))
+                .toList();
+        assertEquals(1, digests.size(), "the fold must produce ONE digest, never a stacked second one");
+        final var digest = String.valueOf(digests.getFirst().content());
+        assertTrue(
+                digest.contains("Previous context:") && digest.contains("the old work summary"),
+                "the folded digest must carry the previous summary body forward");
+        assertTrue(
+                digest.contains("folded-into-previous + new tool work"),
+                "the folded digest must carry the newly summarized tool material");
+        assertTrue(
+                result.messages().stream()
+                        .noneMatch(m -> String.valueOf(m.content()).contains("output1")),
+                "the tool-churn region must be summarized away, not preserved after the digest");
+        // the folded digest sits exactly at index `from` (just after the system prompt), which is
+        // the digestIndex ensureUnderWindow protects: it must not have been spliced by the size fit
+        assertEquals(1, result.messages().indexOf(digests.getFirst()), "the digest stays at index `from`");
     }
 
     @Test
@@ -703,11 +771,11 @@ class ContextManagerTest {
     }
 
     @Test
-    void compactionTriggerIsClampedToTheUsableWindowForLargeOutputReserves() {
+    void compactionTriggerIsCappedToASafetyFractionOfTheUsableWindowForLargeOutputReserves() {
         // azure_gpt-5.5-like: a 500k window declaring a 128k output cap leaves only 372k usable, yet
         // the raw opencode-style buffer trigger is window - max(15%, 16k) = 425k, above the usable
-        // window. The clamp must pull the trigger down to the usable window so the gauge cannot
-        // cross 100% without ever tripping an automatic compaction.
+        // window. The safety cap must pull the trigger down to a real safety margin below the usable
+        // window so the gauge cannot cross 100% without ever tripping an automatic compaction.
         final var cfg = config(
                 6,
                 500_000,
@@ -718,13 +786,36 @@ class ContextManagerTest {
         final var manager = manager(cfg, null);
         final var usable = manager.usableWindowTokens();
         assertEquals(372_000, usable, "500k window minus a 128k output reserve");
-        assertEquals(372_000, manager.compactionTriggerTokens(), "the trigger must never exceed the usable window");
+        assertEquals(
+                334_800,
+                manager.compactionTriggerTokens(),
+                "the trigger must never exceed 90% of the usable window (legacy clamp would land it on the usable window = 100% gauge)");
+    }
+
+    @Test
+    void compactionTriggerSafetyIsConfigurableAndNeverEqualsTheUsableWindowAtOneHundredPercent() {
+        // even at triggerSafetyPercent=100 the trigger is the usable window itself - the legacy clamp
+        // behavior - but a value below 100 (the default) adds headroom
+        final var full = config(
+                6,
+                500_000,
+                Map.of(
+                        "yca.provider.providers.0.outputTokens", "128000",
+                        "yca.compaction.triggerSafetyPercent", "100"));
+        final var capped = config(
+                6,
+                500_000,
+                Map.of(
+                        "yca.provider.providers.0.outputTokens", "128000",
+                        "yca.compaction.triggerSafetyPercent", "75"));
+        assertEquals(372_000, manager(full, null).compactionTriggerTokens(), "100% safety = legacy clamp");
+        assertEquals(279_000, manager(capped, null).compactionTriggerTokens(), "75% safety adds headroom");
     }
 
     @Test
     void compactionTriggerKeepsTheBufferWhenTheOutputReserveIsSmall() {
         // with a default reserve below the buffer floor the raw trigger already sits under the usable
-        // window, so the clamp is a no-op and opencode parity is preserved
+        // window, so the safety cap is a no-op and opencode parity is preserved
         final var cfg = config(
                 6,
                 32_000,
@@ -736,6 +827,98 @@ class ContextManagerTest {
                 16_000,
                 manager.compactionTriggerTokens(),
                 "small reserve: buffer trigger (32k - 16k floor) is unchanged");
+    }
+
+    @Test
+    void compactionTriggerForRelativeCapProvidersKeepsTheBufferModeTrigger() {
+        // freeinference-like: a 1M window with a relative (DETECTED_RELATIVE) output cap is not a hard
+        // partition, so nothing is reserved and the usable window is 1M - min(20k, 250k) = 980k; the raw
+        // buffer trigger (1M - 150k = 850k) is below the 90% safety cap (882k), so opencode parity holds.
+        // The relative-cap shape is expressed at the ContextBudget level (detected /v1/models extension,
+        // not a configured outputTokens - a configured cap is always absolute).
+        assertEquals(
+                850_000,
+                ContextBudget.compactionTrigger(1_000_000, 15, 16_000, 980_000, 90),
+                "raw buffer trigger stays below the safety cap for relative-cap providers");
+        assertEquals(
+                882_000,
+                ContextBudget.compactionTrigger(1_000_000, 0, 0, 980_000, 90),
+                "when the raw trigger would exceed the safety cap, the cap wins");
+    }
+
+    @Test
+    void perProviderCompactionThresholdAndGateOverrideGlobalsPerSession() {
+        // the provider block overrides the global triggerSafetyPercent and gate budgets; the global
+        // values apply when no per-provider block is set
+        final var cfg = config(
+                6,
+                500_000,
+                Map.of(
+                        "yca.provider.providers.0.outputTokens", "128000",
+                        "yca.provider.providers.0.compaction.triggerSafetyPercent", "80",
+                        "yca.provider.providers.0.compaction.gateMaxAttempts", "4",
+                        "yca.provider.providers.0.compaction.gateMaxDurationMs", "90000"));
+        final var manager = manager(cfg, null);
+        assertEquals(372_000, manager.usableWindowTokens());
+        // global default safety is 90 -> 334_800; the provider override 80 -> 297_600
+        assertEquals(297_600, manager.compactionTriggerTokens(null), "provider triggerSafetyPercent must win");
+        // an unknown provider id falls back to the default provider (which carries the override) -
+        // ProviderManager.provider(id) resolves unknowns to the default, so the override still applies
+        assertEquals(
+                297_600,
+                manager.compactionTriggerTokens(new ChatSettings("other-provider", null, null, null)),
+                "unknown provider id resolves to the default provider and its override");
+        assertEquals(4, manager.resolvedGateMaxAttempts(null), "provider gateMaxAttempts must resolve");
+        assertEquals(90_000, manager.resolvedGateMaxDurationMs(null), "provider gateMaxDurationMs must resolve");
+        assertEquals(
+                4,
+                manager.resolvedGateMaxAttempts(new ChatSettings("other-provider", null, null, null)),
+                "unknown provider id falls back to the default provider override");
+    }
+
+    @Test
+    void automaticCompactionLandsBelowTheTriggerNotJustUnderTheUsableWindow() {
+        // azure-like window: 500k window + 128k output cap -> usable 372k, trigger capped at 90% =
+        // 334.8k. An automatic (non-forced, non-urgent) compaction must shrink the kept tail until the
+        // estimate is BELOW the trigger - real headroom for the next turns - not merely under the hard
+        // usable window (which would still read 100% on the gauge).
+        final var cfg = config(
+                6,
+                500_000,
+                Map.of(
+                        "yca.provider.providers.0.outputTokens", "128000",
+                        "yca.compaction.bufferPercent", "15",
+                        "yca.compaction.bufferMinTokens", "16000",
+                        "yca.compaction.tailBudgetTokens", "20000"));
+        final var tracker = new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC());
+        assertEquals(372_000, tracker.usableWindow(), "500k minus 128k output reserve");
+        final var chat = chatReturning("digest: heavy history summarized");
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(cfg, chat, tracker, providerManager(cfg), null, "s1", new BackoffSleeper()));
+        assertEquals(334_800, manager.compactionTriggerTokens(), "trigger = 90% of the usable window");
+
+        // a heavy history: many tool outputs in the middle so compaction has something to summarize,
+        // and a genuinely big tail so the post-compaction list needs tail spilling to fit the trigger
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 8; i++) {
+            messages.add(Message.user("step " + i));
+            messages.add(Message.assistant("tool call " + i, null));
+            messages.add(Message.tool("call_" + i, "x".repeat(40_000), false));
+        }
+        messages.add(Message.user("current task " + "y".repeat(200_000)));
+
+        final var result = manager.compact(messages);
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+        assertTrue(
+                tracker.estimateContext(result.messages()) < manager.compactionTriggerTokens(),
+                "automatic compaction must land below the trigger (got "
+                        + tracker.estimateContext(result.messages()) + " vs trigger "
+                        + manager.compactionTriggerTokens() + ")");
+        assertTrue(
+                tracker.estimateContext(result.messages()) >= 0, "the list must still contain the digest and the tail");
     }
 
     @Test
@@ -775,6 +958,62 @@ class ContextManagerTest {
         assertTrue(
                 urgent.error() != null && urgent.error().contains("upstream 500"),
                 "the truncation must still surface the summarizer failure: " + urgent.error());
+    }
+
+    @Test
+    void compactionEmitsProgressAndResultNoticesOnSuccess() {
+        final var cfg = config(6, 128_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var events = new ArrayList<AgentEvent>();
+        final var chat = chatReturning("digest: summarized");
+        final var tracker = new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC());
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        tracker,
+                        providerManager(cfg),
+                        new Emitter() {
+                            @Override
+                            public <T> void emit(final T event) {
+                                if (event instanceof AgentEvent agentEvent) {
+                                    events.add(agentEvent);
+                                }
+                            }
+                        },
+                        "s1",
+                        new BackoffSleeper()));
+
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 8; i++) {
+            messages.add(Message.user("old step " + i + " " + "x".repeat(1_000)));
+            messages.add(Message.assistant("ack " + i, null));
+        }
+        messages.add(Message.user("current task"));
+
+        final var result = manager.compact(messages, true);
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+
+        final var notices = events.stream()
+                .filter(AgentEvent.Notice.class::isInstance)
+                .map(AgentEvent.Notice.class::cast)
+                .toList();
+        assertTrue(notices.size() >= 2, "progress + result notices expected, got " + notices);
+        final var progress = notices.get(0);
+        assertEquals(AgentEvent.Notice.Level.INFO, progress.level());
+        assertTrue(
+                progress.message().startsWith("Compaction in progress... (\u2248"),
+                "progress notice must carry the estimated token count: " + progress.message());
+        assertTrue(
+                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens\\)"),
+                "progress notice must carry a numeric estimate: " + progress.message());
+        assertTrue(
+                notices.stream()
+                        .anyMatch(n -> n.message().startsWith("Compacted: context ")
+                                || n.message().startsWith("Compacted: reclaimed ~")),
+                "a compaction result notice must be emitted, got " + notices);
     }
 
     private ContextManager manager(final CodingAgentConfiguration cfg, final ChatClient chat) {

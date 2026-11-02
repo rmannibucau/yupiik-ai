@@ -127,6 +127,23 @@ public record ChatCompletionRequest(
                 value);
     }
 
+    /** A copy recording this request's retry mode under a reserved {@code others} key (see {@link io.yupiik.ia.agent.core.llm.ChatClient#RETRY_MODE_OTHERS_KEY}). */
+    public ChatCompletionRequest withRetryMode(final io.yupiik.ia.agent.core.llm.RetryMode mode) {
+        return new ChatCompletionRequest(
+                model,
+                messages,
+                temperature,
+                topP,
+                stream,
+                tools,
+                toolChoice,
+                maxTokens,
+                reasoningEffort,
+                putIfAbsent(others, io.yupiik.ia.agent.core.llm.ChatClient.RETRY_MODE_OTHERS_KEY, mode),
+                sessionId,
+                settings);
+    }
+
     /** A copy carrying the given session attribution (replacing the previous one); keeps the settings. */
     public ChatCompletionRequest withSessionId(final String value) {
         return new ChatCompletionRequest(

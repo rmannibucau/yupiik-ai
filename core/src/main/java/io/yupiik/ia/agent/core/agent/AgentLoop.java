@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.ContextManager;
@@ -88,6 +89,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
@@ -221,6 +223,13 @@ public class AgentLoop {
     private final ToolCallPairingRepair pairingRepair;
     private final String subagentId;
     private final String subagentName;
+    /**
+     * Interruptible sleep for the compaction gate's backoff cadence (between gate passes) and for the
+     * coordination of the {@code /compact urgent} escalation probe. Production sleeps on the real
+     * clock; tests substitute a virtual-time instance to exercise the wall-clock budget
+     * ({@code gateMaxDurationMs}) without stalling the suite.
+     */
+    private volatile BackoffSleeper backoffSleeper = new BackoffSleeper();
     /** Null means this is a regular agent turn; a non-null set is a subagent execution ceiling. */
     private volatile Set<String> allowedTools;
 
@@ -688,6 +697,17 @@ public class AgentLoop {
         this.subagentName = subagentName;
         this.userFeedbackService = userFeedbackService;
         this.pairingRepair = pairingRepair != null ? pairingRepair : new ToolCallPairingRepair(sessionStore, clock);
+    }
+
+    /**
+     * Installs the sleeper used by the compaction gate's backoff cadence (between gate passes).
+     * Tests substitute a virtual-time instance to exercise the wall-clock budget
+     * ({@code gateMaxDurationMs}) without stalling the suite; production keeps the default.
+     */
+    public void backoffSleeper(final BackoffSleeper value) {
+        if (value != null) {
+            this.backoffSleeper = value;
+        }
     }
 
     /**
@@ -1426,6 +1446,26 @@ public class AgentLoop {
                 .name();
     }
 
+    /**
+     * Pinned escalation of the compaction gate: the context could not be brought under the trigger
+     * by recovery compaction + local spill within the gate budget (or compaction stopped making
+     * progress). The turn is <em>not</em> blocked: after this notice the request proceeds, so a
+     * genuinely non-compactable context (single oversized user message, digest-only history) can
+     * never hang the loop - the provider hard-overflow retry remains the final safety net.
+     */
+    private void escalateCompactionGate(final int effectiveAfter) {
+        final var trigger = contextManager.compactionTriggerTokens();
+        final var hardLimit = contextManager.usableWindowTokens();
+        emit(AgentEvent.Notice.compactionGateEscalated(
+                "Compaction gate: the context cannot be compacted below the trigger "
+                        + "(about " + effectiveAfter + " tokens; trigger " + trigger
+                        + ", hard limit "
+                        + hardLimit
+                        + "). Run /compact urgent to force local truncation, or "
+                        + "reduce the session size. Continuing and monitoring the provider hard limit.",
+                currentSessionId));
+    }
+
     private AgentEvent.Status status(final String message) {
         return new AgentEvent.Status(message, currentSessionId, subagentId, subagentName);
     }
@@ -1525,8 +1565,9 @@ public class AgentLoop {
         // tool-pairing 400 (Azure/litellm "tool_calls must be followed by tool messages") can be repaired
         // and retried once without risking an endless retry loop on a non-tool 400.
         var toolPairingRepaired = false;
-        var compactionPressureWarningEmitted = false;
-        var forcedCompactionRecoveryAttempted = false;
+        var compactionGateEscalated = false;
+        var forcedCompactionRecoveryAttempted = 0;
+        var gateStartedAtNanos = 0L;
         var autoNoticeEmitted = false;
         var truncationContinues = 0;
         var emptyCompletionRetries = 0;
@@ -1631,25 +1672,119 @@ public class AgentLoop {
                     }
                 }
                 // The normal tail floor is optimized for retaining recent history. If it leaves the
-                // prompt above the trigger, make one bounded forced pass with the coordinator's
-                // tighter tail budget before sending the request. This is deliberately separate
-                // from the provider hard-overflow retry: the trigger can be below the usable window.
-                if (compactedThisTurn
-                        && !forcedCompactionRecoveryAttempted
+                // prompt above the trigger, run the compaction gate: a bounded sequence of ever
+                // tighter forced passes, an LLM-free local tail spill, then - if the context still
+                // cannot get under the trigger and compaction stops making progress - escalate to a
+                // pinned error and continue (never block the turn forever on a non-compactable
+                // context, and never silently limp past the trigger). The gate is deliberately
+                // separate from the provider hard-overflow retry: the trigger can be below the
+                // usable window, and the gate must not send a request while the prompt is over it.
+                // The gate also runs when the checkpoint compact itself made no progress (Mode.NONE):
+                // in that case the recovery pass and the local spill get their chance, and if they
+                // also reclaim nothing the context is declared non-compactable instead of limping.
+                if (!compactionGateEscalated
                         && usageTracker.effectiveContext(messages, toolsTokens)
                                 >= contextManager.compactionTriggerTokens()) {
-                    forcedCompactionRecoveryAttempted = true;
-                    final var recovery = contextManager.compactForRecovery(messages, cancelled, runSettings);
-                    if (recovery.changed()) {
-                        messages.clear();
-                        messages.addAll(recovery.messages());
-                        appliedKinds.add("compact-recovery");
-                        appliedModes.add(recovery.mode());
-                        if (contextView != null) {
-                            contextView.compression().absorbAll();
+                    final var gateConfig = configuration.compaction();
+                    // per-session/per-provider overrides win over the global gate budgets (a session or
+                    // provider on a flakier route can raise its own gate ceiling without affecting others)
+                    final var resolvedAttempts = contextManager.resolvedGateMaxAttempts(runSettings);
+                    final var resolvedDuration = contextManager.resolvedGateMaxDurationMs(runSettings);
+                    final var maxAttempts = resolvedAttempts > 0 ? resolvedAttempts : gateConfig.gateMaxAttempts();
+                    final var maxDurationMs = resolvedDuration > 0 ? resolvedDuration : gateConfig.gateMaxDurationMs();
+                    if (gateStartedAtNanos == 0) {
+                        gateStartedAtNanos = precisionDurationMarker.now();
+                    }
+                    var consecutiveWeakPasses = 0;
+                    var gateBudgetExhausted = false;
+                    while (!compactionGateEscalated
+                            && !cancelled.getAsBoolean()
+                            && usageTracker.effectiveContext(messages, toolsTokens)
+                                    >= contextManager.compactionTriggerTokens()
+                            && !gateBudgetExhausted) {
+                        if (maxAttempts > 0 && forcedCompactionRecoveryAttempted >= maxAttempts) {
+                            gateBudgetExhausted = true;
+                            break;
                         }
-                        persistContext(sessionId, messages);
-                        compactedThisTurn = true;
+                        if (maxDurationMs > 0
+                                && precisionDurationMarker.now() - gateStartedAtNanos
+                                        >= TimeUnit.MILLISECONDS.toNanos(maxDurationMs)) {
+                            gateBudgetExhausted = true;
+                            break;
+                        }
+                        forcedCompactionRecoveryAttempted++;
+                        final var effectiveBefore = usageTracker.effectiveContext(messages, toolsTokens);
+                        emit(status("Compacting... " + (int) usageTracker.contextPercent(effectiveBefore)
+                                + "% (trigger "
+                                + (int) usageTracker.contextPercent(contextManager.compactionTriggerTokens())
+                                + "%)"));
+                        // 1) one tighter forced pass (halved tail budget) - LLM-backed
+                        final var recovery = contextManager.compactForRecovery(messages, cancelled, runSettings);
+                        if (recovery.changed()) {
+                            messages.clear();
+                            messages.addAll(recovery.messages());
+                            appliedKinds.add("compact-recovery");
+                            appliedModes.add(recovery.mode());
+                            if (contextView != null) {
+                                contextView.compression().absorbAll();
+                            }
+                            persistContext(sessionId, messages);
+                            compactedThisTurn = true;
+                        } else {
+                            // 2) no summarizer progress: LLM-free local spill of pre-digest tool
+                            // outputs (never touches the digest at index 0) before the next run
+                            final var spilled =
+                                    contextManager.localSpill(messages, contextManager.compactionTriggerTokens());
+                            if (spilled.changed()) {
+                                messages.clear();
+                                messages.addAll(spilled.messages());
+                                appliedKinds.add("compact-spill");
+                                appliedModes.add(spilled.mode());
+                                persistContext(sessionId, messages);
+                                compactedThisTurn = true;
+                            }
+                        }
+                        if (cancelled.getAsBoolean()) {
+                            // the user pressed Esc mid-pass: abort the gate without escalating
+                            break;
+                        }
+                        // progress check: a pass that reclaims nothing (or only a tiny <5% fraction,
+                        // twice in a row) means the context cannot be compacted further with the
+                        // current strategy - escalate instead of blocking or silently limping. A
+                        // genuine strong pass resets the weak-pass counter.
+                        final var effectiveAfter = usageTracker.effectiveContext(messages, toolsTokens);
+                        final var reclaimed = effectiveBefore - effectiveAfter;
+                        if (reclaimed <= 0) {
+                            compactionGateEscalated = true;
+                            escalateCompactionGate(effectiveAfter);
+                        } else if (reclaimed * 100L < effectiveBefore * 5L) {
+                            // a weak pass (<5% reclaimed) bumps the counter; only the second
+                            // consecutive weak pass escalates. A weak pass must NOT fall through to
+                            // the strong-pass reset below, or the counter can never reach two.
+                            if (++consecutiveWeakPasses >= 2) {
+                                compactionGateEscalated = true;
+                                escalateCompactionGate(effectiveAfter);
+                            }
+                        } else {
+                            // a genuine strong pass resets the weak-pass counter.
+                            consecutiveWeakPasses = 0;
+                        }
+                        // backoff between gate passes: bounded and interruptible, so Esc aborts the
+                        // sleep (interrupted sleep reports false) instead of idling out the budget
+                        if (!compactionGateEscalated && !cancelled.getAsBoolean()) {
+                            if (!backoffSleeper.sleep(Math.min(1_000L * forcedCompactionRecoveryAttempted, 5_000L))) {
+                                break;
+                            }
+                        }
+                    }
+                    if (!compactionGateEscalated
+                            && !cancelled.getAsBoolean()
+                            && gateBudgetExhausted
+                            && usageTracker.effectiveContext(messages, toolsTokens)
+                                    >= contextManager.compactionTriggerTokens()) {
+                        // ran out of attempts or wall-clock budget while still over the trigger
+                        compactionGateEscalated = true;
+                        escalateCompactionGate(usageTracker.effectiveContext(messages, toolsTokens));
                     }
                 }
                 if (!appliedKinds.isEmpty()) {
@@ -1664,25 +1799,6 @@ public class AgentLoop {
                             toolsTokens,
                             () -> closed || cancelled.getAsBoolean(),
                             useProfileModel ? runSettings : chatSettings);
-                }
-                if (compactedThisTurn
-                        && !compactionPressureWarningEmitted
-                        && usageTracker.effectiveContext(messages, toolsTokens)
-                                >= contextManager.compactionTriggerTokens()) {
-                    // A compaction checkpoint is not a failed turn: long tool-heavy tasks can
-                    // legitimately keep growing beyond the trigger. The old five-attempt ERROR+break
-                    // made productive reductions terminate the user's task. Keep the turn running
-                    // and let the existing hard-window overflow recovery decide if a request truly
-                    // cannot be sent. Warn once instead of repeating the same warning each round.
-                    compactionPressureWarningEmitted = true;
-                    final var effectiveAfterCompaction = usageTracker.effectiveContext(messages, toolsTokens);
-                    final var trigger = contextManager.compactionTriggerTokens();
-                    final var hardLimit = contextManager.usableWindowTokens();
-                    emit(notice(
-                            AgentEvent.Notice.Level.WARN,
-                            "Context remains above the compaction trigger after reduction (about "
-                                    + effectiveAfterCompaction + " tokens; trigger " + trigger + ", hard limit "
-                                    + hardLimit + "); continuing the turn and monitoring the provider context limit."));
                 }
 
                 // append-only volatile session state: the tail is its own trailing user message in the

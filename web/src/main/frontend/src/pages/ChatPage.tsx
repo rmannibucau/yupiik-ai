@@ -1215,6 +1215,9 @@ function StatusBar({
   // while a turn runs the transient status message is the live label (e.g. "thinking... (5s)",
   // "working"); only fall back to a generic label if the busiest frame carried none.
   const live = busy && notice && notice !== 'ready' ? notice : '';
+  // compaction pins its own spinner label: the notice text stays as the message while compacting,
+  // and the elapsed counter keeps ticking (the summarizer can run for many seconds).
+  const compacting = !!status.compacting;
   // elapsed seconds since the turn went busy: ticks while a turn runs so a stalled backend (no
   // more frames) stays distinguishable from a fast one - the counter keeps climbing regardless.
   const [elapsed, setElapsed] = useState(0);
@@ -1232,7 +1235,7 @@ function StatusBar({
       className="flex items-center gap-2 overflow-hidden border-t px-4 py-1 text-sm"
       style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}
     >
-      {busy || initializing ? (
+      {busy || initializing || compacting ? (
         // animated spinner indistinguishable from a still dot: a CSS rotation on a spinner glyph.
         <span className="shrink-0" style={{ color: 'var(--yca-accent)', animation: 'yca-spin 0.8s linear infinite' }}>
           ⟳
@@ -1242,11 +1245,13 @@ function StatusBar({
       )}
       <span
         className="min-w-0 truncate"
-        style={isError ? { color: '#ff8484' } : notice && !live && !initializing ? { color: 'var(--yca-text)' } : undefined}
+        style={isError ? { color: '#ff8484' } : (notice && !live && !initializing) || compacting ? { color: 'var(--yca-text)' } : undefined}
       >
         {initializing
           ? 'Loading conversation…'
-          : live || notice || (busy ? 'working…' : 'ready')}
+          : compacting
+            ? 'compacting context…'
+            : live || notice || (busy ? 'working…' : 'ready')}
         {busy && !initializing && <span className="opacity-70"> · {elapsed}s</span>}
       </span>
       {status.notice?.level && status.notice.level !== 'INFO' && (

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.ia.agent.core.llm.Usage;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Events emitted on the global bus by the agent loops. Every event is tagged
@@ -340,7 +341,8 @@ public sealed interface AgentEvent {
             String sessionId,
             String subagentId,
             String subagentName,
-            Throwable cause)
+            Throwable cause,
+            CompactionLifecycle compaction)
             implements AgentEvent {
 
         public enum Level {
@@ -349,12 +351,32 @@ public sealed interface AgentEvent {
             ERROR
         }
 
+        /**
+         * Compaction lifecycle stage of this notice, for the UI to pin/clear the compacting
+         * indicator without parsing the message text. Always non-null: the reduced convenience
+         * constructors pass {@link #NONE}; the canonical constructor requires an explicit value.
+         */
+        public enum CompactionLifecycle {
+            /** Not a compaction lifecycle notice. */
+            NONE,
+            /** A compaction pass is starting (arm the indicator). */
+            START,
+            /** A compaction pass completed (clear the indicator). */
+            COMPLETED,
+            /** The compaction gate escalated (clear the indicator; the message carries the guidance). */
+            GATE_ESCALATED
+        }
+
+        public Notice {
+            Objects.requireNonNull(compaction, "compaction lifecycle is required");
+        }
+
         public Notice(final Level level, final String message, final String sessionId) {
-            this(level, message, null, sessionId, null, null, null);
+            this(level, message, null, sessionId, null, null, null, CompactionLifecycle.NONE);
         }
 
         public Notice(final Level level, final String message, final String finishReason, final String sessionId) {
-            this(level, message, finishReason, sessionId, null, null, null);
+            this(level, message, finishReason, sessionId, null, null, null, CompactionLifecycle.NONE);
         }
 
         /** Cause-less construction keeping the pre-stack-trace arity; {@code cause} defaults to {@code null}. */
@@ -365,7 +387,19 @@ public sealed interface AgentEvent {
                 final String sessionId,
                 final String subagentId,
                 final String subagentName) {
-            this(level, message, finishReason, sessionId, subagentId, subagentName, null);
+            this(level, message, finishReason, sessionId, subagentId, subagentName, null, CompactionLifecycle.NONE);
+        }
+
+        /** 7-arg construction with a cause and no compaction lifecycle. */
+        public Notice(
+                final Level level,
+                final String message,
+                final String finishReason,
+                final String sessionId,
+                final String subagentId,
+                final String subagentName,
+                final Throwable cause) {
+            this(level, message, finishReason, sessionId, subagentId, subagentName, cause, CompactionLifecycle.NONE);
         }
 
         public static Notice info(final String message, final String sessionId) {
@@ -378,6 +412,22 @@ public sealed interface AgentEvent {
 
         public static Notice error(final String message, final String sessionId) {
             return new Notice(Level.ERROR, message, sessionId);
+        }
+
+        /** Info lifecycle notice arming the compacting indicator. */
+        public static Notice compactionStart(final String message, final String sessionId) {
+            return new Notice(Level.INFO, message, null, sessionId, null, null, null, CompactionLifecycle.START);
+        }
+
+        /** Info lifecycle notice clearing the compacting indicator after a successful pass. */
+        public static Notice compacted(final String message, final String sessionId) {
+            return new Notice(Level.INFO, message, null, sessionId, null, null, null, CompactionLifecycle.COMPLETED);
+        }
+
+        /** Error lifecycle notice clearing the compacting indicator when the compaction gate escalates. */
+        public static Notice compactionGateEscalated(final String message, final String sessionId) {
+            return new Notice(
+                    Level.ERROR, message, null, sessionId, null, null, null, CompactionLifecycle.GATE_ESCALATED);
         }
     }
 

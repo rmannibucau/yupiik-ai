@@ -135,7 +135,8 @@ public class RunShellFrontend implements ShellFrontend {
                         String sessionId,
                         String subagentId,
                         String subagentName,
-                        Throwable cause)) {
+                        Throwable cause,
+                        var compaction)) {
             notice(level, prefix + message);
         } else if (event
                 instanceof
@@ -196,7 +197,8 @@ public class RunShellFrontend implements ShellFrontend {
         } else if (event instanceof AgentEvent.Compacted(var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.Notice(var _, var _, var _, var _, String id, String name, var _)) {
+        } else if (event
+                instanceof AgentEvent.Notice(var _, var _, var _, var _, String id, String name, var _, var _)) {
             subagentId = id;
             subagentName = name;
         } else if (event instanceof AgentEvent.Status(var _, var _, String id, String name)) {

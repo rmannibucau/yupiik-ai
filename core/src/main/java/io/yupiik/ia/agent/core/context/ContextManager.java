@@ -79,11 +79,12 @@ public class ContextManager {
 
     /**
      * The prompt token count that triggers the next automatic compaction: the legacy percentage of the
-     * usable window when {@code thresholdPercent > 0}, else the opencode-style buffer trigger clamped so
-     * it never lies above the usable window (context window minus the completion headroom). A large
-     * declared output cap would otherwise push the buffer trigger beyond what the input may actually
-     * occupy, letting the context gauge cross 100% without ever tripping an automatic compaction. Also
-     * used by the anti-thrash notice and the usage status so every surface reports the same wall.
+     * usable window when {@code thresholdPercent > 0}, else the opencode-style buffer trigger capped so
+     * it never lies above a safety fraction of the usable window. A large declared output cap would
+     * otherwise push the buffer trigger beyond what the input may actually occupy; without the safety
+     * fraction the trigger would clamp exactly onto the usable window and let the context gauge cross
+     * 100% without ever tripping an automatic compaction. Also used by the anti-thrash notice and the
+     * usage status so every surface reports the same wall.
      *
      * @return the trigger in estimated prompt tokens, or {@link Integer#MAX_VALUE} when compaction is disabled.
      */
@@ -98,15 +99,53 @@ public class ContextManager {
         if (c.thresholdPercent() > 0) {
             return (int) Math.ceil(usageTracker.usableWindow() * c.thresholdPercent() / 100.0);
         }
-        return Math.min(
-                ContextBudget.compactionTrigger(
-                        usageTracker.contextWindowTokenCount().value(), c.bufferPercent(), c.bufferMinTokens()),
-                usageTracker.usableWindow());
+        return ContextBudget.compactionTrigger(
+                usageTracker.contextWindowTokenCount().value(),
+                c.bufferPercent(),
+                c.bufferMinTokens(),
+                usageTracker.usableWindow(),
+                c.triggerSafetyPercent());
     }
 
     /** Hard prompt-input limit, excluding output headroom and including external tool-schema tokens at call sites. */
     public int usableWindowTokens() {
         return usageTracker == null ? Integer.MAX_VALUE : usageTracker.usableWindow();
+    }
+
+    /**
+     * The automatic-compaction trigger for the session's provider selection: same computation as
+     * {@link #compactionTriggerTokens()} but honors a per-provider {@code compaction.triggerSafetyPercent}
+     * override when configured.
+     */
+    public int compactionTriggerTokens(final ChatSettings settings) {
+        if (configuration == null || usageTracker == null) {
+            return Integer.MAX_VALUE;
+        }
+        final var c = configuration.compaction();
+        if (c == null || !c.enabled()) {
+            return usageTracker.usableWindow();
+        }
+        if (c.thresholdPercent() > 0) {
+            return (int) Math.ceil(usageTracker.usableWindow() * c.thresholdPercent() / 100.0);
+        }
+        final var overridden = coordinator == null ? -1 : coordinator.resolvedTriggerSafetyPercent(settings);
+        final var safety = overridden > 0 ? overridden : c.triggerSafetyPercent();
+        return ContextBudget.compactionTrigger(
+                usageTracker.contextWindowTokenCount().value(),
+                c.bufferPercent(),
+                c.bufferMinTokens(),
+                usageTracker.usableWindow(),
+                safety);
+    }
+
+    /** The per-provider gate attempt budget for the session, or -1 to use the global default. */
+    public int resolvedGateMaxAttempts(final ChatSettings settings) {
+        return coordinator == null ? -1 : coordinator.resolvedGateMaxAttempts(settings);
+    }
+
+    /** The per-provider gate wall-clock budget (ms) for the session, or -1 to use the global default. */
+    public long resolvedGateMaxDurationMs(final ChatSettings settings) {
+        return coordinator == null ? -1 : coordinator.resolvedGateMaxDurationMs(settings);
     }
 
     public CompactionResult prune(final List<Message> messages) {
@@ -193,6 +232,19 @@ public class ContextManager {
     public CompactionResult compactForRecovery(
             final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
         return compact(messages, true, null, 0, cancelled, settings);
+    }
+
+    /**
+     * LLM-free local spill toward a token target (the compaction gate's [no-LM] reduction step):
+     * splices pre-digest tool outputs so the estimate drops toward {@code targetTokens}; never touches
+     * the system prompt or the digest. Delegates to {@link CompactionCoordinator#localSpill}.
+     */
+    public CompactionResult localSpill(final List<Message> messages, final int targetTokens) {
+        resetSpeculation();
+        if (coordinator == null) {
+            return new CompactionResult(messages, CompactionResult.Mode.NONE, "");
+        }
+        return coordinator.localSpill(messages, targetTokens);
     }
 
     public CompactionResult compactForOverflow(final List<Message> messages) {

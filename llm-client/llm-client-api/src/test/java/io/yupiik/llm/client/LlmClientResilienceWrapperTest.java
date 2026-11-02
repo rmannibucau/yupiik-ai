@@ -630,6 +630,84 @@ class LlmClientResilienceWrapperTest {
         assertEquals(1, dial.calls.get(), "a canceled turn must not retry");
     }
 
+    @Test
+    void skipRetriesSurfacesTheFailureAfterExactlyOneAttempt() throws Exception {
+        // a cooperative caller (the compaction coordinator) owns the retry loop: the wrapper must
+        // keep acquiring the permit but perform exactly ONE attempt on a retryable 5xx instead of
+        // the configured 3.
+        final var dial = new ScriptedDialect(new LlmHttpFailureException(500, "boom", null));
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
+        final var failure = assertThrows(
+                ExecutionException.class,
+                () -> wrapper.chat(dial, null, () -> false, null, true)
+                        .toCompletableFuture()
+                        .get(5, TimeUnit.SECONDS));
+        assertTrue(failure.getCause() instanceof LlmHttpFailureException, "got: " + failure.getCause());
+        assertEquals(1, dial.calls.get(), "skipRetries must surface the failure immediately, without wrapper retries");
+    }
+
+    @Test
+    void withoutSkipRetriesTheWrapperRetriesUpToTheConfiguredBudget() throws Exception {
+        // control case: an always-failing retryable 5xx with the same config is retried by the
+        // wrapper itself (3 attempts) when the caller does not own the retry loop.
+        final var dial = new ScriptedDialect(
+                new LlmHttpFailureException(500, "boom", null),
+                new LlmHttpFailureException(500, "boom", null),
+                new LlmHttpFailureException(500, "boom", null));
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
+        final var failure = assertThrows(
+                ExecutionException.class,
+                () -> wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .get(5, TimeUnit.SECONDS));
+        assertTrue(failure.getCause() instanceof LlmHttpFailureException, "got: " + failure.getCause());
+        assertEquals(
+                3,
+                dial.calls.get(),
+                "without skipRetries the wrapper must burn its own 3-attempt retry budget, got " + dial.calls);
+    }
+
+    @Test
+    void skipRetriesStillAppliesTheConcurrencyPermit() throws Exception {
+        // even with skipRetries=true the wrapper is not a pass-through: the concurrency permit
+        // (maxConcurrent=1) serializes two cooperative calls, proving the throttle loop still runs.
+        final var entered = new AtomicInteger();
+        final var release = new CountDownLatch(1);
+        final var dial = new ScriptedDialect() {
+            @Override
+            public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
+                final var call = entered.incrementAndGet();
+                if (call == 1) {
+                    return CompletableFuture.supplyAsync(() -> {
+                        try {
+                            release.await();
+                        } catch (final InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        return response();
+                    });
+                }
+                return CompletableFuture.completedFuture(response());
+            }
+        };
+        final var wrapper = new LlmClientResilienceWrapper(config(1, 0, 1), null);
+        final var first = wrapper.chat(dial, null, () -> false, null, true);
+        final var second = CompletableFuture.supplyAsync(() -> wrapper.chat(dial, null, () -> false, null, true)
+                .toCompletableFuture()
+                .join());
+        // give the second call a moment to reach the permit gate: it must NOT have entered the
+        // dialect while the first call still holds the permit
+        Thread.sleep(200);
+        assertEquals(
+                1,
+                entered.get(),
+                "the second cooperative call must block on the concurrency permit, not enter the dialect");
+        release.countDown();
+        assertEquals("ok", first.toCompletableFuture().get(5, TimeUnit.SECONDS).text());
+        assertEquals("ok", second.get(5, TimeUnit.SECONDS).text());
+        assertEquals(2, entered.get(), "both cooperative calls must eventually run once the permit is released");
+    }
+
     private static LlmResponse response() {
         return new LlmResponse(
                 "id",
