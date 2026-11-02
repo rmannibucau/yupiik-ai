@@ -640,4 +640,73 @@ class ContextCompressionTest {
         assertSame(messages, disabled.rewrite(messages));
         assertEquals(0, disabled.savedTokens(messages));
     }
+
+    @Test
+    void stripEchoedRefsFastPathReturnsSameInstanceWithoutAtSign() {
+        // the char gate: text without '@' can never carry a seam or a glued marker, so the input is
+        // returned verbatim (same instance, zero Matcher allocations) - the streaming render hot path
+        final var compression = new ContextCompression(null);
+        final var clean = "just some streaming text, no markers here 12345";
+        assertSame(clean, compression.stripEchoedRefs(clean));
+        assertSame("", compression.stripEchoedRefs(""));
+        // an '@' anywhere engages the scan (the fast path is off); the output is unchanged here
+        // because "a@b" is an email-like identifier, but the scan ran over it
+        assertEquals("a@b", compression.stripEchoedRefs("a@b"));
+    }
+
+    @Test
+    void stripEchoedRefsCharLoopMatchesRegexParity() {
+        // the char-level GLUED_SEAM_WORD replacement must reproduce the regex semantics exactly,
+        // including the ASCII-only lookbehind and the evidence gate
+        final var compression = new ContextCompression(null);
+        for (var i = 0; i < 10631; i++) {
+            compression.refOf(Message.user("m" + i));
+        }
+        compression.refOf(Message.user("last"));
+        // suffix run, blanks preserved, only the '@' dropped
+        assertEquals("EntCompactionTruncates10632", compression.stripEchoedRefs("@EntCompactionTruncates10632"));
+        assertEquals(" man10632que", compression.stripEchoedRefs("@ man10632que"));
+        // lookbehind is ASCII-only ([A-Za-z0-9]): a non-ASCII letter before '@' does NOT exempt it
+        compression.refOf(Message.user("w125"));
+        assertEquals("éword125", compression.stripEchoedRefs("é@word125"));
+        // gate fails (digit-run too short, or not a letter-initial word) -> untouched
+        assertEquals("@step12", compression.stripEchoedRefs("@step12"));
+        assertEquals("@1290", compression.stripEchoedRefs("@1290")); // digit-initial: no letter word
+        // consecutive candidates: both embed assigned refs (the 1..10633 range covers 125 and 10632),
+        // so both are stripped and the scan resumes correctly across two strips
+        assertEquals("no125 yes10632", compression.stripEchoedRefs("@no125 @yes10632"));
+        // emails/identifiers untouched
+        assertEquals("mail@example.com", compression.stripEchoedRefs("mail@example.com"));
+        assertEquals("answer@1", compression.stripEchoedRefs("answer@1"));
+    }
+
+    @Test
+    void stripEchoedRefsCharLoopMultipleStripsAcrossText() {
+        final var compression = new ContextCompression(null);
+        for (var i = 0; i < 12503; i++) {
+            compression.refOf(Message.user("m" + i));
+        }
+        compression.refOf(Message.user("last"));
+        // two separated glued leaks in one text: both stripped, surrounding prose preserved
+        assertEquals(
+                "a Ent12504 b Locally125 c",
+                compression.stripEchoedRefs("a @Ent12504 b @Locally125 c"));
+        // stripping resumes correctly after a skipped (non-gated) candidate
+        assertEquals(
+                "x @step12 y word12504 z",
+                compression.stripEchoedRefs("x @step12 y @word12504 z"));
+    }
+
+    @Test
+    void withholdDanglingPrefixFastPathWithoutAtSign() {
+        final var compression = new ContextCompression(config());
+        // withholdDanglingPrefix composes stripEchoedRefs (identity fast path) with the manual
+        // stripBareAnchorLines pass, which always rebuilds the string; the outcome must be the
+        // input unchanged for clean text without any '@'
+        final var clean = "normal markdown line\nsecond line 42";
+        assertEquals(clean, compression.withholdDanglingPrefix(clean));
+        // a trailing newline yields a final empty line that the manual re-join keeps, so the
+        // trailing '\n' is preserved (existing stripBareAnchorLines behavior, unchanged)
+        assertEquals(clean + "\n", compression.withholdDanglingPrefix(clean + "\n"));
+    }
 }

@@ -241,6 +241,85 @@ class ConversationTranscriptTest {
     }
 
     @Test
+    void streamingTailIsScrubbedWhileDurableHeadStaysCached() {
+        final var t = new ConversationTranscript();
+        // a durable head carrying echoed seams + a bare anchor line that the per-write scrub of
+        // flushPending/TurnDone would normally remove; appendTranscript is the RAW path so the
+        // head still needs the render-time scrub (parity with the pre-split whole-string pass)
+        t.appendTranscript("\n**Assistant**\n\nhello @9@ world\n");
+        final var md = t.markdown("|", "");
+        assertTrue(md.contains("hello world"), "durable head echoes must be scrubbed on first build: " + md);
+
+        // a streaming turn only mutates the pending tail: the durable head must be REUSED, so a
+        // seam that shows up in the tail is scrubbed but the head is not re-derived each frame
+        t.startUserTurn("go");
+        t.onEvent(new AgentEvent.TextDelta("streaming @7@ answer", "s1"));
+        final var streaming = t.markdown("|", "");
+        assertTrue(streaming.contains("streaming answer"), "streaming tail echoes must be scrubbed: " + streaming);
+        assertTrue(streaming.contains("hello world"), "durable head content must still render: " + streaming);
+        assertFalse(streaming.contains("@9@"), "head seam must not leak through the cache: " + streaming);
+    }
+
+    @Test
+    void markdownHeadCacheIsInvalidatedByDurableMutationsAndReboundCompression() {
+        final var t = new ConversationTranscript();
+        t.appendTranscript("\n**Assistant**\n\nfirst\n");
+        final var first = t.markdown("|", "");
+        assertTrue(first.contains("first"));
+
+        // appendTranscript is a durable mutation: the head (and hence the whole markdown) rebuilds
+        t.appendTranscript("\n**Assistant**\n\nsecond\n");
+        final var second = t.markdown("|", "");
+        assertTrue(second.contains("second"));
+        assertNotSame(first, second, "a durable append must rebuild the markdown");
+
+        // a streaming delta alone is NOT a durable mutation: same head, new pending tail rendered
+        t.startUserTurn("go");
+        t.onEvent(new AgentEvent.TextDelta("streaming tail", "s1"));
+        final var third = t.markdown("|", "");
+        assertTrue(third.contains("second"), "durable head must still render after a stream delta");
+        assertTrue(third.contains("streaming tail"), "streaming pending tail must render");
+        assertFalse(third.contains("@9@"), "no seam may leak through the reused head");
+
+        // bindCompression swaps the scrubber: the cached head was sanitized against the old refs,
+        // so it must be dropped and rebuilt on the next render (no stale seam refs leak)
+        t.bindCompression(new ContextCompression(null));
+        final var rebound = t.markdown("|", "");
+        assertTrue(rebound.contains("second"), "rebinding must not lose the durable head: " + rebound);
+    }
+
+    @Test
+    void markdownHeadCacheIsDroppedOnResetAndClearAndTrim() {
+        final var t = new ConversationTranscript();
+        t.appendTranscript("\n**Assistant**\n\nhello\n");
+        assertTrue(t.markdown("|", "").contains("hello"));
+
+        t.reset();
+        assertTrue(t.markdown("|", "welcome").contains("welcome"), "reset must drop the cached head");
+        // the outer markdown cache legitimately holds "welcome" from the call above (same spinner,
+        // same contentVersion) - a *different* fallback still returns that cached string, which is
+        // the pre-existing cache semantics (fallback is not part of the key), so assert through a
+        // fresh mutation instead
+        t.appendTranscript("\n**Assistant**\n\nnew start\n");
+        assertTrue(t.markdown("|", "").contains("new start"), "post-reset content must render");
+
+        t.appendTranscript("\n**Assistant**\n\nagain\n");
+        assertTrue(t.markdown("|", "").contains("again"));
+
+        t.clearConversation();
+        assertTrue(t.markdown("|", "welcome").contains("welcome"), "clear must drop the cached head");
+
+        // trim() head-truncates the durable transcript: the head cache must rebuild on the shorter
+        // content (the classic compaction eviction path)
+        t.appendTranscript("\n**Assistant**\n\nkept tail\n");
+        t.maxHistoryCharacters(12);
+        t.trim();
+        final var trimmed = t.markdown("|", "");
+        assertFalse(trimmed.contains("hello"), "trimmed head must not render the cut head");
+        assertTrue(trimmed.contains("kept tail"), "trimmed head must keep the surviving tail: " + trimmed);
+    }
+
+    @Test
     void turnMetricsKeepDurationAndResetClearsIt() {
         final var t = new ConversationTranscript();
         t.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, "s1"));
