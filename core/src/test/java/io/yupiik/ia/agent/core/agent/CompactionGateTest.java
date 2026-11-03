@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.GateConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
@@ -435,7 +436,7 @@ class CompactionGateTest {
             }
         };
         final var providers = new io.yupiik.ia.agent.core.wiring.ProviderManager(config, mapper);
-        return new AgentLoop(
+        final var loop = new AgentLoop(
                 client,
                 new ToolRegistry(null) {
                     @Override
@@ -480,5 +481,16 @@ class CompactionGateTest {
                 null,
                 resolvedPrecision,
                 null);
+        // the gate's per-pass backoff is a real Thread.sleep (capped at 5s), which would stall the
+        // suite for ~9s across these cases; the tests assert the gate's cadence/outcome through the
+        // recovery-call counts and escalation events, never the wall-clock delay, so a no-op sleeper
+        // is safe and keeps the class fast. The wall-clock budget case runs on its own VirtualNanos.
+        loop.backoffSleeper(new BackoffSleeper() {
+            @Override
+            public boolean sleep(final long millis) {
+                return true;
+            }
+        });
+        return loop;
     }
 }
