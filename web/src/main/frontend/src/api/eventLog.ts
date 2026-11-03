@@ -315,8 +315,16 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
       // A server-emitted standalone fragment (e.g. the Codex authorize URL pushed through
       // WebShellFrontend.transcript during login). It becomes its own 'notice' block so it is never
       // merged with a streaming assistant text-delta nor overwritten by turn-done consolidation.
-      settle();
-      blocks.push({ kind: 'notice', content: ev.message ?? '' });
+      // EXCEPTION: the /executing-tools transcript (identified by its "**Executing tools**" header)
+      // is only-modal - it never renders inline, only in the dedicated modal (mirroring /btw).
+      if (ev.message?.startsWith('**Executing tools**')) {
+        // only-modal: the content lives only in the /executing-tools modal; still settle any
+        // in-progress stream so a following text-delta starts a fresh block (mirrors the notice path)
+        settle();
+      } else {
+        settle();
+        blocks.push({ kind: 'notice', content: ev.message ?? '' });
+      }
     } else if (ev.type === 'btw') {
       // /btw answers live in the status bar pill + modal (folded from the same log by foldStatus),
       // never in the transcript stream - the side conversation must not pollute the main thread.

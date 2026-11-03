@@ -1056,6 +1056,48 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void executingToolsShowsRunningToolInModalOverlay() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-executing-tools-running-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a tool is genuinely in flight (tracked by the transcript model, most-recent-first)
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"sleep 10\"}", sid(shellRegistry)));
+
+        tuiRef.get().dispatch(new PasteEvent("/executing-tools"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        // the modal overlay is open with the running tool's command
+        awaitTextWithin("sleep 10", TIMEOUT_MS);
+        awaitTextWithin("executing-tools", TIMEOUT_MS);
+
+        // Esc closes the modal
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+
+        quit();
+    }
+
+    @Test
+    void executingToolsWithNoneRunningShowsEmptyModal() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-executing-tools-empty-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("/executing-tools"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        // the empty-case modal is visible (a durable overlay, not a transient status toast)
+        awaitTextWithin("no tool executing", TIMEOUT_MS);
+
+        quit();
+    }
+
+    @Test
     void wideStatusMessagesRenderInLastPositionOfStatusStrip() throws Exception {
         // /theme (no arg) produces a wide informational message routed to the trailing
         // notification channel rather than replacing the agent state at the strip head

@@ -70,6 +70,20 @@ describe('eventsToBlocks', () => {
     });
   });
 
+  it('skips the /executing-tools transcript inline (only-modal, never a notice block)', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'user', sessionId: 's1', message: '/executing-tools' }),
+      ev({
+        type: 'transcript',
+        sessionId: 's1',
+        message: '**Executing tools**\n\n| tool | command |\n| --- | --- |\n| bash | sleep 10 |',
+      }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'the main answer' }),
+    ]);
+    // the executing-tools content lives only in the dedicated modal: no inline notice block is created
+    expect(blocks.map((b) => b.kind)).toEqual(['user', 'text']);
+  });
+
   it('keeps a preceding transcript notice intact when a later text-delta streams (no merge)', () => {
     const blocks = eventsToBlocks([
       ev({ type: 'transcript', sessionId: 's1', message: '<https://auth.openai.com/authorize>\n\nWaiting...' }),

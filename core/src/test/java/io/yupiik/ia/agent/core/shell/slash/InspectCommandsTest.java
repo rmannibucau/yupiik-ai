@@ -42,10 +42,17 @@ class InspectCommandsTest {
     }
 
     @Test
-    void executingToolsWithNothingRunningReportsStatus() {
+    void executingToolsWithNothingRunningEmitsDurableTranscript() {
+        // an empty list must be a durable Transcript (not a Status toast): on the TUI/web a status is a
+        // transient, easy-to-miss notification while a Transcript is always visible and surfaces the modal.
         final var env = new ShellEnv(null, null, new ShellSession().sessionId("s1"), new ConversationTranscript());
         final var outcome = command(env, "/executing-tools");
-        assertTrue(outcome instanceof ShellOutcome.Status, "empty list must be a status: " + outcome);
+        final var content = content(outcome);
+        assertTrue(
+                outcome instanceof ShellOutcome.Transcript,
+                "empty list must be a transcript, not a status: " + outcome);
+        assertTrue(content.startsWith("**Executing tools**"), "must keep the executing-tools marker: " + content);
+        assertTrue(content.contains("(no tool executing)"), "must say no tool is executing: " + content);
     }
 
     private static ShellOutcome command(final ShellEnv env, final String text) {

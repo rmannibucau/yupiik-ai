@@ -158,7 +158,11 @@ public class InspectCommands implements SlashCommandSet {
     private ShellOutcome executingTools(final String arg, final ShellEnv env) {
         final var running = env.transcript().runningToolsSnapshot();
         if (running.isEmpty()) {
-            return ShellOutcome.status("(no tool executing)");
+            // emitted as a durable Transcript (not a Status toast): on the TUI/web an empty status is a
+            // transient, easy-to-miss notification, while a Transcript is always visible (and, on the web,
+            // is what surfaces the modal). The "**Executing tools**" header is the marker the web uses to
+            // skip this fragment from the inline chat so it only ever appears in the modal.
+            return ShellOutcome.transcript("**Executing tools**\n\n(no tool executing)");
         }
         final var rows = running.stream()
                 .map(tool -> {

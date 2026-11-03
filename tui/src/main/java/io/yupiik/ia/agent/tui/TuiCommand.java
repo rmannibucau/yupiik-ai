@@ -1907,6 +1907,10 @@ public class TuiCommand implements Runnable {
         if (state.btw != null) {
             return onBtwKey(key, runner, state);
         }
+        if (state.executingTools != null) {
+            onExecutingToolsKey(key, state);
+            return true;
+        }
         if (key.hasCtrl() && key.hasShift() && key.isCharIgnoreCase('c')) {
             copySelection(runner, state);
             return true;
@@ -2436,6 +2440,12 @@ public class TuiCommand implements Runnable {
             btw(parts.length > 1 ? parts[1].strip() : "", runner, state);
             return;
         }
+        if ("executing-tools".equals(parts[0].toLowerCase(Locale.ROOT))) {
+            // read-only snapshot shown in its own modal overlay (only-modal, like /btw): never lands
+            // in the transcript and never renders as a transient status toast
+            openExecutingTools(state);
+            return;
+        }
         // the user prompt is transcribed as plain markdown (no backticks): wrapping it in
         // an inline-code span made slash commands look exactly like `code`; plain text (under
         // the You bar) stays visually distinct from code tokens
@@ -2571,6 +2581,44 @@ public class TuiCommand implements Runnable {
                 btw.retryable(),
                 scrollService.apply(btw.scroll(), delta),
                 btw.cancelled());
+    }
+
+    /** Opens the /executing-tools modal overlay from the current running-tools snapshot. */
+    private void openExecutingTools(final UiState state) {
+        final var running = state.model.runningToolsSnapshot();
+        state.executingTools = new UiState.ExecutingToolsOverlay(executingToolsMarkdown(running), 0);
+    }
+
+    private static String executingToolsMarkdown(final List<ConversationTranscript.RunningToolInfo> running) {
+        if (running.isEmpty()) {
+            return "(no tool executing)";
+        }
+        final var rows = running.stream()
+                .map(tool -> {
+                    final var command =
+                            tool.command() == null || tool.command().isBlank() ? tool.name() : tool.command();
+                    final var label = tool.ordinal() > 0 ? "#" + tool.ordinal() : "";
+                    return List.of(
+                            SlashRegistry.cell(tool.name()), SlashRegistry.cell(command), SlashRegistry.cell(label));
+                })
+                .toList();
+        return SlashRegistry.table(List.of("tool", "command", "ordinal"), rows);
+    }
+
+    private void closeExecutingTools(final UiState state) {
+        state.executingTools = null;
+    }
+
+    private void onExecutingToolsKey(final KeyEvent key, final UiState state) {
+        if (key.isCancel() || key.isKey(KeyCode.ESCAPE) || key.isConfirm() || key.isChar('q')) {
+            closeExecutingTools(state);
+            return;
+        }
+        final var delta = scrollService.keyDelta(key);
+        if (delta != 0) {
+            state.executingTools = new UiState.ExecutingToolsOverlay(
+                    state.executingTools.content(), scrollService.apply(state.executingTools.scroll(), delta));
+        }
     }
 
     private void apply(final ShellOutcome outcome, final TuiRunner runner, final UiState state) {
@@ -3385,6 +3433,9 @@ public class TuiCommand implements Runnable {
             approval.detailScroll(scrollService.apply(approval.detailScroll(), delta));
         } else if (state.btw != null) {
             state.btw = withBtwScroll(state.btw, delta);
+        } else if (state.executingTools != null) {
+            state.executingTools = new UiState.ExecutingToolsOverlay(
+                    state.executingTools.content(), scrollService.apply(state.executingTools.scroll(), delta));
         } else if (state.inputZone != null
                 && state.inputZone.contains(wheel.x(), wheel.y())
                 && visualRows(state.input, state.inputZone.width()) > state.inputZone.height()) {
@@ -4003,6 +4054,9 @@ public class TuiCommand implements Runnable {
         // its sole focus, and the overlay state survives so it reappears once resolved.
         if (state.approvals.isEmpty() && state.btw != null) {
             renderBtw(frame, state);
+        }
+        if (state.executingTools != null) {
+            renderExecutingTools(frame, state);
         }
         renderToast(frame, state);
         // published before the highlight so both passes resolve a press against
@@ -7000,6 +7054,43 @@ public class TuiCommand implements Runnable {
                 splits.get(1));
     }
 
+    /** Renders the /executing-tools modal overlay: a centered box with the running-tools table (scrollable). */
+    private void renderExecutingTools(final dev.tamboui.terminal.Frame frame, final UiState state) {
+        final var overlay = state.executingTools;
+        final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
+        final var height = Math.min(Math.max(12, frame.height() * 3 / 5), frame.height());
+        final var rect = Modal.rect(frame, width, height, 0.12);
+        final var inner = modal(frame, rect, " executing-tools ", Color.hex(palette.accent()));
+        if (inner == null) {
+            return;
+        }
+        final var lines = new ArrayList<>(
+                transcriptRenderer.renderRegion(overlay.content(), inner.width(), Style.EMPTY, markdownStyles));
+        final var splits = Layout.vertical()
+                .constraints(Constraint.fill(), Constraint.length(1))
+                .split(inner);
+        final var text = Text.from(lines.toArray(Line[]::new));
+        final var maxScroll =
+                Math.max(0, text.height() - Math.max(1, splits.getFirst().height()));
+        final var scroll = Math.clamp(overlay.scroll(), 0, maxScroll);
+        if (!splits.getFirst().isEmpty()) {
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(text)
+                            .overflow(Overflow.CLIP)
+                            .scroll(scroll)
+                            .build(),
+                    splits.getFirst());
+        }
+        final var footer = "  Wheel/Up/Down scroll  Esc close  ";
+        frame.renderWidget(
+                Paragraph.builder()
+                        .text(Text.from(Line.from(Span.styled(footer, Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
+                        .overflow(Overflow.CLIP)
+                        .build(),
+                splits.get(1));
+    }
+
     private void closeSearch(final UiState state) {
         state.searchOpen = false;
         state.search.clear();
@@ -9257,6 +9348,8 @@ public class TuiCommand implements Runnable {
 
         private volatile BtwOverlay btw;
 
+        private volatile ExecutingToolsOverlay executingTools;
+
         private record BtwOverlay(
                 long ordinal,
                 String question,
@@ -9266,6 +9359,9 @@ public class TuiCommand implements Runnable {
                 boolean retryable,
                 int scroll,
                 AtomicBoolean cancelled) {}
+
+        /** The /executing-tools modal: a read-only snapshot of the running tools, scrollable. */
+        private record ExecutingToolsOverlay(String content, int scroll) {}
 
         private final TranscriptSearch search = new TranscriptSearch();
         private volatile boolean searchOpen;
