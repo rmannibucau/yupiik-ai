@@ -619,4 +619,20 @@ class MarkdownLinesTest {
         assertEquals(1, result.lines().size());
         assertEquals(SelectionState.RowKind.HARD, result.kinds().get(0));
     }
+
+    @Test
+    void wrapCodeHardSplitsALongToken() {
+        // character-exact: a single token wider than the width is hard-split, no character dropped
+        final var lines = List.of(Line.from(Span.raw("abcdefghijklmnop")));
+        final var wrapped = MarkdownLines.wrapCode(lines, 5);
+        assertEquals(List.of("abcde", "fghij", "klmno", "p"), plain(wrapped));
+    }
+
+    @Test
+    void wrapCodePreservesIndentation() {
+        // leading indentation and internal whitespace runs survive the wrap unchanged
+        final var lines = List.of(Line.from(Span.raw("    return value;")));
+        final var wrapped = MarkdownLines.wrapCode(lines, 8);
+        assertEquals(List.of("    retu", "rn value", ";"), plain(wrapped));
+    }
 }

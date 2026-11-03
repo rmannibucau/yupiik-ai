@@ -50,6 +50,7 @@ import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionEntry;
@@ -81,8 +82,10 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -2021,6 +2024,74 @@ class TuiCommandRenderTest {
         assertTrue(
                 sentToTabProvider.stream().anyMatch(it -> it.contains("\"model\":\"b03\"")),
                 "/btw must send the tab's model (b03), got: " + sentToTabProvider);
+
+        quit();
+    }
+
+    @Test
+    void feedbackModalShowsFullQuestionAndWrapsLongOptions() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-feedback-modal-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a fenced code block long enough that the old fixed 6-row question area
+        // would have hidden its tail: the modal must grow to show every line
+        final var codeLines = new ArrayList<String>();
+        codeLines.add("```java");
+        for (int i = 1; i <= 10; i++) {
+            codeLines.add("line " + i + ": final var value = compute(" + i + ");");
+        }
+        codeLines.add("```");
+        final var longQuestion = String.join("\n", codeLines);
+        // a single option long enough to wrap within the panel width
+        final var longOption = "option-" + "with-a-very-long-description-that-definitely-wraps-".repeat(3) + "tail";
+        attachFeedbackPrompt(command, List.of(new Question("q1", longQuestion, List.of(longOption), false)), 0);
+
+        // the last code line (line 10) is visible, and the trailing ``` fence too
+        awaitText("line 10: final var value = compute(10);");
+        awaitText("```");
+        // the long option is present (wrapped), and its tail survives the wrap
+        awaitText("tail");
+        // the own-answer pseudo-option still renders after the wrapped option
+        awaitText("Type your own answer...");
+
+        // the tabs (first word of each question) stay bounded: the long single-word
+        // marker must not overflow the tab bar
+        assertTrue(
+                backend.text().stripTrailing().split("\n", -1).length <= HeadlessBackend.HEIGHT,
+                "no extra rows may appear beyond the screen:\n" + backend.text());
+
+        quit();
+    }
+
+    @Test
+    void feedbackOptionsScrollWindowKeepsFocusVisible() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-feedback-scroll-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // 8 options + the own-answer row overflow the (7-row) options panel of a short
+        // single-question modal, so moving focus must scroll the window to keep it visible
+        final var options = new ArrayList<String>();
+        for (int i = 0; i < 8; i++) {
+            options.add("option " + i + " choice");
+        }
+        attachFeedbackPrompt(command, List.of(new Question("q", "pick", options, false)), 0);
+        awaitText("option 0 choice");
+
+        for (int i = 0; i < 6; i++) {
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.DOWN));
+        }
+        // the focused option stays visible and the window is scrolled (indicator + top row gone)
+        awaitText("option 6 choice");
+        assertTrue(backend.text().contains("▲"), "the scroll indicator must show once scrolled:\n" + backend.text());
+        assertFalse(backend.text().contains("option 0 choice"), "the top must scroll out of view:\n" + backend.text());
 
         quit();
     }
@@ -4782,6 +4853,50 @@ class TuiCommandRenderTest {
                 Thread.getAllStackTraces().keySet().stream()
                         .noneMatch(t -> t.getName().equals("yca-tui-mouse-restore")),
                 "mouse-restore shutdown hook must be removed on clean exit");
+    }
+
+    private static Class<?> nestedClass(final String simpleName) throws ClassNotFoundException {
+        return Class.forName("io.yupiik.ia.agent.tui.TuiCommand$" + simpleName);
+    }
+
+    /**
+     * Builds a {@code TuiCommand.FeedbackPrompt} for {@code raw} and attaches it to the active
+     * tab's UiState on the render thread (mirror of {@code TuiCommand.feedbackGate}: the prompt
+     * uses a never-awaited latch and a throwaway answers map, then gets painted by the next tick
+     * because {@code runLater} marks the tab dirty). The tab is set to {@code tab}.
+     */
+    private static Object attachFeedbackPrompt(final TuiCommand command, final List<Question> raw, final int tab)
+            throws Exception {
+        final var ctor = nestedClass("FeedbackPrompt")
+                .getDeclaredConstructor(List.class, CountDownLatch.class, Map.class, AtomicBoolean.class);
+        ctor.setAccessible(true);
+        final var prompt = ctor.newInstance(raw, new CountDownLatch(0), new ConcurrentHashMap<>(), new AtomicBoolean());
+        final var tabMethod = nestedClass("FeedbackPrompt").getDeclaredMethod("tab", int.class);
+        tabMethod.setAccessible(true);
+        tabMethod.invoke(prompt, tab);
+
+        final var tabManagerField = TuiCommand.class.getDeclaredField("tabManager");
+        tabManagerField.setAccessible(true);
+        final var tabManager = tabManagerField.get(command);
+        final var activeMethod = tabManager.getClass().getMethod("active");
+        final var state = activeMethod.invoke(tabManager);
+        final var stateClass = state.getClass();
+        final var promptField = stateClass.getDeclaredField("feedbackPrompt");
+        promptField.setAccessible(true);
+        final var dirtyField = stateClass.getDeclaredField("dirty");
+        dirtyField.setAccessible(true);
+        final var runnerField = stateClass.getDeclaredField("runner");
+        runnerField.setAccessible(true);
+        final var tui = runnerField.get(state);
+        tui.getClass().getMethod("runLater", Runnable.class).invoke(tui, (Runnable) () -> {
+            try {
+                promptField.set(state, prompt);
+                dirtyField.set(state, true);
+            } catch (final IllegalAccessException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        return prompt;
     }
 
     private void quit() throws InterruptedException {

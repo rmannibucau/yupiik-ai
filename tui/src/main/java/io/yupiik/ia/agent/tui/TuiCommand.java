@@ -1263,9 +1263,9 @@ public class TuiCommand implements Runnable {
         }
         if (prompt.tab() < prompt.questions().size()) {
             final var fq = prompt.questions().get(prompt.tab());
-            for (int i = 0; i < fq.optionRects().size(); i++) {
-                final var r = fq.optionRects().get(i);
-                if (r != null && r.contains(x, y)) {
+            for (final var row : fq.optionRects()) {
+                if (row != null && row.rect().contains(x, y)) {
+                    final var i = row.option();
                     if (fq.question.multiple()) {
                         activateCheckbox(fq, i);
                     } else {
@@ -8246,11 +8246,12 @@ public class TuiCommand implements Runnable {
         final var isConfirmTab = prompt.tab() >= prompt.questions().size();
         final var qIndex = !isConfirmTab ? prompt.tab() : 0;
         final var fq = prompt.questions().get(qIndex);
-        // the question is word-wrapped; the modal grows to fit its rows (capped) so
-        // long questions stay fully readable instead of being clipped to one line
+        // the question is word-wrapped; the modal grows to fit its rows so long
+        // questions (eg. fenced code snippets) stay fully readable instead of
+        // being vertically clipped to a fixed 6-row area
         final var innerWidth = Math.max(1, width - 2);
         final var questionLines = TuiInputSupport.wrapProse(fq.question.prompt(), innerWidth);
-        final var questionRows = Math.min(6, Math.max(1, questionLines.size()));
+        final var questionRows = Math.max(1, questionLines.size());
         final var height = Math.min(
                 Math.max(12, 8 + prompt.questions().size() * 3 + questionRows), Math.max(12, frame.height() * 3 / 4));
         final var rect = Modal.rect(frame, width, height, 0.25);
@@ -8266,8 +8267,12 @@ public class TuiCommand implements Runnable {
         final var bodyRect = splits.get(1);
         buildTabs(frame.buffer(), prompt, tabsRect);
 
+        // the modal height is capped at 3/4 of the frame, so on small terminals the
+        // question area may have to give rows back, but the input block (3 rows)
+        // must never shrink below its natural height
+        final var questionArea = Math.min(questionRows, Math.max(1, bodyRect.height() - 3));
         final var content = Layout.vertical()
-                .constraints(Constraint.length(questionRows), Constraint.fill(), Constraint.length(3))
+                .constraints(Constraint.length(questionArea), Constraint.fill(), Constraint.length(3))
                 .split(bodyRect);
         final var promptLines = new ArrayList<Line>();
         final var promptStyle =
@@ -8331,7 +8336,9 @@ public class TuiCommand implements Runnable {
     private static String word(final String prompt) {
         final var w = prompt.strip();
         final var idx = w.indexOf(" ");
-        return (idx < 0 ? w : w.substring(0, idx)).trim();
+        final var first = (idx < 0 ? w : w.substring(0, idx)).trim();
+        // a single-word question (eg. a long code line) must not overflow the tab bar
+        return first.length() > 13 ? first.substring(0, 13) + "..." : first;
     }
 
     private void renderFeedbackOptions(
@@ -8359,62 +8366,122 @@ public class TuiCommand implements Runnable {
         } else {
             prompt.optionsFocus(Math.clamp(prompt.optionsFocus(), 0, opts));
         }
-        // windowed rendering: keep the focus visible, scroll the tail when there are
-        // more options (plus the own-answer row) than the panel can show
-        final var total = opts + 1;
-        final var rows = Math.max(1, rect.height());
-        final var maxScroll = Math.max(0, total - rows);
-        final var scroll = Math.min(Math.max(0, prompt.optionsFocus() - rows / 2), maxScroll);
-        final var from = Math.min(scroll, total);
-        final var to = Math.min(total, scroll + rows);
-        for (int row = from; row < to; row++) {
-            final var lineRect = new Rect(rect.x(), rect.y() + (row - from), rect.width(), 1);
-            fq.optionRects().add(lineRect);
-            final var line = Line.from(buildOptionLine(fq, row, accent, muted, textColor));
-            frame.renderWidget(Paragraph.builder().text(Text.from(line)).build(), lineRect);
+        // windowed rendering over visual rows: each option is wrapped to the panel
+        // width (character-exact, so long option texts stay fully readable), and the
+        // window keeps the focused logical option visible, scrolling only when there
+        // are more visual rows (wrapped options + the own-answer row) than the panel
+        // can show at once
+        final var optionWidth = Math.max(1, rect.width() - 2);
+        final var wrapped = new ArrayList<List<Line>>(opts);
+        final var optionStarts = new int[opts + 1];
+        var totalRows = 0;
+        for (int i = 0; i < opts; i++) {
+            optionStarts[i] = totalRows;
+            final var lines = wrappedOptionLines(fq, i, optionWidth, accent, muted, textColor);
+            wrapped.add(lines);
+            totalRows += lines.size();
         }
-        if (total > rows) {
+        optionStarts[opts] = totalRows;
+        totalRows += 1; // the own-answer pseudo-option
+        final var rows = Math.max(1, rect.height());
+        final var focused = fq.question.multiple() ? prompt.optionsFocus() : Math.max(fq.selectedIndex(), 0);
+        final var maxScroll = Math.max(0, totalRows - rows);
+        final var scroll = Math.min(Math.max(0, optionStarts[Math.min(focused, opts)] - rows / 2), maxScroll);
+        final var from = Math.min(scroll, totalRows);
+        final var to = Math.min(totalRows, scroll + rows);
+        var visual = 0;
+        for (int i = 0; i < opts; i++) {
+            for (final var line : wrapped.get(i)) {
+                if (visual >= from && visual < to) {
+                    final var lineRect = new Rect(rect.x(), rect.y() + (visual - from), rect.width(), 1);
+                    fq.optionRects().add(new FeedbackOptionRow(lineRect, i));
+                    frame.renderWidget(Paragraph.builder().text(Text.from(line)).build(), lineRect);
+                }
+                visual++;
+            }
+        }
+        if (visual >= from && visual < to) {
+            final var lineRect = new Rect(rect.x(), rect.y() + (visual - from), rect.width(), 1);
+            fq.optionRects().add(new FeedbackOptionRow(lineRect, opts));
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(Text.from(Line.from(buildOwnAnswerLine(fq, opts, accent, muted, textColor))))
+                            .build(),
+                    lineRect);
+        }
+        if (totalRows > rows) {
             frame.renderWidget(
                     Paragraph.builder()
                             .text(Text.from(Line.from(Span.styled(
-                                    (scroll > 0 ? "▲ " : "  ") + (scroll + 1) + "/" + total
-                                            + (scroll + rows < total ? " ▼" : "  "),
+                                    (scroll > 0 ? "▲ " : "  ") + (scroll + 1) + "/" + totalRows
+                                            + (scroll + rows < totalRows ? " ▼" : "  "),
                                     Style.EMPTY.fg(muted)))))
                             .build(),
                     new Rect(rect.x(), rect.y() + Math.max(0, rect.height() - 1), rect.width() / 2, 1));
         }
     }
 
-    private Span[] buildOptionLine(
-            final FeedbackQuestion fq, final int idx, final Color accent, final Color muted, final Color textColor) {
-        final var opts = optionCount(fq);
-        if (idx >= opts) {
-            if (fq.question.multiple()) {
-                final var checked = fq.ownBox().isChecked();
-                return new Span[] {
-                    Span.raw(checked ? "▣ " : "▢ ").style(checked ? Style.EMPTY.fg(accent) : Style.EMPTY.fg(muted)),
-                    Span.raw("Type your own answer...").style(Style.EMPTY.fg(checked ? accent : textColor))
-                };
-            }
-            final var selected = fq.selectedIndex() == idx;
-            return new Span[] {
-                Span.raw("✎ ").style(Style.EMPTY.fg(selected ? accent : muted)),
-                Span.raw("Type your own answer...")
-                        .style(selected ? Style.EMPTY.fg(accent).bold() : Style.EMPTY.fg(textColor))
-            };
-        }
+    /**
+     * Wraps one real option to the given width, marker on the first row only; the
+     * continuation rows carry the same text style so a selected/checked option
+     * highlights across its whole wrapped block. Character-exact hard split via
+     * {@link MarkdownLines#wrapCode}: no option text is ever dropped.
+     */
+    private List<Line> wrappedOptionLines(
+            final FeedbackQuestion fq,
+            final int idx,
+            final int width,
+            final Color accent,
+            final Color muted,
+            final Color textColor) {
         final var option = fq.question.options().get(idx);
+        final var wrapped = MarkdownLines.wrapCode(List.of(Line.from(Span.raw(option))), Math.max(1, width));
+        final var out = new ArrayList<Line>(wrapped.size());
+        for (int r = 0; r < wrapped.size(); r++) {
+            final var text = wrapped.get(r).rawContent();
+            if (r == 0) {
+                if (fq.question.multiple()) {
+                    final var checked = fq.boxes()[idx].isChecked();
+                    out.add(Line.from(
+                            Span.raw(checked ? "▣ " : "▢ ")
+                                    .style(checked ? Style.EMPTY.fg(accent) : Style.EMPTY.fg(muted)),
+                            Span.raw(text).style(Style.EMPTY.fg(textColor))));
+                } else {
+                    final var selected = fq.selectedIndex() == idx;
+                    out.add(Line.from(
+                            Span.raw(selected ? "◉ " : "○ ")
+                                    .style(selected ? Style.EMPTY.fg(accent) : Style.EMPTY.fg(muted)),
+                            Span.raw(text)
+                                    .style(selected ? Style.EMPTY.fg(accent).bold() : Style.EMPTY.fg(textColor))));
+                }
+            } else {
+                final var rowStyle = fq.question.multiple()
+                        ? Style.EMPTY.fg(textColor)
+                        : fq.selectedIndex() == idx ? Style.EMPTY.fg(accent).bold() : Style.EMPTY.fg(textColor);
+                out.add(Line.from(Span.raw(text).style(rowStyle)));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The trailing "Type your own answer..." pseudo-option (logical index {@code opts}).
+     * Kept as a single row so the free-text entry never disappears behind the scroll window.
+     */
+    private Span[] buildOwnAnswerLine(
+            final FeedbackQuestion fq, final int idx, final Color accent, final Color muted, final Color textColor) {
         if (fq.question.multiple()) {
-            final var checked = fq.boxes()[idx].isChecked();
+            final var checked = fq.ownBox().isChecked();
             return new Span[] {
                 Span.raw(checked ? "▣ " : "▢ ").style(checked ? Style.EMPTY.fg(accent) : Style.EMPTY.fg(muted)),
-                Span.raw(option).style(Style.EMPTY.fg(textColor))
+                Span.raw("Type your own answer...").style(Style.EMPTY.fg(checked ? accent : textColor))
             };
         }
         final var selected = fq.selectedIndex() == idx;
         return new Span[] {
-            Span.raw(selected ? "◉ " : "○ ").style(selected ? Style.EMPTY.fg(accent) : Style.EMPTY.fg(muted)),
-            Span.raw(option).style(selected ? Style.EMPTY.fg(accent).bold() : Style.EMPTY.fg(textColor))
+            Span.raw("✎ ").style(Style.EMPTY.fg(selected ? accent : muted)),
+            Span.raw("Type your own answer...")
+                    .style(selected ? Style.EMPTY.fg(accent).bold() : Style.EMPTY.fg(textColor))
         };
     }
 
@@ -9063,7 +9130,7 @@ public class TuiCommand implements Runnable {
         private final CheckboxState[] boxes;
         private final CheckboxState ownBox = new CheckboxState();
         private final TextAreaState ownAnswer = new TextAreaState();
-        private final List<Rect> optionRects = new ArrayList<>();
+        private final List<FeedbackOptionRow> optionRects = new ArrayList<>();
 
         private FeedbackQuestion(final Question question) {
             this.question = question;
@@ -9093,7 +9160,7 @@ public class TuiCommand implements Runnable {
             return ownAnswer;
         }
 
-        private List<Rect> optionRects() {
+        private List<FeedbackOptionRow> optionRects() {
             return optionRects;
         }
 
@@ -9105,6 +9172,9 @@ public class TuiCommand implements Runnable {
             selectedIndex[0] = Math.max(0, index);
         }
     }
+
+    /** One visible option row: the screen rect plus the logical option index it belongs to. */
+    private record FeedbackOptionRow(Rect rect, int option) {}
 
     private static TextAreaState feedbackInput(final FeedbackPrompt prompt) {
         final var idx = prompt.tab() >= prompt.questions().size() ? 0 : prompt.tab();
