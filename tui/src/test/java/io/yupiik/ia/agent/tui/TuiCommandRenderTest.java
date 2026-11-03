@@ -2076,13 +2076,14 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        // 8 options + the own-answer row overflow the (7-row) options panel of a short
-        // single-question modal, so moving focus must scroll the window to keep it visible
+        // a long wrapped question pushes the modal to its 4/5 height cap even on a tall frame, so
+        // the options panel stays small: 8 options + the own-answer row overflow it and moving
+        // focus must scroll the window to keep the focused option visible
         final var options = new ArrayList<String>();
         for (int i = 0; i < 8; i++) {
             options.add("option " + i + " choice");
         }
-        attachFeedbackPrompt(command, List.of(new Question("q", "pick", options, false)), 0);
+        attachFeedbackPrompt(command, List.of(new Question("q", "pick ".repeat(400), options, false)), 0);
         awaitText("option 0 choice");
 
         for (int i = 0; i < 6; i++) {
@@ -2092,6 +2093,71 @@ class TuiCommandRenderTest {
         awaitText("option 6 choice");
         assertTrue(backend.text().contains("▲"), "the scroll indicator must show once scrolled:\n" + backend.text());
         assertFalse(backend.text().contains("option 0 choice"), "the top must scroll out of view:\n" + backend.text());
+
+        quit();
+    }
+
+    @Test
+    void feedbackModalGrowsToFitManyOptionsOnTallFrame() throws Exception {
+        backend = new HeadlessBackend(120, 40);
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-feedback-presize-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // 12 options would previously overflow the fixed panel and pop a scroll window; with
+        // the content pre-sizing the modal grows so every option is visible at once
+        final var options = new ArrayList<String>();
+        for (int i = 0; i < 12; i++) {
+            options.add("option " + i);
+        }
+        attachFeedbackPrompt(command, List.of(new Question("q", "pick one", options, false)), 0);
+        awaitText("option 0");
+        awaitText("option 11");
+        awaitText("Type your own answer...");
+        // no scroll window anywhere: on a tall frame the modal grows instead of scrolling
+        assertFalse(backend.text().contains("▲"), "a tall frame must grow the modal, not scroll:\n" + backend.text());
+
+        quit();
+    }
+
+    @Test
+    void feedbackQuestionScrollsWhenCappedInsteadOfClipping() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-feedback-qscroll-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a question far longer than the capped modal (4/5 of the frame) can show must be reachable
+        // by scrolling, not silently clipped (the old Overflow.CLIP dropped everything past the
+        // visible rows)
+        final var longQuestion = new StringBuilder();
+        for (int i = 1; i <= 80; i++) {
+            longQuestion.append("row ").append(String.format("%02d", i)).append(" content\n");
+        }
+        final var trimmed = longQuestion.toString().stripTrailing();
+        attachFeedbackPrompt(command, List.of(new Question("q", trimmed, List.of("a", "b"), false)), 0);
+        awaitText("row 01 content");
+        // the tail is not visible yet and the n/total affordance confirms there is more
+        assertFalse(
+                backend.text().contains("row 80 content"),
+                "the tail must be clipped before scrolling:\n" + backend.text());
+        awaitText("▼");
+
+        // scrolling down (multi-page) reveals the deep tail and scrolls the top out of view,
+        // replacing the previous silent unreachable clip (the exact last line may sit under the
+        // scroll affordance, exactly like the options panel's bottom-row indicator)
+        for (int i = 0; i < 6; i++) {
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.PAGE_DOWN));
+        }
+        awaitText("row 76 content");
+        assertTrue(backend.text().contains("row 78 content"), "deep tail reachable:\n" + backend.text());
+        assertTrue(backend.text().contains("▲"), "scrolled state must be indicated:\n" + backend.text());
+        awaitNoText("row 01 content");
 
         quit();
     }

@@ -157,4 +157,70 @@ public final class TuiInputSupport {
         }
         return out;
     }
+
+    /**
+     * Display-width aware variant of {@link #wrapProse} used to size the ask_user
+     * feedback modal. It measures each word (and each wrapped row) by the number of
+     * terminal columns each code point occupies via {@link CharWidth}, so wide glyphs
+     * (CJK, emoji, combining sequences) are counted at their real 2-cell width instead
+     * of 1 column per UTF-16 char. {@code wrapProse} is length-based and therefore
+     * underestimates the row count for such text, which made the modal under-grow and
+     * clip its (column-wrapped) question. The produced rows are only used for sizing,
+     * the actual rendering re-wraps to the panel width.
+     */
+    public static List<String> wrapProseWidth(final String text, final int width) {
+        if (text == null || text.isEmpty()) {
+            return List.of();
+        }
+        final var w = Math.max(1, width);
+        final var out = new ArrayList<String>();
+        for (final var raw : text.split("\n", -1)) {
+            if (raw.isBlank()) {
+                out.add("");
+                continue;
+            }
+            final var words = raw.split(" ");
+            final var line = new StringBuilder();
+            var lineWidth = 0;
+            for (final var word : words) {
+                final var wordWidth = CharWidth.of(word);
+                if (wordWidth > w) {
+                    // a single token (eg. a CJK sentence without spaces) is hard-split
+                    // at a column boundary so no row ever visually exceeds the width
+                    if (line.length() > 0) {
+                        out.add(line.toString());
+                        line.setLength(0);
+                        lineWidth = 0;
+                    }
+                    var rem = word;
+                    while (!rem.isEmpty() && CharWidth.of(rem) > w) {
+                        final var piece = CharWidth.substringByWidth(rem, w);
+                        if (piece.isEmpty()) {
+                            break;
+                        }
+                        out.add(piece);
+                        rem = rem.substring(piece.length());
+                    }
+                    line.append(rem);
+                    lineWidth = CharWidth.of(rem);
+                    continue;
+                }
+                if (line.length() > 0 && lineWidth + 1 + wordWidth > w) {
+                    out.add(line.toString());
+                    line.setLength(0);
+                    lineWidth = 0;
+                }
+                if (line.length() > 0) {
+                    line.append(' ');
+                    lineWidth += 1;
+                }
+                line.append(word);
+                lineWidth += wordWidth;
+            }
+            if (line.length() > 0) {
+                out.add(line.toString());
+            }
+        }
+        return out;
+    }
 }

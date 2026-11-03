@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.tamboui.text.CharWidth;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -103,5 +104,36 @@ class TuiInputSupportTest {
         final var token = "x".repeat(25);
         assertTrue(TuiInputSupport.wrapProse(token, 10).stream().allMatch(l -> l.length() <= 10));
         assertEquals(3, TuiInputSupport.wrapProse(token, 10).size());
+    }
+
+    @Test
+    void wrapProseWidthBehavesLikeWrapProseForAscii() {
+        assertEquals(List.of(), TuiInputSupport.wrapProseWidth(null, 10));
+        assertEquals(List.of(), TuiInputSupport.wrapProseWidth("", 10));
+        assertEquals(List.of("ab"), TuiInputSupport.wrapProseWidth("ab", 10));
+        assertEquals(List.of("one", "two"), TuiInputSupport.wrapProseWidth("one\ntwo", 10));
+        assertEquals(
+                List.of("aaaa bbbb", "cccc dddd", "eeee"),
+                TuiInputSupport.wrapProseWidth("aaaa bbbb cccc dddd eeee", 10));
+        assertEquals(List.of("", "x"), TuiInputSupport.wrapProseWidth("\nx", 10), "blank lines are preserved");
+        // a single overlong ASCII token is hard-split and never exceeds the width
+        final var token = "x".repeat(25);
+        assertTrue(TuiInputSupport.wrapProseWidth(token, 10).stream().allMatch(l -> CharWidth.of(l) <= 10));
+        assertEquals(3, TuiInputSupport.wrapProseWidth(token, 10).size());
+    }
+
+    @Test
+    void wrapProseWidthCountsWideGlyphCells() {
+        // 5 two-cell CJK glyphs = 10 display columns; width 6 fits exactly 3 glyphs per row
+        // (the length-based wrapProse would wrongly report a single 5-column row that visually
+        // overflows, which is exactly the "modal under-grows and clips CJK" regression)
+        assertEquals(List.of("中中中", "中中"), TuiInputSupport.wrapProseWidth("中中中中中", 6));
+        // mixed ASCII + wide glyph: the token "ab中cd" is 6 cells wide, hard-split at a clean
+        // column boundary (never inside the wide glyph)
+        assertEquals(List.of("ab中", "cd", "ef"), TuiInputSupport.wrapProseWidth("ab中cd ef", 4));
+        // every produced row stays within the requested display width
+        for (final var row : TuiInputSupport.wrapProseWidth("ab中cd ef 中中中中中", 5)) {
+            assertTrue(CharWidth.of(row) <= 5, "row '" + row + "' exceeds width 5");
+        }
     }
 }

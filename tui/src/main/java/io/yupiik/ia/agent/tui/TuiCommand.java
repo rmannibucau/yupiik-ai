@@ -1202,6 +1202,10 @@ public class TuiCommand implements Runnable {
                 prompt.tab(Math.max(0, prompt.questions().size() - 1));
             } else if (key.isLeft() || (key.hasCtrl() && key.isCharIgnoreCase('t'))) {
                 prompt.tab(prompt.questions().size() - 1);
+            } else if (key.isKey(KeyCode.PAGE_UP)) {
+                scrollFeedbackQuestion(prompt, -scrollService.pageRows());
+            } else if (key.isKey(KeyCode.PAGE_DOWN)) {
+                scrollFeedbackQuestion(prompt, scrollService.pageRows());
             }
             return true;
         }
@@ -1219,6 +1223,14 @@ public class TuiCommand implements Runnable {
         }
         if (key.hasCtrl() && key.isCharIgnoreCase('t')) {
             prompt.tab((prompt.tab() + 1) % tabCount);
+            return true;
+        }
+        if (key.isKey(KeyCode.PAGE_UP)) {
+            scrollFeedbackQuestion(prompt, -scrollService.pageRows());
+            return true;
+        }
+        if (key.isKey(KeyCode.PAGE_DOWN)) {
+            scrollFeedbackQuestion(prompt, scrollService.pageRows());
             return true;
         }
         switch (key.code()) {
@@ -1285,6 +1297,17 @@ public class TuiCommand implements Runnable {
         final var tabCount = prompt.questions().size() + 1;
         final var next = forward ? prompt.tab() + 1 : prompt.tab() - 1;
         prompt.tab(Math.floorMod(next, tabCount));
+    }
+
+    /**
+     * Scrolls the ask_user question (or confirm summary) by {@code delta} rows. A no-op unless the
+     * render reported overflow ({@code questionMaxScroll() > 0}), which keeps PgUp/PgDn harmless on
+     * the common case where the modal already fits its content.
+     */
+    private static void scrollFeedbackQuestion(final FeedbackPrompt prompt, final int delta) {
+        if (prompt.questionMaxScroll() > 0) {
+            prompt.questionScroll(Math.max(0, prompt.questionScroll() + delta));
+        }
     }
 
     private static void moveOption(final FeedbackPrompt prompt, final int qIndex, final int delta) {
@@ -3423,7 +3446,12 @@ public class TuiCommand implements Runnable {
             // two buttons, no scrollable body
         } else if (state.feedbackPrompt != null) {
             final var prompt = state.feedbackPrompt;
-            if (prompt.tab() < prompt.questions().size()) {
+            // when the question/summary overflows the capped modal, the wheel scrolls it (its
+            // tail must stay reachable); otherwise it keeps the legacy behaviour of scrolling
+            // through the option selection
+            if (prompt.questionMaxScroll() > 0) {
+                prompt.questionScroll(scrollService.apply(prompt.questionScroll(), delta));
+            } else if (prompt.tab() < prompt.questions().size()) {
                 moveOption(prompt, prompt.tab(), delta);
             }
         } else if (state.picker != null) {
@@ -8243,17 +8271,40 @@ public class TuiCommand implements Runnable {
         final var textStyle = Style.EMPTY.fg(Color.hex(palette.text()));
         final var warning = Color.hex(palette.warning());
         final var width = Math.min(Math.max(60, frame.width() * 4 / 5), frame.width());
+        final var innerWidth = Math.max(1, width - 2);
         final var isConfirmTab = prompt.tab() >= prompt.questions().size();
         final var qIndex = !isConfirmTab ? prompt.tab() : 0;
         final var fq = prompt.questions().get(qIndex);
-        // the question is word-wrapped; the modal grows to fit its rows so long
-        // questions (eg. fenced code snippets) stay fully readable instead of
-        // being vertically clipped to a fixed 6-row area
-        final var innerWidth = Math.max(1, width - 2);
-        final var questionLines = TuiInputSupport.wrapProse(fq.question.prompt(), innerWidth);
-        final var questionRows = Math.max(1, questionLines.size());
+
+        // The question is word-wrapped with a display-width aware wrap (so CJK/wide glyphs count
+        // their real 2 terminal cells, unlike the length-based wrapProse). The modal then pre-sizes
+        // to the WIDEST tab - question rows + every option's wrapped rows + the whole confirm
+        // summary - so switching tabs never clips and long question/option sets don't pop a scroll
+        // window the moment the user lands on them (they only scroll when the 4/5 frame cap bites).
+        final var questionLines = TuiInputSupport.wrapProseWidth(fq.question.prompt(), innerWidth);
+        final var questionRows = isConfirmTab ? 1 : Math.max(1, questionLines.size());
+        var widestNeed = questionRows;
+        final var optionWidth = Math.max(1, innerWidth - 2);
+        for (int i = 0; i < prompt.questions().size(); i++) {
+            final var question = prompt.questions().get(i).question;
+            final var qr = Math.max(
+                    1,
+                    TuiInputSupport.wrapProseWidth(question.prompt(), innerWidth)
+                            .size());
+            var or = 0;
+            if (question.options() != null) {
+                for (final var opt : question.options()) {
+                    or += MarkdownLines.wrapCode(List.of(Line.from(Span.raw(opt))), optionWidth)
+                            .size();
+                }
+            }
+            widestNeed = Math.max(widestNeed, qr + or);
+        }
+        final var summaryLines = feedbackSummaryLines(prompt, innerWidth);
+        widestNeed = Math.max(widestNeed, summaryLines.size());
+        // ceiling raised 3/4 -> 4/5 (matching the tool-output overlay) and floor 12 -> 14
         final var height = Math.min(
-                Math.max(12, 8 + prompt.questions().size() * 3 + questionRows), Math.max(12, frame.height() * 3 / 4));
+                Math.max(14, 8 + prompt.questions().size() * 3 + widestNeed), Math.max(14, frame.height() * 4 / 5));
         final var rect = Modal.rect(frame, width, height, 0.25);
         final var inner = modal(frame, rect, " user request ", Color.hex(palette.accent()));
         if (inner == null || inner.height() < 4) {
@@ -8267,35 +8318,55 @@ public class TuiCommand implements Runnable {
         final var bodyRect = splits.get(1);
         buildTabs(frame.buffer(), prompt, tabsRect);
 
-        // the modal height is capped at 3/4 of the frame, so on small terminals the
-        // question area may have to give rows back, but the input block (3 rows)
-        // must never shrink below its natural height
+        // the modal height is capped at 4/5 of the frame, so on small terminals the question
+        // area may have to give rows back, but the input block (3 rows) must never shrink
+        // below its natural height
         final var questionArea = Math.min(questionRows, Math.max(1, bodyRect.height() - 3));
         final var content = Layout.vertical()
                 .constraints(Constraint.length(questionArea), Constraint.fill(), Constraint.length(3))
                 .split(bodyRect);
-        final var promptLines = new ArrayList<Line>();
+
+        // the scrollable body: the wrapped question on question tabs, the whole confirm summary on
+        // the confirm tab. Unlike the previous Overflow.CLIP (which silently dropped anything past
+        // the visible rows), it scrolls with the wheel / PgUp / PgDn and shows a n/total affordance,
+        // so content that overflows the capped modal is never an unreachable tail.
         final var promptStyle =
                 isConfirmTab ? textStyle : Style.EMPTY.fg(warning).bold();
+        final List<Line> scrollLines;
+        final Rect scrollRect;
         if (isConfirmTab) {
-            promptLines.add(Line.from(Span.styled(
-                    "Review your answers below, then press Enter to confirm, Backspace to go back and edit.",
-                    promptStyle)));
+            scrollLines = summaryLines;
+            scrollRect = content.get(1);
         } else {
+            scrollLines = new ArrayList<>(questionLines.size());
             for (final var wrapped : questionLines) {
-                promptLines.add(Line.from(Span.styled(wrapped, promptStyle)));
+                scrollLines.add(Line.from(Span.styled(wrapped, promptStyle)));
             }
+            scrollRect = content.get(0);
         }
+        final var scrollAreaRows = Math.max(1, scrollRect.height());
+        final var maxScroll = Math.max(0, scrollLines.size() - scrollAreaRows);
+        prompt.questionMaxScroll(maxScroll);
+        final var clamped = Math.min(prompt.questionScroll(), maxScroll);
         frame.renderWidget(
                 Paragraph.builder()
-                        .text(Text.from(promptLines.toArray(Line[]::new)))
+                        .text(Text.from(scrollLines.toArray(Line[]::new)))
                         .overflow(Overflow.CLIP)
+                        .scroll(clamped)
                         .build(),
-                content.get(0));
+                scrollRect);
+        if (scrollLines.size() > scrollAreaRows) {
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(Text.from(Line.from(Span.styled(
+                                    (clamped > 0 ? "▲ " : "  ") + (clamped + 1) + "/" + scrollLines.size()
+                                            + (clamped + scrollAreaRows < scrollLines.size() ? " ▼" : "  "),
+                                    Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
+                            .build(),
+                    new Rect(scrollRect.x(), scrollRect.y() + Math.max(0, scrollRect.height() - 1), width / 3, 1));
+        }
 
-        if (isConfirmTab) {
-            renderFeedbackSummary(frame, content.get(1), prompt);
-        } else {
+        if (!isConfirmTab) {
             renderFeedbackOptions(frame, content.get(1), fq, prompt);
         }
         final var inputRect = content.get(2);
@@ -8485,12 +8556,21 @@ public class TuiCommand implements Runnable {
         };
     }
 
-    private void renderFeedbackSummary(
-            final dev.tamboui.terminal.Frame frame, final Rect rect, final FeedbackPrompt prompt) {
+    /**
+     * Builds the confirm-tab summary lines. Every question (bold accent) is followed by its
+     * selection(s) (indented, plain text) - all word-wrapped with the display-width aware wrap so
+     * the produced row count matches the terminal render and long options/answers (including CJK or
+     * code snippets) stay fully visible instead of being clipped. The leading instruction line makes
+     * the returned list self-contained (it counts toward the modal height budget).
+     */
+    private List<Line> feedbackSummaryLines(final FeedbackPrompt prompt, final int width) {
+        final var w = Math.max(1, width);
         final var lines = new ArrayList<Line>();
+        lines.add(Line.from(Span.styled(
+                "Review your answers below, then press Enter to confirm, Backspace to go back and edit.",
+                Style.EMPTY.fg(Color.hex(palette.text())))));
         for (final var fq : prompt.questions()) {
-            // the full question, word-wrapped to the panel width so long prompts stay readable
-            for (final var wrapped : TuiInputSupport.wrapProse(fq.question.prompt(), Math.max(1, rect.width()))) {
+            for (final var wrapped : TuiInputSupport.wrapProseWidth(fq.question.prompt(), w)) {
                 lines.add(Line.from(Span.styled(
                         wrapped, Style.EMPTY.fg(Color.hex(palette.accent())).bold())));
             }
@@ -8500,13 +8580,17 @@ public class TuiCommand implements Runnable {
             if (fq.question.multiple()) {
                 for (int i = 0; i < fq.boxes().length && i < opts; i++) {
                     if (fq.boxes()[i].isChecked()) {
-                        lines.add(Line.from(Span.styled(
-                                "  - " + fq.question.options().get(i), Style.EMPTY.fg(Color.hex(palette.text())))));
+                        for (final var l : TuiInputSupport.wrapProseWidth(
+                                "  - " + fq.question.options().get(i), w)) {
+                            lines.add(Line.from(Span.styled(l, Style.EMPTY.fg(Color.hex(palette.text())))));
+                        }
                         any = true;
                     }
                 }
                 if (fq.ownBox().isChecked() && !own.isEmpty()) {
-                    lines.add(Line.from(Span.styled("  - " + own, Style.EMPTY.fg(Color.hex(palette.text())))));
+                    for (final var l : TuiInputSupport.wrapProseWidth("  - " + own, w)) {
+                        lines.add(Line.from(Span.styled(l, Style.EMPTY.fg(Color.hex(palette.text())))));
+                    }
                     any = true;
                 }
             } else {
@@ -8516,7 +8600,9 @@ public class TuiCommand implements Runnable {
                 // a no-options question answers from the free-text field, not a (null) option
                 final var value = opts == 0 ? own : fq.selectedIndex() == opts && !own.isEmpty() ? own : selected;
                 if (value != null) {
-                    lines.add(Line.from(Span.styled("  - " + value, Style.EMPTY.fg(Color.hex(palette.text())))));
+                    for (final var l : TuiInputSupport.wrapProseWidth("  - " + value, w)) {
+                        lines.add(Line.from(Span.styled(l, Style.EMPTY.fg(Color.hex(palette.text())))));
+                    }
                     any = true;
                 }
             }
@@ -8525,8 +8611,7 @@ public class TuiCommand implements Runnable {
             }
             lines.add(Line.empty());
         }
-        frame.renderWidget(
-                Paragraph.builder().text(Text.from(lines.toArray(Line[]::new))).build(), rect);
+        return lines;
     }
 
     /**
@@ -9060,6 +9145,10 @@ public class TuiCommand implements Runnable {
         private int optionsFocus;
         private boolean focusInput;
         private Rect tabsRect;
+        /** Scroll offset of the (column-wrapped) question/prompt or confirm summary, reset on every tab change. */
+        private int questionScroll;
+        /** Overflow (rows beyond the visible question area) computed at the last render; used to route the wheel. */
+        private int questionMaxScroll;
 
         private FeedbackPrompt(
                 final List<Question> raw,
@@ -9097,6 +9186,8 @@ public class TuiCommand implements Runnable {
 
         private void tab(final int tab) {
             this.tab = Math.max(0, tab);
+            // a new tab shows a different question/summary, so its scroll must restart from the top
+            this.questionScroll = 0;
         }
 
         private int optionsFocus() {
@@ -9121,6 +9212,22 @@ public class TuiCommand implements Runnable {
 
         private void tabsRect(final Rect tabsRect) {
             this.tabsRect = tabsRect;
+        }
+
+        private int questionScroll() {
+            return questionScroll;
+        }
+
+        private void questionScroll(final int questionScroll) {
+            this.questionScroll = Math.max(0, questionScroll);
+        }
+
+        private int questionMaxScroll() {
+            return questionMaxScroll;
+        }
+
+        private void questionMaxScroll(final int questionMaxScroll) {
+            this.questionMaxScroll = Math.max(0, questionMaxScroll);
         }
     }
 
