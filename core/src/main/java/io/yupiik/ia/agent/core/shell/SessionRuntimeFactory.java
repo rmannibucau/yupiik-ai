@@ -39,6 +39,7 @@ import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
+import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.core.permissions.BashRulesRegistry;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
@@ -83,6 +84,7 @@ public class SessionRuntimeFactory {
     private final MemoryProductionPolicy memoryProductionPolicy;
     private final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore;
     private volatile io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
+    private final NotificationService notificationService;
 
     public SessionRuntimeFactory(
             final ChatClient chatClient,
@@ -107,7 +109,8 @@ public class SessionRuntimeFactory {
             final BashRulesRegistry bashRulesRegistry,
             final MemoryProductionPolicy memoryProductionPolicy,
             final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore,
-            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
+            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor,
+            final NotificationService notificationService) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -131,6 +134,7 @@ public class SessionRuntimeFactory {
         this.memoryProductionPolicy = memoryProductionPolicy;
         this.quotaStore = quotaStore;
         this.secretRedactor = secretRedactor;
+        this.notificationService = notificationService;
     }
 
     /**
@@ -203,7 +207,8 @@ public class SessionRuntimeFactory {
                 null,
                 feedback,
                 precisionDurationMarker,
-                null);
+                null,
+                notificationService);
         // bounded initialization telemetry: mark the runtime wiring window so pre-first-request
         // startup is decomposable (runtime creation -> model resolution -> prompt build -> initial prompt)
         emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_START);
@@ -302,6 +307,7 @@ public class SessionRuntimeFactory {
         this.memoryProductionPolicy = null;
         this.quotaStore = null;
         this.secretRedactor = null;
+        this.notificationService = null;
     }
 
     private static void emitPhase(final Emitter emitter, final String sessionId, final String name) {

@@ -45,6 +45,7 @@ import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
+import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -219,6 +220,7 @@ public class AgentLoop {
     private final TurnState turnState = new TurnState();
     private final SnapshotStore snapshotStore;
     private final TodoStore todoStore;
+    private final NotificationService notificationService;
     private final ExecutorService executor;
     private final UserFeedbackService userFeedbackService;
     private final ToolCallPairingRepair pairingRepair;
@@ -545,7 +547,8 @@ public class AgentLoop {
             final Clock clock,
             final SnapshotStore snapshotStore,
             final TodoStore todoStore,
-            final ExecutorService executor) {
+            final ExecutorService executor,
+            final NotificationService notificationService) {
         this(
                 chatClient,
                 toolRegistry,
@@ -574,7 +577,8 @@ public class AgentLoop {
                 null,
                 null,
                 new PrecisionDurationMarkerProvider(),
-                null);
+                null,
+                notificationService);
     }
 
     AgentLoop(
@@ -601,7 +605,8 @@ public class AgentLoop {
             final TodoStore todoStore,
             final ExecutorService executor,
             final String subagentId,
-            final String subagentName) {
+            final String subagentName,
+            final NotificationService notificationService) {
         this(
                 chatClient,
                 toolRegistry,
@@ -630,13 +635,14 @@ public class AgentLoop {
                 subagentName,
                 null,
                 new PrecisionDurationMarkerProvider(),
-                null);
+                null,
+                notificationService);
     }
 
     protected AgentLoop() {
         this(
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     /**
@@ -674,7 +680,8 @@ public class AgentLoop {
             final String subagentName,
             final UserFeedbackService userFeedbackService,
             final PrecisionDurationMarkerProvider precisionDurationMarker,
-            final ToolCallPairingRepair pairingRepair) {
+            final ToolCallPairingRepair pairingRepair,
+            final NotificationService notificationService) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -705,6 +712,7 @@ public class AgentLoop {
         this.subagentName = subagentName;
         this.userFeedbackService = userFeedbackService;
         this.pairingRepair = pairingRepair != null ? pairingRepair : new ToolCallPairingRepair(sessionStore, clock);
+        this.notificationService = notificationService;
     }
 
     /**
@@ -1223,6 +1231,12 @@ public class AgentLoop {
                     }
                 }
                 memoryExtractor.asyncExtractNow(messages, runSettings, eligible);
+            }
+            // OS notification for the turn end, top-level turns only (subagents are covered by the parent
+            // turn and must not each fire their own notification). Best-effort and non-blocking: the turned
+            // service swallows failures and runs on the shared executor, so it cannot slow teardown.
+            if (notificationService != null && subagentId == null) {
+                emitTurnEndNotification(currentSessionId, messages);
             }
         }
     }
@@ -2410,6 +2424,59 @@ public class AgentLoop {
             lastTurnEndedWithContent = !content.isBlank();
             emit(turnDone(content));
         }
+    }
+
+    /**
+     * Builds and delivers the OS turn-end notification (top-level turns only, see the {@code doRun} finally).
+     * The notification is best-effort and asynchronous inside {@link NotificationService}, so gathering the
+     * fields here never blocks or fails the turn - it only reads session state.
+     */
+    private void emitTurnEndNotification(final String sessionId, final List<Message> messages) {
+        if (notificationService == null) {
+            return;
+        }
+        final var id = sessionId;
+        final var sessionTitle = sessionStore == null ? "" : sessionStore.summary(id);
+        final var title = (sessionTitle == null || sessionTitle.isBlank()) ? id : id + " - " + sessionTitle;
+        final var resolved = resolvedModel();
+        final var provider = resolved == null || resolved.provider() == null
+                ? ""
+                : resolved.provider().id();
+        final var model = resolved == null || resolved.model() == null ? "" : resolved.model();
+        final var success = lastTurnEndedWithContent;
+        final var lastReply = lastAssistantText(messages);
+        final var body = new StringBuilder(64)
+                .append(success ? "\u2714 Turn ended successfully" : "\u2716 Turn ended with failure")
+                .append('\n')
+                .append('\n')
+                .append(provider.isBlank() ? "" : provider + " / ")
+                .append(model)
+                .append('\n')
+                .append('\n')
+                .append(lastReply)
+                .toString();
+        notificationService.onTurnEnd(id, title, model, provider, success, body);
+    }
+
+    /**
+     * The text of the most recent real assistant reply in {@code messages} (a plain string content), collapsed
+     * to a single line and truncated so a notification body stays compact. Empty string when none is found.
+     */
+    private static String lastAssistantText(final List<Message> messages) {
+        if (messages == null) {
+            return "";
+        }
+        for (var i = messages.size() - 1; i >= 0; i--) {
+            final var message = messages.get(i);
+            if (message == null
+                    || !"assistant".equals(message.role())
+                    || !(message.content() instanceof String content)) {
+                continue;
+            }
+            final var singleLine = content.replaceAll("\\s+", " ").strip();
+            return singleLine.length() <= 400 ? singleLine : singleLine.substring(0, 397) + "...";
+        }
+        return "";
     }
 
     /**

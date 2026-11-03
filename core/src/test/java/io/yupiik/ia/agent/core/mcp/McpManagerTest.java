@@ -378,6 +378,7 @@ class McpManagerTest {
                 base.labels(),
                 base.logging(),
                 base.hooks(),
+                base.notifications(),
                 null); // secrets (default redaction)
     }
 

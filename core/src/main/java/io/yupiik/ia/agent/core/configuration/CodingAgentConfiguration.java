@@ -158,6 +158,9 @@ public record CodingAgentConfiguration(
         @Property(documentation = "External-program hook callbacks bound to events (see the hooks reference).")
         HooksConfiguration hooks,
 
+        @Property(documentation = "OS turn-end notifications (opt-in, disabled by default).")
+        NotificationsConfiguration notifications,
+
         @Property(documentation = "Secret redaction: detect local secrets and keep them off the LLM wire.")
         SecretRedactionConfiguration secrets) {
 

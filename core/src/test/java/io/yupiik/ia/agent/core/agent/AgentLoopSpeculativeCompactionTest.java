@@ -253,7 +253,8 @@ class AgentLoopSpeculativeCompactionTest {
                 Clock.systemUTC(),
                 null,
                 null,
-                executor);
+                executor,
+                null);
     }
 
     private static List<Message> history() {

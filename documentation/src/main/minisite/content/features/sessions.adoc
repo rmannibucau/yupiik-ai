@@ -98,6 +98,42 @@ reachable; it disappears as soon as the pointer leaves the bar (or on click /
 scroll). This relies on mouse-motion tracking (`?1003h`), which most modern
 terminals support; terminals without it simply never show the tooltip.
 
+== Turn-end notifications
+
+By default yca is silent when a turn completes, but it can send an OS
+notification once a top-level turn ends so you are alerted when the agent has
+stopped working (e.g. you switched away while a long task ran). Enable it with
+`yca.notifications.enabled` (`false` by default):
+
+[source,sh]
+....
+yca.notifications.enabled=true
+....
+
+When enabled, a best-effort, asynchronous notification is fired at the end of
+each top-level turn (sub-agents are covered by the parent turn and do not each
+notify). It carries the session title, the provider and model used, whether the
+turn ended on a real reply (success) or not (failure), and a shortened excerpt
+of the last assistant reply. Notifications never fail or slow the turn: any
+delivery error is swallowed and the delivery runs off the turn thread.
+
+The built-in integration uses the desktop notification tool per OS
+(`notify-send` on Linux, `osascript display notification` on macOS,
+`powershell.exe` on Windows). To use your own program instead, set
+`yca.notifications.command` to the command and its arguments; the payload is
+then passed exclusively through environment variables:
+
+[source,sh]
+....
+yca.notifications.command=my-notifier,--flag
+....
+
+The custom command receives `YCA_NOTIFICATION_SESSION`,
+`YCA_NOTIFICATION_TITLE`, `YCA_NOTIFICATION_MODEL`,
+`YCA_NOTIFICATION_PROVIDER`, `YCA_NOTIFICATION_SUCCESS` (`true`/`false`) and
+`YCA_NOTIFICATION_BODY`. Both the built-in sink and a custom command always
+receive these variables.
+
 A memory store is maintained automatically at both the global and per-project
 levels, letting yca remember recurring facts across sessions.
 

@@ -7336,6 +7336,7 @@ class AgentLoopTest {
                 null,
                 null,
                 new io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider(),
+                null,
                 null);
     }
 

@@ -97,7 +97,8 @@ class WebSessionManagerFeedbackGateTest {
                 null,
                 null, // memory production policy
                 null, // quota store
-                null); // SecretRedactor
+                null, // SecretRedactor
+                null); // NotificationService
         this.manager = new WebSessionManager(
                 runtimeFactory,
                 new NoopShellRegistry(),

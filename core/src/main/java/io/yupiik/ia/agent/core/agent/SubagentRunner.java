@@ -332,6 +332,7 @@ public class SubagentRunner {
                 subagentName,
                 parentContext == null ? null : parentContext.feedback(),
                 precisionDurationMarker,
+                null,
                 null);
         // The sub-agent runs on its own dedicated AgentLoop, so its model selection is per-run:
         // inherit the parent tab's provider/model/variant/sampling selection so a child spawned from

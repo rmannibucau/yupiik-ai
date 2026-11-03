@@ -90,6 +90,7 @@ class WebSessionManagerCloseTest {
                 null,
                 null,
                 null,
+                null,
                 null);
         this.turnRunner = new CancelCapturingTurnRunner();
         this.manager = new WebSessionManager(

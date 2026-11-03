@@ -89,7 +89,7 @@ class SessionRuntimeFactoryTest {
                 null, // backoff sleeper
                 null, null, // memory production policy
                 null, // quota store
-                null, null);
+                null, null, null);
         assertNull(factory.resolveSessionWorkdir("s1"), "with no session store nothing can be resolved");
     }
 
@@ -108,6 +108,6 @@ class SessionRuntimeFactoryTest {
                 null, // backoff sleeper
                 null, null, // memory production policy
                 null, // quota store
-                null, null);
+                null, null, null);
     }
 }
