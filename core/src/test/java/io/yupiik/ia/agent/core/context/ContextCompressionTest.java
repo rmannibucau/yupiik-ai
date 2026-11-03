@@ -416,19 +416,119 @@ class ContextCompressionTest {
     }
 
     @Test
-    void rangesInOneCallMustNotOverlapEachOther() {
+    void containedOverlappingRangeIsDroppedNotFatal() {
         final var compression = new ContextCompression(config());
         final var messages = simpleConversation();
         assignedRefs(compression, messages);
+        // [1..4] fully covers [3..4], so the contained (later) range is dropped as redundant and the
+        // covering one is applied - the batch must succeed instead of hard-failing on overlap
         final var result = compression.compress(
                 "bad",
                 List.of(
                         new ContextCompression.Range("1", "4", "whole"),
                         new ContextCompression.Range("3", "4", "tail")));
-        assertFalse(result.success());
-        assertTrue(result.message().contains("overlap"), result.message());
-        assertTrue(result.message().contains("Send disjoint small ranges"), result.message());
-        assertTrue(compression.blocks().isEmpty(), "nothing is compressed when ranges overlap");
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("fully covered by"), result.message());
+        assertEquals(1, compression.blocks().size(), "only the covering range must create a block");
+        assertEquals(1, compression.blocks().get(0).startRef());
+        assertEquals(4, compression.blocks().get(0).endRef());
+        assertTrue(compression.blocks().get(0).summary().contains("whole"));
+    }
+
+    @Test
+    void laterCoveringRangeAbsorbsEarlierOne() {
+        final var compression = new ContextCompression(config());
+        final var messages = simpleConversation();
+        assignedRefs(compression, messages);
+        // the later [1..4] fully covers the earlier [3..4]: the earlier span is absorbed (rewritten
+        // once by the covering summary) instead of both being applied twice
+        final var result = compression.compress(
+                "bad",
+                List.of(
+                        new ContextCompression.Range("3", "4", "tail"),
+                        new ContextCompression.Range("1", "4", "whole")));
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("absorbs the previously applied"), result.message());
+        assertEquals(1, compression.blocks().size(), "the absorbed range must not create its own block");
+        assertEquals(1, compression.blocks().get(0).startRef(), "the covering range starts at ref 1");
+        assertEquals(4, compression.blocks().get(0).endRef());
+        assertTrue(compression.blocks().get(0).summary().contains("whole"));
+    }
+
+    @Test
+    void adjacentRangesBothCompressWithoutOverlapDetection() {
+        final var compression = new ContextCompression(config());
+        final var messages = simpleConversation();
+        assignedRefs(compression, messages);
+        // two genuinely disjoint turns must both compress - the pairwise overlap check must not treat
+        // adjacency (end ref 2, start ref 3) as an overlap
+        final var result = compression.compress(
+                "turns",
+                List.of(
+                        new ContextCompression.Range("1", "2", "first turn"),
+                        new ContextCompression.Range("3", "4", "second turn")));
+        assertTrue(result.success(), result.message());
+        assertEquals(2, compression.blocks().size(), "both disjoint ranges must become blocks");
+        assertEquals(1, compression.blocks().get(0).startRef());
+        assertEquals(3, compression.blocks().get(1).startRef());
+    }
+
+    @Test
+    void overlapSurfacesCompressibleUserTurnRefs() {
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(
+                Message.system("system"),
+                Message.user("t1"),
+                Message.assistant("a1", List.of()),
+                Message.user("t2"),
+                Message.assistant("a2", List.of()),
+                Message.user("t3"),
+                Message.assistant("a3", List.of()));
+        assignedRefs(compression, messages);
+        // [1..4] straddles [3..6] on refs 3-4 (a range spans multiple user turns), so the earlier
+        // range is kept and the later overlapping one dropped; user turn t3 (ref 5) stays outside the
+        // block, so the overlap guidance lists the real surviving compressible start
+        final var result = compression.compress(
+                "bad",
+                List.of(
+                        new ContextCompression.Range("1", "4", "first two turns"),
+                        new ContextCompression.Range("3", "6", "last two turns")));
+        assertTrue(result.success(), result.message());
+        assertTrue(result.message().contains("straddles"), result.message());
+        assertTrue(result.message().contains("kept the earlier range"), result.message());
+        assertTrue(result.message().contains("compressible user-turn starts: @5@"), result.message());
+        assertEquals(1, compression.blocks().size(), "only the kept earlier range must create a block");
+        assertEquals(1, compression.blocks().get(0).startRef());
+        assertEquals(4, compression.blocks().get(0).endRef());
+    }
+
+    @Test
+    void broadCoveringRangeAbsorbsAllEarlierOverlappingOnes() {
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(
+                Message.system("system"),
+                Message.user("t1"),
+                Message.assistant("a1", List.of()),
+                Message.user("t2"),
+                Message.assistant("a2", List.of()),
+                Message.user("t3"),
+                Message.assistant("a3", List.of()));
+        assignedRefs(compression, messages);
+        // [1..2] and [5..6] are already applied, then a broad [1..6] covers both: it must absorb
+        // every narrower covered span so `resolved` stays pairwise disjoint - never two overlapping
+        // blocks like [[5..6],[1..6]]
+        final var result = compression.compress(
+                "whole",
+                List.of(
+                        new ContextCompression.Range("1", "2", "first"),
+                        new ContextCompression.Range("5", "6", "last"),
+                        new ContextCompression.Range("1", "6", "whole")));
+        assertTrue(result.success(), result.message());
+        assertEquals(1, compression.blocks().size(), "the broad range must collapse all covered spans into one block");
+        assertEquals(1, compression.blocks().get(0).startRef());
+        assertEquals(6, compression.blocks().get(0).endRef());
+        assertTrue(compression.blocks().get(0).summary().contains("whole"));
+        assertTrue(result.message().contains("absorbs the previously applied"), result.message());
     }
 
     @Test

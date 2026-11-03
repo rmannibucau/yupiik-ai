@@ -412,6 +412,11 @@ public final class ContextCompression {
         // range fails this way the observer (if any) is handed the valid user-turn ref list so a
         // flash-class model that guessed wrong refs can see the real ones without bloating the transcript
         var refLookupSkips = 0;
+        // how many ranges were dropped or absorbed because they overlapped an already-resolved range
+        // from the same request (effective bounds); used to append the grounded user-turn ref list to
+        // the result message so a strong model that writes overlapping batches can re-anchor in one
+        // round instead of being told the whole request failed
+        var overlapSkips = 0;
         for (final var range : ranges) {
             if (range == null || range.startId() == null || range.endId() == null) {
                 skipped.add("range without both startId and endId (message refs like @12@)");
@@ -521,25 +526,65 @@ public final class ContextCompression {
                     continue;
                 }
             }
-            if (resolved.stream()
-                    .anyMatch(
-                            previous -> effectiveStartRef <= previous.endRef && effectiveEndRef >= previous.startRef)) {
-                final var previousFirst = resolved.stream()
+            // Resolve a same-request overlap deterministically instead of hard-aborting the batch,
+            // keeping the "snap/skip with a corrective nudge, never fail" convention used for every
+            // other bound problem in this loop. Array order is the only tie-break, matching the
+            // ACTIVE-block precedence rewrite() applies to overlapping blocks. The resolution loops so
+            // a broad covering range can absorb every narrower previously-resolved span it covers
+            // (e.g. [1..6] sent after [1..2] and [5..6] absorbs both), guaranteeing that `resolved`
+            // stays pairwise disjoint; if it still straddles a remaining range with no containment it
+            // cannot be inserted disjointly and is dropped instead.
+            var resolvable = true;
+            var sawOverlap = false;
+            while (resolvable) {
+                final var overlapping = resolved.stream()
                         .filter(previous ->
                                 effectiveStartRef <= previous.endRef && effectiveEndRef >= previous.startRef)
-                        .findFirst()
-                        .orElseThrow();
-                return new Result(
-                        false,
-                        "Ranges @" + range.startId() + "@..@" + range.endId() + "@ and @"
-                                + previousFirst.startRef() + "@..@" + previousFirst.endRef()
-                                + "@ overlap, and overlapping ranges cannot be applied deterministically."
-                                + " Send disjoint small ranges as one array instead, or drop the smaller"
-                                + " overlap; nothing was compressed.",
-                        null);
+                        .findFirst();
+                if (overlapping.isEmpty()) {
+                    break; // disjoint from all already-resolved ranges -> add it below
+                }
+                if (!sawOverlap) {
+                    sawOverlap = true;
+                    overlapSkips++;
+                }
+                final var previous = overlapping.get();
+                final var currentCovered =
+                        previous.startRef() <= effectiveStartRef && previous.endRef() >= effectiveEndRef;
+                final var currentCovers =
+                        effectiveStartRef <= previous.startRef() && effectiveEndRef >= previous.endRef();
+                if (currentCovered) {
+                    // the current range adds nothing beyond the already-applied covering one
+                    skipped.add("range " + range.startId() + ".." + range.endId()
+                            + " is fully covered by @" + previous.startRef() + "@..@" + previous.endRef()
+                            + "@ which was already applied; dropped the redundant covered range");
+                    resolvable = false;
+                    break;
+                }
+                if (currentCovers) {
+                    // the current range is the broader one: absorb the narrower previous span - it is
+                    // rewritten once by the covering summary instead of twice - then re-check the rest
+                    resolved.remove(previous);
+                    nudges.add("range " + range.startId() + ".." + range.endId()
+                            + " absorbs the previously applied @" + previous.startRef() + "@..@"
+                            + previous.endRef() + "@ into its covering span and rewrites it once, not twice");
+                    continue;
+                }
+                // straddling overlap with no containment: the current range cannot be inserted
+                // disjointly, so keep the earlier range (first-writer-wins, mirroring ACTIVE-block
+                // precedence) and drop the later one so the batch still applies
+                skipped.add("range " + range.startId() + ".." + range.endId()
+                        + " straddles @" + previous.startRef() + "@..@" + previous.endRef()
+                        + "@ with no containment; kept the earlier range and dropped this later"
+                        + " overlapping one. Send disjoint ranges (each ending just before the next"
+                        + " user message) instead.");
+                resolvable = false;
+                break;
             }
-            resolved.add(new ResolvedRange(
-                    effectiveStartRef, effectiveEndRef, range.summary() == null ? "" : range.summary()));
+            if (resolvable) {
+                resolved.add(new ResolvedRange(
+                        effectiveStartRef, effectiveEndRef, range.summary() == null ? "" : range.summary()));
+            }
         }
 
         // a flash-class model that guessed refs no longer in the live conversation gets the real,
@@ -588,6 +633,32 @@ public final class ContextCompression {
         }
         if (!nudges.isEmpty()) {
             parts.add(String.join("\n", nudges));
+        }
+        if (overlapSkips > 0) {
+            // overlap means every ref was valid, so the onUnknownRefs observer (refLookupSkips > 0)
+            // can never fire here. Surface the bounded, guaranteed-valid user-turn ref list directly
+            // so a strong model that wrote an overlapping batch can re-anchor in one round - the same
+            // list AgentLoop.compressionRefGuidance() renders on the hard tier.
+            final var refs = compressibleUserTurnRefs();
+            if (refs.isEmpty()) {
+                parts.add("Overlapping ranges were resolved; no user-turn start is currently"
+                        + " compressible, so do not retry the same ranges - run /compact or start"
+                        + " a new session.");
+            } else {
+                final var refsText = new StringBuilder("compressible user-turn starts: ");
+                for (var i = 0; i < refs.size(); i++) {
+                    if (i > 0) {
+                        refsText.append(", ");
+                    }
+                    refsText.append('@').append(refs.get(i)).append('@');
+                }
+                final var omitted = compressibleUserTurnCount() - refs.size();
+                if (omitted > 0) {
+                    refsText.append(" (+").append(omitted).append(" omitted)");
+                }
+                refsText.append(" - start on one, end just before the next user message.");
+                parts.add(refsText.toString());
+            }
         }
         final var message = parts.size() == 1 ? parts.get(0) : String.join("\n", parts);
         return new Result(
