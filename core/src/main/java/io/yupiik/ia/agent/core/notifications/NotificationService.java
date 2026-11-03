@@ -15,8 +15,12 @@
  */
 package io.yupiik.ia.agent.core.notifications;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -39,10 +43,12 @@ import java.util.logging.Logger;
  * is taken verbatim from the configuration; the default sink derives the OS tool and always appends
  * {@code <title> <body>} as positional arguments.</p>
  *
- * <p>On Linux the notify-send sink additionally receives {@code --replaces-id} so notifications of the same
- * session collapse in the notification center, and {@code -n <appIconPath>} to brand the popup with the YCA
+ * <p>On Linux the notify-send sink additionally receives the
+ * {@code x-canonical-private-synchronous} hint so notifications of the same session replace each other in the
+ * notification center (it takes a string key, unlike {@code --replace-id} which needs a numeric id), and
+ * {@code -n <appIconPath>} to brand the popup with the YCA
  * icon (bundled and materialized to the temp directory at runtime). {@code -i} keeps its status-icon meaning
- * (emblem-default / dialog-error). Both notify-send flags are scoped to that sink.</p>
+ * (emblem-default / dialog-error). All notify-send-specific flags are scoped to that sink.</p>
  */
 @ApplicationScoped
 public class NotificationService {
@@ -61,7 +67,7 @@ public class NotificationService {
     private final boolean enabled;
     private final boolean custom;
     private final String[] sink;
-    /** True when the resolved default sink is the Linux notify-send tool (only it gets -n and --replaces-id). */
+    /** True when the resolved default sink is the Linux notify-send tool (only it gets the -h hint and -n). */
     private final boolean notifySend;
 
     private final ExecutorService executor;
@@ -123,13 +129,16 @@ public class NotificationService {
             // the custom command receives the payload via env only, its argv stays as configured.
             argv = List.of(sink);
         } else if (notifySend) {
-            // notify-send sink: <--replaces-id> <--i statusIcon> [<-n appIcon>] <title> <body>. The session id
-            // collapses same-session notifications in the center, -i keeps its status-icon meaning, and -n carries
-            // the YCA app brand. The custom-command path above is the supported override for full configurability.
+            // notify-send sink: <-h string:x-canonical-private-synchronous:<sessionId>> <--i statusIcon>
+            // [<-n appIcon>] <title> <body>. The synchronous hint makes same-session notifications replace each
+            // other in the center (it takes a string key, unlike --replace-id which needs a numeric id), -i keeps
+            // its status-icon meaning, and -n carries the YCA app brand. The custom-command path above is the
+            // supported override for full configurability.
             final var appIcon = appIconArgs();
             final var args = new ArrayList<String>(sink.length + 8);
             args.addAll(List.of(sink));
-            args.add("--replaces-id=" + replaceId(sessionId));
+            args.add("-h");
+            args.add("string:x-canonical-private-synchronous:" + replaceId(sessionId));
             args.add("-i");
             args.add(success ? "emblem-default" : "dialog-error");
             if (appIcon.length > 0) {
@@ -221,6 +230,9 @@ public class NotificationService {
                 try {
                     if (!process.waitFor(30, TimeUnit.SECONDS)) {
                         process.destroy();
+                    } else if (process.exitValue() != 0) {
+                        LOGGER.warning(() -> "Failed to notify turn end: exit-code=" + process.exitValue() + "\n"
+                                + tryReadError(process));
                     }
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -229,6 +241,36 @@ public class NotificationService {
         } catch (final Throwable e) {
             LOGGER.log(Level.FINE, "notification could not be delivered", e);
         }
+    }
+
+    private String tryReadError(final Process p) {
+        try {
+            var content = toString(p.getErrorStream());
+            if (content != null) {
+                return content;
+            }
+            // else try stdout
+            content = toString(p.getInputStream());
+            if (content != null) {
+                return content;
+            }
+        } catch (final Throwable t) {
+            // best effort
+        }
+        return "";
+    }
+
+    private String toString(final InputStream stream) throws IOException {
+        if (stream == null) {
+            return null;
+        }
+        try (stream) {
+            final var content = new String(stream.readAllBytes(), UTF_8);
+            if (!content.isBlank()) {
+                return content;
+            }
+        }
+        return null;
     }
 
     private static void runAndSwallow(final Runnable task) {

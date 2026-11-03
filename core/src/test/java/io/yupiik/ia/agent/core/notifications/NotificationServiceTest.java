@@ -173,14 +173,16 @@ class NotificationServiceTest {
         final var service = new NotificationService(config, executor(), exec, tempDir);
         service.onTurnEnd("s1", "t1", "m1", "p1", true, "b1");
         final var delivery = deliveryRef.get();
-        // Linux default sink (notify-send): --app-name=yca, --replaces-id, -i <icon>, -n <appIcon>, <title>, <body>.
+        // Linux default sink (notify-send): --app-name=yca, -h x-canonical-private-synchronous, -i <icon>, -n
+        // <appIcon>, <title>, <body>.
         final var appIcon = tempDir.resolve("yca.png");
         assertTrue(Files.isRegularFile(appIcon), "app icon must be materialized as a file in the temp dir");
         assertEquals(
                 List.of(
                         "notify-send",
                         "--app-name=yca",
-                        "--replaces-id=s1",
+                        "-h",
+                        "string:x-canonical-private-synchronous:s1",
                         "-i",
                         "emblem-default",
                         "-n",
@@ -213,7 +215,8 @@ class NotificationServiceTest {
                 List.of(
                         "notify-send",
                         "--app-name=yca",
-                        "--replaces-id=s2",
+                        "-h",
+                        "string:x-canonical-private-synchronous:s2",
                         "-i",
                         "dialog-error",
                         "-n",
@@ -243,7 +246,8 @@ class NotificationServiceTest {
                 List.of(
                         "notify-send",
                         "--app-name=yca",
-                        "--replaces-id=yca",
+                        "-h",
+                        "string:x-canonical-private-synchronous:yca",
                         "-i",
                         "emblem-default",
                         "-n",
