@@ -102,3 +102,11 @@ the configured `yca.subagents.maxIterations` and applicable provider/model
 iteration cap apply. The effective limit is the lowest of the per-spawn value,
 configured `yca.subagents.maxIterations`, and applicable provider/model
 iteration cap. Nested sub-agents are disabled.
+
+Sub-agent admission enforces two independent limits. `yca.subagents.maxConcurrent`
+bounds how many sub-agents one session may keep in flight. Independently, each
+provider's `maxConcurrent` (or the global `yca.llm.maxConcurrent` fallback)
+reserves one slot for the main session: a provider with `maxConcurrent=1` cannot
+run sub-agents at all, and a provider with `N > 1` runs at most `N-1` concurrent
+sub-agents process-wide. When a spawn is refused, `spawn_subagent` returns a hint
+naming the limiting factor (the session cap or the target provider's cap).

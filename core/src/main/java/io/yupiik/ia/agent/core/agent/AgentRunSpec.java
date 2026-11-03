@@ -26,10 +26,29 @@ public record AgentRunSpec(
         String model,
         Integer maxTurns,
         Set<String> allowedTools,
-        Set<String> parentAllowedTools) {
+        Set<String> parentAllowedTools,
+        // the provider id the sub-agent will actually run on (resolved from the effective model at
+        // spawn); null when unknown (tests, standalone tool invocations)
+        String providerId,
+        // the spawning session's sub-agent budget; null when the caller has no session (tests,
+        // standalone), in which case the per-session limit is not enforced
+        SubagentBudget subagentBudget) {
     public AgentRunSpec {
         allowedTools = allowedTools == null ? null : Set.copyOf(allowedTools);
         parentAllowedTools = parentAllowedTools == null ? null : Set.copyOf(parentAllowedTools);
+    }
+
+    /** Legacy constructor: no target provider id and no session budget (tests, standalone). */
+    public AgentRunSpec(
+            final String parentSessionId,
+            final String task,
+            final String name,
+            final String profile,
+            final String model,
+            final Integer maxTurns,
+            final Set<String> allowedTools,
+            final Set<String> parentAllowedTools) {
+        this(parentSessionId, task, name, profile, model, maxTurns, allowedTools, parentAllowedTools, null, null);
     }
 
     /** Null means no per-run override; an empty set explicitly allows no tools. */

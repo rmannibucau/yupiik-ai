@@ -170,10 +170,16 @@ public class SpawnSubagentTool implements EmbeddedTool {
         if (policy != null && profileName != null && !policy.allowsAgent(profileName)) {
             return ToolResult.error("Agent profile is not available for subagents: " + profileName);
         }
+        // resolve the effective (provider, model) the child would actually run on, once, so the
+        // admission gate targets the right provider (its N-1 cap) and the model-policy check (when
+        // configured) sees the same authoritative tuple. providerDefault comes from the tool only
+        // when the policy gate needs it; the budget/provider parts always use the resolution.
+        final var providerDefault = providerManager == null
+                ? (context.settings() == null ? null : context.settings().model())
+                : providerManager.effectiveSubagentDefault(context.settings());
+        final var effective = io.yupiik.ia.agent.core.agent.EffectiveAgentModel.resolve(
+                providerManager, context.settings(), selectedProfile, normalizedModel, providerDefault);
         if (policy != null) {
-            final var providerDefault = defaultModel(context);
-            final var effective = io.yupiik.ia.agent.core.agent.EffectiveAgentModel.resolve(
-                    providerManager, context.settings(), selectedProfile, normalizedModel, providerDefault);
             if (!io.yupiik.ia.agent.core.agent.SubagentModelPolicy.allows(policy, effective)) {
                 return ToolResult.error("Model is not available for subagents: " + effective.routedReference());
             }
@@ -188,20 +194,22 @@ public class SpawnSubagentTool implements EmbeddedTool {
                         .map(String.class::cast)
                         .collect(java.util.stream.Collectors.toUnmodifiableSet())
                 : args.containsKey("tools") ? Set.of() : null;
-        final var stateOpt = subagentRegistry.start(new AgentRunSpec(
-                context.sessionId(),
-                task,
-                name,
-                profileName,
-                normalizedModel,
-                maxTurns,
-                allowedTools,
-                context.allowedTools()));
-        if (stateOpt.isEmpty()) {
-            return ToolResult.error("Cannot start sub-agent: maximum concurrent sub-agents reached ("
-                    + subagentRegistry.maxConcurrent() + ").");
+        final var start = subagentRegistry.start(
+                new AgentRunSpec(
+                        context.sessionId(),
+                        task,
+                        name,
+                        profileName,
+                        normalizedModel,
+                        maxTurns,
+                        allowedTools,
+                        context.allowedTools()),
+                effective == null ? null : effective.settings().providerId(),
+                context.subagentBudget());
+        if (!start.admitted()) {
+            return ToolResult.error(refusalMessage(start.reason(), effective));
         }
-        final var state = stateOpt.get();
+        final var state = start.state();
 
         // the parent's probe, so an interrupt (Ctrl+C) or a cancelled turn stops the child too:
         // it would otherwise keep burning tokens on an abandoned task. SubagentRunner also ORs the
@@ -212,9 +220,29 @@ public class SpawnSubagentTool implements EmbeddedTool {
         return ToolResult.ok("Sub-agent started: " + displayName + " (task: " + task + ")");
     }
 
-    private String defaultModel(final ToolContext context) {
-        return providerManager == null
-                ? context.settings() == null ? null : context.settings().model()
-                : providerManager.effectiveSubagentDefault(context.settings());
+    /**
+     * Actionable hint for the LLM explaining which of the two admission limits refused the spawn,
+     * naming the limiting factor (the target provider's N-1 cap or the session's sub-agent cap).
+     */
+    private String refusalMessage(
+            final io.yupiik.ia.agent.core.agent.SubagentRegistry.RefusalReason reason,
+            final io.yupiik.ia.agent.core.agent.EffectiveAgentModel effective) {
+        final var providerId = effective == null || effective.settings() == null
+                ? null
+                : effective.settings().providerId();
+        return switch (reason) {
+            case DISABLED -> "Sub-agents are disabled (yca.subagents.enabled=false or concurrency limit is 0).";
+            case PROVIDER_FORBIDDEN ->
+                "Cannot start sub-agent on provider '" + providerId
+                        + "': its maxConcurrent is 1, reserving the only slot for the main session. Route the task"
+                        + " to another provider (model=$other/...) or raise the provider's maxConcurrent.";
+            case PROVIDER_FULL ->
+                "Cannot start sub-agent on provider '" + providerId
+                        + "': it already runs its sub-agent cap (maxConcurrent - 1 concurrent children). Wait for one"
+                        + " to finish or route the task to another provider.";
+            case SESSION_FULL ->
+                "Cannot start sub-agent: this session already reached its"
+                        + " yca.subagents.maxConcurrent sub-agents. Wait for one to complete before spawning another.";
+        };
     }
 }

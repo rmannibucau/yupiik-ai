@@ -141,6 +141,15 @@ public final class SessionRuntime {
         return loop.chatSettings();
     }
 
+    /**
+     * The session's sub-agent admission budget (the {@code yca.subagents.maxConcurrent} per-session
+     * cap), owned by the agent loop. Null for loops that cannot spawn children (sub-agent child
+     * loops, standalone/btw contexts).
+     */
+    public io.yupiik.ia.agent.core.agent.SubagentBudget subagentBudget() {
+        return loop.subagentBudget();
+    }
+
     /** Applies a new session selection (mid-turn changes take effect from the next round/tool call). */
     public void updateChatSettings(final ChatSettings value) {
         loop.updateChatSettings(value);

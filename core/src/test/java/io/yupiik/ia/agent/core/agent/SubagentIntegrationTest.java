@@ -135,8 +135,18 @@ class SubagentIntegrationTest {
         return new ProviderManager() {
             @Override
             public ProviderConfiguration current() {
+                return provider("default");
+            }
+
+            @Override
+            public List<ProviderConfiguration> providers() {
+                return List.of(provider("default"));
+            }
+
+            @Override
+            public ProviderConfiguration provider(final String id) {
                 return new ProviderConfiguration(
-                        "default",
+                        id == null ? "default" : id,
                         "http://test",
                         "key",
                         "model",
@@ -629,13 +639,14 @@ class SubagentIntegrationTest {
         rejected.awaitResult();
         assertEquals(
                 SubagentRegistry.SubagentResult.Status.FAILED, rejected.result().status());
-        assertEquals(0, reg.activeCount());
+        assertEquals(0, reg.providerActive("default"), "the rejected child released its provider slot");
 
         final var replacement = reg.start("parent", "replacement").orElseThrow();
         reg.complete(rejected.id(), SubagentRegistry.SubagentResult.error("duplicate completion", ""));
-        assertEquals(1, reg.activeCount(), "a duplicate completion must not release another child's permit");
+        assertEquals(
+                1, reg.providerActive("default"), "a duplicate completion must not release another child's permit");
         reg.cancel(replacement.id());
-        assertEquals(0, reg.activeCount());
+        assertEquals(0, reg.providerActive("default"));
     }
 
     @Test
@@ -702,10 +713,15 @@ class SubagentIntegrationTest {
     @Test
     void thirdSubagentRejectedWhenAtLimit() {
         final var cfg = config(Map.of("yca.subagents.maxConcurrent", "1"));
-        final var reg = newRegistry(cfg, 3); // provider max 3 -> actualMax = min(2, 1) = 1
+        final var reg = newRegistry(cfg, 3); // provider max 3 -> N-1 = 2, session cap = 1
+        final var budget = new io.yupiik.ia.agent.core.agent.SubagentBudget(1);
 
-        assertTrue(reg.start("parent", "t1").isPresent());
-        assertFalse(reg.start("parent", "t2").isPresent(), "second should be rejected at limit");
+        assertTrue(reg.start(new AgentRunSpec("parent", "t1", null, null, null, null, null, null), "default", budget)
+                .admitted());
+        assertFalse(
+                reg.start(new AgentRunSpec("parent", "t2", null, null, null, null, null, null), "default", budget)
+                        .admitted(),
+                "second should be rejected at limit");
     }
 
     @Test

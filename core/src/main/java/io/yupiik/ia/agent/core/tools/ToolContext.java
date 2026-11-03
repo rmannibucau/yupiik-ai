@@ -78,7 +78,10 @@ public record ToolContext(
         // correlates to the exact started call, never to a same-named sibling.
         long ordinal,
         // effective tool ceiling of the current agent, propagated to prevent delegation from widening access
-        Set<String> allowedTools) {
+        Set<String> allowedTools,
+        // the spawning session's sub-agent admission budget (per-session cap); null when the context
+        // belongs to no session-capable owner (standalone/btw invocations, sub-agent child turns)
+        io.yupiik.ia.agent.core.agent.SubagentBudget subagentBudget) {
 
     /** Backward-compatible convenience: builds a context without per-session provider/model settings. */
     public ToolContext(
@@ -107,6 +110,7 @@ public record ToolContext(
                 null,
                 null,
                 -1,
+                null,
                 null);
     }
 
@@ -140,7 +144,43 @@ public record ToolContext(
                 callCancelled,
                 projectDir,
                 -1,
+                null,
                 null);
+    }
+
+    /** Convenience: a full context plus the session sub-agent budget (spawn-capable sessions). */
+    public ToolContext(
+            final String sessionId,
+            final String subagentId,
+            final String subagentName,
+            final PermissionService permissions,
+            final UserFeedbackService feedback,
+            final TodoStore todos,
+            final StatusReporter statusReporter,
+            final UsageTracker usage,
+            final ContextView contextView,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings,
+            final BooleanSupplier callCancelled,
+            final Path projectDir,
+            final io.yupiik.ia.agent.core.agent.SubagentBudget subagentBudget) {
+        this(
+                sessionId,
+                subagentId,
+                subagentName,
+                permissions,
+                feedback,
+                todos,
+                statusReporter,
+                usage,
+                contextView,
+                cancelled,
+                settings,
+                callCancelled,
+                projectDir,
+                -1,
+                null,
+                subagentBudget);
     }
 
     public ToolContext {
@@ -153,7 +193,22 @@ public record ToolContext(
     /** A context without any session-scoped service, for standalone tool invocation. */
     public static ToolContext empty() {
         return new ToolContext(
-                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, null, -1, null);
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                Cancellations.NEVER,
+                null,
+                null,
+                null,
+                -1,
+                null,
+                null);
     }
 
     /**
@@ -177,6 +232,7 @@ public record ToolContext(
                 null,
                 projectDir,
                 -1,
+                null,
                 null);
     }
 

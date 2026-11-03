@@ -256,6 +256,13 @@ public class AgentLoop {
      * root. A mid-session change rebuilds the runtime rather than mutating this field.
      */
     private volatile java.nio.file.Path sessionWorkdir;
+    /**
+     * The session's sub-agent admission budget (the {@code yca.subagents.maxConcurrent} per-session
+     * cap), set once by {@code SessionRuntimeFactory} like {@link #sessionWorkdir}. Null for loops
+     * that cannot spawn children (sub-agent child loops, standalone/btw contexts). Threaded into
+     * every per-turn {@link ToolContext} so {@code spawn_subagent} can enforce the per-session limit.
+     */
+    private volatile io.yupiik.ia.agent.core.agent.SubagentBudget subagentBudget;
     /** Set when the loop/session is closed so {@link #close()} fires the SessionEnded hook only once. */
     private volatile boolean closed;
     /** True when the last persistContext failed: the on-disk session lags the in-memory one until the next retry. */
@@ -1324,7 +1331,8 @@ public class AgentLoop {
                 callCancelled,
                 sessionWorkdir,
                 ordinal,
-                effectiveAllowedTools());
+                effectiveAllowedTools(),
+                subagentBudget);
     }
 
     /**
@@ -1336,6 +1344,19 @@ public class AgentLoop {
      */
     public void sessionWorkdir(final java.nio.file.Path dir) {
         this.sessionWorkdir = dir;
+    }
+
+    /**
+     * The session's sub-agent admission budget, set once by {@code SessionRuntimeFactory}. Null for
+     * loops that cannot spawn children (sub-agent child loops, standalone/btw contexts).
+     */
+    public void subagentBudget(final io.yupiik.ia.agent.core.agent.SubagentBudget budget) {
+        this.subagentBudget = budget;
+    }
+
+    /** The session's sub-agent admission budget, or null when the loop cannot spawn children. */
+    public io.yupiik.ia.agent.core.agent.SubagentBudget subagentBudget() {
+        return subagentBudget;
     }
 
     // Event helpers that include the session and subagent info

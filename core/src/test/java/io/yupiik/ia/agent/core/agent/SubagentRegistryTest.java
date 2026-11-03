@@ -48,12 +48,27 @@ class SubagentRegistryTest {
         return TestConfigs.codingAgent(entries);
     }
 
+    /** A fake provider package with the given maxConcurrent, resolvable by id ("default"). */
     private ProviderManager providerManager(final int maxConcurrent) {
+        return providerManager("default", maxConcurrent);
+    }
+
+    private ProviderManager providerManager(final String id, final int maxConcurrent) {
         return new ProviderManager() {
             @Override
             public ProviderConfiguration current() {
+                return provider("default");
+            }
+
+            @Override
+            public List<ProviderConfiguration> providers() {
+                return List.of(provider("default"));
+            }
+
+            @Override
+            public ProviderConfiguration provider(final String id) {
                 return new ProviderConfiguration(
-                        "default",
+                        id == null ? "default" : id,
                         "http://test",
                         "key",
                         "model",
@@ -94,45 +109,128 @@ class SubagentRegistryTest {
     }
 
     @Test
-    void startFailsWhenAtMaxConcurrent() {
-        final var registry =
-                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "1")), providerManager(3));
-        assertTrue(registry.start("parent", "t1").isPresent());
-        assertTrue(registry.start("parent", "t2").isEmpty());
+    void providerEntryWithMaxConcurrentOneForbidsSubagents() {
+        // N == 1: the main session reserves the only slot -> subagents are forbidden on that provider,
+        // even with zero in flight and a full session budget.
+        final var registry = new SubagentRegistry(config(Map.of()), providerManager(1));
+        final var result = registry.start(
+                new AgentRunSpec("parent", "t1", null, null, null, null, null, null), "default", new SubagentBudget(4));
+        assertFalse(result.admitted(), "N=1 must forbid subagents on that provider");
+        assertEquals(SubagentRegistry.RefusalReason.PROVIDER_FORBIDDEN, result.reason());
     }
 
     @Test
-    void completeReleasesSemaphoreKeepsStateForCollect() {
+    void providerNAllowsUpToNMinusOneSubagentsThenRefuses() {
+        // N = 4 -> at most 3 concurrent subagents on that provider (the main session holds 1 slot).
+        final var registry = new SubagentRegistry(config(Map.of()), providerManager(4));
+        final var specs = new AgentRunSpec("parent", "t", null, null, null, null, null, null);
+        assertTrue(registry.start(specs, "default", null).admitted());
+        assertTrue(registry.start(specs, "default", null).admitted());
+        assertTrue(registry.start(specs, "default", null).admitted());
+        final var fourth = registry.start(specs, "default", null);
+        assertFalse(fourth.admitted(), "N-1 = 3 in flight already: the 4th must be refused");
+        assertEquals(SubagentRegistry.RefusalReason.PROVIDER_FULL, fourth.reason());
+    }
+
+    @Test
+    void providerCapIsGlobalAcrossSessions() {
+        // N = 2 -> at most 1 subagent on that provider, regardless of which session spawns it.
+        final var registry = new SubagentRegistry(config(Map.of()), providerManager(2));
+        final var s1 = new AgentRunSpec("s1", "t1", null, null, null, null, null, null);
+        final var s2 = new AgentRunSpec("s2", "t2", null, null, null, null, null, null);
+        assertTrue(registry.start(s1, "default", null).admitted());
+        final var fromOtherSession = registry.start(s2, "default", null);
+        assertFalse(fromOtherSession.admitted(), "the provider cap is global per instance, not per session");
+        assertEquals(SubagentRegistry.RefusalReason.PROVIDER_FULL, fromOtherSession.reason());
+    }
+
+    @Test
+    void sessionCapIsEnforcedPerSessionNotGlobal() {
+        // the per-session cap (yca.subagents.maxConcurrent=2) is owned by each session's budget:
+        // session s1 and s2 each get their own 2 in-flight children.
+        final var registry = new SubagentRegistry(config(Map.of()), providerManager(8));
+        final var s1 = new AgentRunSpec("s1", "t1", null, null, null, null, null, null);
+        final var s2 = new AgentRunSpec("s2", "t2", null, null, null, null, null, null);
+        final var budgetS1 = new SubagentBudget(2);
+        final var budgetS2 = new SubagentBudget(2);
+        assertTrue(registry.start(s1, "default", budgetS1).admitted());
+        assertTrue(registry.start(s1, "default", budgetS1).admitted());
+        assertTrue(registry.start(s2, "default", budgetS2).admitted());
+        assertTrue(registry.start(s2, "default", budgetS2).admitted());
+        // both sessions are now at their own cap; one more from s1 is refused
+        final var extra = registry.start(s1, "default", budgetS1);
+        assertFalse(extra.admitted());
+        assertEquals(SubagentRegistry.RefusalReason.SESSION_FULL, extra.reason());
+    }
+
+    @Test
+    void sessionCapRefusalDoesNotLeakProviderSlot() {
+        // the session cap refuses after the provider reserve: the provider counter must be rolled
+        // back so a later spawn (when the session budget frees up) still has its N-1 slots.
+        final var registry = new SubagentRegistry(config(Map.of()), providerManager(8)); // N-1 = 7, session 1
+        final var budget = new SubagentBudget(1);
+        assertTrue(registry.start(new AgentRunSpec("s1", "t1", null, null, null, null, null, null), "default", budget)
+                .admitted());
+        // provider still has plenty of slots, but the session budget is exhausted
+        final var refused =
+                registry.start(new AgentRunSpec("s1", "t2", null, null, null, null, null, null), "default", budget);
+        assertFalse(refused.admitted());
+        assertEquals(SubagentRegistry.RefusalReason.SESSION_FULL, refused.reason());
+        // release the first child: both the session permit and the provider slot free up
+        registry.complete(
+                registry.listActive().get(0).id(), SubagentRegistry.SubagentResult.success("done", "conv", List.of()));
+        assertTrue(registry.start(new AgentRunSpec("s1", "t3", null, null, null, null, null, null), "default", budget)
+                .admitted());
+    }
+
+    @Test
+    void completeReleasesBothLimitsAndKeepsStateForCollect() {
         final var registry =
                 new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "1")), providerManager(3));
-        final var state = registry.start("parent", "task").orElseThrow();
+        final var budget = new SubagentBudget(1);
+        final var state = registry.start(
+                        new AgentRunSpec("parent", "task", null, null, null, null, null, null), "default", budget)
+                .state();
         registry.complete(state.id(), SubagentRegistry.SubagentResult.success("done", "conv", List.of()));
-        // State should still be available for collect
+        // state still available for collect
         assertTrue(registry.get(state.id()).isPresent());
-        // But semaphore is released, so new subagent can start
-        assertTrue(registry.start("parent", "t2").isPresent());
+        // both limits released: a new subagent can start
+        assertTrue(
+                registry.start(new AgentRunSpec("parent", "t2", null, null, null, null, null, null), "default", budget)
+                        .admitted());
     }
 
     @Test
-    void cancelReleasesSemaphoreAndRemovesState() {
+    void cancelReleasesBothLimitsAndRemovesState() {
         final var registry =
                 new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "1")), providerManager(3));
-        final var state = registry.start("parent", "task").orElseThrow();
+        final var budget = new SubagentBudget(1);
+        final var state = registry.start(
+                        new AgentRunSpec("parent", "task", null, null, null, null, null, null), "default", budget)
+                .state();
         registry.cancel(state.id());
-        // Cancel removes state immediately
+        // cancel removes state immediately
         assertTrue(registry.get(state.id()).isEmpty());
-        assertTrue(registry.start("parent", "t2").isPresent());
+        // both limits released
+        assertTrue(
+                registry.start(new AgentRunSpec("parent", "t2", null, null, null, null, null, null), "default", budget)
+                        .admitted());
     }
 
     @Test
-    void cancelByParentSessionCancelsOnlyThatSessionsChildren() {
-        // the latch behind "the parent turn was interrupted": children of that session stop,
-        // children of other tabs keep running
+    void cancelByParentSessionReleasesBothLimits() {
         final var registry =
                 new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "4")), providerManager(5));
-        final var mine = registry.start("s1", "t1").orElseThrow();
-        final var mineToo = registry.start("s1", "t2").orElseThrow();
-        final var other = registry.start("s2", "t3").orElseThrow();
+        final var budget = new SubagentBudget(4);
+        final var mine = registry.start(
+                        new AgentRunSpec("s1", "t1", null, null, null, null, null, null), "default", budget)
+                .state();
+        final var mineToo = registry.start(
+                        new AgentRunSpec("s1", "t2", null, null, null, null, null, null), "default", budget)
+                .state();
+        final var other = registry.start(
+                        new AgentRunSpec("s2", "t3", null, null, null, null, null, null), "default", budget)
+                .state();
 
         assertEquals(2, registry.cancelByParentSession("s1"));
         assertTrue(registry.get(mine.id()).isEmpty(), "a cancelled child is removed");
@@ -141,6 +239,9 @@ class SubagentRegistryTest {
         assertEquals(1, registry.cancelByParentSession("s2"));
         assertEquals(0, registry.cancelByParentSession(null), "a blank session id cancels nothing");
         assertEquals(0, registry.cancelByParentSession(""), "a blank session id cancels nothing");
+        // provider slots of the cancelled children are free again
+        assertTrue(registry.start(new AgentRunSpec("s3", "t4", null, null, null, null, null, null), "default", budget)
+                .admitted());
     }
 
     @Test
@@ -178,60 +279,35 @@ class SubagentRegistryTest {
     }
 
     @Test
-    void updateSemaphoreRecalculatesOnProviderChange() {
-        // the subagent budget is a process-local cap (number of simultaneous AgentLoops), not the
-        // provider's in-flight LLM budget - the shared client queues any LLM overflow, so there is
-        // no "minus one" reservation for the main session.
+    void maxConcurrentIsThePerSessionCap() {
+        // the per-provider N-1 cap no longer shrinks the registry-wide "maxConcurrent": that one is
+        // the per-session yca.subagents.maxConcurrent only.
         final var registry =
                 new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "3")), providerManager(2));
-        assertEquals(2, registry.maxConcurrent()); // min(2, 3) = 2
-        final var newRegistry =
-                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "3")), providerManager(5));
-        assertEquals(3, newRegistry.maxConcurrent()); // min(5, 3) = 3
+        assertEquals(3, registry.maxConcurrent());
     }
 
     @Test
-    void updateSemaphoreBoundedByConfigAndProvider() {
-        // config cap is the binding constraint
-        final var cfgBounded =
-                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "1")), providerManager(10));
-        assertEquals(1, cfgBounded.maxConcurrent()); // min(10, 1) = 1
-
-        // provider cap is the binding constraint
-        final var providerBounded =
-                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "10")), providerManager(2));
-        assertEquals(2, providerBounded.maxConcurrent()); // min(2, 10) = 2
-
-        // provider with no explicit cap (maxConcurrent < 0) falls back to the global yca.llm.maxConcurrent
-        // (default 4 here); config cap wins over both
-        final var fallbackModelMax =
-                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "2")), providerManager(-1));
-        assertEquals(2, fallbackModelMax.maxConcurrent()); // min(4, 2) = 2 via the llm fallback
-
-        // a provider budget of exactly the config cap keeps the cap, no longer degraded by -1
-        final var equal = new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "2")), providerManager(2));
-        assertEquals(2, equal.maxConcurrent()); // min(2, 2) = 2
-    }
-
-    @Test
-    void startSucceedsWithOneProviderSlot() {
-        // with provider maxConcurrent=1 the registry still allows one subagent: the shared client
-        // queues the LLM request rather than reserving the only slot for the (possibly idle) main.
-        final var registry =
-                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "4")), providerManager(1));
-        assertEquals(1, registry.maxConcurrent()); // min(1, 4) = 1
-        assertTrue(registry.start("parent", "t1").isPresent());
+    void unlimitedProviderMeansNoProviderGate() {
+        // provider maxConcurrent <= 0 is unlimited; with the global llm cap also unlimited (-1),
+        // only the per-session cap applies, even with many children on that provider.
+        final var registry = new SubagentRegistry(config(Map.of("yca.llm.maxConcurrent", "-1")), providerManager(-1));
+        for (int i = 0; i < 10; i++) {
+            assertTrue(registry.start(
+                            new AgentRunSpec("parent", "t" + i, null, null, null, null, null, null), "default", null)
+                    .admitted());
+        }
     }
 
     @Test
     void collectReturnsResultEvenAfterStateEvictedByCleanup() {
         // the get -> collect race: once done states exceed maxCompletedStates, cleanup() evicts them
         // from the subagents map, but collect must still return the finished result via the cache.
-        // provider=2, subagents=2 -> maxConcurrent=min(2,2)=2, maxCompletedStates=max(3,6)=6.
+        // provider=2, subagents=2 -> maxConcurrent=session=2, maxCompletedStates=max(3,6)=6.
         final var registry =
                 new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "2")), providerManager(2));
         // complete more subagents than maxCompletedStates (6) so cleanup() LRU-evicts the oldest done
-        // state from the map. Each start acquires a permit and each complete releases it, so 10 cycles run.
+        // state from the map. Each start+complete cycle acquires and releases the permits, so 10 cycles run.
         final var ids = new java.util.ArrayList<String>();
         for (int i = 0; i < 10; i++) {
             final var s = registry.start("parent", "task" + i).orElseThrow();

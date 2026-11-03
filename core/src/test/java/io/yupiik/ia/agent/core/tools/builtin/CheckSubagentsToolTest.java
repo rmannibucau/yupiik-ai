@@ -155,7 +155,8 @@ class CheckSubagentsToolTest {
                 context.callCancelled(),
                 context.projectDir(),
                 context.ordinal(),
-                context.allowedTools());
+                context.allowedTools(),
+                null);
         cancelled.set(true);
         final var result =
                 tool.execute(Map.of("action", "collect", "subagent_id", state.id(), "max_wait_ms", "5000"), ctx);

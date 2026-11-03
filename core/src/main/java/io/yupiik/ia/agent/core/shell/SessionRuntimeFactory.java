@@ -216,6 +216,13 @@ public class SessionRuntimeFactory {
             systemPromptBuilder.workdir(workdir);
             permissions.projectDir(workdir);
         }
+        // per-session sub-agent admission budget: the yca.subagents.maxConcurrent cap, owned by the
+        // session object (dies with it, no registry-side map to clean up). Sub-agent child loops
+        // (built directly by SubagentRunner) never get one: nested spawns are disabled anyway.
+        if (configuration != null && configuration.subagents() != null) {
+            loop.subagentBudget(new io.yupiik.ia.agent.core.agent.SubagentBudget(
+                    configuration.subagents().maxConcurrent()));
+        }
         if (emitter != null) {
             emitter.emit(new SessionStartedEvent(
                     new EventContext(

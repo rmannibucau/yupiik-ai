@@ -65,8 +65,18 @@ class SpawnSubagentToolTest {
         return new ProviderManager() {
             @Override
             public ProviderConfiguration current() {
+                return provider("default");
+            }
+
+            @Override
+            public List<ProviderConfiguration> providers() {
+                return List.of(provider("default"));
+            }
+
+            @Override
+            public ProviderConfiguration provider(final String id) {
                 return new ProviderConfiguration(
-                        "default",
+                        id == null ? "default" : id,
                         "http://test",
                         "key",
                         "model",
@@ -168,6 +178,12 @@ class SpawnSubagentToolTest {
 
     private ToolContext context(final TodoStore todos) {
         return new ToolContext("s1", null, null, null, null, todos, null, null, null, Cancellations.NEVER);
+    }
+
+    /** A context with the default per-session sub-agent budget of the given config. */
+    private ToolContext context(final TodoStore todos, final io.yupiik.ia.agent.core.agent.SubagentBudget budget) {
+        return new ToolContext(
+                "s1", null, null, null, null, todos, null, null, null, Cancellations.NEVER, null, null, null, budget);
     }
 
     private TodoStore noopTodoStore() {
@@ -287,12 +303,19 @@ class SpawnSubagentToolTest {
     void executeFailsWhenConcurrencyExhausted() {
         final var cfg = config(Map.of("yca.subagents.maxConcurrent", "1"));
         final var reg = registry(cfg);
-        // Fill the semaphore directly
-        reg.start("parent", "t1").orElseThrow();
+        // Fill the session budget directly (the per-session cap is 1) with the same budget the
+        // tool's context will carry, so the spawn is refused at the session cap.
+        final var budget = new io.yupiik.ia.agent.core.agent.SubagentBudget(1);
+        reg.start(
+                        new io.yupiik.ia.agent.core.agent.AgentRunSpec(
+                                "parent", "t1", null, null, null, null, null, null),
+                        "default",
+                        budget)
+                .state();
         final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
-        final var result = tool.execute(Map.of("task", "do work"), context(noopTodoStore()));
+        final var result = tool.execute(Map.of("task", "do work"), context(noopTodoStore(), budget));
         assertFalse(result.success(), result.output());
-        assertTrue(result.output().contains("maximum concurrent sub-agents reached"));
+        assertTrue(result.output().contains("yca.subagents.maxConcurrent"), result.output());
     }
 
     @Test

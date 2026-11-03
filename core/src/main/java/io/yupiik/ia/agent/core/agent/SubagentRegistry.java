@@ -28,7 +28,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 
@@ -60,9 +59,16 @@ public class SubagentRegistry {
                 }
             });
 
-    private final AtomicInteger activeCount = new AtomicInteger(0);
-    private volatile Semaphore semaphore;
-    private volatile int maxConcurrent;
+    /**
+     * Process-wide per-target-provider in-flight sub-agent count: the {@code N-1} cap (N = the
+     * provider's {@code maxConcurrent}, reserved one slot for the main session) is global per
+     * instance. Bounded by the number of configured providers, so no session-keyed cleanup is needed.
+     */
+    private final ConcurrentHashMap<String, AtomicInteger> providerSubagents = new ConcurrentHashMap<>();
+
+    /** The per-session cap ({@code yca.subagents.maxConcurrent}): the "number of sub agents per session" limit. */
+    private final int sessionMaxConcurrent;
+
     private final SpeakerLabels speakerLabels;
 
     public SubagentRegistry(final CodingAgentConfiguration configuration, final ProviderManager providerManager) {
@@ -76,51 +82,50 @@ public class SubagentRegistry {
         this.configuration = configuration;
         this.providerManager = providerManager;
         this.speakerLabels = speakerLabels;
-        updateSemaphore();
+        this.sessionMaxConcurrent = configuration != null && configuration.subagents() != null
+                ? Math.max(0, configuration.subagents().maxConcurrent())
+                : 4;
     }
 
     protected SubagentRegistry() {
         this.configuration = null;
         this.providerManager = null;
         this.speakerLabels = null;
+        this.sessionMaxConcurrent = 4;
     }
 
-    public void updateSemaphore() {
-        final var provider = providerManager != null ? providerManager.current() : null;
-        final var configMax = configuration != null && configuration.subagents() != null
-                ? configuration.subagents().maxConcurrent()
-                : 4;
-        final var modelMax = provider != null && provider.maxConcurrent() >= 0
-                ? provider.maxConcurrent()
-                : (configuration != null && configuration.llm() != null
-                        ? configuration.llm().maxConcurrent()
-                        : -1);
-
-        // Process-local subagent budget (number of simultaneous Subagent AgentLoops), independent of
-        // the provider's in-flight LLM budget enforced by the shared ChatClient: an AgentLoop spends
-        // most of its wall-clock in tool execution, so provider.maxConcurrent is no longer "minus one"
-        // (the main session can be idle while a child runs) - the shared client queues any LLM overflow.
-        int effectiveModelMax = modelMax > 0 ? modelMax : Integer.MAX_VALUE;
-        int actualMax = Math.min(effectiveModelMax, configMax);
-        this.maxConcurrent = Math.max(0, actualMax);
-        this.semaphore = this.maxConcurrent > 0 ? new Semaphore(this.maxConcurrent) : null;
-        if (this.maxConcurrent > 0 && modelMax > 0 && this.maxConcurrent > 2L * modelMax) {
-            LOGGER.warning(
-                    () -> "subagents.maxConcurrent=" + this.maxConcurrent + " exposes more simultaneous AgentLoops "
-                            + "than the provider LLM budget can serve (provider.maxConcurrent=" + modelMax
-                            + "): most subagents will queue on the shared client until an LLM permit frees.");
-        }
-    }
-
+    /**
+     * The per-session sub-agent budget: the number of simultaneous sub-agents one session may keep
+     * in flight ({@code yca.subagents.maxConcurrent}). The per-provider {@code N-1} cap is enforced
+     * separately at admission against the target provider (see {@link #start}).
+     */
     public int maxConcurrent() {
-        return maxConcurrent;
+        return sessionMaxConcurrent;
     }
 
     public boolean enabled() {
         return configuration != null
                 && configuration.subagents() != null
                 && configuration.subagents().enabled()
-                && maxConcurrent > 0;
+                && sessionMaxConcurrent > 0;
+    }
+
+    /** Why a sub-agent spawn was refused, surfaced to the LLM by {@code spawn_subagent}. */
+    public enum RefusalReason {
+        DISABLED,
+        /** Target provider maxConcurrent == 1: the main session reserves the only slot. */
+        PROVIDER_FORBIDDEN,
+        /** Target provider already runs N-1 sub-agents (its cap minus the main-session slot). */
+        PROVIDER_FULL,
+        /** The spawning session already has {@code yca.subagents.maxConcurrent} sub-agents in flight. */
+        SESSION_FULL
+    }
+
+    /** Admission outcome: the started state, or the reason it was refused (null state). */
+    public record StartResult(SubagentState state, RefusalReason reason) {
+        public boolean admitted() {
+            return state != null;
+        }
     }
 
     public Optional<SubagentState> start(final String parentSessionId, final String task) {
@@ -142,27 +147,115 @@ public class SubagentRegistry {
         return start(new AgentRunSpec(parentSessionId, task, name, null, model, null, null, null));
     }
 
+    /** Backward-compatible start: no target provider id, no session budget (tests, standalone). */
     public Optional<SubagentState> start(final AgentRunSpec spec) {
+        final var result = start(spec, null, null);
+        return Optional.ofNullable(result.state());
+    }
+
+    /**
+     * Admit a sub-agent against the two independent limits:
+     * <ol>
+     *   <li>the per-session cap ({@code yca.subagents.maxConcurrent}) via {@code budget};</li>
+     *   <li>the per-target-provider {@code N-1} cap (N = the provider's {@code maxConcurrent} when
+     *       {@code >= 0}, else the global {@code yca.llm.maxConcurrent}); N == 1 forbids sub-agents
+     *       on that provider entirely, N &gt; 1 allows at most N-1 concurrent sub-agents there.</li>
+     * </ol>
+     * Both gates must pass. On refusal nothing is acquired or reserved (no leak), and the reason is
+     * returned so {@code spawn_subagent} can hint the LLM about the limiting factor.
+     *
+     * @param providerId the provider the sub-agent will actually run on (from the effective model);
+     *     null/blank falls back to the process-wide current provider
+     * @param budget the spawning session's budget; null skips the per-session gate (tests, standalone)
+     */
+    public StartResult start(final AgentRunSpec spec, final String providerId, final SubagentBudget budget) {
         if (!enabled()) {
-            return Optional.empty();
+            return new StartResult(null, RefusalReason.DISABLED);
         }
-        if (semaphore == null || !semaphore.tryAcquire()) {
-            return Optional.empty();
+        final var n = providerConcurrency(providerId);
+        if (n == 1) {
+            return new StartResult(null, RefusalReason.PROVIDER_FORBIDDEN);
         }
-        activeCount.incrementAndGet();
+        if (n > 1) {
+            final var counter = providerCounter(providerKey(providerId));
+            // reserve-then-rollback: atomic against concurrent spawns on the same provider
+            final var reserved = counter.incrementAndGet();
+            if (reserved > n - 1) {
+                counter.decrementAndGet();
+                return new StartResult(null, RefusalReason.PROVIDER_FULL);
+            }
+            final var state = admit(budget, spec, providerKey(providerId));
+            if (state == null) {
+                counter.decrementAndGet();
+                return new StartResult(null, RefusalReason.SESSION_FULL);
+            }
+            return new StartResult(state, null);
+        }
+        // unlimited provider (n <= 0): only the session cap applies
+        final var state = admit(budget, spec, providerKey(providerId));
+        if (state == null) {
+            return new StartResult(null, RefusalReason.SESSION_FULL);
+        }
+        return new StartResult(state, null);
+    }
+
+    /** The per-session permit acquisition + state creation, factored so the caller rolls back the
+     * provider reservation when it fails. Returns null when the session budget is exhausted.
+     * The budget is stored on the state so {@code complete}/{@code cancel} can release it. */
+    private SubagentState admit(final SubagentBudget budget, final AgentRunSpec spec, final String providerKey) {
+        if (budget != null && !budget.tryAcquire()) {
+            return null;
+        }
         final var id = UUID.randomUUID().toString();
-        final var state = new SubagentState(id, spec, System.currentTimeMillis());
+        final var state = new SubagentState(id, spec, System.currentTimeMillis(), providerKey, budget);
         subagents.put(id, state);
-        return Optional.of(state);
+        return state;
+    }
+
+    /**
+     * The target provider's concurrency N: {@code provider.maxConcurrent()} when {@code >= 0},
+     * else the global {@code yca.llm.maxConcurrent()}. {@code <= 0} means unlimited (no provider gate).
+     * A {@code null}/{@code "default"} provider id resolves to the process-wide current provider.
+     */
+    private int providerConcurrency(final String providerId) {
+        final var provider = providerId == null || providerId.isBlank()
+                ? (providerManager == null ? null : providerManager.current())
+                : (providerManager == null ? null : providerManager.provider(providerId));
+        if (provider != null && provider.maxConcurrent() >= 0) {
+            return provider.maxConcurrent();
+        }
+        return configuration != null && configuration.llm() != null
+                ? configuration.llm().maxConcurrent()
+                : -1;
+    }
+
+    /** The stable counter key for a provider id: blank -> "default". */
+    private String providerKey(final String providerId) {
+        return providerId == null || providerId.isBlank() ? "default" : providerId;
+    }
+
+    private AtomicInteger providerCounter(final String providerKey) {
+        return providerSubagents.computeIfAbsent(providerKey, _ -> new AtomicInteger());
+    }
+
+    /** Releases both limits held by a state (its provider reservation + its session permit). */
+    private void release(final SubagentState state) {
+        if (state.providerId() != null) {
+            final var counter = providerSubagents.get(state.providerId());
+            if (counter != null) {
+                counter.decrementAndGet();
+            }
+        }
+        final var budget = state.subagentBudget();
+        if (budget != null) {
+            budget.release();
+        }
     }
 
     public void complete(final String subagentId, final SubagentResult result) {
         final var state = subagents.get(subagentId);
         if (state != null && state.complete(result)) {
-            activeCount.decrementAndGet();
-            if (semaphore != null) {
-                semaphore.release();
-            }
+            release(state);
             completedResults.put(subagentId, result);
         }
         cleanup();
@@ -172,10 +265,7 @@ public class SubagentRegistry {
         final var state = subagents.get(subagentId);
         if (state != null && state.cancel()) {
             subagents.remove(subagentId, state);
-            activeCount.decrementAndGet();
-            if (semaphore != null) {
-                semaphore.release();
-            }
+            release(state);
         }
     }
 
@@ -303,16 +393,18 @@ public class SubagentRegistry {
                 .toList();
     }
 
-    public int activeCount() {
-        return activeCount.get();
+    /** The number of in-flight sub-agents on a provider (informational; 0 for unknown ids). */
+    public int providerActive(final String providerId) {
+        final var counter = providerSubagents.get(providerKey(providerId));
+        return counter == null ? 0 : counter.get();
     }
 
     /**
      * Safety guard: maximum completed states retained before LRU eviction.
-     * Scales with concurrency limit to bound memory.
+     * Scales with the per-session concurrency limit to bound memory.
      */
     private int maxCompletedStates() {
-        return Math.max(3, maxConcurrent * 3);
+        return Math.max(3, sessionMaxConcurrent * 3);
     }
 
     private void cleanup() {
@@ -362,8 +454,33 @@ public class SubagentRegistry {
         }
 
         public SubagentState(final String id, final AgentRunSpec spec, final long startedAt) {
+            this(id, spec, startedAt, spec.providerId());
+        }
+
+        SubagentState(final String id, final AgentRunSpec spec, final long startedAt, final String providerId) {
+            this(id, spec, startedAt, providerId, spec.subagentBudget());
+        }
+
+        SubagentState(
+                final String id,
+                final AgentRunSpec spec,
+                final long startedAt,
+                final String providerId,
+                final SubagentBudget budget) {
             this.id = id;
-            this.spec = spec;
+            this.spec = providerId == null
+                    ? spec
+                    : new AgentRunSpec(
+                            spec.parentSessionId(),
+                            spec.task(),
+                            spec.name(),
+                            spec.profile(),
+                            spec.model(),
+                            spec.maxTurns(),
+                            spec.allowedTools(),
+                            spec.parentAllowedTools(),
+                            providerId,
+                            budget == null ? spec.subagentBudget() : budget);
             this.startedAt = startedAt;
         }
 
@@ -402,6 +519,16 @@ public class SubagentRegistry {
 
         public Set<String> parentAllowedTools() {
             return spec.parentAllowedTools();
+        }
+
+        /** The provider the sub-agent was admitted against (stable counter key), or null. */
+        public String providerId() {
+            return spec.providerId();
+        }
+
+        /** The spawning session's budget this child holds a permit of, or null. */
+        public SubagentBudget subagentBudget() {
+            return spec.subagentBudget();
         }
 
         public AgentRunSpec spec() {
