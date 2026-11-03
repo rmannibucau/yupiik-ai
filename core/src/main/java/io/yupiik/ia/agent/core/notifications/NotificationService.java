@@ -31,20 +31,13 @@ import java.util.logging.Logger;
  * payload as environment variables; otherwise a best-effort default sink per OS is used. Every path is async
  * (run on the shared executor) and swallows failures so a notification can never fail or slow a turn.
  *
- * <p>The runtime command is resolved once ({@link #resolveSink()}, lazily at first delivery) and then the
+ * <p>The runtime command is resolved once ({@link #defaultSink()} lazily at first delivery) and then the
  * resolved executable is used directly on every later delivery - no per-call OS detection. The custom command
  * is taken verbatim from the configuration; the default sink derives the OS tool and always appends
  * {@code <title> <body>} as positional arguments.</p>
  */
 @ApplicationScoped
 public class NotificationService {
-    /**
-     * True when running in a GraalVM native image (same guard as the clipboard): native-image does not ship
-     * {@code java.awt}, so touching AWT there aborts the process (native failure, not a catchable exception).
-     * The property is "runtime" in a native image and absent in a JVM; reading it touches no AWT class.
-     */
-    private static final boolean NATIVE_IMAGE = System.getProperty("org.graalvm.nativeimage.imagecode") != null;
-
     private static final Logger LOGGER = Logger.getLogger(NotificationService.class.getName());
 
     public static final String ENV_SESSION = "YCA_NOTIFICATION_SESSION";
@@ -60,8 +53,8 @@ public class NotificationService {
     private final ExecutorService executor;
     private final ExecFn exec;
 
-    /** Asynchronous process start; tests inject a fake to observe command/env without spawning. */
-    interface ExecFn {
+    @FunctionalInterface
+    protected interface ExecFn {
         Process start(List<String> command, Map<String, String> env) throws Exception;
     }
 
@@ -69,8 +62,7 @@ public class NotificationService {
         this(configuration, executor, NotificationService::processBuilderStart);
     }
 
-    /** Test seam: an explicit exec function lets tests observe the rejected command/env without spawning. */
-    public NotificationService(
+    protected NotificationService(
             final CodingAgentConfiguration configuration, final ExecutorService executor, final ExecFn exec) {
         final var notifications =
                 configuration == null || configuration.notifications() == null ? null : configuration.notifications();
@@ -103,11 +95,16 @@ public class NotificationService {
             // the custom command receives the payload via env only, its argv stays as configured.
             argv = List.of(sink);
         } else {
-            // the default sink takes <title> <body> as positional args.
-            final var args = new String[sink.length + 2];
+            // the default sink takes <-i <icon>> <title> <body> as positional args, the icon reflecting the
+            // turn status (success/error). The names are desktop stock icons and stay fixed: the custom-command
+            // path above is the supported override for full configurability.
+            final var icon = success ? "emblem-default" : "dialog-error";
+            final var args = new String[sink.length + 4]; // sink + (-i icon) + title + body
             System.arraycopy(sink, 0, args, 0, sink.length);
-            args[sink.length] = title == null ? "" : title;
-            args[sink.length + 1] = body == null ? "" : body;
+            args[sink.length] = "-i";
+            args[sink.length + 1] = icon;
+            args[sink.length + 2] = title == null ? "" : title;
+            args[sink.length + 3] = body == null ? "" : body;
             argv = List.of(args);
         }
         try {

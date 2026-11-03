@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.notifications;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.condition.OS.LINUX;
 
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import java.util.ArrayList;
@@ -26,6 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 
 @Timeout(30)
 class NotificationServiceTest {
@@ -157,7 +159,8 @@ class NotificationServiceTest {
     }
 
     @Test
-    void defaultSinkAppendsTitleAndBodyAndSetsEnv() {
+    @EnabledOnOs(LINUX)
+    void defaultSinkAppendsIconTitleAndBodyAndSetsEnv() {
         final var deliveryRef = new AtomicReference<Delivery>();
         final var exec = (NotificationService.ExecFn) (argv, env) -> {
             deliveryRef.set(new Delivery(argv, env));
@@ -167,16 +170,31 @@ class NotificationServiceTest {
         final var service = new NotificationService(config, executor(), exec);
         service.onTurnEnd("s1", "t1", "m1", "p1", true, "b1");
         final var delivery = deliveryRef.get();
-        // default sink on this test JVM is resolved at runtime by os.name; assert the trailing title+body are there
-        assertTrue(delivery.argv().size() >= 2, "default sink must receive title and body args");
-        assertEquals("t1", delivery.argv().get(delivery.argv().size() - 2));
-        assertEquals("b1", delivery.argv().get(delivery.argv().size() - 1));
+        // Linux default sink (notify-send) is: --app-name=yca, -i <icon>, <title>, <body>.
+        assertEquals(List.of("notify-send", "--app-name=yca", "-i", "emblem-default", "t1", "b1"), delivery.argv());
         assertEquals("s1", delivery.env().get(NotificationService.ENV_SESSION));
         assertEquals("t1", delivery.env().get(NotificationService.ENV_TITLE));
         assertEquals("m1", delivery.env().get(NotificationService.ENV_MODEL));
         assertEquals("p1", delivery.env().get(NotificationService.ENV_PROVIDER));
         assertEquals("true", delivery.env().get(NotificationService.ENV_SUCCESS));
         assertEquals("b1", delivery.env().get(NotificationService.ENV_BODY));
+    }
+
+    @Test
+    @EnabledOnOs(LINUX)
+    void defaultSinkUsesErrorIconOnFailure() {
+        final var deliveryRef = new AtomicReference<Delivery>();
+        final var exec = (NotificationService.ExecFn) (argv, env) -> {
+            deliveryRef.set(new Delivery(argv, env));
+            return new FakeProcess();
+        };
+        final var config = TestConfigs.codingAgent(Map.of("yca.notifications.enabled", "true"));
+        final var service = new NotificationService(config, executor(), exec);
+        service.onTurnEnd("s2", "t2", "m2", "p2", false, "b2");
+        final var delivery = deliveryRef.get();
+        assertEquals(List.of("notify-send", "--app-name=yca", "-i", "dialog-error", "t2", "b2"), delivery.argv());
+        assertEquals("false", delivery.env().get(NotificationService.ENV_SUCCESS));
+        assertEquals("b2", delivery.env().get(NotificationService.ENV_BODY));
     }
 
     @Test

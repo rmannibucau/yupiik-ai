@@ -2445,16 +2445,8 @@ public class AgentLoop {
         final var model = resolved == null || resolved.model() == null ? "" : resolved.model();
         final var success = lastTurnEndedWithContent;
         final var lastReply = lastAssistantText(messages);
-        final var body = new StringBuilder(64)
-                .append(success ? "\u2714 Turn ended successfully" : "\u2716 Turn ended with failure")
-                .append('\n')
-                .append('\n')
-                .append(provider.isBlank() ? "" : provider + " / ")
-                .append(model)
-                .append('\n')
-                .append('\n')
-                .append(lastReply)
-                .toString();
+        final var body =
+                (success ? "✔ " : "✖ ") + (provider.isBlank() ? "" : provider + " / ") + model + "\n\n" + lastReply;
         notificationService.onTurnEnd(id, title, model, provider, success, body);
     }
 
