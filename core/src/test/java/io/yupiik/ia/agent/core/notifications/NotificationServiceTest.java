@@ -20,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.condition.OS.LINUX;
 
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +30,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.io.TempDir;
 
 @Timeout(30)
 class NotificationServiceTest {
@@ -160,18 +163,31 @@ class NotificationServiceTest {
 
     @Test
     @EnabledOnOs(LINUX)
-    void defaultSinkAppendsIconTitleAndBodyAndSetsEnv() {
+    void defaultSinkAppendsIconTitleAndBodyAndSetsEnv(@TempDir final Path tempDir) {
         final var deliveryRef = new AtomicReference<Delivery>();
         final var exec = (NotificationService.ExecFn) (argv, env) -> {
             deliveryRef.set(new Delivery(argv, env));
             return new FakeProcess();
         };
         final var config = TestConfigs.codingAgent(Map.of("yca.notifications.enabled", "true"));
-        final var service = new NotificationService(config, executor(), exec);
+        final var service = new NotificationService(config, executor(), exec, tempDir);
         service.onTurnEnd("s1", "t1", "m1", "p1", true, "b1");
         final var delivery = deliveryRef.get();
-        // Linux default sink (notify-send) is: --app-name=yca, -i <icon>, <title>, <body>.
-        assertEquals(List.of("notify-send", "--app-name=yca", "-i", "emblem-default", "t1", "b1"), delivery.argv());
+        // Linux default sink (notify-send): --app-name=yca, --replaces-id, -i <icon>, -n <appIcon>, <title>, <body>.
+        final var appIcon = tempDir.resolve("yca.png");
+        assertTrue(Files.isRegularFile(appIcon), "app icon must be materialized as a file in the temp dir");
+        assertEquals(
+                List.of(
+                        "notify-send",
+                        "--app-name=yca",
+                        "--replaces-id=s1",
+                        "-i",
+                        "emblem-default",
+                        "-n",
+                        appIcon.toString(),
+                        "t1",
+                        "b1"),
+                delivery.argv());
         assertEquals("s1", delivery.env().get(NotificationService.ENV_SESSION));
         assertEquals("t1", delivery.env().get(NotificationService.ENV_TITLE));
         assertEquals("m1", delivery.env().get(NotificationService.ENV_MODEL));
@@ -182,19 +198,59 @@ class NotificationServiceTest {
 
     @Test
     @EnabledOnOs(LINUX)
-    void defaultSinkUsesErrorIconOnFailure() {
+    void defaultSinkUsesErrorIconOnFailure(@TempDir final Path tempDir) {
         final var deliveryRef = new AtomicReference<Delivery>();
         final var exec = (NotificationService.ExecFn) (argv, env) -> {
             deliveryRef.set(new Delivery(argv, env));
             return new FakeProcess();
         };
         final var config = TestConfigs.codingAgent(Map.of("yca.notifications.enabled", "true"));
-        final var service = new NotificationService(config, executor(), exec);
+        final var service = new NotificationService(config, executor(), exec, tempDir);
         service.onTurnEnd("s2", "t2", "m2", "p2", false, "b2");
         final var delivery = deliveryRef.get();
-        assertEquals(List.of("notify-send", "--app-name=yca", "-i", "dialog-error", "t2", "b2"), delivery.argv());
+        final var appIcon = tempDir.resolve("yca.png");
+        assertEquals(
+                List.of(
+                        "notify-send",
+                        "--app-name=yca",
+                        "--replaces-id=s2",
+                        "-i",
+                        "dialog-error",
+                        "-n",
+                        appIcon.toString(),
+                        "t2",
+                        "b2"),
+                delivery.argv());
         assertEquals("false", delivery.env().get(NotificationService.ENV_SUCCESS));
         assertEquals("b2", delivery.env().get(NotificationService.ENV_BODY));
+    }
+
+    @Test
+    @EnabledOnOs(LINUX)
+    void defaultSinkFallsBackToYcaReplacesIdWhenSessionIsNull(@TempDir final Path tempDir) {
+        final var deliveryRef = new AtomicReference<Delivery>();
+        final var exec = (NotificationService.ExecFn) (argv, env) -> {
+            deliveryRef.set(new Delivery(argv, env));
+            return new FakeProcess();
+        };
+        final var config = TestConfigs.codingAgent(Map.of("yca.notifications.enabled", "true"));
+        final var service = new NotificationService(config, executor(), exec, tempDir);
+        service.onTurnEnd(null, "t3", "m3", "p3", true, "b3");
+        final var delivery = deliveryRef.get();
+        final var appIcon = tempDir.resolve("yca.png");
+        // a null session id collapses under the fixed "yca" key, and -n is still applied.
+        assertEquals(
+                List.of(
+                        "notify-send",
+                        "--app-name=yca",
+                        "--replaces-id=yca",
+                        "-i",
+                        "emblem-default",
+                        "-n",
+                        appIcon.toString(),
+                        "t3",
+                        "b3"),
+                delivery.argv());
     }
 
     @Test

@@ -153,6 +153,11 @@
                 <resource>
                   <pattern>META-INF/resources/.*</pattern>
                 </resource>
+                <!-- the OS notification app-icon; it is copied to a temp file at runtime so  -->
+                <!-- notify-send -n can display it, so it must reach the native image too.   -->
+                <resource>
+                  <pattern>io/yupiik/ia/agent/core/notifications/.*\.png</pattern>
+                </resource>
                 <!-- parser .class bytes for the spawned-JVM native parse: SpawnedJvmGraphParser assembles these into a
                      throwaway jar at runtime (no jars embedded). Patterns are component-scoped (.* does not cross /), so
                      each sub-package needed by ParserClassSet is listed explicitly; ParserClassSet.CLASSES selects the

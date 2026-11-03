@@ -17,6 +17,9 @@ package io.yupiik.ia.agent.core.notifications;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -35,10 +38,18 @@ import java.util.logging.Logger;
  * resolved executable is used directly on every later delivery - no per-call OS detection. The custom command
  * is taken verbatim from the configuration; the default sink derives the OS tool and always appends
  * {@code <title> <body>} as positional arguments.</p>
+ *
+ * <p>On Linux the notify-send sink additionally receives {@code --replaces-id} so notifications of the same
+ * session collapse in the notification center, and {@code -n <appIconPath>} to brand the popup with the YCA
+ * icon (bundled and materialized to the temp directory at runtime). {@code -i} keeps its status-icon meaning
+ * (emblem-default / dialog-error). Both notify-send flags are scoped to that sink.</p>
  */
 @ApplicationScoped
 public class NotificationService {
     private static final Logger LOGGER = Logger.getLogger(NotificationService.class.getName());
+
+    /** Bundled app-icon resource, materialized to a temp file so notify-send {@code -n} can reference it. */
+    private static final String APP_ICON_RESOURCE = "/io/yupiik/ia/agent/core/notifications/yca.png";
 
     public static final String ENV_SESSION = "YCA_NOTIFICATION_SESSION";
     public static final String ENV_TITLE = "YCA_NOTIFICATION_TITLE";
@@ -50,8 +61,15 @@ public class NotificationService {
     private final boolean enabled;
     private final boolean custom;
     private final String[] sink;
+    /** True when the resolved default sink is the Linux notify-send tool (only it gets -n and --replaces-id). */
+    private final boolean notifySend;
+
     private final ExecutorService executor;
     private final ExecFn exec;
+    /** Optional override for the temp dir the app icon is materialized into (defaults to java.io.tmpdir). */
+    private final Path iconDir;
+    /** Lazily resolved default-sink app-icon argv fragment (null until resolved, empty array when skipped). */
+    private volatile String[] appIconArgs;
 
     @FunctionalInterface
     protected interface ExecFn {
@@ -64,6 +82,14 @@ public class NotificationService {
 
     protected NotificationService(
             final CodingAgentConfiguration configuration, final ExecutorService executor, final ExecFn exec) {
+        this(configuration, executor, exec, null);
+    }
+
+    protected NotificationService(
+            final CodingAgentConfiguration configuration,
+            final ExecutorService executor,
+            final ExecFn exec,
+            final Path iconDir) {
         final var notifications =
                 configuration == null || configuration.notifications() == null ? null : configuration.notifications();
         this.enabled = notifications != null && notifications.enabled();
@@ -71,8 +97,10 @@ public class NotificationService {
                 notifications == null || notifications.command() == null ? null : notifications.command();
         this.custom = cfgCommand != null && !cfgCommand.isEmpty();
         this.sink = custom ? cfgCommand.toArray(String[]::new) : defaultSink();
+        this.notifySend = !custom && sink.length > 0 && sink[0].contains("notify-send");
         this.executor = executor;
         this.exec = exec;
+        this.iconDir = iconDir;
     }
 
     /**
@@ -94,10 +122,25 @@ public class NotificationService {
         if (custom) {
             // the custom command receives the payload via env only, its argv stays as configured.
             argv = List.of(sink);
+        } else if (notifySend) {
+            // notify-send sink: <--replaces-id> <--i statusIcon> [<-n appIcon>] <title> <body>. The session id
+            // collapses same-session notifications in the center, -i keeps its status-icon meaning, and -n carries
+            // the YCA app brand. The custom-command path above is the supported override for full configurability.
+            final var appIcon = appIconArgs();
+            final var args = new ArrayList<String>(sink.length + 8);
+            args.addAll(List.of(sink));
+            args.add("--replaces-id=" + replaceId(sessionId));
+            args.add("-i");
+            args.add(success ? "emblem-default" : "dialog-error");
+            if (appIcon.length > 0) {
+                args.add("-n");
+                args.add(appIcon[1]);
+            }
+            args.add(title == null ? "" : title);
+            args.add(body == null ? "" : body);
+            argv = List.copyOf(args);
         } else {
-            // the default sink takes <-i <icon>> <title> <body> as positional args, the icon reflecting the
-            // turn status (success/error). The names are desktop stock icons and stay fixed: the custom-command
-            // path above is the supported override for full configurability.
+            // other OS default sinks keep their existing <-i <icon>> <title> <body> shape untouched.
             final var icon = success ? "emblem-default" : "dialog-error";
             final var args = new String[sink.length + 4]; // sink + (-i icon) + title + body
             System.arraycopy(sink, 0, args, 0, sink.length);
@@ -116,6 +159,59 @@ public class NotificationService {
         } catch (final Throwable e) {
             LOGGER.log(Level.FINE, "notification could not be scheduled", e);
         }
+    }
+
+    private static String replaceId(final String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return "yca";
+        }
+        return sessionId;
+    }
+
+    /**
+     * Returns the notify-send {@code -n} app-icon argv fragment as {@code {"-n", <iconPath>}}, resolved once and
+     * reused on every delivery. An empty array means the app icon is skipped (resource missing or materialization
+     * failure) - never an error.
+     */
+    private String[] appIconArgs() {
+        var args = appIconArgs;
+        if (args == null) {
+            synchronized (this) {
+                args = appIconArgs;
+                if (args == null) {
+                    args = resolveAppIconArgs();
+                    appIconArgs = args;
+                }
+            }
+        }
+        return args;
+    }
+
+    private String[] resolveAppIconArgs() {
+        try (final var in = NotificationService.class.getResourceAsStream(APP_ICON_RESOURCE)) {
+            if (in == null) {
+                return new String[0];
+            }
+            final var dir = iconDir();
+            Files.createDirectories(dir);
+            final var icon = dir.resolve("yca.png");
+            try (final var out = Files.newOutputStream(icon)) {
+                in.transferTo(out);
+            }
+            return new String[] {"-n", icon.toString()};
+        } catch (final Throwable e) {
+            // best-effort: a missing/unwritable icon must never fail the notification, just drop the brand icon.
+            LOGGER.log(Level.FINE, "could not materialize the notification app-icon", e);
+            return new String[0];
+        }
+    }
+
+    private Path iconDir() {
+        if (iconDir != null) {
+            return iconDir;
+        }
+        final var base = System.getProperty("java.io.tmpdir");
+        return Path.of(base == null || base.isBlank() ? "/tmp" : base).resolve("yca-icons");
     }
 
     private void run(final List<String> argv, final Map<String, String> env) {
