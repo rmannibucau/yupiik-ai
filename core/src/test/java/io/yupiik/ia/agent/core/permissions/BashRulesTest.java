@@ -488,6 +488,41 @@ class BashRulesTest {
     }
 
     @Test
+    void statusCommandsAndLoopControlKeywordsAreAllowed() {
+        // `true`/`false` are freely usable no-op/status commands (exit 0/exit 1, no side effects)
+        // and `break`/`continue` are loop-control syntax, so an infinite-style loop using them stays
+        // readable; the real commands of the bodies are still evaluated segment by segment.
+        final var compiled = compile(CommandPermissionConfiguration.defaultRules());
+        for (final var agentMode : List.of(AgentMode.PLAN, AgentMode.BUILD)) {
+            assertTrue(compiled.evaluate(agentMode, "true").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "false").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "true && ls").allowed(), agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "while true; do echo ok; break; done")
+                            .allowed(),
+                    agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "while true; do echo ok; continue; done")
+                            .allowed(),
+                    agentMode.name());
+            // plain loop-control keywords work in nested loops too
+            assertTrue(
+                    compiled.evaluate(agentMode, "while true; do while true; do break; done; done")
+                            .allowed(),
+                    agentMode.name());
+            // bodies are not skipped: a mutating command inside the loop still gates the whole compound
+            assertFalse(
+                    compiled.evaluate(agentMode, "while true; do git push; break; done")
+                            .allowed(),
+                    agentMode.name());
+            assertFalse(
+                    compiled.evaluate(agentMode, "while true; do git push; continue; done")
+                            .allowed(),
+                    agentMode.name());
+        }
+    }
+
+    @Test
     void theReportedExplorationCommandsAreAutoAllowed() {
         // the exact two commands that motivated the change: read-only find + grep/wc/head pipelines
         // and a for loop titled from a verified find|xargs|grep|head substitution

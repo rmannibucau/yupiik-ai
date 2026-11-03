@@ -220,6 +220,12 @@ public record CommandPermissionConfiguration(
                 command("yes"),
 
                 // -----------------------------------------------------------------
+                // Status / no-op utilities: exit 0 / exit 1 predicates with no side effects
+                // -----------------------------------------------------------------
+                command("true"),
+                command("false"),
+
+                // -----------------------------------------------------------------
                 // Environment / identity / system inspection
                 // -----------------------------------------------------------------
                 command("env"),

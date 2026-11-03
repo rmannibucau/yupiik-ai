@@ -116,7 +116,7 @@ public final class BashRules {
         private static final Set<String> TOLERATED_REDIRECTS = Set.of("2>/dev/null", ">/dev/null", "2>&1");
         // shell control keywords are syntax markers, not commands: they never execute anything by themselves
         private static final Set<String> STRUCTURAL_HEAD =
-                Set.of("for", "while", "until", "if", "then", "else", "elif", "do", "done", "fi");
+                Set.of("for", "while", "until", "if", "then", "else", "elif", "do", "done", "fi", "break", "continue");
         // command substitution placeholders introduced by mask(command)
         private static final String SUBSTITUTION_PREFIX = "YCA_SUB_";
         // guard against pathological nested $($($(...))) commands
