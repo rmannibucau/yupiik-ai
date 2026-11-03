@@ -269,17 +269,16 @@ public class FileSessionStore implements SessionStore {
 
     private String doCreate() {
         writableDir();
-        String id;
-        final var stamp = clock.millis();
-        final var all = list();
-        final var used = new HashSet<String>();
-        all.forEach(info -> used.add(info.id()));
-        for (var i = 0; ; i++) {
-            id = "s" + Long.toHexString(stamp + i);
-            if (!used.contains(id)) {
-                break;
-            }
-        }
+        // Session ids are s + creation-time(seconds, hex) + random(hex) and must stay <= 16 chars so they
+        // remain UI-friendly to display and paste. We deliberately use second (not millisecond) granularity
+        // to keep the prefix short and the id within that budget: within a single second the 7 random hex
+        // chars (28 bits) still make ids collision-free without scanning the store, and the coarser timestamp
+        // only means two sessions created in the same wall-clock second are not strictly ordered - which is
+        // functionally acceptable for a local session id.
+        final var now = clock.instant(); // injectable, deterministic in tests
+        final var seconds = now.getEpochSecond(); // up to 8 hex chars for ~7000 years
+        final var random = ThreadLocalRandom.current().nextInt() & 0x0FFFFFFF; // 28 bits => 7 hex chars
+        final String id = "s" + Long.toHexString(seconds) + String.format("%07x", random);
         try {
             Files.createDirectories(path(id).getParent());
             Files.writeString(path(id), "");

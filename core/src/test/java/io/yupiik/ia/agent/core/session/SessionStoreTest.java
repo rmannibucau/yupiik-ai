@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.session;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -56,13 +57,17 @@ class SessionStoreTest {
     }
 
     private FileSessionStore newStore(final SessionConfiguration sessions) {
+        return newStore(sessions, Clock.systemUTC());
+    }
+
+    private FileSessionStore newStore(final SessionConfiguration sessions, final Clock clock) {
         return new FileSessionStore(
                 io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
                         "yca.storageHome", dir.toString(),
                         "yca.sessions.retentionDays", String.valueOf(sessions.retentionDays()),
                         "yca.sessions.compressDays", String.valueOf(sessions.compressDays()))),
                 mapper,
-                Clock.systemUTC());
+                clock);
     }
 
     private static void setAge(final Path file, final long daysOld) throws Exception {
@@ -168,6 +173,38 @@ class SessionStoreTest {
         assertEquals("reading", loaded.get(1).content());
         assertEquals("read", loaded.get(1).toolCalls().get(0).function().name());
         assertEquals("c1", loaded.get(1).toolCallId());
+    }
+
+    @Test
+    void createdIdsAreCompactHexCollisionFreeWithoutScan() {
+        final var store = newStore();
+        final var first = store.create();
+        final var second = store.create();
+
+        // generated shape: s + creation-seconds(hex) + random(hex), kept <= 16 chars for the UI
+        // generated shape: s + creation-seconds(hex, variable length) + random(hex), kept <= 16 chars for the UI
+        assertTrue(
+                first.matches("s[0-9a-f]+") && first.length() <= 16,
+                "id must match the generated hex shape and stay within 16 chars: " + first);
+        assertTrue(
+                second.matches("s[0-9a-f]+") && second.length() <= 16,
+                "id must match the generated hex shape and stay within 16 chars: " + second);
+        assertNotEquals(first, second, "two sessions must never share an id");
+    }
+
+    @Test
+    void createdIdsWithSameSecondStillDiffer() {
+        // pin the clock so two creates land in the same wall-clock second: only the random suffix differs,
+        // which is what makes the id collision-free without having to scan the store
+        final var fixed = Clock.fixed(Instant.EPOCH, java.time.ZoneOffset.UTC);
+        final var store = newStore(new SessionConfiguration(30, 15), fixed);
+        final var first = store.create();
+        final var second = store.create();
+
+        // epoch seconds (0) renders as "s0" + 7 random hex chars => exactly 9 chars
+        assertTrue(first.matches("s0[0-9a-f]{7}"), "expected s0 + 7 random hex chars: " + first);
+        assertTrue(second.matches("s0[0-9a-f]{7}"), "expected s0 + 7 random hex chars: " + second);
+        assertNotEquals(first, second, "same-second ids must still differ via the random suffix");
     }
 
     @Test
