@@ -15,8 +15,6 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
-
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.ArrayList;
 import java.util.Set;
@@ -24,10 +22,19 @@ import java.util.stream.Stream;
 
 @ApplicationScoped
 public class NpmOutputProcessor implements OutputProcessor {
+    private final CommandOutputPostProcessor commandOutput;
+
+    public NpmOutputProcessor(final CommandOutputPostProcessor commandOutput) {
+        this.commandOutput = commandOutput;
+    }
+
+    public NpmOutputProcessor() {
+        this(new CommandOutputPostProcessor());
+    }
 
     @Override
     public boolean supports(final String command) {
-        return matchesHead(command, "npm", "pnpm", "yarn", "bun");
+        return commandOutput.matchesHead(command, "npm", "pnpm", "yarn", "bun");
     }
 
     @Override
@@ -44,7 +51,7 @@ public class NpmOutputProcessor implements OutputProcessor {
     public Stream<String> process(final String command, final Stream<String> lines) {
         final var out = new ArrayList<String>();
         for (final var raw : lines.toList()) {
-            final var line = Optimizers.stripAnsi(raw).strip();
+            final var line = commandOutput.stripAnsi(raw).strip();
             if (line.isEmpty() || line.startsWith("> ")) {
                 continue;
             }

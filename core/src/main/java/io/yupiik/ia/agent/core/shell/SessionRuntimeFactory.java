@@ -208,7 +208,10 @@ public class SessionRuntimeFactory {
                 feedback,
                 precisionDurationMarker,
                 null,
-                notificationService);
+                notificationService,
+                null,
+                null,
+                null);
         // bounded initialization telemetry: mark the runtime wiring window so pre-first-request
         // startup is decomposable (runtime creation -> model resolution -> prompt build -> initial prompt)
         emitPhase(emitter, sessionId, AgentEvent.Phase.RUNTIME_CREATE_START);

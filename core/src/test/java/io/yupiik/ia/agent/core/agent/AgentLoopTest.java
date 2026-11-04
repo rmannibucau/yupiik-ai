@@ -4549,7 +4549,7 @@ class AgentLoopTest {
         messages.add(Message.tool("r1", "original read content of /a.txt"));
         // appendToolResult appends the write result AFTER computing the stale paths, so onLanded
         // runs against the conversation WITHOUT the write result message.
-        final var write = new AgentLoop.ToolOutcome("w1", "write_file", "written", true, true, List.of("/a.txt"), 10L);
+        final var write = new ToolOutcome("w1", "write_file", "written", true, true, List.of("/a.txt"), 10L);
 
         final var stalePaths = staleReads.onLanded(messages, write);
 
@@ -7343,6 +7343,9 @@ class AgentLoopTest {
                 null,
                 null,
                 new io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider(),
+                null,
+                null,
+                null,
                 null,
                 null);
     }

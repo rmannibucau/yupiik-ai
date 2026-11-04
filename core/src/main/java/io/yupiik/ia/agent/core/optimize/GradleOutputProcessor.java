@@ -15,9 +15,6 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
-import static io.yupiik.ia.agent.core.optimize.Optimizers.containsFlag;
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
-
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -28,9 +25,16 @@ import java.util.stream.Stream;
 @ApplicationScoped
 public class GradleOutputProcessor implements OutputProcessor {
     private final LogNoiseOutputProcessor logNoise;
+    private final CommandOutputPostProcessor commandOutput;
+
+    public GradleOutputProcessor(
+            final LogNoiseOutputProcessor logNoise, final CommandOutputPostProcessor commandOutput) {
+        this.logNoise = logNoise;
+        this.commandOutput = commandOutput;
+    }
 
     public GradleOutputProcessor(final LogNoiseOutputProcessor logNoise) {
-        this.logNoise = logNoise;
+        this(logNoise, new CommandOutputPostProcessor());
     }
 
     public GradleOutputProcessor() {
@@ -39,7 +43,7 @@ public class GradleOutputProcessor implements OutputProcessor {
 
     @Override
     public boolean supports(final String command) {
-        return matchesHead(command, "gradle", "gradlew");
+        return commandOutput.matchesHead(command, "gradle", "gradlew");
     }
 
     @Override
@@ -54,7 +58,7 @@ public class GradleOutputProcessor implements OutputProcessor {
 
     @Override
     public Stream<String> process(final String command, final Stream<String> lines) {
-        if (containsFlag(command, "--info", "--debug", "--stacktrace", "--scan")) {
+        if (commandOutput.containsFlag(command, "--info", "--debug", "--stacktrace", "--scan")) {
             return lines;
         }
         final var all = lines.toArray(String[]::new);
@@ -65,7 +69,7 @@ public class GradleOutputProcessor implements OutputProcessor {
         var inFailure = false;
 
         for (final var raw : all) {
-            final var line = Optimizers.stripAnsi(raw);
+            final var line = commandOutput.stripAnsi(raw);
             if (logNoise.drop(line) || line.startsWith("Download ")) {
                 continue;
             }
@@ -128,7 +132,7 @@ public class GradleOutputProcessor implements OutputProcessor {
         }
         final var passing = new LinkedHashSet<String>();
         for (final var raw : all) {
-            final var line = Optimizers.stripAnsi(raw);
+            final var line = commandOutput.stripAnsi(raw);
             final var m = Pattern.compile("> Task (:[^ ]+)").matcher(line);
             if (m.find()
                     && !line.contains("FAILED")

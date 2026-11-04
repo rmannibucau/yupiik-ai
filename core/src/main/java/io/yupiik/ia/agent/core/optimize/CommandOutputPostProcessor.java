@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.configuration.OptimizeConfiguration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -23,9 +25,14 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-public final class Optimizers {
-    private Optimizers() {}
-
+/**
+ * Stateless command-matching/output-bytes service shared by the {@link OutputProcessor} beans and
+ * {@link io.yupiik.ia.agent.core.tools.ToolExecutionService}. Holds the command-matching and
+ * output-normalization algorithms used across tool output optimization, injectable as a single
+ * application-scoped component (it carries no mutable state).
+ */
+@ApplicationScoped
+public class CommandOutputPostProcessor {
     private static final Pattern ANSI = Pattern.compile("\u001B\\[[0-9;]*[A-Za-z]|\u001B\\][^\u0007]*\u0007");
     private static final Set<String> KNOWN_EXTENSIONS = Set.of("cmd", "exe", "sh");
 
@@ -33,7 +40,7 @@ public final class Optimizers {
      * Normalizes a command or processor alias for loose matching: strips './' (and '../') prefixes,
      * keeps only the file name, drops a trailing known extension (.cmd, .exe, .sh) and strips whitespace.
      */
-    public static String normalizeCommand(final String name) {
+    public String normalizeCommand(final String name) {
         if (name == null) {
             return "";
         }
@@ -55,7 +62,7 @@ public final class Optimizers {
     /**
      * @return true if the configured value loosely matches one of the aliases.
      */
-    public static boolean matchesAlias(final String configured, final Collection<String> aliases) {
+    public boolean matchesAlias(final String configured, final Collection<String> aliases) {
         final var normalized = normalizeCommand(configured);
         if (normalized.isEmpty()) {
             return false;
@@ -68,17 +75,17 @@ public final class Optimizers {
         return false;
     }
 
-    public static String stripAnsi(final String s) {
+    public String stripAnsi(final String s) {
         return s == null ? "" : ANSI.matcher(s).replaceAll("");
     }
 
-    public static String firstToken(final String command) {
+    public String firstToken(final String command) {
         final var trimmed = command.strip();
         final var space = trimmed.indexOf(' ');
         return space < 0 ? trimmed : trimmed.substring(0, space);
     }
 
-    public static String secondToken(final String command) {
+    public String secondToken(final String command) {
         final var tokens = command.strip().split("\\s+");
         for (var i = 1; i < tokens.length; i++) {
             if (!tokens[i].startsWith("-")) {
@@ -92,7 +99,7 @@ public final class Optimizers {
      * The third significant (non-flag) token: {@code gh pr view 42} -> {@code view},
      * {@code gh run list} -> {@code list}, {@code gh api} -> {@code ""}.
      */
-    public static String thirdToken(final String command) {
+    public String thirdToken(final String command) {
         final var tokens = command.strip().split("\\s+");
         int found = 0;
         for (var i = 1; i < tokens.length; i++) {
@@ -107,7 +114,7 @@ public final class Optimizers {
         return "";
     }
 
-    public static String baseName(final String path) {
+    public String baseName(final String path) {
         final var i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
         return i < 0 ? path : path.substring(i + 1);
     }
@@ -116,7 +123,7 @@ public final class Optimizers {
      * @return true when the first significant head token of {@code command} matches one of {@code names}
      *     (token-wise, after dropping env assignments and leading {@code cd <dir> &&} segments).
      */
-    public static boolean matchesHeadToken(final String command, final String... names) {
+    public boolean matchesHeadToken(final String command, final String... names) {
         final var tokens = tokenize(command);
         var i = 0;
         boolean progressed;
@@ -149,7 +156,7 @@ public final class Optimizers {
     /**
      * @return the first significant head token, or {@code null} when the command is empty.
      */
-    public static String headToken(final String command) {
+    public String headToken(final String command) {
         final var tokens = tokenize(command);
         var i = 0;
         boolean progressed;
@@ -170,7 +177,7 @@ public final class Optimizers {
         return i < tokens.size() ? baseName(tokens.get(i)) : null;
     }
 
-    public static boolean matchesHead(final String command, final String... names) {
+    public boolean matchesHead(final String command, final String... names) {
         final var tokens = tokenize(command);
         // skip a leading preamble made of env assignments (FOO=bar ...) and `cd <dir> &&` segments,
         // in any order and possibly repeated, eg. `cd /path && MY_FLAG=1 mvn ...`
@@ -203,22 +210,22 @@ public final class Optimizers {
     }
 
     /**
-     * @return the command with a leading well-known wrapper chain stripped, so `timeout 120 mvn -o apply`,
-     *     `sudo mvn ...`, `nohup git ...`, `env FOO=1 mvn ...`, `command mvn ...` or `sh -c "mvn ..."`
-     *     all resolve to the inner command (e.g. `mvn -o apply`). Handled wrappers (chained and repeatable):
-     *     {@code sudo}, {@code nohup}, {@code timeout <seconds>}, {@code env [VAR=..]}, {@code command} and
-     *     {@code sh/bash/zsh/dash -c "..."}. Returns empty when the head is not a recognized wrapper or the
-     *     unwrapped command is degenerate (a bare wrapper with nothing after it, or a {@code -c} multi-command
-     *     script containing `;`, `&&` or `|`, which is left to the generic fallback).
+     * @return the command with a leading well-known wrapper chain stripped, so {@code timeout 120 mvn -o apply},
+     *     {@code sudo mvn ...}, {@code nohup git ...}, {@code env FOO=1 mvn ...}, {@code command mvn ...} or
+     *     {@code sh -c "mvn ..."} all resolve to the inner command (e.g. {@code mvn -o apply}). Handled wrappers
+     *     (chained and repeatable): {@code sudo}, {@code nohup}, {@code timeout <seconds>}, {@code env [VAR=..]},
+     *     {@code command} and {@code sh/bash/zsh/dash -c "..."}. Returns empty when the head is not a recognized
+     *     wrapper or the unwrapped command is degenerate (a bare wrapper with nothing after it, or a {@code -c}
+     *     multi-command script containing `;`, `&&` or `|`, which is left to the generic fallback).
      */
-    public static Optional<String> unwrapCommandWrapper(final String command) {
+    public Optional<String> unwrapCommandWrapper(final String command) {
         if (command == null || command.isBlank()) {
             return Optional.empty();
         }
         return stripWrappers(tokenize(command));
     }
 
-    private static Optional<String> stripWrappers(final List<String> tokens) {
+    private Optional<String> stripWrappers(final List<String> tokens) {
         var i = 0;
         // skip a leading preamble made of env assignments and `cd <dir> &&` segments, like matchesHead
         boolean progressed;
@@ -293,7 +300,7 @@ public final class Optimizers {
         };
     }
 
-    private static int skipFlags(final List<String> tokens, final int start) {
+    private int skipFlags(final List<String> tokens, final int start) {
         var j = start;
         while (j < tokens.size() && tokens.get(j).startsWith("-")) {
             j++;
@@ -301,7 +308,7 @@ public final class Optimizers {
         return j;
     }
 
-    private static boolean isEnvAssignment(final String token) {
+    private boolean isEnvAssignment(final String token) {
         return token.matches("[A-Za-z_][A-Za-z0-9_]*=.*");
     }
 
@@ -309,7 +316,7 @@ public final class Optimizers {
      * Splits a command line into tokens, keeping double- and single-quoted segments together
      * (quotes themselves are dropped).
      */
-    private static List<String> tokenize(final String command) {
+    private List<String> tokenize(final String command) {
         final var tokens = new ArrayList<String>();
         if (command == null) {
             return tokens;
@@ -345,10 +352,82 @@ public final class Optimizers {
         return tokens;
     }
 
-    public static boolean containsFlag(final String command, final String... flags) {
+    public boolean containsFlag(final String command, final String... flags) {
         for (final var f : flags) {
             if (command.contains(f)) {
                 return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @return true when the processor/command is disabled by the global {@code disabled} list
+     *     (loose alias matching) or by its per-tool {@code enabled} flag in {@code toolOutputs}.
+     */
+    public boolean isDisabled(final OptimizeConfiguration optimize, final Collection<String> aliases) {
+        if (optimize.disabled() != null && aliases.stream().anyMatch(a -> matches(optimize.disabled(), a))) {
+            return true;
+        }
+        return !isToolEnabled(optimize, aliases);
+    }
+
+    private boolean matches(final List<String> configured, final String alias) {
+        return configured.stream().anyMatch(c -> matchesAlias(c, Set.of(alias)));
+    }
+
+    /** Per-tool enabled flag, default true when the tool entry is absent. */
+    private boolean isToolEnabled(final OptimizeConfiguration optimize, final Collection<String> aliases) {
+        final var toolOutputs = optimize.toolOutputs();
+        if (toolOutputs == null) {
+            return true;
+        }
+        // Resolve the tool entry by processor alias set; unknown entries default to enabled.
+        if (aliasMatches(aliases, "mvn", "mvnd", "mvnw")) {
+            return toolOutputs.maven() == null || toolOutputs.maven().enabled();
+        }
+        if (aliasMatches(aliases, "gradle", "gradlew")) {
+            return toolOutputs.gradle() == null || toolOutputs.gradle().enabled();
+        }
+        if (aliasMatches(aliases, "git")) {
+            return toolOutputs.git() == null || toolOutputs.git().enabled();
+        }
+        if (aliasMatches(aliases, "gh")) {
+            return toolOutputs.gh() == null || toolOutputs.gh().enabled();
+        }
+        if (aliasMatches(aliases, "npm", "pnpm", "yarn", "bun")) {
+            return toolOutputs.npm() == null || toolOutputs.npm().enabled();
+        }
+        if (aliasMatches(aliases, "prettier")) {
+            return toolOutputs.prettier() == null || toolOutputs.prettier().enabled();
+        }
+        if (aliasMatches(aliases, "generic")) {
+            return toolOutputs.generic() == null || toolOutputs.generic().enabled();
+        }
+        if (aliasMatches(aliases, "ls", "find", "tree", "du", "grep", "rg", "egrep", "fgrep", "ast-grep")) {
+            return toolOutputs.filesystem() == null || toolOutputs.filesystem().enabled();
+        }
+        if (aliasMatches(aliases, "tsc", "eslint", "biome", "next")) {
+            return toolOutputs.js() == null || toolOutputs.js().enabled();
+        }
+        if (aliasMatches(aliases, "kubectl")) {
+            return toolOutputs.kubectl() == null || toolOutputs.kubectl().enabled();
+        }
+        if (aliasMatches(aliases, "docker", "docker-compose", "docker compose")) {
+            return toolOutputs.docker() == null || toolOutputs.docker().enabled();
+        }
+        if (aliasMatches(aliases, "json")) {
+            return toolOutputs.json() == null || toolOutputs.json().enabled();
+        }
+        return true;
+    }
+
+    private boolean aliasMatches(final Collection<String> aliases, final String... names) {
+        for (final var alias : aliases) {
+            for (final var name : names) {
+                if (alias.equalsIgnoreCase(name)) {
+                    return true;
+                }
             }
         }
         return false;

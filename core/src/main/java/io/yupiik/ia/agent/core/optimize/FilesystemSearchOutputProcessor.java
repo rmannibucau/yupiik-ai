@@ -15,11 +15,6 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
-import static io.yupiik.ia.agent.core.optimize.Optimizers.headToken;
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHeadToken;
-import static io.yupiik.ia.agent.core.optimize.Optimizers.stripAnsi;
-
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import java.util.ArrayList;
@@ -43,19 +38,27 @@ public class FilesystemSearchOutputProcessor implements OutputProcessor {
     private static final Pattern NUMBERED_LINE = Pattern.compile("^(\\d+):(.*)$"); // line:content (single file -n)
 
     private final CodingAgentConfiguration configuration;
+    private final CommandOutputPostProcessor commandOutput;
+
+    public FilesystemSearchOutputProcessor(
+            final CodingAgentConfiguration configuration, final CommandOutputPostProcessor commandOutput) {
+        this.configuration = configuration;
+        this.commandOutput = commandOutput;
+    }
 
     public FilesystemSearchOutputProcessor(final CodingAgentConfiguration configuration) {
-        this.configuration = configuration;
+        this(configuration, new CommandOutputPostProcessor());
     }
 
     protected FilesystemSearchOutputProcessor() {
         this.configuration = null;
+        this.commandOutput = new CommandOutputPostProcessor();
     }
 
     @Override
     public boolean supports(final String command) {
-        return matchesHeadToken(command, "ls", "find", "tree", "du")
-                || matchesHead(command, "grep", "rg", "egrep", "fgrep", "ast-grep");
+        return commandOutput.matchesHeadToken(command, "ls", "find", "tree", "du")
+                || commandOutput.matchesHead(command, "grep", "rg", "egrep", "fgrep", "ast-grep");
     }
 
     @Override
@@ -70,8 +73,8 @@ public class FilesystemSearchOutputProcessor implements OutputProcessor {
 
     @Override
     public Stream<String> process(final String command, final Stream<String> lines) {
-        final var all = lines.map(Optimizers::stripAnsi).toList();
-        final var head = headToken(command);
+        final var all = lines.map(commandOutput::stripAnsi).toList();
+        final var head = commandOutput.headToken(command);
         if (isListing(head)) {
             return processListing(head, all);
         }
@@ -99,7 +102,7 @@ public class FilesystemSearchOutputProcessor implements OutputProcessor {
         // find / tree / du: group paths by their parent so a directory is listed once with a count.
         final var grouped = new LinkedHashMap<String, List<String>>();
         for (final var raw : all) {
-            final var line = stripAnsi(raw).strip();
+            final var line = commandOutput.stripAnsi(raw).strip();
             if (line.isEmpty()) {
                 continue;
             }
@@ -137,7 +140,7 @@ public class FilesystemSearchOutputProcessor implements OutputProcessor {
         final var out = new ArrayList<String>();
         final var byFile = new LinkedHashMap<String, List<String>>();
         for (final var raw : all) {
-            final var line = stripAnsi(raw).strip();
+            final var line = commandOutput.stripAnsi(raw).strip();
             if (line.isEmpty()) {
                 continue;
             }

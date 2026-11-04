@@ -26,7 +26,6 @@ import io.yupiik.ia.agent.core.cli.prompt.Prompt;
 import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
 import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
@@ -35,9 +34,7 @@ import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
 import io.yupiik.ia.agent.core.shell.AnsiShellIO;
 import io.yupiik.ia.agent.core.shell.ConversationCoordinator;
-import io.yupiik.ia.agent.core.shell.DurationFormat;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
-import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
@@ -124,6 +121,8 @@ public class CliCommand implements Runnable {
     private final MarkdownColorizer colorizer;
     private final Symbols symbols;
     private final AnsiShellFrontend frontend;
+
+    private CliUsagePrinter usagePrinter;
     private final AnsiShellIO io;
     /**
      * Interaction gates shared by the AnsiShellIO interactions and the interrupt menu
@@ -883,100 +882,19 @@ public class CliCommand implements Runnable {
      * turn changed it; an unchanged list stays silent.
      */
     private void printTodosIfChanged(final List<TodoItem> before) {
-        final var after = session.runtime().todos().all();
-        if (after.equals(before)) {
-            return;
-        }
-        println();
-        println(MarkdownColorizer.status("todos:"));
-        frontend.renderTodos(after).forEach(this::println);
+        usagePrinter().printTodosIfChanged(before);
     }
 
     private void printUsage() {
-        final var stats = frontend.stats();
-        final var usage = stats.lastUsage();
-        if (usage == null) {
-            return;
+        usagePrinter().printUsage();
+    }
+
+    private CliUsagePrinter usagePrinter() {
+        if (usagePrinter == null) {
+            usagePrinter = new CliUsagePrinter(
+                    conf, session, frontend, symbols, line -> println(line), () -> println(), this::writeLineErr);
         }
-        final var lastTurnMetrics = stats.lastTurnMetrics();
-        final var toolsRun = stats.toolsRun();
-        final var sb = new StringBuilder();
-        sb.append(symbols.infoMarker());
-        if (conf.showUsage()) {
-            sb.append(String.format(
-                    Locale.ROOT,
-                    "~%,d tokens (%.1f%% of %,d)",
-                    usage.estimatedContextTokens(),
-                    usage.contextPercent(),
-                    session.runtime().usage().usableWindow()));
-            if (usage.usage() != null && usage.usage().cacheReadTokens() > 0) {
-                final var cached = MetricsFormat.cachedTokens(
-                        usage.usage().cacheReadTokens(), usage.usage().promptTokens());
-                if (!cached.isEmpty()) {
-                    sb.append(" · ").append(cached);
-                }
-            }
-            final var backgroundTokens = session.runtime().usage().auxiliaryPromptTokens()
-                    + session.runtime().usage().auxiliaryCompletionTokens();
-            if (backgroundTokens > 0) {
-                sb.append(String.format(Locale.ROOT, " · %,d background tokens (compaction/memory)", backgroundTokens));
-            }
-        }
-        if (session.metrics().showPerTurn() && lastTurnMetrics != null) {
-            if (conf.showUsage()) {
-                sb.append(" · ");
-            }
-            sb.append(lastTurnMetrics.llmCalls()).append(" LLM");
-            if (lastTurnMetrics.thinkingDurationMs() > 0) {
-                sb.append(" (")
-                        .append(DurationFormat.humanize(lastTurnMetrics.thinkingDurationMs()))
-                        .append(" think)");
-            }
-            final var tokPerSec = MetricsFormat.tokPerSec(lastTurnMetrics.throughput());
-            if (!tokPerSec.isEmpty()) {
-                sb.append(" · ").append(tokPerSec);
-            }
-            if (session.metrics().displayMode() == MetricsDisplayMode.FULL) {
-                sb.append(" · ")
-                        .append(lastTurnMetrics.toolsRun())
-                        .append(" tools ")
-                        .append("(")
-                        .append(DurationFormat.humanize(lastTurnMetrics.toolDurationSumMs()))
-                        .append(" sum")
-                        .append("/")
-                        .append(DurationFormat.humanize(lastTurnMetrics.toolDurationWallMs()))
-                        .append(" wall)");
-            } else {
-                sb.append(" · ")
-                        .append(lastTurnMetrics.toolsRun())
-                        .append(" tools (")
-                        .append(DurationFormat.humanize(lastTurnMetrics.toolDurationSumMs()))
-                        .append("/")
-                        .append(DurationFormat.humanize(lastTurnMetrics.toolDurationWallMs()))
-                        .append(")");
-            }
-        } else if (toolsRun > 0) {
-            if (conf.showUsage()) {
-                sb.append(" · ");
-            }
-            sb.append(toolsRun).append(toolsRun == 1 ? " tool" : " tools");
-        }
-        if (session.metrics().showSessionTotals() && session.runtime().usage().requests() > 0) {
-            if (conf.showUsage() || toolsRun > 0 || (session.metrics().showPerTurn() && lastTurnMetrics != null)) {
-                sb.append(" · ");
-            }
-            sb.append("session: ").append(session.runtime().usage().requests()).append(" LLM calls");
-        }
-        final var elapsedMillis = (System.nanoTime() - stats.turnStartNanos()) / 1_000_000L;
-        if (conf.showUsage()
-                || toolsRun > 0
-                || (session.metrics().showPerTurn() && lastTurnMetrics != null)
-                || (session.metrics().showSessionTotals()
-                        && session.runtime().usage().requests() > 0)) {
-            sb.append(" · ");
-        }
-        sb.append(DurationFormat.humanize(elapsedMillis));
-        writeLineErr(MarkdownColorizer.status(sb.toString()));
+        return usagePrinter;
     }
 
     /** The environment shared actions run against; the transcript is the shared one. */

@@ -16,7 +16,6 @@
 package io.yupiik.ia.agent.tui;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-import io.yupiik.ia.agent.tui.TuiCommand.UiState;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 

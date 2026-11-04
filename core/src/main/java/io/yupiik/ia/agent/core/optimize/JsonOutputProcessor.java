@@ -15,7 +15,6 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHeadToken;
 import static java.util.stream.Collectors.joining;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -38,20 +37,30 @@ import java.util.stream.Stream;
 public class JsonOutputProcessor implements OutputProcessor {
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
+    private final CommandOutputPostProcessor commandOutput;
 
-    public JsonOutputProcessor(final CodingAgentConfiguration configuration, final JsonMapper mapper) {
+    public JsonOutputProcessor(
+            final CodingAgentConfiguration configuration,
+            final JsonMapper mapper,
+            final CommandOutputPostProcessor commandOutput) {
         this.configuration = configuration;
         this.mapper = mapper;
+        this.commandOutput = commandOutput;
+    }
+
+    public JsonOutputProcessor(final CodingAgentConfiguration configuration, final JsonMapper mapper) {
+        this(configuration, mapper, new CommandOutputPostProcessor());
     }
 
     protected JsonOutputProcessor() {
         this.configuration = null;
         this.mapper = null;
+        this.commandOutput = new CommandOutputPostProcessor();
     }
 
     @Override
     public boolean supports(final String command) {
-        return matchesHeadToken(command, "kubectl", "docker", "gh", "aws");
+        return commandOutput.matchesHeadToken(command, "kubectl", "docker", "gh", "aws");
     }
 
     @Override
@@ -66,7 +75,7 @@ public class JsonOutputProcessor implements OutputProcessor {
 
     @Override
     public Stream<String> process(final String command, final Stream<String> lines) {
-        final var stripped = lines.map(Optimizers::stripAnsi).toList();
+        final var stripped = lines.map(commandOutput::stripAnsi).toList();
         final var text = String.join("\n", stripped).strip();
         if (text.isEmpty() || !text.startsWith("[") && !text.startsWith("{")) {
             return stripped.stream(); // not JSON: preserve original lines so the generic processor can act
@@ -184,8 +193,8 @@ public class JsonOutputProcessor implements OutputProcessor {
         };
     }
 
-    private static String headOf(final String command) {
-        final var head = Optimizers.headToken(command);
+    private String headOf(final String command) {
+        final var head = commandOutput.headToken(command);
         return head == null ? "" : head;
     }
 

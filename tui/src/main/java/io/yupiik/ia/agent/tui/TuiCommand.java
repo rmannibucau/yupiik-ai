@@ -80,14 +80,12 @@ import io.yupiik.ia.agent.core.shell.DurationFormat;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
 import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
-import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellFrontend;
 import io.yupiik.ia.agent.core.shell.ShellIO;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
-import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
@@ -111,27 +109,22 @@ import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.Deque;
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
@@ -1294,63 +1287,31 @@ public class TuiCommand implements Runnable {
     }
 
     private static void toggleTab(final FeedbackPrompt prompt, final boolean forward) {
-        final var tabCount = prompt.questions().size() + 1;
-        final var next = forward ? prompt.tab() + 1 : prompt.tab() - 1;
-        prompt.tab(Math.floorMod(next, tabCount));
+        TuiFeedbackSupport.toggleTab(prompt, forward);
     }
 
-    /**
-     * Scrolls the ask_user question (or confirm summary) by {@code delta} rows. A no-op unless the
-     * render reported overflow ({@code questionMaxScroll() > 0}), which keeps PgUp/PgDn harmless on
-     * the common case where the modal already fits its content.
-     */
     private static void scrollFeedbackQuestion(final FeedbackPrompt prompt, final int delta) {
-        if (prompt.questionMaxScroll() > 0) {
-            prompt.questionScroll(Math.max(0, prompt.questionScroll() + delta));
-        }
+        TuiFeedbackSupport.scrollFeedbackQuestion(prompt, delta);
     }
 
     private static void moveOption(final FeedbackPrompt prompt, final int qIndex, final int delta) {
-        final var fq = prompt.questions().get(qIndex);
-        final var opts = optionCount(fq);
-        final var total = opts + (opts == 0 ? 0 : 1);
-        if (!fq.question.multiple() && opts > 0) {
-            final var current = fq.selectedIndex();
-            fq.selectedIndex(Math.floorMod((Math.max(current, 0)) + delta, total));
-            setOptionFocus(prompt, fq, fq.selectedIndex());
-        } else if (fq.question.multiple() && opts > 0) {
-            final var current = prompt.optionsFocus();
-            prompt.optionsFocus(Math.floorMod(Math.max(0, current) + delta, total));
-        }
+        TuiFeedbackSupport.moveOption(prompt, qIndex, delta);
     }
 
     private static int optionCount(final FeedbackQuestion fq) {
-        return fq.question.options() == null ? 0 : fq.question.options().size();
+        return TuiFeedbackSupport.optionCount(fq);
     }
 
     private static boolean ownEntrySelected(final FeedbackQuestion fq) {
-        final var opts = optionCount(fq);
-        return !fq.question.multiple() && opts > 0 && fq.selectedIndex() == opts;
+        return TuiFeedbackSupport.ownEntrySelected(fq);
     }
 
     private static void setOptionFocus(final FeedbackPrompt prompt, final FeedbackQuestion fq, final int idx) {
-        if (idx >= 0) {
-            prompt.optionsFocus(idx);
-        }
+        TuiFeedbackSupport.setOptionFocus(prompt, fq, idx);
     }
 
     private static void activateCheckbox(final FeedbackQuestion fq, final int idx) {
-        if (!fq.question.multiple()) {
-            return;
-        }
-        final var opts = optionCount(fq);
-        if (opts > 0 && idx == opts) {
-            fq.ownBox().toggle();
-            return;
-        }
-        if (idx >= 0 && idx < fq.boxes().length && idx < opts) {
-            fq.boxes()[idx].toggle();
-        }
+        TuiFeedbackSupport.activateCheckbox(fq, idx);
     }
 
     private void handleTextInput(final TextAreaState area, final KeyEvent key) {
@@ -4455,37 +4416,9 @@ public class TuiCommand implements Runnable {
      * fall back to their label or "quota".
      */
     private static String compactWindowLabel(final AgentEvent.UsageUpdated.Quota.Window window) {
-        final var seconds = window.windowSeconds();
-        if (seconds != null && seconds > 0) {
-            if (seconds % 86400 == 0) {
-                return seconds / 86400 + "d";
-            }
-            if (seconds % 3600 == 0) {
-                return seconds / 3600 + "h";
-            }
-            if (seconds % 60 == 0) {
-                return seconds / 60 + "m";
-            }
-            return seconds + "s";
-        }
-        final var label = window.label();
-        return label == null || label.isBlank() ? "quota" : label;
+        return TuiQuotaRender.compactWindowLabel(window);
     }
 
-    // Unicode block fill chars mirror the Gauge widget's sub-cell rendering; the partial
-    // blocks (\u258f..\u2589) give a smooth fill edge between 0 and full (\u2588).
-    private static final char QUOTA_BLOCK_FULL = '\u2588';
-    private static final char[] QUOTA_BLOCK_PARTIAL = {
-        '\u258f', '\u258e', '\u258d', '\u258c', '\u258b', '\u258a', '\u2589'
-    };
-
-    /**
-     * Renders a single account-quota window into one sidebar row with the labels around the
-     * bar, mirroring the web panel: the compact window kind on the left, the consumed {@code used}
-     * percentage on the right, and a Unicode-block fill bar across the middle. Unlike the Gauge
-     * widget (which only centers its label) this places both labels at the row edges so the bar,
-     * sized by {@code used} (0-100; {@code null} = unknown), stays visible between them.
-     */
     private static Line quotaWindowRow(
             final int width,
             final String kind,
@@ -4494,55 +4427,11 @@ public class TuiCommand implements Runnable {
             final Color barColor,
             final Style labelStyle,
             final Style valueStyle) {
-        final var kindText = ellipsize(kind, Math.max(1, width - pct.length() - 2));
-        final var barStart = kindText.length() + 1; // one space after the kind
-        final var barEnd = Math.max(barStart, width - pct.length());
-        final var barWidth = barEnd - barStart;
-        final var bar = new StringBuilder(barWidth);
-        if (barWidth > 0 && used != null) {
-            final var filled = (int) Math.round(barWidth * used / 100.0);
-            int x;
-            for (x = 0; x < Math.min(filled, barWidth); x++) {
-                bar.append(QUOTA_BLOCK_FULL);
-            }
-            if (filled < barWidth) {
-                final var frac = barWidth * used / 100.0 - filled;
-                if (frac > 0 && x < barWidth) {
-                    bar.append(QUOTA_BLOCK_PARTIAL[Math.min(QUOTA_BLOCK_PARTIAL.length - 1, (int) (frac * 8))]);
-                    x++;
-                }
-            }
-            while (x < barWidth) {
-                bar.append(' ');
-                x++;
-            }
-        } else {
-            bar.append(" ".repeat(Math.max(0, barWidth)));
-        }
-        final var barStyle = Style.EMPTY.fg(barColor);
-        return Line.from(
-                Span.styled(kindText, labelStyle),
-                Span.styled(bar.toString(), barStyle),
-                Span.styled(" " + pct, valueStyle));
+        return TuiQuotaRender.quotaWindowRow(width, kind, pct, used, barColor, labelStyle, valueStyle);
     }
 
-    /**
-     * Compact "time until reset" caption from an epoch seconds reset deadline, e.g. "now",
-     * "in 2d 3h", "in 2h 15m", "in 10m". {@code resetAt <= 0} (already at/over the deadline)
-     * yields "now".
-     */
     private static String formatQuotaReset(final long resetAt) {
-        final var seconds = Math.max(0, resetAt - java.time.Instant.now().getEpochSecond());
-        if (seconds == 0) {
-            return "now";
-        }
-        if (seconds >= 86400) {
-            return "in " + (seconds / 86400) + "d " + (seconds % 86400 / 3600) + "h";
-        }
-        if (seconds >= 3600) {
-            return "in " + (seconds / 3600) + "h " + (seconds % 3600 / 60) + "m";
-        }
-        return "in " + Math.max(1, (seconds + 59) / 60) + "m";
+        return TuiQuotaRender.formatQuotaReset(resetAt);
     }
 
     private void renderTranscript(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
@@ -8730,22 +8619,11 @@ public class TuiCommand implements Runnable {
     }
 
     private static String ellipsize(final String text, final int max) {
-        if (text == null || text.length() <= max) {
-            return text == null ? "" : text;
-        }
-        return max <= 3 ? text.substring(0, Math.max(0, max)) : text.substring(0, max - 3) + "...";
+        return TuiTextRender.ellipsize(text, max);
     }
 
-    /**
-     * Keeps the trailing characters when the text is too long, truncating the head with "{@code ...}".
-     * Used where the meaningful tail matters most (e.g. the cwd's deepest folder segments) instead of the
-     * {@link #ellipsize(String, int)} head-keeping behaviour.
-     */
     private static String ellipsizeLeading(final String text, final int max) {
-        if (text == null || text.length() <= max) {
-            return text == null ? "" : text;
-        }
-        return max <= 3 ? text.substring(text.length() - max) : "..." + text.substring(text.length() - max + 3);
+        return TuiTextRender.ellipsizeLeading(text, max);
     }
 
     private static String formatTokens(final long value) {
@@ -8842,7 +8720,7 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private static final class Approval {
+    static final class Approval {
         enum Action {
             DENY("Deny  [Esc]"),
             ALLOW("Allow  [Enter]"),
@@ -8943,7 +8821,7 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private static final class PickerPrompt {
+    static final class PickerPrompt {
         private final String title;
         private final List<String> items;
         private final int pageSize;
@@ -9111,7 +8989,7 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private static final class PendingEditPlan {
+    static final class PendingEditPlan {
         private final Path path;
         private final String original;
         private volatile Rect confirmRect;
@@ -9149,21 +9027,21 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private static final class FeedbackPrompt {
-        private final List<FeedbackQuestion> questions;
-        private final CountDownLatch latch;
-        private final Map<String, Object> answers;
-        private final AtomicBoolean answered;
-        private int tab;
-        private int optionsFocus;
-        private boolean focusInput;
-        private Rect tabsRect;
+    static final class FeedbackPrompt {
+        final List<FeedbackQuestion> questions;
+        final CountDownLatch latch;
+        final Map<String, Object> answers;
+        final AtomicBoolean answered;
+        int tab;
+        int optionsFocus;
+        boolean focusInput;
+        Rect tabsRect;
         /** Scroll offset of the (column-wrapped) question/prompt or confirm summary, reset on every tab change. */
-        private int questionScroll;
+        int questionScroll;
         /** Overflow (rows beyond the visible question area) computed at the last render; used to route the wheel. */
-        private int questionMaxScroll;
+        int questionMaxScroll;
 
-        private FeedbackPrompt(
+        FeedbackPrompt(
                 final List<Question> raw,
                 final CountDownLatch latch,
                 final Map<String, Object> answers,
@@ -9177,82 +9055,82 @@ public class TuiCommand implements Runnable {
             this.answered = answered;
         }
 
-        private List<FeedbackQuestion> questions() {
+        List<FeedbackQuestion> questions() {
             return questions;
         }
 
-        private CountDownLatch latch() {
+        CountDownLatch latch() {
             return latch;
         }
 
-        private Map<String, Object> answers() {
+        Map<String, Object> answers() {
             return answers;
         }
 
-        private AtomicBoolean answered() {
+        AtomicBoolean answered() {
             return answered;
         }
 
-        private int tab() {
+        int tab() {
             return tab;
         }
 
-        private void tab(final int tab) {
+        void tab(final int tab) {
             this.tab = Math.max(0, tab);
             // a new tab shows a different question/summary, so its scroll must restart from the top
             this.questionScroll = 0;
         }
 
-        private int optionsFocus() {
+        int optionsFocus() {
             return optionsFocus;
         }
 
-        private void optionsFocus(final int optionsFocus) {
+        void optionsFocus(final int optionsFocus) {
             this.optionsFocus = Math.max(0, optionsFocus);
         }
 
-        private boolean focusInput() {
+        boolean focusInput() {
             return focusInput;
         }
 
-        private void focusInput(final boolean focusInput) {
+        void focusInput(final boolean focusInput) {
             this.focusInput = focusInput;
         }
 
-        private Rect tabsRect() {
+        Rect tabsRect() {
             return tabsRect;
         }
 
-        private void tabsRect(final Rect tabsRect) {
+        void tabsRect(final Rect tabsRect) {
             this.tabsRect = tabsRect;
         }
 
-        private int questionScroll() {
+        int questionScroll() {
             return questionScroll;
         }
 
-        private void questionScroll(final int questionScroll) {
+        void questionScroll(final int questionScroll) {
             this.questionScroll = Math.max(0, questionScroll);
         }
 
-        private int questionMaxScroll() {
+        int questionMaxScroll() {
             return questionMaxScroll;
         }
 
-        private void questionMaxScroll(final int questionMaxScroll) {
+        void questionMaxScroll(final int questionMaxScroll) {
             this.questionMaxScroll = Math.max(0, questionMaxScroll);
         }
     }
 
-    private static final class FeedbackQuestion {
-        private final Question question;
-        private final int[] selectedIndex = {0};
-        private final CheckboxState[] boxes;
-        private final CheckboxState ownBox = new CheckboxState();
-        private final TextAreaState ownAnswer = new TextAreaState();
-        private final List<FeedbackOptionRow> optionRects = new ArrayList<>();
+    static final class FeedbackQuestion {
+        final Question question;
+        final int[] selectedIndex = {0};
+        final CheckboxState[] boxes;
+        final CheckboxState ownBox = new CheckboxState();
+        final TextAreaState ownAnswer = new TextAreaState();
+        final List<FeedbackOptionRow> optionRects = new ArrayList<>();
 
-        private FeedbackQuestion(final Question question) {
+        FeedbackQuestion(final Question question) {
             this.question = question;
             if (question.multiple() && question.options() != null) {
                 this.boxes = new CheckboxState[question.options().size()];
@@ -9264,413 +9142,42 @@ public class TuiCommand implements Runnable {
             }
         }
 
-        private Question question() {
+        Question question() {
             return question;
         }
 
-        private CheckboxState[] boxes() {
+        CheckboxState[] boxes() {
             return boxes;
         }
 
-        private CheckboxState ownBox() {
+        CheckboxState ownBox() {
             return ownBox;
         }
 
-        private TextAreaState ownAnswer() {
+        TextAreaState ownAnswer() {
             return ownAnswer;
         }
 
-        private List<FeedbackOptionRow> optionRects() {
+        List<FeedbackOptionRow> optionRects() {
             return optionRects;
         }
 
-        private int selectedIndex() {
+        int selectedIndex() {
             return selectedIndex[0];
         }
 
-        private void selectedIndex(final int index) {
+        void selectedIndex(final int index) {
             selectedIndex[0] = Math.max(0, index);
         }
     }
 
     /** One visible option row: the screen rect plus the logical option index it belongs to. */
-    private record FeedbackOptionRow(Rect rect, int option) {}
+    record FeedbackOptionRow(Rect rect, int option) {}
 
     private static TextAreaState feedbackInput(final FeedbackPrompt prompt) {
         final var idx = prompt.tab() >= prompt.questions().size() ? 0 : prompt.tab();
         return prompt.questions().get(idx).ownAnswer();
     }
 
-    static final class UiState {
-        /**
-         * An armed busy wait phase with the spinner style to render and the wall-clock time it
-         * was armed ({@code -1} before the first {@link #waiting} call). The armed time lets the
-         * busy label advance "thinking... (Ns)" and friends without depending on the transcript
-         * status string (which other event paths may rewrite mid-turn, see {@code busyIndicator}).
-         */
-        private record Wait(String message, SpinnerStyle style, long armedAtMillis) {}
-
-        /** Full-screen expandable view of one captured tool output (Ctrl+O). */
-        private record ToolOverlay(long ordinal, ToolOutputStore.Entry entry, int scroll) {
-            /** Replaces the entry of a focused overlay, keeping the scroll offset (live running-tool output). */
-            private ToolOverlay withEntry(final ToolOutputStore.Entry fresh) {
-                return new ToolOverlay(ordinal, fresh, scroll);
-            }
-        }
-
-        /**
-         * Persisted detail of the last error (message + optional stack trace) for the Alt+E modal.
-         *
-         * @param transient_ true when the error comes from a recoverable, self-healing notice (eg. a
-         *                   mid-stream retry): such a banner is auto-cleared once the next request
-         *                   actually succeeds. Persistent errors (ERROR notices, agent turn failures,
-         *                   SEVERE logs) set it to false and stay until dismissed or the next submit.
-         */
-        private record ErrorDetail(String message, String stack, boolean transient_) {}
-
-        /** Screen hit-area of a rendered tool card header (click to collapse/expand, Alt+Up/Down to navigate). */
-        private record ToolAnchor(long ordinal, Rect header, int row, boolean runMember) {}
-
-        /** Screen hit-area of a tool run header (click to collapse/expand the run). */
-        private record RunHeader(long id, Rect header, int row) {}
-
-        /** Transcript row of a truncated tool card "click to expand" footer (click opens the full output). */
-        private record FooterLink(long ordinal, int row) {}
-
-        /** A tool card position in the flat transcript row space (row = top line of the card). */
-        private record ToolTop(long ordinal, int row, boolean runMember, boolean bordered) {}
-
-        private final TuiTranscriptModel model;
-        private final Clock clock;
-        private final TextAreaState input = new TextAreaState();
-        private volatile String sessionId = "";
-        /** Per-session services (loop, permissions, todos, usage...) created when the tab opens. */
-        private volatile SessionRuntime runtime;
-
-        private volatile String title;
-        private volatile Wait wait;
-        private volatile String activeAgent = "";
-        private volatile boolean showThinking;
-        private volatile ToolOutputVisibility showToolActions = ToolOutputVisibility.COLLAPSED;
-        private volatile boolean showTodos;
-        private volatile boolean showTodosCollapsed;
-        private volatile boolean interrupted;
-
-        /** Last URL surfaced via the frontend (e.g. a Codex login); opened on-demand by Alt+O. */
-        private volatile String lastExternalUrl;
-
-        /** Whether the last turn completed: drives the tab-bar done icon until a new turn starts. */
-        private volatile boolean turnCompleted;
-
-        private volatile long lastRenderTick;
-        /**
-         * Pending background mutation awaiting its tick paint: set by {@link #runLater(UiState, Runnable)}
-         * before the action runs, cleared at the start of {@link #render}. Render-thread only.
-         */
-        private volatile boolean dirty;
-
-        private volatile boolean quitArmed;
-        private volatile CompletableFuture<Boolean> inFlight;
-        private volatile boolean historyActive;
-        private volatile String historyDraft = "";
-        /**
-         * Pending approval dialogs (head = currently displayed), FIFO. Both the main agent
-         * turn and a /btw side answer can need the user at the same time: each is enqueued
-         * by its gate invocation and resolved one after the other, so a late approval never
-         * steals the visible dialog of an earlier one.
-         */
-        private final Deque<Approval> approvals = new ConcurrentLinkedDeque<>();
-
-        private volatile FeedbackPrompt feedbackPrompt;
-        private volatile PickerPrompt picker;
-        private volatile PendingEditPlan editPlan;
-        private volatile CompletionEngine.Suggestion completion;
-        private volatile int completionIndex;
-        private volatile int completionCursor = -1;
-        private volatile boolean completionNavigated;
-        /** Screen hit-area of the completion popup (full box) as drawn last frame; null when no popup. */
-        private volatile Rect completionRect;
-        /**
-         * Set when the popup is dismissed explicitly (Esc, Enter accepting a candidate, Tab, a
-         * cursor move) so the asynchronous completion warm-up refresh cannot reopen it right after
-         * the user closed it; cleared by {@link #liveComplete(UiState)} on the next text edit,
-         * which legitimately re-arms live completion.
-         */
-        private volatile boolean completionDismissed;
-
-        private final SelectionState selection = new SelectionState();
-        private volatile String[][] screenGrid = new String[0][0];
-        /** The frozen frame a selection copies from, published once per render tick. */
-        private volatile SelectionState.SelectionFrame selectionFrame;
-        /** Per-screen-row copy kinds ({@code HARD} when unknown), published by the transcript render. */
-        private volatile SelectionState.RowKind[] rowKinds = new SelectionState.RowKind[0];
-        /** Copyable chat content columns (role bars and walls excluded), or -1 when unknown. */
-        private volatile int chatContentLeft = -1;
-
-        private volatile int chatContentRight = -1;
-        private volatile Rect copyZone;
-        private volatile Rect inputZone;
-        /**
-         * Visual-row scroll anchor of the prompt input. In follow mode (the default,
-         * {@link #inputUserScrolled} is {@code false}) it is recomputed each frame to
-         * keep the caret row visible; when the user scrolls the input manually (mouse
-         * wheel over a long prompt) it holds the explicit offset and
-         * {@code inputUserScrolled} latches so the renderer stops auto-following until
-         * the next keystroke re-arms it.
-         */
-        private volatile int inputScroll;
-        /** Whether the user scrolled the prompt input manually (mouse wheel). */
-        private volatile boolean inputUserScrolled;
-        /**
-         * Content regions of the last rendered frame that a selection may be
-         * confined to, in draw order (bottom to top). Read by the event thread
-         * to resolve a mouse press, published by the render thread each frame.
-         */
-        private volatile List<Rect> paneZones = List.of();
-        /**
-         * The copyable interior regions of the boxed chunks drawn last frame, published by
-         * the render thread. {@link SelectionState#copy(String[][], List)} uses them to strip
-         * box walls and top/bottom rule rows from a selection without quoting frame glyphs,
-         * so every bordered widget (code blocks, tool cards, tool runs) copies clean.
-         */
-        private volatile List<SelectionState.CopyBox> copyBoxes = List.of();
-
-        private final SpinnerState spinnerState = new SpinnerState();
-        private volatile String lastTodosRender = "";
-        private volatile Toast toast;
-        private volatile long toastShownAt;
-        private volatile TuiRunner runner;
-        private final Deque<String> pendingPrompts = new ConcurrentLinkedDeque<>();
-
-        /**
-         * Startup prompts ({@code --initial-prompt}) not yet submitted: each one waits for the
-         * previous turn to end so they run one after the other, one turn each, instead of being
-         * merged into a running turn like a type-ahead prompt.
-         */
-        private final Deque<String> initialPrompts = new ConcurrentLinkedDeque<>();
-
-        private volatile String errorMessage;
-        private volatile ErrorDetail errorDetail;
-        private volatile boolean errorOpen;
-        private volatile int errorScroll;
-        private volatile String notification;
-
-        /** Millis when {@link #notification} was set; {@code 0} when none is pending. */
-        private volatile long notificationShownAt;
-
-        /**
-         * True while a compaction lifecycle is in flight (a "Compaction in progress..." notice was
-         * seen and no "Compacted:"/"Compaction gate:" result yet): pins the compacting indicator in
-         * the ⓘ notification slot, bypassing the TTL, so a long summarizer pass stays visible.
-         */
-        private volatile boolean compactionActive;
-
-        /**
-         * Full title of the tab the mouse currently hovers (tab bar tooltip), or
-         * {@code null} when the pointer is not over the bar. Set by the event thread
-         * on MOVE, cleared on leave/click/scroll; rendered by the render thread as a
-         * single-line floating panel under the tab strip.
-         */
-        private volatile String hoverTitle;
-
-        private volatile ToolOverlay toolOverlay;
-
-        /**
-         * Screen rect of the tool output modal's footer row (the ellipsized raw-args
-         * line), recorded by the render thread so the event thread can hit-test a
-         * MOVE and surface the full command/args in a hover tooltip. {@code null}
-         * while no tool overlay is drawn.
-         */
-        private volatile Rect toolOverlayFooter;
-
-        /**
-         * Full command or raw args text the pointer currently hovers in the tool
-         * output modal footer, or {@code null}. Rendered by the render thread as a
-         * floating chip over the modal; cleared on scroll / press / drag / release.
-         */
-        private volatile String hoverToolCmd;
-
-        /**
-         * Per-window quota gauge hit-areas (sidebar), recorded by the render thread each frame
-         * so the event thread can hit-test a MOVE and surface the reset time in a hover tooltip.
-         * Populated only while the quota gauges are actually drawn ({@code showQuota}); cleared
-         * to an empty list on every frame where quota is hidden, so switching to a no-quota
-         * provider removes the hit-areas on the next repaint and the tooltip never hovers a bar
-         * that is not shown.
-         */
-        private volatile List<QuotaHoverArea> quotaHoverAreas = List.of();
-
-        /**
-         * Reset-time caption ("Resets in ...", or "now") of the quota gauge the pointer currently
-         * hovers in the sidebar, or {@code null}. Rendered by the render thread as a floating chip
-         * below the gauge row; cleared on scroll / press / drag / leave / provider switch.
-         */
-        private volatile String hoverQuotaReset;
-
-        /**
-         * Screen rect of the quota gauge the pointer currently hovers (used to anchor the
-         * reset tooltip chip below it), or {@code null} when not hovering a quota gauge.
-         */
-        private volatile Rect hoverQuotaRect;
-
-        /**
-         * Screen rect of the sidebar context gauge, recorded by the render thread each frame so the
-         * event thread can hit-test a MOVE and surface the estimated context size in a hover tooltip.
-         * Cleared whenever the gauge is not drawn, so no tooltip appears over a hidden gauge.
-         */
-        private volatile Rect contextGaugeRect;
-
-        /**
-         * Caption ("~12.3k tok") shown in the floating chip below the context gauge the pointer
-         * currently hovers, or {@code null}. Rendered by the render thread; cleared on
-         * scroll / press / drag / leave.
-         */
-        private volatile String hoverContextSize;
-
-        /**
-         * Ordinal of the tool card whose header strip (border + title row) the pointer
-         * currently hovers, or {@code -1}. Rendered by the render thread as a reversed
-         * header row so the click target is visible; cleared on scroll / press.
-         */
-        private volatile long hoverToolCard = -1;
-
-        private record QuotaHoverArea(Rect rect, long resetAtEpochSeconds) {}
-
-        private volatile BtwOverlay btw;
-
-        private volatile ExecutingToolsOverlay executingTools;
-
-        private record BtwOverlay(
-                long ordinal,
-                String question,
-                String answer,
-                String error,
-                boolean running,
-                boolean retryable,
-                int scroll,
-                AtomicBoolean cancelled) {}
-
-        /** The /executing-tools modal: a read-only snapshot of the running tools, scrollable. */
-        private record ExecutingToolsOverlay(String content, int scroll) {}
-
-        private final TranscriptSearch search = new TranscriptSearch();
-        private volatile boolean searchOpen;
-        private volatile List<String> flatRows = List.of();
-        private volatile int maxViewOffset;
-        private volatile int pendingJumpRow = -1;
-        private final Set<Long> collapsedTools = new HashSet<>();
-        /**
-         * Per-run collapse overrides keyed by the run's first tool ordinal; a run with no
-         * entry follows the current mode default (SHOWN open, COLLAPSED collapsed). Cleared
-         * on Ctrl+L together with {@link #collapsedTools}.
-         */
-        private final Map<Long, Boolean> runCollapsed = new HashMap<>();
-
-        private volatile List<ToolAnchor> toolAnchors = List.of();
-        private volatile List<ToolAnchor> toolFooterLinks = List.of();
-        /** Rendered run header hit-areas (click to toggle the run), populated each frame. */
-        private volatile List<RunHeader> runHeaders = List.of();
-        /** Wall-clock millis when the current live thinking stream started, -1 when idle. */
-        private volatile long thinkingStartedAtMillis = -1;
-
-        private final List<Rect> queueRects = new ArrayList<>();
-        private volatile boolean shortcutsOpen;
-        private volatile int shortcutsScroll;
-        private volatile Rect shortcutRect;
-        /**
-         * Screen rect of the leading ✖ glyph in the error banner (the click-to-dismiss target),
-         * recorded by the render thread so the event thread can hit-test a press and clear the
-         * error. {@code null} while no error banner is drawn.
-         */
-        private volatile Rect errorCloseRect;
-        /** Subagents overlay: null when closed, the detail id when showing one subagent, empty for the list. */
-        private volatile String subagentsOverlay = null;
-
-        private volatile int subagentsScroll;
-        private volatile String lastCodeBlock;
-        /** Pending tool args per name (FIFO), mirroring the core transcript's running tools. */
-        private final Map<String, ArrayDeque<String>> pendingToolArgs = new HashMap<>();
-        /**
-         * Ordinals of the started-not-finished tools per name (FIFO), aligned with
-         * {@link #pendingToolArgs}: the running block parsed by {@link ToolCard} carries
-         * the (#ordinal) emitted by the core transcript, and the renderer falls back to
-         * this queue when the header has no suffix yet, so the running card is always
-         * anchored (clickable running-tool overlay) even before the first marked header.
-         */
-        private final Map<String, ArrayDeque<Long>> pendingToolOrdinals = new HashMap<>();
-
-        private volatile long focusedToolOrdinal = -1;
-        private volatile int toolNavIndex = -1;
-        private volatile boolean yankArmed;
-        private volatile int lastYankLen;
-
-        private void pushToast(final String message, final ToastLevel level) {
-            toast = new Toast(message, level);
-            toastShownAt = clock.millis();
-        }
-
-        private void clearToast() {
-            toast = null;
-        }
-
-        UiState(final ThinkTagSplitter thinkTags, final Clock clock) {
-            this(thinkTags, clock, null);
-        }
-
-        UiState(
-                final ThinkTagSplitter thinkTags,
-                final Clock clock,
-                final TuiConfiguration.ToolOutputConfiguration toolOutput) {
-            this.model = new TuiTranscriptModel(thinkTags);
-            this.clock = clock;
-            this.session = new ShellSession();
-            final var limits =
-                    toolOutput == null ? new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0) : toolOutput;
-            this.toolOutputs =
-                    new ToolOutputStore(limits.maxEntries(), limits.maxOutputChars(), limits.maxTotalChars());
-            this.killRing = new KillRing();
-            this.undoStack = new UndoStack();
-            this.interruptor = new InterruptCoordinator(clock, true);
-        }
-
-        /** Per-tab shell state: session id, agent, view flags, busy and metrics. */
-        private ShellSession session;
-
-        /** Captured tool outputs of this tab (Ctrl+O overlay, copy from tool cards). */
-        private final ToolOutputStore toolOutputs;
-
-        /** Ctrl+U/Ctrl+K last-deleted text ring. */
-        private final KillRing killRing;
-
-        /** Undo/redo stack of the input text. */
-        private final UndoStack undoStack;
-
-        /** Ctrl+C press window: interrupt vs quit. */
-        private final InterruptCoordinator interruptor;
-
-        /** Monotonic ordinal for this tab's /btw overlays. */
-        private final AtomicLong btwOrdinal = new AtomicLong();
-
-        /** Pending readLine future, only set while the input is not owned by a turn. */
-        private volatile CompletableFuture<Optional<String>> pendingLine;
-
-        /** Per-session services of this tab; wired once the runtime is created at startup. */
-        private SessionRuntime runtime() {
-            return runtime;
-        }
-
-        /** Wires the per-session services of this tab. */
-        private void runtime(final SessionRuntime runtime) {
-            this.runtime = runtime;
-        }
-    }
-
-    private record Toast(String message, ToastLevel level) {}
-
-    private enum ToastLevel {
-        SUCCESS,
-        ERROR,
-        INFO,
-        WARNING
-    }
+    record Toast(String message, ToastLevel level) {}
 }

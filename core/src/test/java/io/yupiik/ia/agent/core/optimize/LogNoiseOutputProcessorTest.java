@@ -18,18 +18,33 @@ package io.yupiik.ia.agent.core.optimize;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.core.configuration.OptimizeConfiguration;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
  * Regression guard for the log-noise filter: proves the {@code @Property(defaultValue=...)}
- * defaults (materialized through {@link io.yupiik.ia.agent.core.configuration.OptimizeConfiguration#defaults()}
- * and matched via {@link FastRegex}) drop the expected framework log lines and never drop
+ * defaults (materialized through {@link CodingAgentConfiguration$FusionConfigurationFactory} and
+ * matched via {@link FastRegex}) drop the expected framework log lines and never drop
  * warnings/errors. Covers the yupiik-logging-jul, Spring Boot, Tomcat/Jetty, Gradle and Maven
  * formats.
  */
 class LogNoiseOutputProcessorTest {
 
-    private final LogNoiseOutputProcessor processor = new LogNoiseOutputProcessor();
+    private final LogNoiseOutputProcessor processor = new LogNoiseOutputProcessor(defaultsOptimize());
+
+    /**
+     * Materializes the {@link OptimizeConfiguration} bearing every {@code @Property(defaultValue=...)}
+     * default, as the container would at startup with no {@code yca.optimize.*} property set. Kept in
+     * test code only (production configuration records are anemic data models with no defaults helper).
+     */
+    private static OptimizeConfiguration defaultsOptimize() {
+        return new CodingAgentConfiguration$FusionConfigurationFactory(Configuration.of(Map.of()))
+                .get()
+                .optimize();
+    }
 
     @Test
     void dropsYupiikJulTimestampedInfoLogs() {

@@ -27,9 +27,9 @@ import org.junit.jupiter.api.Test;
 class TabManagerTest {
 
     private final TabManager manager = new TabManager();
-    private final TuiCommand.UiState s1 = new TuiCommand.UiState(new ThinkTagSplitter(), Clock.systemUTC());
-    private final TuiCommand.UiState s2 = new TuiCommand.UiState(new ThinkTagSplitter(), Clock.systemUTC());
-    private final TuiCommand.UiState s3 = new TuiCommand.UiState(new ThinkTagSplitter(), Clock.systemUTC());
+    private final UiState s1 = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+    private final UiState s2 = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+    private final UiState s3 = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
 
     private void seed() {
         manager.add(s1);

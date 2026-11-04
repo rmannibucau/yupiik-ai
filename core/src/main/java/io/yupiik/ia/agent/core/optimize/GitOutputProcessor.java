@@ -15,8 +15,6 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
-
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import java.util.ArrayList;
@@ -35,13 +33,24 @@ public class GitOutputProcessor implements OutputProcessor {
     private static final Pattern PUSH_BRANCH = Pattern.compile("\\*\\s+([^\\s]+)\\s+->");
 
     private final int maxBlobBytes;
+    private final CommandOutputPostProcessor commandOutput;
+
+    public GitOutputProcessor(
+            final CodingAgentConfiguration configuration, final CommandOutputPostProcessor commandOutput) {
+        this(resolveMaxBlobBytes(configuration), commandOutput);
+    }
 
     public GitOutputProcessor(final CodingAgentConfiguration configuration) {
-        this(resolveMaxBlobBytes(configuration));
+        this(resolveMaxBlobBytes(configuration), new CommandOutputPostProcessor());
+    }
+
+    GitOutputProcessor(final int maxBlobBytes, final CommandOutputPostProcessor commandOutput) {
+        this.maxBlobBytes = maxBlobBytes;
+        this.commandOutput = commandOutput;
     }
 
     GitOutputProcessor(final int maxBlobBytes) {
-        this.maxBlobBytes = maxBlobBytes;
+        this(maxBlobBytes, new CommandOutputPostProcessor());
     }
 
     protected GitOutputProcessor() {
@@ -60,7 +69,7 @@ public class GitOutputProcessor implements OutputProcessor {
 
     @Override
     public boolean supports(final String command) {
-        return matchesHead(command, "git");
+        return commandOutput.matchesHead(command, "git");
     }
 
     @Override
@@ -78,7 +87,7 @@ public class GitOutputProcessor implements OutputProcessor {
         final var sub = subCommand(command);
         return switch (sub) {
             case "diff" ->
-                Optimizers.containsFlag(
+                commandOutput.containsFlag(
                                 command,
                                 "-p",
                                 "-u",
@@ -91,7 +100,7 @@ public class GitOutputProcessor implements OutputProcessor {
                         ? lines
                         : processDiff(lines);
             case "log" ->
-                Optimizers.containsFlag(
+                commandOutput.containsFlag(
                                 command,
                                 "-p",
                                 "-u",
@@ -104,10 +113,10 @@ public class GitOutputProcessor implements OutputProcessor {
                         ? lines
                         : processLog(lines, false);
             case "show" ->
-                Optimizers.containsFlag(command, "--stat", "--format", "--pretty", "--name-only", "--name-status")
+                commandOutput.containsFlag(command, "--stat", "--format", "--pretty", "--name-only", "--name-status")
                         ? lines
                         : processShow(command, lines);
-            case "status" -> Optimizers.containsFlag(command, "--porcelain") ? lines : processStatus(lines);
+            case "status" -> commandOutput.containsFlag(command, "--porcelain") ? lines : processStatus(lines);
             case "stash" -> processStash(command, lines);
             case "add", "commit", "push", "pull", "merge", "fetch" -> processMutation(command, lines);
             default -> lines;
@@ -291,16 +300,16 @@ public class GitOutputProcessor implements OutputProcessor {
         return lines.filter(line -> !line.isBlank())
                 .filter(line -> !line.strip().startsWith("(use "))
                 .filter(line -> !line.startsWith("nothing to commit"))
-                .map(Optimizers::stripAnsi);
+                .map(commandOutput::stripAnsi);
     }
 
     private Stream<String> processStash(final String command, final Stream<String> lines) {
-        final var action = Optimizers.secondToken(command.replaceFirst("^git\\s+stash\\s*", ""));
+        final var action = commandOutput.secondToken(command.replaceFirst("^git\\s+stash\\s*", ""));
         if (!"list".equals(action) && !"".equals(action)) {
             return lines; // push/pop/apply/... carry real output, keep it
         }
         // stash list: "stash@{0}: WIP on main: abc1234 message" -> "stash@{0}: abc1234 message"
-        return lines.map(Optimizers::stripAnsi).map(line -> {
+        return lines.map(commandOutput::stripAnsi).map(line -> {
             final var i = line.indexOf(": WIP on ");
             if (i >= 0) {
                 return line.substring(0, i) + ":"
@@ -312,9 +321,9 @@ public class GitOutputProcessor implements OutputProcessor {
 
     private Stream<String> processMutation(final String command, final Stream<String> lines) {
         final var out = new ArrayList<String>();
-        final var sub = Optimizers.firstToken(command.replaceFirst("^git\\s+", ""));
+        final var sub = commandOutput.firstToken(command.replaceFirst("^git\\s+", ""));
         for (final var raw : lines.toList()) {
-            final var line = Optimizers.stripAnsi(raw).strip();
+            final var line = commandOutput.stripAnsi(raw).strip();
             if (line.isEmpty()) {
                 continue;
             }

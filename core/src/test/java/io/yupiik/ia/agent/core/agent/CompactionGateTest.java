@@ -481,6 +481,9 @@ class CompactionGateTest {
                 null,
                 resolvedPrecision,
                 null,
+                null,
+                null,
+                null,
                 null);
         // the gate's per-pass backoff is a real Thread.sleep (capped at 5s), which would stall the
         // suite for ~9s across these cases; the tests assert the gate's cadence/outcome through the

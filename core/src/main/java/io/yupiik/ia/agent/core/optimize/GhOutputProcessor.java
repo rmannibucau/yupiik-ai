@@ -15,8 +15,6 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
-
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -34,6 +32,16 @@ import java.util.stream.Stream;
  */
 @ApplicationScoped
 public class GhOutputProcessor implements OutputProcessor {
+    private final CommandOutputPostProcessor commandOutput;
+
+    public GhOutputProcessor(final CommandOutputPostProcessor commandOutput) {
+        this.commandOutput = commandOutput;
+    }
+
+    public GhOutputProcessor() {
+        this(new CommandOutputPostProcessor());
+    }
+
     private static final String[] DECORATION = {
         "title:",
         "head:",
@@ -57,7 +65,7 @@ public class GhOutputProcessor implements OutputProcessor {
 
     @Override
     public boolean supports(final String command) {
-        return matchesHead(command, "gh");
+        return commandOutput.matchesHead(command, "gh");
     }
 
     @Override
@@ -72,7 +80,7 @@ public class GhOutputProcessor implements OutputProcessor {
 
     @Override
     public Stream<String> process(final String command, final Stream<String> lines) {
-        final var all = lines.map(Optimizers::stripAnsi).toList();
+        final var all = lines.map(commandOutput::stripAnsi).toList();
         final var sub = subCommand(command);
         return switch (sub) {
             case "pr", "issue" -> processPrIssue(command, all);
@@ -83,7 +91,7 @@ public class GhOutputProcessor implements OutputProcessor {
 
     private Stream<String> processPrIssue(final String command, final List<String> all) {
         // list/status shapes: "123  title  branch  state" or a status line "checks: ..."
-        final var verb = Optimizers.thirdToken(command);
+        final var verb = commandOutput.thirdToken(command);
         if ("list".equals(verb)) {
             final var seen = new LinkedHashSet<String>();
             for (final var raw : all) {
@@ -121,7 +129,7 @@ public class GhOutputProcessor implements OutputProcessor {
     }
 
     private Stream<String> processRun(final String command, final List<String> all) {
-        final var verb = Optimizers.thirdToken(command);
+        final var verb = commandOutput.thirdToken(command);
         if ("view".equals(verb)) {
             final var out = new ArrayList<String>();
             for (final var raw : all) {

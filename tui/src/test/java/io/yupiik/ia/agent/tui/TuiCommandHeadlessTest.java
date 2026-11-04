@@ -474,7 +474,7 @@ class TuiCommandHeadlessTest {
         final var own = promptQuestionReflection(prompt, 0);
         setTextArea(own, "my typed answer");
 
-        invokeConfirmAnswers(command, new TuiCommand.UiState(deps.thinkTags(), Clock.systemUTC()), prompt);
+        invokeConfirmAnswers(command, new UiState(deps.thinkTags(), Clock.systemUTC()), prompt);
 
         assertEquals("my typed answer", answers.get("q1"), "a no-options free-text answer must be stored");
         assertTrue(answered.get(), "confirm marks the prompt as answered");
@@ -512,10 +512,10 @@ class TuiCommandHeadlessTest {
         setText.invoke(state, text);
     }
 
-    private static void invokeConfirmAnswers(
-            final TuiCommand command, final TuiCommand.UiState state, final Object prompt) throws Exception {
-        final var method = TuiCommand.class.getDeclaredMethod(
-                "confirmAnswers", TuiCommand.UiState.class, nestedClass("FeedbackPrompt"));
+    private static void invokeConfirmAnswers(final TuiCommand command, final UiState state, final Object prompt)
+            throws Exception {
+        final var method =
+                TuiCommand.class.getDeclaredMethod("confirmAnswers", UiState.class, nestedClass("FeedbackPrompt"));
         method.setAccessible(true);
         method.invoke(command, state, prompt);
     }

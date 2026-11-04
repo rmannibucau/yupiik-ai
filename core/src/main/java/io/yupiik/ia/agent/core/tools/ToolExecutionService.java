@@ -23,7 +23,7 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
-import io.yupiik.ia.agent.core.optimize.Optimizers;
+import io.yupiik.ia.agent.core.optimize.CommandOutputPostProcessor;
 import io.yupiik.ia.agent.core.optimize.OutputProcessor;
 import java.util.Comparator;
 import java.util.List;
@@ -38,35 +38,44 @@ public class ToolExecutionService {
     private final CodingAgentConfiguration configuration;
     private final Emitter emitter;
     private final List<OutputProcessor> processors;
+    private final CommandOutputPostProcessor commandOutput;
     private final String subagentId;
     private final String subagentName;
 
     public ToolExecutionService(
             final CodingAgentConfiguration configuration,
             final Emitter emitter,
+            final List<OutputProcessor> processors,
+            final CommandOutputPostProcessor commandOutput) {
+        this(configuration, emitter, processors, commandOutput, null, null);
+    }
+
+    public ToolExecutionService(
+            final CodingAgentConfiguration configuration,
+            final Emitter emitter,
             final List<OutputProcessor> processors) {
-        this(configuration, emitter, processors, null, null);
+        this(configuration, emitter, processors, null, null, null);
     }
 
     protected ToolExecutionService(
             final CodingAgentConfiguration configuration,
             final Emitter emitter,
             final List<OutputProcessor> processors,
+            final CommandOutputPostProcessor commandOutput,
             final String subagentId,
             final String subagentName) {
         this.configuration = configuration;
         this.emitter = emitter;
         this.processors = processors;
+        // single defaulting point: an injected instance is used as-is, a hand-wired or
+        // test construction without one falls back to a fresh stateless processor
+        this.commandOutput = commandOutput == null ? new CommandOutputPostProcessor() : commandOutput;
         this.subagentId = subagentId;
         this.subagentName = subagentName;
     }
 
     protected ToolExecutionService() {
-        this.configuration = null;
-        this.emitter = null;
-        this.processors = null;
-        this.subagentId = null;
-        this.subagentName = null;
+        this(null, null, null, null, null, null);
     }
 
     public ToolResult execute(final EmbeddedTool tool, final Map<String, Object> args) {
@@ -81,7 +90,7 @@ public class ToolExecutionService {
     public ToolResult execute(final EmbeddedTool tool, final Map<String, Object> args, final ToolContext context) {
         final var ctx = context == null ? ToolContext.empty() : context;
         final var optimize = configuration.optimize();
-        final var optimizeThis = optimize.enabled() && !optimize.isDisabled(List.of(tool.name()));
+        final var optimizeThis = optimize.enabled() && !commandOutput.isDisabled(optimize, List.of(tool.name()));
         if (optimizeThis) {
             try {
                 emitter.emit(new BeforeToolExecutionEvent(
@@ -137,7 +146,7 @@ public class ToolExecutionService {
         // Peek through a leading wrapper (sudo, timeout 120, env VAR=.., command, sh -c ...) so the
         // command head matchers see the inner command: `timeout 120 mvn ...` is optimized as `mvn ...`.
         final var effective = optimize.skipCommandWrapper()
-                ? Optimizers.unwrapCommandWrapper(command).orElse(command)
+                ? commandOutput.unwrapCommandWrapper(command).orElse(command)
                 : command;
         final var minReduction = Math.max(0, Math.min(100, optimize.minReductionPercent()));
         final var sorted = processors.stream()
@@ -145,7 +154,7 @@ public class ToolExecutionService {
                 .sorted(Comparator.comparingInt(OutputProcessor::order))
                 .toList();
         for (final var processor : sorted) {
-            if (optimize.isDisabled(processor.names())) {
+            if (commandOutput.isDisabled(optimize, processor.names())) {
                 continue;
             }
             try {

@@ -15,8 +15,6 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
-
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -31,9 +29,16 @@ import java.util.stream.Stream;
 @ApplicationScoped
 public class MavenOutputProcessor implements OutputProcessor {
     private final LogNoiseOutputProcessor logNoise;
+    private final CommandOutputPostProcessor commandOutput;
+
+    public MavenOutputProcessor(
+            final LogNoiseOutputProcessor logNoise, final CommandOutputPostProcessor commandOutput) {
+        this.logNoise = logNoise;
+        this.commandOutput = commandOutput;
+    }
 
     public MavenOutputProcessor(final LogNoiseOutputProcessor logNoise) {
-        this.logNoise = logNoise;
+        this(logNoise, new CommandOutputPostProcessor());
     }
 
     public MavenOutputProcessor() {
@@ -60,7 +65,7 @@ public class MavenOutputProcessor implements OutputProcessor {
 
     @Override
     public boolean supports(final String command) {
-        return matchesHead(command, "mvn", "mvnd");
+        return commandOutput.matchesHead(command, "mvn", "mvnd");
     }
 
     @Override
@@ -87,7 +92,7 @@ public class MavenOutputProcessor implements OutputProcessor {
         var inReactor = false;
 
         for (final var raw : lines.toArray(String[]::new)) {
-            final var line = Optimizers.stripAnsi(raw);
+            final var line = commandOutput.stripAnsi(raw);
             if (logNoise.drop(line) || NOISE.matcher(line).matches()) {
                 continue;
             }

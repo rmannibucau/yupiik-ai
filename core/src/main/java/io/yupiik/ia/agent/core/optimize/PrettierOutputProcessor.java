@@ -15,9 +15,6 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
-import static io.yupiik.ia.agent.core.optimize.Optimizers.containsFlag;
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
-
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.ArrayList;
 import java.util.Set;
@@ -26,10 +23,19 @@ import java.util.stream.Stream;
 @ApplicationScoped
 public class PrettierOutputProcessor implements OutputProcessor {
     private static final int MAX_FILES = 20;
+    private final CommandOutputPostProcessor commandOutput;
+
+    public PrettierOutputProcessor(final CommandOutputPostProcessor commandOutput) {
+        this.commandOutput = commandOutput;
+    }
+
+    public PrettierOutputProcessor() {
+        this(new CommandOutputPostProcessor());
+    }
 
     @Override
     public boolean supports(final String command) {
-        return matchesHead(command, "prettier");
+        return commandOutput.matchesHead(command, "prettier");
     }
 
     @Override
@@ -44,8 +50,8 @@ public class PrettierOutputProcessor implements OutputProcessor {
 
     @Override
     public Stream<String> process(final String command, final Stream<String> lines) {
-        final var all = lines.map(Optimizers::stripAnsi).toList();
-        final var check = containsFlag(command, "--check", "-c");
+        final var all = lines.map(commandOutput::stripAnsi).toList();
+        final var check = commandOutput.containsFlag(command, "--check", "-c");
         final var paths = all.stream()
                 .filter(l -> !l.isBlank() && !l.contains("error") && !l.contains("Error") && !l.startsWith("["))
                 .map(String::strip)

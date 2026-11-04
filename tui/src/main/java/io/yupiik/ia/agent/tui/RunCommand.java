@@ -35,7 +35,6 @@ import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import java.io.BufferedWriter;
 import java.io.IOException;
-import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -239,34 +238,7 @@ public class RunCommand implements Runnable {
      * When {@code sun.misc.Signal} is unavailable the cancel supplier simply stays false.
      */
     private BooleanSupplier installCancelHandler(final AtomicBoolean userCancelled) {
-        final var cancelled = new AtomicBoolean();
-        final var lastInterruptAt = new long[] {0};
-        try {
-            final var signal = Class.forName("sun.misc.Signal");
-            final var handler = Class.forName("sun.misc.SignalHandler");
-            final var handle = signal.getMethod("handle", signal, handler);
-            final var ctor = signal.getConstructor(String.class);
-            final var interruptHandler = Proxy.newProxyInstance(
-                    RunCommand.class.getClassLoader(), new Class<?>[] {handler}, (_, method, _) -> {
-                        if (method.getName().equals("handle")) {
-                            final var now = System.currentTimeMillis();
-                            final var previous = lastInterruptAt[0];
-                            lastInterruptAt[0] = now;
-                            if (previous > 0 && now - previous <= 2_000L) {
-                                LOGGER.severe("forced exit");
-                                System.exit(130);
-                            }
-                            cancelled.set(true);
-                            userCancelled.set(true);
-                            LOGGER.warning("cancelling the current turn (ctrl-c again to force exit)...");
-                        }
-                        return null;
-                    });
-            handle.invoke(null, ctor.newInstance("INT"), interruptHandler);
-        } catch (final Throwable ignored) {
-            // signal handling is best-effort; headless runs keep the default JVM behavior
-        }
-        return cancelled::get;
+        return RunCancelHandler.install(userCancelled);
     }
 
     private void writeMetrics(final Metrics metrics, final long started, final AgentLoop.AuxiliaryUsage aux) {

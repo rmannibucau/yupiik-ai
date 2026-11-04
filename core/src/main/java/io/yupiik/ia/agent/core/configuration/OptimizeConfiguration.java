@@ -18,11 +18,8 @@ package io.yupiik.ia.agent.core.configuration;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-import io.yupiik.ia.agent.core.optimize.Optimizers;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Tool output optimization settings (rtk style token reduction).
@@ -87,83 +84,10 @@ public record OptimizeConfiguration(
                                 + "dropped levels are INFO/FINE/FINER/FINEST/CONFIG/DEBUG; WARNING/SEVERE/ERROR are "
                                 + "never dropped.")
         LogNoiseConfiguration logNoise) {
-
     /**
-     * @return true when the processor/command is disabled by the global {@code disabled} list
-     *     (loose alias matching) or by its per-tool {@code enabled} flag in {@code toolOutputs}.
-     */
-    public boolean isDisabled(final Collection<String> aliases) {
-        if (disabled != null && aliases.stream().anyMatch(a -> matches(disabled, a))) {
-            return true;
-        }
-        return !isToolEnabled(aliases);
-    }
-
-    private boolean matches(final List<String> configured, final String alias) {
-        return configured.stream().anyMatch(c -> Optimizers.matchesAlias(c, Set.of(alias)));
-    }
-
-    /** Per-tool enabled flag, default true when the tool entry is absent. */
-    private boolean isToolEnabled(final Collection<String> aliases) {
-        if (toolOutputs == null) {
-            return true;
-        }
-        // Resolve the tool entry by processor alias set; unknown entries default to enabled.
-        if (aliasMatches(aliases, "mvn", "mvnd", "mvnw")) {
-            return toolOutputs.maven() == null || toolOutputs.maven().enabled();
-        }
-        if (aliasMatches(aliases, "gradle", "gradlew")) {
-            return toolOutputs.gradle() == null || toolOutputs.gradle().enabled();
-        }
-        if (aliasMatches(aliases, "git")) {
-            return toolOutputs.git() == null || toolOutputs.git().enabled();
-        }
-        if (aliasMatches(aliases, "gh")) {
-            return toolOutputs.gh() == null || toolOutputs.gh().enabled();
-        }
-        if (aliasMatches(aliases, "npm", "pnpm", "yarn", "bun")) {
-            return toolOutputs.npm() == null || toolOutputs.npm().enabled();
-        }
-        if (aliasMatches(aliases, "prettier")) {
-            return toolOutputs.prettier() == null || toolOutputs.prettier().enabled();
-        }
-        if (aliasMatches(aliases, "generic")) {
-            return toolOutputs.generic() == null || toolOutputs.generic().enabled();
-        }
-        if (aliasMatches(aliases, "ls", "find", "tree", "du", "grep", "rg", "egrep", "fgrep", "ast-grep")) {
-            return toolOutputs.filesystem() == null || toolOutputs.filesystem().enabled();
-        }
-        if (aliasMatches(aliases, "tsc", "eslint", "biome", "next")) {
-            return toolOutputs.js() == null || toolOutputs.js().enabled();
-        }
-        if (aliasMatches(aliases, "kubectl")) {
-            return toolOutputs.kubectl() == null || toolOutputs.kubectl().enabled();
-        }
-        if (aliasMatches(aliases, "docker", "docker-compose", "docker compose")) {
-            return toolOutputs.docker() == null || toolOutputs.docker().enabled();
-        }
-        if (aliasMatches(aliases, "json")) {
-            return toolOutputs.json() == null || toolOutputs.json().enabled();
-        }
-        return true;
-    }
-
-    private boolean aliasMatches(final Collection<String> aliases, final String... names) {
-        for (final var alias : aliases) {
-            for (final var name : names) {
-                if (alias.equalsIgnoreCase(name)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Builds the {@link OptimizeConfiguration} with every nested default applied (in particular the
+     * Materializes the default {@link OptimizeConfiguration} with every nested default applied (in particular the
      * {@link LogNoiseConfiguration} drop rules declared in {@code @Property(defaultValue=...)}), as
-     * the container would at startup with no {@code yca.optimize.*} property set. This is the
-     * defaults materialized from the config model — there is no separate runtime default constant.
+     * the container would at startup with no {@code yca.optimize.*} property set.
      */
     public static OptimizeConfiguration defaults() {
         return new CodingAgentConfiguration$FusionConfigurationFactory(Configuration.of(Map.of()))

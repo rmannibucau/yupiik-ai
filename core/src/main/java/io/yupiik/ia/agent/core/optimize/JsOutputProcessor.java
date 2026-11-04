@@ -15,8 +15,6 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHeadToken;
-
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import java.util.ArrayList;
@@ -44,18 +42,26 @@ public class JsOutputProcessor implements OutputProcessor {
     private static final Pattern NEXT_ERROR = Pattern.compile("^(\\.?/?[^: ]+):(\\d+):(\\d+):?\\s+(.*)$");
 
     private final CodingAgentConfiguration configuration;
+    private final CommandOutputPostProcessor commandOutput;
+
+    public JsOutputProcessor(
+            final CodingAgentConfiguration configuration, final CommandOutputPostProcessor commandOutput) {
+        this.configuration = configuration;
+        this.commandOutput = commandOutput;
+    }
 
     public JsOutputProcessor(final CodingAgentConfiguration configuration) {
-        this.configuration = configuration;
+        this(configuration, new CommandOutputPostProcessor());
     }
 
     protected JsOutputProcessor() {
         this.configuration = null;
+        this.commandOutput = new CommandOutputPostProcessor();
     }
 
     @Override
     public boolean supports(final String command) {
-        return matchesHeadToken(command, "tsc", "eslint", "biome", "next");
+        return commandOutput.matchesHeadToken(command, "tsc", "eslint", "biome", "next");
     }
 
     @Override
@@ -74,7 +80,7 @@ public class JsOutputProcessor implements OutputProcessor {
         final var perFile = new LinkedHashMap<String, List<String>>();
         String lastFile = null;
         for (final var raw : lines.toList()) {
-            final var line = Optimizers.stripAnsi(raw).strip();
+            final var line = commandOutput.stripAnsi(raw).strip();
             if (line.isEmpty()) {
                 continue;
             }

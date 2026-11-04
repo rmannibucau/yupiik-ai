@@ -15,9 +15,6 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
-import static io.yupiik.ia.agent.core.optimize.Optimizers.stripAnsi;
-
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,10 +31,19 @@ import java.util.stream.Stream;
 public class DockerOutputProcessor implements OutputProcessor {
     private static final int MAX_PS_LINES = 20;
     private static final int MAX_LOG_LINES = 50;
+    private final CommandOutputPostProcessor commandOutput;
+
+    public DockerOutputProcessor(final CommandOutputPostProcessor commandOutput) {
+        this.commandOutput = commandOutput;
+    }
+
+    public DockerOutputProcessor() {
+        this(new CommandOutputPostProcessor());
+    }
 
     @Override
     public boolean supports(final String command) {
-        return matchesHead(command, "docker");
+        return commandOutput.matchesHead(command, "docker");
     }
 
     @Override
@@ -52,8 +58,8 @@ public class DockerOutputProcessor implements OutputProcessor {
 
     @Override
     public Stream<String> process(final String command, final Stream<String> lines) {
-        final var all = lines.map(Optimizers::stripAnsi).toList();
-        if (Optimizers.containsFlag(command, "-o", "--output", "inspect", "ps --format")) {
+        final var all = lines.map(commandOutput::stripAnsi).toList();
+        if (commandOutput.containsFlag(command, "-o", "--output", "inspect", "ps --format")) {
             return all.stream(); // JSON or custom format: handled elsewhere / passthrough
         }
         final var sub = subCommand(command);
@@ -78,7 +84,7 @@ public class DockerOutputProcessor implements OutputProcessor {
         final var out = new ArrayList<String>(all.size());
         var header = true;
         for (final var raw : all) {
-            final var line = stripAnsi(raw).stripTrailing();
+            final var line = commandOutput.stripAnsi(raw).stripTrailing();
             if (line.isBlank()) {
                 continue;
             }
@@ -97,11 +103,11 @@ public class DockerOutputProcessor implements OutputProcessor {
         return out.stream();
     }
 
-    private static String pickHeader(final String[] cols, final int[] keep) {
+    private String pickHeader(final String[] cols, final int[] keep) {
         final var out = new ArrayList<String>();
         for (final var k : keep) {
             if (k < cols.length) {
-                out.add(stripAnsi(cols[k]));
+                out.add(commandOutput.stripAnsi(cols[k]));
             }
         }
         return String.join("  ", out);

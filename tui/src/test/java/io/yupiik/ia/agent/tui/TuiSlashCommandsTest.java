@@ -38,7 +38,7 @@ class TuiSlashCommandsTest {
 
     private void seed(final int count) {
         for (int i = 0; i < count; i++) {
-            tabManager.add(new TuiCommand.UiState(new ThinkTagSplitter(), Clock.systemUTC()));
+            tabManager.add(new UiState(new ThinkTagSplitter(), Clock.systemUTC()));
         }
         tabManager.activate(0);
     }
