@@ -93,6 +93,20 @@
   </build>
 
   <profiles>
+    <!--
+      Optional JVM AOT cache (JDK 25+, JEP 483/514/515) for faster JVM startup.
+      After building the fatjar, generate (and regenerate after every fatjar rebuild) the cache with:
+        java -XX:AOTCacheOutput=yca/target/yca-bin-1.0.0-SNAPSHOT.aot \
+          -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar tui -initialPrompt "/exit" </dev/null
+      and launch JVM runs with:
+        java -XX:AOTCache=yca/target/yca-bin-1.0.0-SNAPSHOT.aot \
+          -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar ...
+      Measured (JDK 25, with the native-access flag the JLine terminal
+      requires): plain JVM ~3.3-3.8s, JVM + AOT cache ~1.3-1.6s,
+      native binary ~0.75s. Generate the cache with the same flags
+      used to launch, otherwise the cache under-delivers.
+      A stale/missing cache only logs a warning and falls back to plain startup.
+      -->
     <profile>
       <id>native</id>
       <build>

@@ -21,12 +21,79 @@ https://tamboui.dev[TamboUI], with a multi-LLM and model backend abstraction.
 
 Defaults to `https://api.openai.com/v1`.
 
-[source,shell]
+[source,bash]
 ----
 export OPENAI_API_KEY=sk-...
-java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar \
+java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-*-fatjar.jar \
   run --prompt "list the files" --provider-model gpt-5-mini
 ----
+
+== Launch options
+
+yca runs either as a GraalVM native binary or as a plain JVM application.
+
+=== Native binary (recommended)
+
+Build once with Maven (see <<Build>>), then launch the binary in
+`yca/target/yca-bin.graal.bin`:
+
+[source,bash]
+----
+alias yca='$REPO_ROOT/yca/target/yca-bin.graal.bin'
+yca tui
+----
+
+Add the alias to your `~/.bashrc` (adjust the path) to get a fast `yca`
+command. If you prefer the JVM flavor, keep the fatjar and alias:
+
+[source,bash]
+----
+alias yca='java --enable-native-access=ALL-UNNAMED -jar $REPO_ROOT/yca/target/yca-bin-*-fatjar.jar'
+yca tui
+----
+
+Set the `REPO_ROOT` variable in the alias to the checkout directory or inline
+the absolute path.
+
+=== Startup performance
+
+Shipped-JVM startup is dominated by class loading and JIT warm-up
+(interactive `tui`/`cli` sessions reach steady-state C2 compilation in a few
+minutes). Two cheap mitigations, applied at the JVM launch line above, cut
+startup by about 2.4x:
+
+* A JVM AOT cache (JDK 25+, JEP 483/514/515) preloads and pre-links the
+  classes used by a training run, and carries method profiles so the JIT
+  warms up faster. Create it once per fatjar build, then point every launch
+  at it with `-XX:AOTCache`:
+
+[source,bash]
+----
+java -XX:AOTCacheOutput=yca/target/yca-bin-*.aot \
+  --enable-native-access=ALL-UNNAMED \
+  -jar yca/target/yca-bin-*-fatjar.jar \
+  tui --initialPrompt '/exit' </dev/null
+
+java -XX:AOTCache=yca/target/yca-bin-*.aot \
+  --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-*-fatjar.jar "$@"
+----
+
+* `-Xverify:none` skips bytecode verification at class load. This trades a
+  little safety margin for speed and is only relevant on the JVM path.
+
+Measured time from command line to TUI prompt (JDK 25, Linux, with the
+`--enable-native-access` flag that the JLine terminal requires): plain JVM
+~3.3-3.8s, JVM + AOT cache ~1.3-1.6s, native binary ~0.75s.
+
+TIP: generate the AOT cache with the same JVM flags you use to launch - the
+native-access flag changes the code paths the cache records, and a cache
+trained with different flags silently under-delivers.
+
+TIP: regenerate the AOT cache after every fatjar rebuild - the cache is
+bound to the exact class bytes of the build.
+
+The `-XX:AOTCache` flag was added in JDK 25 (JEP 514); on JDK 24 use the
+equivalent `-XX:AOTCacheOutput`/`-XX:AOTCache` training pair.
 
 == Documentation
 
@@ -37,7 +104,7 @@ https://yupiik.io/fusion-coding-agent/[yupiik.io/fusion-coding-agent].
 
 Requirements: Java 25+ (26 works), Maven 4.x.
 
-[source,shell]
+[source,bash]
 ----
 export JAVA_HOME=~/.sdkman/candidates/java/26.0.2+1.1-zulu
 mvn clean install
@@ -49,9 +116,9 @@ The runnable artifact is the fatjar: `yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.j
 
 Generate and serve the documentation site live on http://localhost:4200:
 
-[source,shell]
+[source,bash]
 ----
-mvn -pl documentation io.yupiik.maven:yupiik-tools-maven-plugin:1.2.14:serve-minisite
+mvn -pl documentation io.yupiik.maven:yupiik-tools-maven-plugin:1.3.0:serve-minisite
 ----
 
 Docs authoring conventions (nav attributes, generated-vs-handwritten split) are

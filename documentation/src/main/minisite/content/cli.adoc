@@ -49,15 +49,78 @@ xref:cli/code-graph-index.adoc[code-graph-index].
 
 Example:
 
-[source,bash]
+[source,bash,subs="attributes+"]
 ----
 export OPENAI_API_KEY=sk-...
-java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar \
+java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-{project_version}-fatjar.jar \
   run --prompt "explain the pom.xml" --yca-provider-model gpt-5-mini
 ----
 
 TIP: The structural code graph (enabled by default) uses the `javac` API and
-therefore needs a JDK (not a plain JRE). No extra JVM flags are required.
+therefore needs a JDK (not a plain JRE).
+
+== Launch options
+
+yca runs either as a GraalVM native binary or as a plain JVM application.
+Whichever flavor you pick, put it behind an alias so the `yca` command stays
+the same:
+
+[source,bash,subs="attributes+"]
+----
+# option 1: native binary (fastest startup)
+alias yca="$REPO_ROOT/yca/target/yca-bin.graal.bin"
+# option 2: JVM with the fatjar + AOT cache (see "Startup performance")
+alias yca="java --enable-native-access=ALL-UNNAMED \
+  -XX:AOTCache=$REPO_ROOT/yca/target/yca-bin-{project_version}.aot \
+  -jar $REPO_ROOT/yca/target/yca-bin-{project_version}-fatjar.jar"
+
+yca tui
+----
+
+Set `$REPO_ROOT` to the checkout directory (or inline the absolute path).
+
+=== Startup performance
+
+The JVM startup cost is dominated by class loading and JIT warm-up. Two cheap
+mitigations cut it by about 2.4x:
+
+* A JVM AOT cache (JDK 25+, JEP 483/514/515) preloads and pre-links the
+  classes of a training run, and carries method profiles so the JIT warms up
+  faster. Create it once per fatjar build, then point every launch at it with
+  `-XX:AOTCache`:
+
+[source,bash,subs="attributes+"]
+----
+# one-time training run, with launch flags (writes the archive next to the fatjar)
+java -XX:AOTCacheOutput=yca/target/yca-bin-{project_version}.aot \
+  --enable-native-access=ALL-UNNAMED \
+  -jar yca/target/yca-bin-{project_version}-fatjar.jar \
+  tui --initialPrompt '/exit' </dev/null
+
+# then launch with the same flags
+java --enable-native-access=ALL-UNNAMED \
+  -XX:AOTCache=yca/target/yca-bin-{project_version}.aot \
+  -jar yca/target/yca-bin-{project_version}-fatjar.jar "$@"
+----
+
+TIP: regenerate the AOT cache after every fatjar rebuild - the cache is bound
+to the exact class bytes of the build (a stale or missing cache just logs a
+warning and the JVM falls back to plain startup).
+
+* `-Xverify:none` skips bytecode verification at class load; it is a smaller
+  extra gain once the AOT cache is in place and trades a little safety margin
+  for speed.
+
+Measured time from command line to TUI prompt (JDK 25, Linux, with the
+`--enable-native-access` flag that the JLine terminal requires): plain JVM
+~3.3-3.8s, JVM + AOT cache ~1.3-1.6s, native binary ~0.75s.
+
+IMPORTANT: generate the AOT cache with the same JVM flags you use to launch
+(the native-access flag changes the code paths the cache records); a cache
+trained with different flags silently under-delivers.
+
+The `-XX:AOTCache` flag was added in JDK 25 (JEP 514); on JDK 24 use
+`-XX:AOTCacheOutput` for the training run and `-XX:AOTCache` to load.
 
 TUI options (`tui.*`), cli options (`cli.*`), web options (`web.*`) and run
 options (`run.*`) are documented on their xref:cli/index.adoc[command pages].
