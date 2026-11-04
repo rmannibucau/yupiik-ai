@@ -556,17 +556,24 @@ public class ConversationTranscript {
                         String mode,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        AgentEvent.Compacted.CompactionTokens tokens)) {
             // side feedback only: record the appliance for the sidebar instead of touching the
             // leading status, which must stay on the short busy/ready state (a stale "context
             // dedup done..." used to hide the current spinner/error at the bottom)
-            recordAppliance(new AgentEvent.Compacted(kinds, mode, sessionId, subagentId, subagentName));
+            recordAppliance(new AgentEvent.Compacted(kinds, mode, sessionId, subagentId, subagentName, tokens));
             transcript
                     .append("\n\n> context ")
                     .append(String.join(", ", kinds))
                     .append(" applied (")
                     .append(mode.toLowerCase(Locale.ROOT))
-                    .append(")\n");
+                    .append(')');
+            final var shrink =
+                    MetricsFormat.shrink(tokens == null ? 0 : tokens.before(), tokens == null ? 0 : tokens.after());
+            if (!shrink.isEmpty()) {
+                transcript.append(", ").append(shrink);
+            }
+            transcript.append('\n');
             touchTranscript();
             touch();
         } else if (event

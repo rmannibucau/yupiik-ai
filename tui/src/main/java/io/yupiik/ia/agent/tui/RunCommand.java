@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.RunShellFrontend;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
@@ -406,7 +407,7 @@ public class RunCommand implements Runnable {
                 perCallReasoning = 0;
             } else if (event instanceof final AgentEvent.Compacted c) {
                 compactions.incrementAndGet();
-                detail.compact(started, String.join(",", c.kinds()), c.mode());
+                detail.compact(started, String.join(",", c.kinds()), c.mode(), c.tokens());
             } else if (event instanceof final AgentEvent.Phase p) {
                 if (p.name() != null) {
                     detail.phase(started, p.name());
@@ -531,8 +532,17 @@ public class RunCommand implements Runnable {
             write("answer t=" + (System.nanoTime() - started) / 1_000_000L + " chars=" + chars);
         }
 
-        void compact(final long started, final String kind, final String mode) {
-            write("compact t=" + (System.nanoTime() - started) / 1_000_000L + " kind=" + kind + " mode=" + mode);
+        void compact(
+                final long started,
+                final String kind,
+                final String mode,
+                final AgentEvent.Compacted.CompactionTokens tokens) {
+            final var shrink =
+                    MetricsFormat.shrink(tokens == null ? 0 : tokens.before(), tokens == null ? 0 : tokens.after());
+            write("compact t=" + (System.nanoTime() - started) / 1_000_000L
+                    + " kind=" + kind
+                    + " mode=" + mode
+                    + (shrink.isEmpty() ? "" : " shrink=" + shrink));
         }
 
         void turnMetrics(

@@ -111,6 +111,23 @@ class WebEventDtoTest {
         final var dto = WebEventDto.of(new AgentEvent.Compacted(List.of("dedup", "prune"), "CLEARED", "s1"));
         assertEquals("compacted", dto.type());
         assertEquals("dedup,prune|CLEARED", dto.message());
+        assertEquals(null, dto.data().get("tokensBefore"), "no tokens carried -> no before key");
+        assertEquals(null, dto.data().get("tokensAfter"), "no tokens carried -> no after key");
+    }
+
+    @Test
+    void compactedCarriesTheTokenMetricsWhenPresent() {
+        // the raw before/after estimates are plumbed for the web frontend to render its own
+        // "513k -> 87k (83%)" style feedback
+        final var dto = WebEventDto.of(new AgentEvent.Compacted(
+                List.of("dedup", "compact-spill"),
+                "SHRUNK",
+                "s1",
+                null,
+                null,
+                new AgentEvent.Compacted.CompactionTokens(513_000, 87_000)));
+        assertEquals(513_000, dto.data().get("tokensBefore"));
+        assertEquals(87_000, dto.data().get("tokensAfter"));
     }
 
     @Test

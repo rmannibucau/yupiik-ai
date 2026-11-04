@@ -4398,6 +4398,13 @@ class AgentLoopTest {
         assertEquals(List.of("dedup", "prune", "compact"), compacted.get(0).kinds());
         assertEquals(
                 "SUMMARY", compacted.get(0).mode(), "the LLM compaction mode must win over the prune/zero-LLM CLEARED");
+        assertNotNull(compacted.get(0).tokens(), "the merged event must carry the raw before/after estimates");
+        assertTrue(
+                compacted.get(0).tokens().after() >= 0
+                        && compacted.get(0).tokens().before()
+                                >= compacted.get(0).tokens().after(),
+                "the after estimate must not exceed the before one: "
+                        + compacted.get(0).tokens());
     }
 
     @Test

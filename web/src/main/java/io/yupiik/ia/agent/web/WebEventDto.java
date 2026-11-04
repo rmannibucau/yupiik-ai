@@ -215,6 +215,14 @@ public record WebEventDto(
                         "success", t.success(),
                         "cancelled", t.cancelled(),
                         "subagentId", t.subagentId() == null ? "" : t.subagentId());
+            case AgentEvent.Compacted t -> {
+                final var data = new LinkedHashMap<String, Object>();
+                if (t.tokens() != null) {
+                    data.put("tokensBefore", t.tokens().before());
+                    data.put("tokensAfter", t.tokens().after());
+                }
+                yield data;
+            }
             default -> Map.of();
         };
     }

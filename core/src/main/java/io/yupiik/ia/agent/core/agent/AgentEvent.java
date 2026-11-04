@@ -278,16 +278,35 @@ public sealed interface AgentEvent {
         }
     }
 
-    record Compacted(List<String> kinds, String mode, String sessionId, String subagentId, String subagentName)
+    record Compacted(
+            List<String> kinds,
+            String mode,
+            String sessionId,
+            String subagentId,
+            String subagentName,
+            CompactionTokens tokens)
             implements AgentEvent {
+
+        /**
+         * Estimated raw context size before/after the applied reductions, in tokens (never the
+         * anchor-calibrated estimation, so the two sides compare the same currency). {@code null}
+         * when the emitting path could not measure (e.g. events built by tests or legacy producers).
+         */
+        public record CompactionTokens(int before, int after) {}
+
         /** Convenience for the single-strategy case (explicit tool request, LLM-only compaction...). */
         public Compacted(String kind, String mode, String sessionId) {
-            this(List.of(kind), mode, sessionId, null, null);
+            this(List.of(kind), mode, sessionId, null, null, null);
         }
 
         /** Convenience for the merged-strategy case (several reductions of the same checkpoint). */
         public Compacted(List<String> kinds, String mode, String sessionId) {
-            this(kinds, mode, sessionId, null, null);
+            this(kinds, mode, sessionId, null, null, null);
+        }
+
+        /** Convenience carrying the measured tokens (before/after, raw estimates). */
+        public Compacted(List<String> kinds, String mode, String sessionId, String subagentId, String subagentName) {
+            this(kinds, mode, sessionId, subagentId, subagentName, null);
         }
     }
 

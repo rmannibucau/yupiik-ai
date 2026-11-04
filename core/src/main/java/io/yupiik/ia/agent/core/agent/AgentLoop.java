@@ -1454,11 +1454,26 @@ public class AgentLoop {
     }
 
     private AgentEvent.Compacted compacted(final String kind, final String mode) {
-        return compacted(List.of(kind), mode);
+        return compacted(List.of(kind), mode, null);
+    }
+
+    private AgentEvent.Compacted compacted(
+            final String kind, final String mode, final AgentEvent.Compacted.CompactionTokens tokens) {
+        return compacted(List.of(kind), mode, tokens);
     }
 
     private AgentEvent.Compacted compacted(final List<String> kinds, final String mode) {
-        return new AgentEvent.Compacted(kinds, mode, currentSessionId, subagentId, subagentName);
+        return compacted(kinds, mode, null);
+    }
+
+    private AgentEvent.Compacted compacted(
+            final List<String> kinds, final String mode, final AgentEvent.Compacted.CompactionTokens tokens) {
+        return new AgentEvent.Compacted(kinds, mode, currentSessionId, subagentId, subagentName, tokens);
+    }
+
+    /** Bounded before/after pair for a Compacted event (raw estimates, never negative). */
+    private static AgentEvent.Compacted.CompactionTokens compactionTokens(final int before, final int after) {
+        return new AgentEvent.Compacted.CompactionTokens(Math.max(0, before), Math.max(0, after));
     }
 
     /**
@@ -1665,6 +1680,10 @@ public class AgentLoop {
                 var compactedThisTurn = false;
                 final var appliedKinds = new ArrayList<String>(4);
                 var appliedModes = new ArrayList<CompactionResult.Mode>(2);
+                // raw estimate before the first reduction of this checkpoint: reported on the merged
+                // Compacted event so the notice can show the actual reclaim (estimates, never the
+                // anchor-calibrated gauge - the anchor is cleared mid-checkpoint below)
+                final var contextBefore = usageTracker.estimateContext(messages, toolsTokens);
                 final var llmFree = contextManager.ignoreLlm(runSettings);
                 if (contextManager.pruneNeeded(messages, toolsTokens)) {
                     // the DCP-style strategies are the compact-checkpoint's weapon under llmFree
@@ -1845,7 +1864,9 @@ public class AgentLoop {
                     }
                 }
                 if (!appliedKinds.isEmpty()) {
-                    emit(compacted(appliedKinds, bestMode(appliedModes)));
+                    final var contextAfter = usageTracker.estimateContext(messages, toolsTokens);
+                    emit(compacted(
+                            appliedKinds, bestMode(appliedModes), compactionTokens(contextBefore, contextAfter)));
                 }
                 if (compactedThisTurn) {
                     contextManager.resetSpeculation();
@@ -1981,11 +2002,16 @@ public class AgentLoop {
                         persistContext(sessionId, messages);
                         usageTracker.clearAnchor();
                     }
+                    final var beforeOverflowContext = usageTracker.estimateContext(messages, toolsTokens);
                     final var compacted = contextManager.compactForOverflow(messages, cancelled, runSettings);
                     if (compacted.changed() && !compacted.messages().isEmpty()) {
                         messages.clear();
                         messages.addAll(compacted.messages());
-                        emit(compacted("compact-retry", compacted.mode().name()));
+                        emit(compacted(
+                                "compact-retry",
+                                compacted.mode().name(),
+                                compactionTokens(
+                                        beforeOverflowContext, usageTracker.estimateContext(messages, toolsTokens))));
                         persistContext(sessionId, messages);
                         overflowRetried = true;
                         continue;
@@ -2664,6 +2690,7 @@ public class AgentLoop {
             final List<Message> messages,
             final ContextView.Directive directive,
             final int toolsTokens) {
+        final var beforeDirectiveContext = usageTracker.estimateContext(messages, toolsTokens);
         final var result = "prune".equals(directive.action())
                 ? contextManager.prune(messages)
                 : contextManager.compact(
@@ -2686,7 +2713,10 @@ public class AgentLoop {
             // the whole-context digest supersedes every active compression block
             contextView.compression().absorbAll();
         }
-        emit(compacted("tool", result.mode().name()));
+        emit(compacted(
+                "tool",
+                result.mode().name(),
+                compactionTokens(beforeDirectiveContext, usageTracker.estimateContext(messages, toolsTokens))));
         persistContext(sessionId, messages);
         emit(notice(
                 AgentEvent.Notice.Level.INFO,
@@ -3174,6 +3204,9 @@ public class AgentLoop {
         final var effectiveCancelled = cancelled == null ? (BooleanSupplier) () -> false : cancelled;
         final var appliedKinds = new ArrayList<String>(2);
         var appliedModes = new ArrayList<CompactionResult.Mode>(2);
+        // raw estimate before the first round reduction, reported on the merged event (same
+        // currency as the after-measure below, independent of the anchor clearing in this method)
+        final var beforeRoundContext = usageTracker.estimateContext(messages, toolsTokens);
         if (contextManager.pruneNeeded(messages, toolsTokens)) {
             final var pruned = contextManager.prune(messages);
             if (pruned.changed()) {
@@ -3201,7 +3234,10 @@ public class AgentLoop {
             }
         }
         if (!appliedKinds.isEmpty()) {
-            emit(compacted(appliedKinds, bestMode(appliedModes)));
+            emit(compacted(
+                    appliedKinds,
+                    bestMode(appliedModes),
+                    compactionTokens(beforeRoundContext, usageTracker.estimateContext(messages, toolsTokens))));
         }
     }
 

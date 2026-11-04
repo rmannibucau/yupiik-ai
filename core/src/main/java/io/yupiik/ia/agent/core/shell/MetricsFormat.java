@@ -72,14 +72,14 @@ public final class MetricsFormat {
             return "";
         }
         final var percent = (int) Math.round(cacheRead * 100.0 / prompt);
-        return "cached " + humanizeTokens(cacheRead) + " (" + percent + "%)";
+        return "cached " + tokens(cacheRead) + " (" + percent + "%)";
     }
 
     /**
      * Compact human form of a token count: {@code M} for millions above 1M, {@code k} for
      * thousands, at most one decimal place (whole when over 9).
      */
-    private static String humanizeTokens(final long value) {
+    public static String tokens(final long value) {
         if (value < 1_000) {
             return String.valueOf(value);
         }
@@ -89,6 +89,24 @@ public final class MetricsFormat {
         }
         final var m = value / 1_000_000.0;
         return (m > 9 ? String.format("%.0fM", m) : String.format("%.1fM", m)).replace(',', '.');
+    }
+
+    /**
+     * Compact "before -> after (reclaim %)" segment for a compaction notice, e.g.
+     * {@code "513K -> 87K (83%)"} for {@code (513_000, 87_000)}. Empty when the pair is not
+     * usable ({@code before <= 0}) or nothing was reclaimed ({@code after >= before}).
+     *
+     * @param before estimated context tokens before the reduction
+     * @param after  estimated context tokens after the reduction
+     * @return the segment, or {@code ""} when there is nothing meaningful to show.
+     */
+    public static String shrink(final int before, final int after) {
+        if (before <= 0 || after < 0 || after >= before) {
+            return "";
+        }
+        final var reclaimed = Math.min(after, before);
+        final var percent = (int) Math.round((before - reclaimed) * 100.0 / before);
+        return tokens(before) + " -> " + tokens(after) + " (" + percent + "%)";
     }
 
     /**

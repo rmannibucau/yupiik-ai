@@ -134,6 +134,33 @@ class MetricsFormatTest {
         assertFalse(report.split("\n")[1].contains("cached"), "no cache usage -> no cached segment: " + report);
     }
 
+    @Test
+    void tokensHelperFormatsCompactHumanCounts() {
+        assertEquals("0", MetricsFormat.tokens(0));
+        assertEquals("999", MetricsFormat.tokens(999));
+        assertEquals("1.2k", MetricsFormat.tokens(1_200));
+        assertEquals("14k", MetricsFormat.tokens(13_700));
+        assertEquals("1.2M", MetricsFormat.tokens(1_200_000));
+        assertEquals("10M", MetricsFormat.tokens(10_400_000));
+    }
+
+    @Test
+    void shrinkFormatsTheBeforeAfterReclaimSegment() {
+        assertEquals("513k -> 87k (83%)", MetricsFormat.shrink(513_000, 87_000));
+        assertEquals("100 -> 90 (10%)", MetricsFormat.shrink(100, 90));
+        assertEquals("1.2M -> 512k (57%)", MetricsFormat.shrink(1_200_000, 512_000));
+        assertEquals("200 -> 100 (50%)", MetricsFormat.shrink(200, 100));
+    }
+
+    @Test
+    void shrinkIsEmptyWhenThereIsNothingMeaningfulToShow() {
+        assertEquals("", MetricsFormat.shrink(0, 0), "no before");
+        assertEquals("", MetricsFormat.shrink(-1, 100), "negative before");
+        assertEquals("", MetricsFormat.shrink(100, -1), "negative after");
+        assertEquals("", MetricsFormat.shrink(100, 100), "no reclaim");
+        assertEquals("", MetricsFormat.shrink(100, 200), "grew");
+    }
+
     private static ConversationTranscript transcriptWithReasoningTurn() {
         final var transcript = new ConversationTranscript();
         transcript.onEvent(new AgentEvent.TurnMetrics(

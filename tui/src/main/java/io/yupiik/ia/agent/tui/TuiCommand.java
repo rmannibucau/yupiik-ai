@@ -4353,11 +4353,11 @@ public class TuiCommand implements Runnable {
         final var appliances = state.model.appliances();
         if (!appliances.isEmpty()) {
             final var app = appliances.getFirst();
+            final var appLabel = cleanupLabel(app.kinds(), app.mode()) + reclaimPercent(app.tokens());
             text.add(Line.from(
                     Span.styled("cleanup ", label),
                     Span.styled(
-                            ellipsize(cleanupLabel(app.kinds(), app.mode()), Math.max(8, width - 8)),
-                            Style.EMPTY.fg(Color.hex(palette.info())))));
+                            ellipsize(appLabel, Math.max(8, width - 8)), Style.EMPTY.fg(Color.hex(palette.info())))));
         }
         final var lines = Text.from(text.toArray(Line[]::new));
         final var textRect = rows.getFirst();
@@ -4433,6 +4433,19 @@ public class TuiCommand implements Runnable {
                 .filter(labels::contains)
                 .findFirst()
                 .orElse(labels.isEmpty() ? "context updated" : labels.getFirst());
+    }
+
+    /**
+     * Compact percent-of-reclaimed-context suffix for the sidebar appliance, e.g. {@code " -83%"}
+     * when the compaction brought the context from 513K to 87K. Empty when the event carried no
+     * usable token pair or nothing was reclaimed.
+     */
+    static String reclaimPercent(final AgentEvent.Compacted.CompactionTokens tokens) {
+        if (tokens == null || tokens.before() <= 0 || tokens.after() < 0 || tokens.after() >= tokens.before()) {
+            return "";
+        }
+        final var percent = (int) Math.round((tokens.before() - tokens.after()) * 100.0 / tokens.before());
+        return percent <= 0 ? "" : " -" + percent + "%";
     }
 
     /**

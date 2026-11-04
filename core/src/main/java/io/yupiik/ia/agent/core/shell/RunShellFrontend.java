@@ -124,8 +124,11 @@ public class RunShellFrontend implements ShellFrontend {
             }
         } else if (event instanceof final AgentEvent.Compacted c) {
             ensureStderrNewline();
+            final var tokens = c.tokens();
+            final var shrink =
+                    MetricsFormat.shrink(tokens == null ? 0 : tokens.before(), tokens == null ? 0 : tokens.after());
             LOGGER.info(() -> prefix + "context " + String.join(", ", c.kinds()) + " applied ("
-                    + c.mode().toLowerCase(Locale.ROOT) + ")");
+                    + c.mode().toLowerCase(Locale.ROOT) + ")" + (shrink.isEmpty() ? "" : ", " + shrink));
         } else if (event
                 instanceof
                 AgentEvent.Notice(
@@ -194,7 +197,7 @@ public class RunShellFrontend implements ShellFrontend {
                 instanceof AgentEvent.ToolFinished(var _, var _, var _, var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.Compacted(var _, var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.Compacted(var _, var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
         } else if (event

@@ -421,6 +421,24 @@ class TuiTranscriptModelTest {
     }
 
     @Test
+    void compactedShowsTheReclaimMetricsWhenCarried() {
+        // the event carries the raw estimated before/after pair: the durable transcript appends
+        // the formatted segment and the sidebar appliance records the pair for the " -83%" suffix
+        final var tokens = new AgentEvent.Compacted.CompactionTokens(513_000, 87_000);
+        model.onEvent(new AgentEvent.Compacted(List.of("dedup", "compact-spill"), "SHRUNK", "s1", null, null, tokens));
+        assertEquals(1, model.appliances().size());
+        assertEquals(
+                tokens,
+                model.appliances().getFirst().tokens(),
+                "the sidebar appliance must keep the metrics for its reclaim suffix");
+        assertTrue(
+                model.transcript()
+                        .toString()
+                        .contains("> context dedup, compact-spill applied (shrunk), 513k -> 87k (83%)"),
+                "transcript: " + model.transcript());
+    }
+
+    @Test
     void noticeRendersDistinctTranscriptAndStatus() {
         model.onEvent(AgentEvent.Notice.error("boom", "s1"));
         assertTrue(model.transcript().toString().contains("> ⚠ error: boom"));
