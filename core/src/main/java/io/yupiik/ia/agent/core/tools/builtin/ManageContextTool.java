@@ -77,8 +77,10 @@ public class ManageContextTool implements EmbeddedTool {
     @Override
     public String description() {
         return "Manage the conversation context. action=compress (default) summarizes genuinely closed"
-                + " conversation ranges: each message sent to the provider ends with a stable compact"
-                + " seam tag (an at-sign, the message number, an at-sign); pass topic plus"
+                + " conversation ranges. References appear either as seam tags after messages or as"
+                + " boundary metadata associated with user turns. In boundary metadata, use the user"
+                + " turn's start reference as startId and the preceding end reference shown at a later"
+                + " user turn as endId; endId is inclusive. Pass topic plus"
                 + " content=[{startId,endId,summary}] with ranges that start on a user message"
                 + " and end at a turn boundary. When there is a large amount of genuinely closed"
                 + " history, send 2-4 small disjoint ranges as a single content array, each starting"

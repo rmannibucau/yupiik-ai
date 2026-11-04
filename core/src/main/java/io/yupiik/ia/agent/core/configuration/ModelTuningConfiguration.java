@@ -125,4 +125,47 @@ public record ModelTuningConfiguration(
                 defaultValue = "\"\"",
                 documentation =
                         "Optional raw JSON object merged (put-if-absent) into the payload of every request for this model, over the provider-level one. Empty is ignored.")
-        String providerSpecificOptions) {}
+        String providerSpecificOptions,
+
+        @Property(
+                defaultValue = "io.yupiik.ia.agent.core.configuration.BoundaryOnlyRefMode.AUTO",
+                documentation =
+                        "Experimental compression reference presentation: ENABLED exposes turn boundaries instead of tagging every message; DISABLED retains legacy tags. AUTO enables it for deepseek-v4-flash with selected high or max variants only. An explicit model setting overrides the provider setting; AUTO inherits the provider setting. Resolved independently for each session request.")
+        BoundaryOnlyRefMode compressionBoundaryOnly) {
+    public ModelTuningConfiguration(
+            final String reasoningEffort,
+            final RepairToolCallArgumentsMode repairToolCallArguments,
+            final InBandToolCallsMode inBandToolCalls,
+            final ReasoningFormatMode reasoningFormat,
+            final Boolean forceNonEmptyContent,
+            final Integer outputTokens,
+            final Integer systemPromptMaxChars,
+            final Integer plateauRounds,
+            final Integer maxIterations,
+            final PlateauFeedbackMode plateauFeedback,
+            final Integer explorationNudgeRounds,
+            final Boolean turnContinuesOnTextEnd,
+            final Integer repeatSuccessThreshold,
+            final List<ModelVariantConfiguration> variants,
+            final String defaultVariant,
+            final String providerSpecificOptions) {
+        this(
+                reasoningEffort,
+                repairToolCallArguments,
+                inBandToolCalls,
+                reasoningFormat,
+                forceNonEmptyContent,
+                outputTokens,
+                systemPromptMaxChars,
+                plateauRounds,
+                maxIterations,
+                plateauFeedback,
+                explorationNudgeRounds,
+                turnContinuesOnTextEnd,
+                repeatSuccessThreshold,
+                variants,
+                defaultVariant,
+                providerSpecificOptions,
+                BoundaryOnlyRefMode.AUTO);
+    }
+}

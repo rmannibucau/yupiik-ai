@@ -24,6 +24,7 @@ import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.httpclient.core.listener.impl.CurlLoggerListener;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.BoundaryOnlyRefMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
@@ -990,6 +991,23 @@ public class ChatClient implements AutoCloseable {
 
     /** A request rebased onto its resolved routing (provider in the settings) plus the concrete model name. */
     private record RoutedRequest(ChatCompletionRequest request, String model) {}
+
+    /** Resolve the presentation against the very same session routing and variant as the request. */
+    public boolean compressionBoundaryOnly(final ChatCompletionRequest request) throws IOException {
+        if (providerManager == null) {
+            return false;
+        }
+        final var routed = resolveModel(request);
+        final var provider = target(routed.request());
+        final var mode = providerManager.compressionBoundaryOnly(provider, routed.model());
+        if (mode != BoundaryOnlyRefMode.AUTO) {
+            return mode == BoundaryOnlyRefMode.ENABLED;
+        }
+        final var variant = selectedVariant(provider, routed.model(), routed.request());
+        return routed.model().toLowerCase(Locale.ROOT).contains("deepseek-v4-flash")
+                && variant != null
+                && ("high".equalsIgnoreCase(variant.name()) || "max".equalsIgnoreCase(variant.name()));
+    }
 
     private ChatCompletionRequest useModel(final ChatCompletionRequest request) throws IOException {
         return withPromotedExtras(applyModelDefaults(request));

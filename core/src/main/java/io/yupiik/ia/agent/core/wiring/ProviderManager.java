@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.wiring;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.BoundaryOnlyRefMode;
 import io.yupiik.ia.agent.core.configuration.BufferConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CompactionLlmMode;
@@ -862,6 +863,21 @@ public class ProviderManager {
             return entry.behavior();
         }
         return providerTuning(provider);
+    }
+
+    /** Explicit model setting wins, otherwise inherit the provider setting. */
+    public BoundaryOnlyRefMode compressionBoundaryOnly(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        final var mode = entry == null || entry.behavior() == null
+                ? null
+                : entry.behavior().compressionBoundaryOnly();
+        if (mode != null && mode != BoundaryOnlyRefMode.AUTO) {
+            return mode;
+        }
+        final var tuning = providerTuning(provider);
+        return tuning == null || tuning.compressionBoundaryOnly() == null
+                ? BoundaryOnlyRefMode.AUTO
+                : tuning.compressionBoundaryOnly();
     }
 
     /** The provider-level tuning record, or null. */

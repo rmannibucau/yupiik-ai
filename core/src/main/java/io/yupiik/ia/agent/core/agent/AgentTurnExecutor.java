@@ -1054,9 +1054,16 @@ public class AgentTurnExecutor {
                 final var compressed = host.contextView == null
                         ? messages
                         : host.contextView.compression().rewrite(messages);
+                final var presentationRequest = new ChatCompletionRequest(
+                                model, compressed, null, null, null, tools, "auto", null, null, null)
+                        .withSessionId(sessionId)
+                        .withSettings(requestSettings)
+                        .withTuning(runTuning);
                 final var wireSource = host.contextView == null
                         ? compressed
-                        : host.contextView.compression().renderRefs(compressed);
+                        : host.contextView
+                                .compression()
+                                .renderRefs(compressed, host.compressionBoundaryOnly(presentationRequest));
                 final var outbound = new OutboundLlmRequest(wireSource, requestSettings, sessionId);
                 host.emitter.emit(outbound);
                 final var wireMessages = outbound.messages();

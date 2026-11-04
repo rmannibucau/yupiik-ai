@@ -120,6 +120,48 @@ class ContextCompressionTest {
     }
 
     @Test
+    void boundaryRenderingUsesPublishedTurnEndsAndKeepsLegacyRendering() {
+        final var compression = new ContextCompression(config());
+        final var messages = simpleConversation();
+        compression.publish(messages);
+        final var rendered = compression.renderRefs(messages, true);
+        assertTrue(rendered.get(1).content().toString().contains("@1@"));
+        assertEquals("done", rendered.get(2).content());
+        assertTrue(rendered.get(3).content().toString().contains("@2@"));
+        assertTrue(rendered.get(3).content().toString().contains("@3@"));
+        assertTrue(rendered.get(3).content().toString().contains("@4@"));
+        assertEquals("also done", rendered.get(4).content());
+        assertTrue(compression
+                        .compress("first", List.of(new ContextCompression.Range("1", "2", "done")))
+                        .blockId()
+                != null);
+        final var rewritten = compression.renderRefs(compression.rewrite(messages), true);
+        assertTrue(rewritten.get(1).content().toString().contains("@b1@"));
+        assertFalse(rewritten.get(2).content().toString().contains("@2@"));
+        assertTrue(compression.renderRefs(messages).get(2).content().toString().contains("@2@"));
+    }
+
+    @Test
+    void boundaryRenderingRespectsProtectedTurnsAndSyntheticUsers() {
+        final var compression = new ContextCompression(protectedConfig());
+        final var messages = List.of(
+                Message.system("system"),
+                Message.user("first"),
+                Message.assistant("done", List.of()),
+                Message.user("<compacted-context>digest</compacted-context>"),
+                Message.user("last"),
+                Message.assistant("answer", List.of()),
+                new Message("user", "tail", null, null, null, Map.of("volatileTail", true)));
+        compression.publish(messages);
+        final var rendered = compression.renderRefs(messages, true);
+        assertTrue(rendered.get(1).content().toString().contains("@1@"));
+        assertTrue(rendered.get(1).content().toString().contains("@2@"));
+        assertEquals(messages.get(3), rendered.get(3));
+        assertEquals(messages.get(4), rendered.get(4));
+        assertEquals(messages.get(6), rendered.get(6));
+    }
+
+    @Test
     void stripEchoedRefsRemovesCompactSeamsFromModelOutput() {
         final var compression = new ContextCompression(null);
         assertEquals("done\ncontinue", compression.stripEchoedRefs("done\n@90@\ncontinue"));

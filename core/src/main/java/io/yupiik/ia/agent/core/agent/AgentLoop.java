@@ -36,6 +36,7 @@ import io.yupiik.ia.agent.core.events.ModelSwitchingEvent;
 import io.yupiik.ia.agent.core.events.SessionEndedEvent;
 import io.yupiik.ia.agent.core.events.hooks.EventContextBuilder;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
@@ -56,6 +57,7 @@ import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -1425,6 +1427,10 @@ public class AgentLoop {
     String requestModel(final ProviderManager.ResolvedModel windowModel, final ChatSettings settings) {
         final var current = resolvedModel(settings);
         return current == null ? (windowModel == null ? null : windowModel.model()) : current.model();
+    }
+
+    boolean compressionBoundaryOnly(final ChatCompletionRequest request) throws IOException {
+        return chatClient != null && chatClient.compressionBoundaryOnly(request);
     }
 
     /**

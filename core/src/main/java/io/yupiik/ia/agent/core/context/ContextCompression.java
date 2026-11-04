@@ -286,6 +286,14 @@ public final class ContextCompression {
      * working list.
      */
     public List<Message> renderRefs(final List<Message> messages) {
+        return renderRefs(messages, false);
+    }
+
+    /**
+     * Renders either the legacy per-message refs or only compressible turn boundaries.
+     * Boundary refs retain the identities of the published messages, even after rewriting blocks.
+     */
+    public List<Message> renderRefs(final List<Message> messages, final boolean boundaryOnly) {
         lock.lock();
         try {
             if (!enabled() || messages == null) {
@@ -294,6 +302,59 @@ public final class ContextCompression {
             final var out = new ArrayList<Message>(messages.size());
             final var refs = new HashSet<String>();
             refs.add("");
+            final var boundaries = new IdentityHashMap<Message, List<Integer>>();
+            if (boundaryOnly) {
+                // Assign in transcript order, including messages without textual content: an end
+                // boundary can be a tool call or result with no renderable body.
+                for (var i = 1; i < published.size(); i++) {
+                    final var message = published.get(i);
+                    if (message != null && !"system".equals(message.role()) && !isVolatileTail(message)) {
+                        refOf(message);
+                    }
+                }
+                final var visible = java.util.Collections.newSetFromMap(new IdentityHashMap<Message, Boolean>());
+                visible.addAll(messages);
+                final var protectedFrom = configuration.turnProtection() && configuration.turnProtectionTurns() > 0
+                        ? protectedTurnStart(configuration.turnProtectionTurns())
+                        : -1;
+                for (var i = 1; i < published.size(); i++) {
+                    final var start = published.get(i);
+                    if (start == null
+                            || !"user".equals(start.role())
+                            || isVolatileTail(start)
+                            || isDigestOnlyUserMessage(start)
+                            || start.content() == null
+                            || !visible.contains(start)) {
+                        continue;
+                    }
+                    var end = i;
+                    while (end + 1 < published.size()
+                            && !isVolatileTail(published.get(end + 1))
+                            && !"user".equals(published.get(end + 1).role())) {
+                        end++;
+                    }
+                    if (end == i
+                            || (protectedFrom >= 0 && end >= protectedFrom)
+                            || overlapsActive(refOf(start), refOf(published.get(end)))) {
+                        continue;
+                    }
+                    boundaries
+                            .computeIfAbsent(start, ignored -> new ArrayList<>())
+                            .add(refOf(start));
+                    final var next = end + 1 < published.size() ? published.get(end + 1) : null;
+                    final var carrier = next != null
+                                    && "user".equals(next.role())
+                                    && !isVolatileTail(next)
+                                    && !isDigestOnlyUserMessage(next)
+                                    && next.content() != null
+                                    && visible.contains(next)
+                            ? next
+                            : start;
+                    boundaries
+                            .computeIfAbsent(carrier, ignored -> new ArrayList<>())
+                            .add(refOf(published.get(end)));
+                }
+            }
             for (var i = 0; i < messages.size(); i++) {
                 final var message = messages.get(i);
                 if (i == 0
@@ -308,6 +369,27 @@ public final class ContextCompression {
                     continue;
                 }
                 final var content = message.content() instanceof String s ? s : String.valueOf(message.content());
+                if (boundaryOnly) {
+                    final var tags = boundaries.get(message);
+                    if (tags == null) {
+                        out.add(message);
+                        continue;
+                    }
+                    final var tagged = new StringBuilder(content);
+                    for (final var ref : tags) {
+                        final var tag = "@" + ref + "@";
+                        refs.add(tag);
+                        tagged.append('\n').append(tag);
+                    }
+                    out.add(new Message(
+                            message.role(),
+                            tagged.toString(),
+                            message.name(),
+                            message.toolCalls(),
+                            message.toolCallId(),
+                            message.others()));
+                    continue;
+                }
                 // compact seam: "@N@" rather than "[ref @N@]" - no bracket shape for the model to copy
                 final var ref = refOf(message);
                 refs.add("@" + ref + "@");
