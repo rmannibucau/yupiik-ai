@@ -4548,7 +4548,7 @@ public class TuiCommand implements Runnable {
             // line. Boxed chunks have no kinds (the CopyBox geometry already handles their
             // interior; a 1-cell rule row is never copied).
             final var localKinds = chunk.rowKinds();
-            if (localKinds != null && !chunk.boxed()) {
+            if (localKinds != null && localKinds.length > 0 && !chunk.boxed()) {
                 for (var r = Math.max(0, skip); r < Math.min(chunk.height(), skip + visibleH); r++) {
                     final var screenY = inner.y() + visibleTop + (r - skip);
                     if (screenY >= 0 && screenY < kinds.length) {
@@ -5235,7 +5235,7 @@ public class TuiCommand implements Runnable {
                         .scroll(Math.clamp(innerH - 1, 0, skip))
                         .build(),
                 null,
-                kinds == null ? null : kinds.toArray(SelectionState.RowKind[]::new)));
+                kinds == null || kinds.isEmpty() ? null : kinds.toArray(SelectionState.RowKind[]::new)));
     }
 
     /** Concatenated span contents of a line (used for transcript search). */

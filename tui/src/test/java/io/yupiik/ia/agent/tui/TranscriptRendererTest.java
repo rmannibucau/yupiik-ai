@@ -198,6 +198,21 @@ class TranscriptRendererTest {
     }
 
     /** Renders every growing prefix of {@code md}, as a token-by-token stream would. */
+    @Test
+    void referenceDefinitionOnlyRendersAlignedEmpty() {
+        // a non-blank turn body that renders to zero rows (here a markdown reference
+        // definition) must come back with aligned empty lines AND kinds. This is the root
+        // condition behind the transcript ArrayIndexOutOfBounds(-1): a chunk built from such
+        // a body previously carried a non-null empty rowKinds array and the render loop hit
+        // localKinds[-1]. The fix normalizes empty kinds to null at the chunk producer, so a
+        // chunk can never expose an empty kinds array.
+        final var rendered = renderer.renderRegionWithKinds(
+                "[ref]: https://example.com\n", 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        assertTrue(rendered.lines().isEmpty(), () -> "expected no rows: " + rendered.lines());
+        assertTrue(rendered.kinds().isEmpty(), () -> "kinds must stay aligned with rows: " + rendered.kinds());
+        assertEquals(rendered.lines().size(), rendered.kinds().size());
+    }
+
     private void assertEveryFrameMatchesAFullRender(final String md) {
         for (var cut = 1; cut <= md.length(); cut++) {
             final var frame = cut;
