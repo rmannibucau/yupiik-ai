@@ -74,10 +74,11 @@ class SubagentModelRoutingParityTest {
         this.mapper = mapper;
         final var cfg = config(Map.of());
         final var pm = configuredPm(cfg);
+        final var resolver = new AgentModelResolver(pm);
         final var policy = new SpawnSubagentToolConfiguration(List.of("reviewer"), List.of("child"), List.of());
 
         // an explicit $provider/model: the gate sees the routed reference and approves it
-        final var effective = EffectiveAgentModel.resolve(pm, ChatSettings.EMPTY, null, "$child/child-model", null);
+        final var effective = resolver.resolve(ChatSettings.EMPTY, null, "$child/child-model", null);
         assertTrue(SubagentModelPolicy.allows(policy, effective), "gate must approve a routed explicit model");
         // the approved reference and the settings the runner would send must agree
         assertEquals("$child/child-model", effective.routedReference());
@@ -90,6 +91,7 @@ class SubagentModelRoutingParityTest {
         this.mapper = mapper;
         final var cfg = config(Map.of());
         final var pm = configuredPm(cfg);
+        final var resolver = new AgentModelResolver(pm);
         final var profile = new AgentConfiguration(
                 "reviewer",
                 "Review",
@@ -98,10 +100,51 @@ class SubagentModelRoutingParityTest {
                 null);
         final var policy = new SpawnSubagentToolConfiguration(List.of("reviewer"), List.of("child"), List.of());
 
-        final var effective = EffectiveAgentModel.resolve(pm, ChatSettings.EMPTY, profile, null, null);
+        final var effective = resolver.resolve(ChatSettings.EMPTY, profile, null, null);
         assertTrue(SubagentModelPolicy.allows(policy, effective), "a profile model on the selected provider passes");
         assertEquals("child", effective.settings().providerId());
         assertEquals("child-model", effective.settings().model());
+    }
+
+    @Test
+    void bareDeclaredModelPinsToItsProviderNotTheProcessCurrent(final JsonMapper mapper) {
+        this.mapper = mapper;
+        // process current = "default" (no setProvider): a bare "child-model" must still route to
+        // the provider that declares it, not to the process current provider.
+        final var cfg = config(Map.of());
+        final var pm = manager(cfg);
+        final var resolver = new AgentModelResolver(pm);
+        final var policy = new SpawnSubagentToolConfiguration(List.of(), List.of("child"), List.of());
+
+        final var effective = resolver.resolve(ChatSettings.EMPTY, null, "child-model", null);
+        assertEquals(
+                "$child/child-model",
+                effective.routedReference(),
+                "the declaring provider must win over the process current");
+        assertEquals("child", effective.settings().providerId());
+        assertEquals("child-model", effective.settings().model());
+        assertTrue(SubagentModelPolicy.allows(policy, effective));
+    }
+
+    @Test
+    void undeclaredBareModelFallsBackToInheritedProviderNotProcessCurrent(final JsonMapper mapper) {
+        this.mapper = mapper;
+        // the user-reported case: the session runs on "child" (codex), the process current is
+        // "default", and the bare model is declared by no configured provider. It must follow the
+        // spawning session's provider, not the process current.
+        final var cfg = config(Map.of());
+        final var pm = manager(cfg);
+        final var resolver = new AgentModelResolver(pm);
+        final var policy = new SpawnSubagentToolConfiguration(List.of(), List.of("child"), List.of());
+        final var inherited = ChatSettings.EMPTY.withProviderId("child").withModel("parent-model");
+
+        final var effective = resolver.resolve(inherited, null, "gpt-6.1-sol", null);
+        assertEquals(
+                "child",
+                effective.settings().providerId(),
+                "an undeclared bare model must follow the spawning session's provider");
+        assertEquals("gpt-6.1-sol", effective.settings().model());
+        assertTrue(SubagentModelPolicy.allows(policy, effective));
     }
 
     @Test
@@ -109,10 +152,11 @@ class SubagentModelRoutingParityTest {
         this.mapper = mapper;
         final var cfg = config(Map.of());
         final var pm = configuredPm(cfg);
+        final var resolver = new AgentModelResolver(pm);
         // allowedProviders only lists "default", but the model routes to "child": the gate must reject.
         final var policy = new SpawnSubagentToolConfiguration(List.of(), List.of("default"), List.of());
 
-        final var effective = EffectiveAgentModel.resolve(pm, ChatSettings.EMPTY, null, "$child/child-model", null);
+        final var effective = resolver.resolve(ChatSettings.EMPTY, null, "$child/child-model", null);
         assertEquals("$child/child-model", effective.routedReference());
         assertFalse(SubagentModelPolicy.allows(policy, effective), "a provider outside the allowlist must be rejected");
     }
@@ -122,9 +166,10 @@ class SubagentModelRoutingParityTest {
         this.mapper = mapper;
         final var cfg = config(Map.of());
         final var pm = configuredPm(cfg);
+        final var resolver = new AgentModelResolver(pm);
         final var inherited = ChatSettings.EMPTY.withProviderId("child").withModel("child-model");
 
-        final var effective = EffectiveAgentModel.resolve(pm, inherited, null, null, null);
+        final var effective = resolver.resolve(inherited, null, null, null);
         final var policy = new SpawnSubagentToolConfiguration(List.of(), List.of("child"), List.of());
         assertTrue(SubagentModelPolicy.allows(policy, effective), "the inherited selection remains usable");
         assertEquals("child-model", effective.settings().model());

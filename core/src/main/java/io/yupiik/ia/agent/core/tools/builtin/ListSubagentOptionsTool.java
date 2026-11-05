@@ -47,16 +47,27 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
     private final ProviderManager providerManager;
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
+    private final io.yupiik.ia.agent.core.agent.AgentModelResolver agentModelResolver;
+
+    public ListSubagentOptionsTool(
+            final AgentProvider agentProvider,
+            final ProviderManager providerManager,
+            final CodingAgentConfiguration configuration,
+            final JsonMapper mapper,
+            final io.yupiik.ia.agent.core.agent.AgentModelResolver agentModelResolver) {
+        this.agentProvider = agentProvider;
+        this.providerManager = providerManager;
+        this.configuration = configuration;
+        this.mapper = mapper;
+        this.agentModelResolver = agentModelResolver;
+    }
 
     public ListSubagentOptionsTool(
             final AgentProvider agentProvider,
             final ProviderManager providerManager,
             final CodingAgentConfiguration configuration,
             final JsonMapper mapper) {
-        this.agentProvider = agentProvider;
-        this.providerManager = providerManager;
-        this.configuration = configuration;
-        this.mapper = mapper;
+        this(agentProvider, providerManager, configuration, mapper, null);
     }
 
     protected ListSubagentOptionsTool() {
@@ -64,6 +75,7 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
         this.providerManager = null;
         this.configuration = null;
         this.mapper = null;
+        this.agentModelResolver = null;
     }
 
     @Override
@@ -151,8 +163,11 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
                     continue;
                 }
                 final var description = compactDescription(agent.description());
-                final var effective = io.yupiik.ia.agent.core.agent.EffectiveAgentModel.resolve(
-                        providerManager, io.yupiik.ia.agent.core.llm.ChatSettings.EMPTY, agent, null, profileDefault);
+                final var resolver = agentModelResolver == null
+                        ? new io.yupiik.ia.agent.core.agent.AgentModelResolver(providerManager)
+                        : agentModelResolver;
+                final var effective =
+                        resolver.resolve(io.yupiik.ia.agent.core.llm.ChatSettings.EMPTY, agent, null, profileDefault);
                 final var model = effective.reference();
                 if (!io.yupiik.ia.agent.core.agent.SubagentModelPolicy.allows(policy, effective)) {
                     continue;

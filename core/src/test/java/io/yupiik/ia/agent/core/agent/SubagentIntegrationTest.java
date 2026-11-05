@@ -474,6 +474,7 @@ class SubagentIntegrationTest {
                     delegate.mapper,
                     delegate.structuralCodeGraph,
                     delegate.providerManager,
+                    delegate.agentModelResolver,
                     delegate.agentProvider,
                     delegate.todoPromptResolver,
                     delegate.mavenRepositoryKnowledge,
@@ -608,6 +609,7 @@ class SubagentIntegrationTest {
                         return null;
                     }
                 },
+                null, // agent model resolver (falls back to the provider-manager-backed default)
                 null,
                 new TodoPromptResolver(),
                 null,

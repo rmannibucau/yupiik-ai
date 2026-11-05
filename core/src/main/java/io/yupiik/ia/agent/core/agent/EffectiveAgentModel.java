@@ -15,64 +15,14 @@
  */
 package io.yupiik.ia.agent.core.agent;
 
-import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 /**
- * The single, authoritative model choice for a child agent: explicit spawn model, then profile
- * model, then provider default, then the inherited contextual selection. The {@code routed}
- * tuple is what the policy gate and the actual execution both consume, so the two can never
- * disagree on the effective provider and model.
+ * The authoritative (provider, model) choice for an agent run, resolved by
+ * {@link AgentModelResolver}: the concrete routed provider, the {@link ChatSettings} carrying the
+ * effective provider id/model and inherited tuning, the bare effective model name, and the routed
+ * {@code $provider/model} string the provider layer sees.
  */
-public record EffectiveAgentModel(AgentModelRouting.Resolved routed) {
-    public static EffectiveAgentModel resolve(
-            final ProviderManager providers,
-            final ChatSettings inherited,
-            final AgentConfiguration profile,
-            final String explicit,
-            final String providerDefault) {
-        final var base = inherited == null ? ChatSettings.EMPTY : inherited;
-        final var profileModel = profile == null || profile.model() == null
-                ? null
-                : AgentModelRouting.refName(profile.model().name());
-        final var selected = first(
-                AgentModelRouting.refName(explicit),
-                profileModel,
-                AgentModelRouting.refName(providerDefault),
-                base.model());
-        if (selected == null) {
-            return new EffectiveAgentModel(AgentModelRouting.Resolved.fallback(base, null));
-        }
-        return new EffectiveAgentModel(AgentModelRouting.route(providers, selected, base));
-    }
-
-    /** The concrete routed provider (null only when no provider manager is available). */
-    public ProviderManager.ResolvedModel resolved() {
-        return routed == null ? null : routed.resolved();
-    }
-
-    /** The {@link ChatSettings} carrying the effective provider id, model name and inherited tuning. */
-    public ChatSettings settings() {
-        return routed == null ? ChatSettings.EMPTY : routed.settings();
-    }
-
-    /** The bare effective model name (or null when nothing is configured). */
-    public String reference() {
-        return routed == null ? null : routed.model();
-    }
-
-    /** The {@code $provider/model} string the provider layer actually sees (or the bare name). */
-    public String routedReference() {
-        return routed == null ? null : routed.routedReference();
-    }
-
-    private static String first(final String... candidates) {
-        for (final var candidate : candidates) {
-            if (candidate != null && !candidate.isBlank()) {
-                return candidate.strip();
-            }
-        }
-        return null;
-    }
-}
+public record EffectiveAgentModel(
+        ProviderManager.ResolvedModel resolved, ChatSettings settings, String reference, String routedReference) {}

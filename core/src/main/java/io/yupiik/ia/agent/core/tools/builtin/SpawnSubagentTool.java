@@ -42,6 +42,24 @@ public class SpawnSubagentTool implements EmbeddedTool {
     private final SnapshotStore snapshotStore;
     private final CodingAgentConfiguration configuration;
     private final ProviderManager providerManager;
+    private final io.yupiik.ia.agent.core.agent.AgentModelResolver agentModelResolver;
+
+    public SpawnSubagentTool(
+            final SubagentRegistry subagentRegistry,
+            final SubagentRunner subagentRunner,
+            final SessionStore sessionStore,
+            final SnapshotStore snapshotStore,
+            final CodingAgentConfiguration configuration,
+            final ProviderManager providerManager,
+            final io.yupiik.ia.agent.core.agent.AgentModelResolver agentModelResolver) {
+        this.subagentRegistry = subagentRegistry;
+        this.subagentRunner = subagentRunner;
+        this.sessionStore = sessionStore;
+        this.snapshotStore = snapshotStore;
+        this.configuration = configuration;
+        this.providerManager = providerManager;
+        this.agentModelResolver = agentModelResolver;
+    }
 
     public SpawnSubagentTool(
             final SubagentRegistry subagentRegistry,
@@ -50,12 +68,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
             final SnapshotStore snapshotStore,
             final CodingAgentConfiguration configuration,
             final ProviderManager providerManager) {
-        this.subagentRegistry = subagentRegistry;
-        this.subagentRunner = subagentRunner;
-        this.sessionStore = sessionStore;
-        this.snapshotStore = snapshotStore;
-        this.configuration = configuration;
-        this.providerManager = providerManager;
+        this(subagentRegistry, subagentRunner, sessionStore, snapshotStore, configuration, providerManager, null);
     }
 
     public SpawnSubagentTool(
@@ -64,7 +77,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
             final SessionStore sessionStore,
             final SnapshotStore snapshotStore,
             final CodingAgentConfiguration configuration) {
-        this(subagentRegistry, subagentRunner, sessionStore, snapshotStore, configuration, null);
+        this(subagentRegistry, subagentRunner, sessionStore, snapshotStore, configuration, null, null);
     }
 
     protected SpawnSubagentTool() {
@@ -74,6 +87,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
         this.snapshotStore = null;
         this.configuration = null;
         this.providerManager = null;
+        this.agentModelResolver = null;
     }
 
     @Override
@@ -177,8 +191,10 @@ public class SpawnSubagentTool implements EmbeddedTool {
         final var providerDefault = providerManager == null
                 ? (context.settings() == null ? null : context.settings().model())
                 : providerManager.effectiveSubagentDefault(context.settings());
-        final var effective = io.yupiik.ia.agent.core.agent.EffectiveAgentModel.resolve(
-                providerManager, context.settings(), selectedProfile, normalizedModel, providerDefault);
+        final var resolver = agentModelResolver == null
+                ? new io.yupiik.ia.agent.core.agent.AgentModelResolver(providerManager)
+                : agentModelResolver;
+        final var effective = resolver.resolve(context.settings(), selectedProfile, normalizedModel, providerDefault);
         if (policy != null) {
             if (!io.yupiik.ia.agent.core.agent.SubagentModelPolicy.allows(policy, effective)) {
                 return ToolResult.error("Model is not available for subagents: " + effective.routedReference());

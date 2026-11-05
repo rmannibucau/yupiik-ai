@@ -122,6 +122,7 @@ class SpawnSubagentToolTest {
                 null,
                 null,
                 null,
+                null,
                 registry,
                 new PrecisionDurationMarkerProvider(),
                 new BackoffSleeper(),
@@ -266,6 +267,7 @@ class SpawnSubagentToolTest {
                         null,
                         null,
                         null,
+                        null,
                         reg,
                         new PrecisionDurationMarkerProvider(),
                         new BackoffSleeper(),
@@ -325,6 +327,7 @@ class SpawnSubagentToolTest {
         final var captured = new AtomicReference<String>();
         final var runner =
                 new SubagentRunner(
+                        null,
                         null,
                         null,
                         null,
@@ -412,6 +415,7 @@ class SpawnSubagentToolTest {
                         null,
                         null,
                         null,
+                        null,
                         reg,
                         new PrecisionDurationMarkerProvider(),
                         new BackoffSleeper(),
@@ -443,6 +447,7 @@ class SpawnSubagentToolTest {
         final AtomicReference<Integer> captured = new AtomicReference<>();
         final var runner =
                 new SubagentRunner(
+                        null,
                         null,
                         null,
                         null,

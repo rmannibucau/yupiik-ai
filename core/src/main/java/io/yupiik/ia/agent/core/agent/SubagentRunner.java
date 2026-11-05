@@ -28,7 +28,6 @@ import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.context.SubagentUsageTracker;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
-import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
@@ -65,6 +64,7 @@ public class SubagentRunner {
     protected final JsonMapper mapper;
     protected final StructuralCodeGraph structuralCodeGraph;
     protected final ProviderManager providerManager;
+    protected final AgentModelResolver agentModelResolver;
     protected final AgentProvider agentProvider;
     protected final TodoPromptResolver todoPromptResolver;
     protected final MavenRepositoryKnowledgeService mavenRepositoryKnowledge;
@@ -87,6 +87,7 @@ public class SubagentRunner {
             final JsonMapper mapper,
             final StructuralCodeGraph structuralCodeGraph,
             final ProviderManager providerManager,
+            final AgentModelResolver agentModelResolver,
             final AgentProvider agentProvider,
             final TodoPromptResolver todoPromptResolver,
             final MavenRepositoryKnowledgeService mavenRepositoryKnowledge,
@@ -107,6 +108,7 @@ public class SubagentRunner {
         this.mapper = mapper;
         this.structuralCodeGraph = structuralCodeGraph;
         this.providerManager = providerManager;
+        this.agentModelResolver = agentModelResolver;
         this.agentProvider = agentProvider;
         this.todoPromptResolver = todoPromptResolver;
         this.mavenRepositoryKnowledge = mavenRepositoryKnowledge;
@@ -130,6 +132,7 @@ public class SubagentRunner {
         this.mapper = null;
         this.structuralCodeGraph = null;
         this.providerManager = null;
+        this.agentModelResolver = null;
         this.agentProvider = null;
         this.todoPromptResolver = null;
         this.mavenRepositoryKnowledge = null;
@@ -346,8 +349,8 @@ public class SubagentRunner {
         final var requested = state.model();
         final var baseSettings =
                 agentLoop.chatSettings().inheritFrom(parentContext == null ? null : parentContext.settings());
-        final var effectiveModel = EffectiveAgentModel.resolve(
-                providerManager,
+        final var resolver = agentModelResolver == null ? new AgentModelResolver(providerManager) : agentModelResolver;
+        final var effectiveModel = resolver.resolve(
                 baseSettings,
                 profile,
                 requested,
@@ -476,44 +479,5 @@ public class SubagentRunner {
                 .filter(Objects::nonNull)
                 .distinct()
                 .toList();
-    }
-
-    /**
-     * Routes a model reference to sub-agent chat settings: {@code $provider/model} selects that
-     * provider explicitly; a bare name is pinned (via {@link ProviderManager#toRoutedReference})
-     * to whichever configured provider declares it, else resolved against the parent's provider.
-     * The parent's variant/sampling are preserved unless the routed model overrides them; passing
-     * {@code ChatSettings.EMPTY} as base keeps the process defaults for the routed provider.
-     */
-    private ChatSettings routeSubagentModel(final ProviderManager pm, final String reference, final ChatSettings base) {
-        final var ref = reference.strip();
-        if (ref.startsWith("$")) {
-            final var resolved = pm.resolve(ref);
-            final var provider = resolved.provider();
-            final var model = resolved.model() == null || resolved.model().isBlank()
-                    ? (provider == null || provider.model() == null ? "" : provider.model())
-                    : resolved.model();
-            final var providerId =
-                    provider == null || provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
-            return ChatSettings.EMPTY
-                    .withProviderId(providerId)
-                    .withModel(model)
-                    .inheritFrom(base);
-        }
-        // bare name: pin to the declaring provider when identifiable, else resolve against base
-        final var routable = ref.startsWith("$") ? ref : pm.toRoutedReference(ref);
-        if (routable.startsWith("$")) {
-            final var resolved = pm.resolve(routable);
-            final var provider = resolved.provider();
-            final var providerId =
-                    provider == null || provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
-            final var model = resolved.model() == null || resolved.model().isBlank() ? ref : resolved.model();
-            return ChatSettings.EMPTY
-                    .withProviderId(providerId)
-                    .withModel(model)
-                    .inheritFrom(base);
-        }
-        // not pinned to any configured provider: keep the parent's provider, switch the model
-        return base.withModel(ref);
     }
 }

@@ -168,6 +168,7 @@ public class AgentLoop {
     final StructuralCodeGraph structuralCodeGraph;
     final ProviderManager providerManager;
     final AgentProvider agentProvider;
+    final AgentModelResolver agentModelResolver;
     final Clock clock;
     final PrecisionDurationMarkerProvider precisionDurationMarker;
     final TurnState turnState = new TurnState();
@@ -646,6 +647,7 @@ public class AgentLoop {
         this.structuralCodeGraph = structuralCodeGraph;
         this.providerManager = providerManager;
         this.agentProvider = agentProvider;
+        this.agentModelResolver = new AgentModelResolver(providerManager);
         this.clock = clock;
         this.precisionDurationMarker = precisionDurationMarker;
         this.snapshotStore = snapshotStore;

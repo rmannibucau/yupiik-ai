@@ -388,15 +388,11 @@ public class AgentTurnExecutor {
         final var contextualAgentTuning = host.agentModelTuning;
         final var configuredAgentModel = agent == null || agent.model() == null
                 ? null
-                : AgentModelRouting.refName(agent.model().name());
+                : host.agentModelResolver.configuredName(agent.model().name());
         final var useProfileModel = configuredAgentModel != null;
         host.emitPhase(AgentEvent.Phase.MODEL_RESOLUTION_START);
-        final var effectiveModel = EffectiveAgentModel.resolve(
-                host.providerManager != null && contextualSettings.providerId() != null ? host.providerManager : null,
-                contextualSettings,
-                host.skipConfiguredAgentModel ? null : agent,
-                explicitModel,
-                null);
+        final var effectiveModel = host.agentModelResolver.resolve(
+                contextualSettings, host.skipConfiguredAgentModel ? null : agent, explicitModel, null);
         host.emitPhase(AgentEvent.Phase.MODEL_RESOLUTION_END);
         final var runSettings =
                 !host.skipConfiguredAgentModel && useProfileModel ? effectiveModel.settings() : contextualSettings;

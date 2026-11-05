@@ -7302,6 +7302,15 @@ class AgentLoopTest {
                     }
 
                     @Override
+                    public String toRoutedReference(final String modelReference) {
+                        // the bare fixture has no configuration: only a test-provided override can
+                        // pin a bare name to a declaring provider; without one the bare name is kept
+                        return providerManagerOverride == null
+                                ? modelReference
+                                : providerManagerOverride.toRoutedReference(modelReference);
+                    }
+
+                    @Override
                     public boolean memoryUsesMainModel(final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
                         // the bare fixture has no configuration: only a test-provided override can
                         // resolve the models; a null override conservatively reads as same-model (LAZY)
