@@ -232,11 +232,22 @@ public class ManageContextTool implements EmbeddedTool {
     }
 
     private ToolResult compress(final ContextView contextView, final Map<String, Object> args) {
-        if (!(args.get("content") instanceof List<?> content) || content.isEmpty()) {
+        Object content = args.get("content");
+        if (content instanceof String s && !s.isBlank()) {
+            // tolerate a model that sends content as a JSON-encoded string rather than a hydrated array.
+            try {
+                content = mapper.fromString(Object.class, s);
+            } catch (final RuntimeException e) {
+                return ToolResult.error(
+                        "content must be a non-empty array of {startId,endId,summary} ranges; could not parse the "
+                                + "JSON-encoded content: " + e.getMessage());
+            }
+        }
+        if (!(content instanceof List<?> list) || list.isEmpty()) {
             return ToolResult.error("content must be a non-empty array of {startId,endId,summary} ranges.");
         }
-        final var ranges = new ArrayList<ContextCompression.Range>(content.size());
-        for (final var item : content) {
+        final var ranges = new ArrayList<ContextCompression.Range>(list.size());
+        for (final var item : list) {
             if (!(item instanceof Map<?, ?> range)) {
                 return ToolResult.error("Each content entry must be an object with startId, endId and summary.");
             }

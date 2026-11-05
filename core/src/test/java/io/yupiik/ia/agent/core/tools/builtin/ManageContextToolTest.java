@@ -177,6 +177,28 @@ class ManageContextToolTest {
     }
 
     @Test
+    void compressToleratesAJsonEncodedStringContent() {
+        final var cfg = config(true);
+        final var view = new ContextView(cfg.compression());
+        final var messages = List.of(
+                Message.system("system"),
+                Message.user("first task"),
+                Message.assistant("done", List.of()),
+                Message.user("next task"));
+        view.publishMessages(messages);
+        view.compression().renderRefs(messages); // assigns stable refs like the agent loop does
+        final var tool = new ManageContextTool(cfg, mapper, providerManager());
+        final var json =
+                mapper.toString(List.of(Map.of("startId", "1", "endId", "2", "summary", "first task was completed")));
+        final var result =
+                tool.execute(Map.of("action", "compress", "topic", "first task", "content", json), context(view));
+        assertTrue(result.success(), result.output());
+        assertEquals(1, view.compression().blocks().size());
+        assertEquals(4, messages.size(), "the transcript itself must never be mutated");
+        assertEquals(3, view.compression().rewrite(messages).size(), "the block replaces the two-message span");
+    }
+
+    @Test
     void secondRequestIsRejectedWhileOneIsPending() {
         final var view = new ContextView();
         view.publish(new ContextView.Snapshot(40, 70_000, 100_000, 80_000, 90.0, 65, 80));
