@@ -16,14 +16,18 @@
 package io.yupiik.ia.agent.web;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.framework.build.api.jsonrpc.JsonRpc;
 import io.yupiik.fusion.framework.build.api.jsonrpc.JsonRpcParam;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.codegraph.GraphModel;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -32,11 +36,17 @@ import io.yupiik.ia.agent.core.shell.slash.CompletionEngine;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 
 /**
  * JSON-RPC surface of the web UI: thin delegation to the shared core services,
@@ -207,8 +217,7 @@ public class WebJsonRpc {
 
     private record CachedReplay(int count, List<WebEventDto> events) {}
 
-    private final java.util.concurrent.ConcurrentHashMap<String, CachedReplay> replayCache =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CachedReplay> replayCache = new ConcurrentHashMap<>();
 
     @JsonRpc(value = "sessions.create", documentation = "Creates a new empty session and returns its id.")
     public Map<String, String> createSession() {
@@ -226,7 +235,7 @@ public class WebJsonRpc {
         if (existing == null || existing.isEmpty()) {
             return List.of();
         }
-        final var ids = new java.util.HashSet<String>();
+        final var ids = new HashSet<String>();
         existing.forEach(i -> ids.add(i.id()));
         return restoreSessions.sessions().stream()
                 .filter(ids::contains)
@@ -240,8 +249,7 @@ public class WebJsonRpc {
     }
 
     @JsonRpc(value = "sessions.get", documentation = "Returns the full message list of a session.")
-    public List<io.yupiik.ia.agent.core.llm.Message> getSession(
-            @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+    public List<Message> getSession(@JsonRpcParam(required = true, documentation = "Session id.") final String id) {
         return sessionStore.load(id);
     }
 
@@ -423,8 +431,8 @@ public class WebJsonRpc {
         if (dir == null || dir.isBlank()) {
             return Map.of("ok", false, "error", "directory is required");
         }
-        final var normalized = java.nio.file.Path.of(dir).toAbsolutePath().normalize();
-        if (!java.nio.file.Files.isDirectory(normalized)) {
+        final var normalized = Path.of(dir).toAbsolutePath().normalize();
+        if (!Files.isDirectory(normalized)) {
             return Map.of("ok", false, "error", "not a directory: " + normalized);
         }
         // persist the new marker (replaceProject handles the case where one already exists) ...
@@ -530,7 +538,7 @@ public class WebJsonRpc {
         return Map.of("resolved", sessions.resolve(id, requestId, result));
     }
 
-    private static String safe(final java.util.function.Supplier<String> supplier) {
+    private static String safe(final Supplier<String> supplier) {
         try {
             return supplier.get();
         } catch (final RuntimeException e) {
@@ -549,18 +557,18 @@ public class WebJsonRpc {
             return "";
         }
         try {
-            final var head = java.nio.file.Path.of(dir, ".git", "HEAD");
-            if (!java.nio.file.Files.isRegularFile(head)) {
+            final var head = Path.of(dir, ".git", "HEAD");
+            if (!Files.isRegularFile(head)) {
                 return "";
             }
-            final var content = java.nio.file.Files.readString(head).strip();
+            final var content = Files.readString(head).strip();
             if (content.startsWith("ref:")) {
                 final var ref = content.substring(4).strip();
                 return ref.startsWith("refs/heads/") ? ref.substring("refs/heads/".length()) : ref;
             }
             // detached HEAD: return the bare sha (like GitBranchPoller)
             return content.length() > 12 ? content.substring(0, 12) : content;
-        } catch (final java.io.IOException e) {
+        } catch (final IOException e) {
             return "";
         }
     }
@@ -640,7 +648,7 @@ public class WebJsonRpc {
     public Map<String, String> codeGraphResync(
             @JsonRpcParam(documentation = "Optional session project root to resync (defaults to the process project).")
                     final String root) {
-        return Map.of("status", codeGraph.resync(root == null || root.isBlank() ? null : java.nio.file.Path.of(root)));
+        return Map.of("status", codeGraph.resync(root == null || root.isBlank() ? null : Path.of(root)));
     }
 
     @JsonRpc(
@@ -668,7 +676,7 @@ public class WebJsonRpc {
         return new CodeGraphHits(result);
     }
 
-    private Map<String, Object> symbolHit(final io.yupiik.ia.agent.core.codegraph.GraphModel.Symbol symbol) {
+    private Map<String, Object> symbolHit(final GraphModel.Symbol symbol) {
         final var map = new LinkedHashMap<String, Object>();
         map.put("fqn", symbol.fqn());
         map.put("kind", String.valueOf(symbol.kind()));
@@ -691,8 +699,7 @@ public class WebJsonRpc {
      * per-session provider override, so the sidebar's candidates follow a {@code /provider} switch
      * instead of always reflecting the process-default provider.
      */
-    private static List<String> modelsOf(
-            final ChatClient chatClient, final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
+    private static List<String> modelsOf(final ChatClient chatClient, final ChatSettings settings) {
         if (chatClient == null) {
             return List.of();
         }
@@ -860,19 +867,19 @@ public class WebJsonRpc {
     }
 
     /** Lightweight session summary for the sessions list. */
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record SessionSummary(String id, String title, long modifiedAt, long sizeBytes, String project) {}
 
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record ToolListingDto(boolean anyTool, List<ServerDto> servers, int matches) {
-        @io.yupiik.fusion.framework.build.api.json.JsonModel
+        @JsonModel
         public record ServerDto(String server, List<ToolDto> tools) {}
 
-        @io.yupiik.fusion.framework.build.api.json.JsonModel
+        @JsonModel
         public record ToolDto(String name, String description) {}
     }
 
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record MemoryDto(
             String global,
             String project,
@@ -881,31 +888,31 @@ public class WebJsonRpc {
             boolean globalExists,
             boolean projectExists) {}
 
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record ModeChangeDto(String message, String seedMessage, String seedError) {}
 
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record PermissionsDto(String agentMode, String permissionMode, List<String> sessionGrants) {}
 
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record CodeGraphHits(List<Map<String, Object>> hits) {}
 
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record McpDto(String name, String state) {}
 
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record SlashCommandCatalog(String name, String command, String usage, String group, String description) {}
 
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record CompletionSuggestion(List<String> items, int replaceStart, int replaceEnd, String label) {}
 
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record TodoDto(String content, String status) {}
 
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record QueuedListDto(List<String> prompts) {}
 
-    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    @JsonModel
     public record SessionMetadataDto(
             String sessionId,
             String model,
@@ -918,7 +925,7 @@ public class WebJsonRpc {
             List<McpStateDto> mcpServers,
             List<String> modelCandidates,
             List<String> providerCandidates) {
-        @io.yupiik.fusion.framework.build.api.json.JsonModel
+        @JsonModel
         public record McpStateDto(String name, String state) {}
     }
 }

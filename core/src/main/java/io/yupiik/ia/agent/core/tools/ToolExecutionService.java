@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.CommandOutputPostProcessor;
 import io.yupiik.ia.agent.core.optimize.OutputProcessor;
+import io.yupiik.ia.agent.core.security.ToolExecutionPrepare;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -106,7 +107,7 @@ public class ToolExecutionService {
             // secret redaction: restore provenance fakes in the tool args back to the real values
             // right before execution so commands that need a credential still work (the provider
             // never saw the real value). Only registry-tracked fakes are restored.
-            emitter.emit(new io.yupiik.ia.agent.core.security.ToolExecutionPrepare(tool.name(), args, ctx.sessionId()));
+            emitter.emit(new ToolExecutionPrepare(tool.name(), args, ctx.sessionId()));
             result = tool.execute(args, ctx);
         } catch (final RuntimeException | Error e) {
             result = ToolResult.error("Tool " + tool.name() + " failed: " + e);

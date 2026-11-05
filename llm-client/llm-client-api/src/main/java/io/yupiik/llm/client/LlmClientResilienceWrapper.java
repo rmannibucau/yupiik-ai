@@ -275,14 +275,6 @@ public final class LlmClientResilienceWrapper {
             final Dialect dialect,
             final LlmRequest request,
             final BooleanSupplier cancelled,
-            final Consumer<PauseEvent> listener) {
-        return attempt(dialect, request, cancelled, listener, false);
-    }
-
-    private CompletionStage<LlmResponse> attempt(
-            final Dialect dialect,
-            final LlmRequest request,
-            final BooleanSupplier cancelled,
             final Consumer<PauseEvent> listener,
             final boolean skipRetries) {
         final var result = new CompletableFuture<LlmResponse>();

@@ -70,7 +70,6 @@ public final class ModelRoundProcessor {
         final var maxAttempts = 1 + Math.max(0, configuration.llm().streamRetriesMaxAttempts());
         IOException last = null;
         observer.begin();
-        var toolPairingSeen = false;
         for (var attempt = 1; attempt <= maxAttempts; attempt++) {
             if (cancelled.getAsBoolean()) {
                 throw new IOException("Cancelled");
@@ -86,10 +85,7 @@ public final class ModelRoundProcessor {
                 // budget). Instead flag the caller (AgentLoop owns the history and repairs it) and rethrow
                 // immediately so the repair runs on the first attempt instead of after a retry storm.
                 if (e instanceof LlmHttpFailureException failure && isToolCallPairingRejected(failure)) {
-                    if (!toolPairingSeen) {
-                        toolPairingSeen = true;
-                        observer.toolCallPairingRejected();
-                    }
+                    observer.toolCallPairingRejected();
                     throw e;
                 }
                 if (e instanceof LlmHttpFailureException failure && isToolCallArgumentsRejected(failure)) {

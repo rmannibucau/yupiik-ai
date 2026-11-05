@@ -19,6 +19,7 @@ import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.tree.IdentifierTree;
 import com.sun.source.tree.ImportTree;
+import com.sun.source.tree.LineMap;
 import com.sun.source.tree.MemberSelectTree;
 import com.sun.source.tree.MethodInvocationTree;
 import com.sun.source.tree.MethodTree;
@@ -27,6 +28,7 @@ import com.sun.source.tree.PackageTree;
 import com.sun.source.tree.Tree;
 import com.sun.source.tree.VariableTree;
 import com.sun.source.util.JavacTask;
+import com.sun.source.util.SimpleTreeVisitor;
 import com.sun.source.util.SourcePositions;
 import com.sun.source.util.TreeScanner;
 import com.sun.source.util.Trees;
@@ -154,7 +156,7 @@ public class JavaGraphParser implements GraphParser {
         private final List<GraphModel.Edge> edges = new ArrayList<>();
         private final String fileName;
         private final String packageName;
-        private final com.sun.source.tree.LineMap lineMap;
+        private final LineMap lineMap;
         private final SourcePositions positions;
         private final CompilationUnitTree unit;
         private final Map<String, String> importedTypes = new HashMap<>();
@@ -175,7 +177,7 @@ public class JavaGraphParser implements GraphParser {
             final var out = new String[1];
             for (final var t : unit.getTypeDecls()) {
                 final var p = t.accept(
-                        new com.sun.source.util.SimpleTreeVisitor<Object, Object>() {
+                        new SimpleTreeVisitor<Object, Object>() {
                             @Override
                             public Object visitPackage(final PackageTree node, final Object o) {
                                 out[0] = node.getPackageName() == null

@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
@@ -61,7 +62,7 @@ public class SystemPromptBuilder {
     private final ProviderManager providerManager;
     private final TodoPromptResolver todoPromptResolver;
     private final MavenRepositoryKnowledgeService mavenRepositoryKnowledge;
-    private volatile io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
+    private volatile SecretRedactor secretRedactor;
     /** The session's per-tab selection (provider/model); when set the prompt caps follow it. */
     protected volatile ChatSettings settings;
 
@@ -71,7 +72,7 @@ public class SystemPromptBuilder {
      * turns and provider prefix caches keep hitting. When {@code null} the process default
      * ({@code configuration.resolveWorkingDir()/resolveProjectDir()}) is used.
      */
-    protected volatile java.nio.file.Path workdir;
+    protected volatile Path workdir;
 
     /**
      * The durable {@code <memory>} section of the system prompt, computed once per session - lazily
@@ -86,7 +87,7 @@ public class SystemPromptBuilder {
     private String cachedMemorySection;
 
     /** Attach the owning session's working directory; called once at runtime creation. */
-    public void workdir(final java.nio.file.Path dir) {
+    public void workdir(final Path dir) {
         this.workdir = dir == null ? null : dir.toAbsolutePath().normalize();
     }
 
@@ -118,7 +119,7 @@ public class SystemPromptBuilder {
             final ProviderManager providerManager,
             final TodoPromptResolver todoPromptResolver,
             final MavenRepositoryKnowledgeService mavenRepositoryKnowledge,
-            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
+            final SecretRedactor secretRedactor) {
         this.configuration = configuration;
         this.memoryStore = memoryStore;
         this.todoStore = todoStore;

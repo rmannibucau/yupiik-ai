@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.configuration;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import java.util.List;
+import java.util.Objects;
 
 /** Catalog and routing ceilings for subagent selection. Empty lists leave the corresponding choice unrestricted. */
 @JsonModel
@@ -50,9 +51,6 @@ public record SpawnSubagentToolConfiguration(
             return false;
         }
         final var normalized = value.strip();
-        return values.stream()
-                .filter(java.util.Objects::nonNull)
-                .map(String::strip)
-                .anyMatch(normalized::equals);
+        return values.stream().filter(Objects::nonNull).map(String::strip).anyMatch(normalized::equals);
     }
 }

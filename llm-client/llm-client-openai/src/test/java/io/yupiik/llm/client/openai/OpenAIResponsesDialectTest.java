@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
@@ -90,8 +91,7 @@ class OpenAIResponsesDialectTest {
                 extensions);
     }
 
-    private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status, final String body)
-            throws IOException {
+    private static void respond(final HttpExchange exchange, final int status, final String body) throws IOException {
         final var bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json");
         exchange.sendResponseHeaders(status, bytes.length);

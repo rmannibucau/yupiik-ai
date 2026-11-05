@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.llm.CodexAuthTemplateHelper;
 import io.yupiik.ia.agent.core.llm.CodexLoginService;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -64,7 +65,7 @@ public class CodexLoginCommands implements SlashCommandSet {
     }
 
     /** Returns the single value following {@code option} (eg. --workspace X), else null. */
-    static String optionValue(final java.util.List<String> tokens, final String option) {
+    static String optionValue(final List<String> tokens, final String option) {
         for (int i = 0; i + 1 < tokens.size(); i++) {
             if (option.equalsIgnoreCase(tokens.get(i))) {
                 return tokens.get(i + 1);
@@ -75,7 +76,7 @@ public class CodexLoginCommands implements SlashCommandSet {
 
     private ShellOutcome runLogin(final String arg, final ShellEnv env) {
         final var parts = arg.isEmpty() ? List.<String>of() : List.of(arg.split("\\s+"));
-        final var tokens = new java.util.ArrayList<String>();
+        final var tokens = new ArrayList<String>();
         for (final var p : parts) {
             if (!p.isBlank()) {
                 tokens.add(p);

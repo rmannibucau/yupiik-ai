@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import java.lang.reflect.Proxy;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Logger;
@@ -46,7 +47,7 @@ final class RunCancelHandler {
             final var handler = Class.forName("sun.misc.SignalHandler");
             final var handle = signal.getMethod("handle", signal, handler);
             final var ctor = signal.getConstructor(String.class);
-            final var interruptHandler = java.lang.reflect.Proxy.newProxyInstance(
+            final var interruptHandler = Proxy.newProxyInstance(
                     RunCancelHandler.class.getClassLoader(), new Class<?>[] {handler}, (_, method, _) -> {
                         if (method.getName().equals("handle")) {
                             final var now = System.currentTimeMillis();

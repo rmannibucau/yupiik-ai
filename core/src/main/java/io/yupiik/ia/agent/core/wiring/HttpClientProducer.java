@@ -56,6 +56,7 @@ import java.util.TreeMap;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
@@ -97,7 +98,7 @@ public class HttpClientProducer {
         }
         if (cfg.disableTlsCheck()) {
             builder.sslContext(trustAllSslContext());
-            builder.sslParameters(new javax.net.ssl.SSLParameters() {
+            builder.sslParameters(new SSLParameters() {
                 {
                     setEndpointIdentificationAlgorithm(null);
                 }

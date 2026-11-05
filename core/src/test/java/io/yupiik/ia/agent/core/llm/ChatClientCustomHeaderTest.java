@@ -168,10 +168,6 @@ class ChatClientCustomHeaderTest {
                 List.of(new CustomAuthTemplateHelper(), new CustomAuthHeaderOverride()));
     }
 
-    private CodingAgentConfiguration configuration(final JsonMapper mapper) {
-        return configuration(mapper, null, null);
-    }
-
     private CodingAgentConfiguration configuration(
             final JsonMapper mapper, final String storageHome, final String dynamicHeaders) {
         final var entries = new HashMap<String, String>();

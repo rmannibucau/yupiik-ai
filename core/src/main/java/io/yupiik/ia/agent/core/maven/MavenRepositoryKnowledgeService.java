@@ -21,6 +21,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.KnowledgeFactory;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
@@ -335,10 +336,7 @@ public class MavenRepositoryKnowledgeService {
      * used, the LLM calls resolve the session's provider/model lazily at call time (never captured at
      * construction); null falls back to the process default.
      */
-    public String index(
-            final List<String> gavStrings,
-            final boolean force,
-            final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
+    public String index(final List<String> gavStrings, final boolean force, final ChatSettings settings) {
         if (!enabled()) {
             return "maven repository knowledge is disabled";
         }
@@ -350,7 +348,7 @@ public class MavenRepositoryKnowledgeService {
         }
     }
 
-    private void bindLlmSettings(final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
+    private void bindLlmSettings(final ChatSettings settings) {
         if (llm instanceof YcaKnowledgeLlm yca) {
             yca.withSettings(settings);
         }
@@ -450,7 +448,7 @@ public class MavenRepositoryKnowledgeService {
             final String gav,
             final Consumer<String> progress,
             final Consumer<String> onFinished,
-            final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
+            final ChatSettings settings) {
         if (!enabled()) {
             return List.of("maven repository knowledge is disabled");
         }
@@ -495,7 +493,7 @@ public class MavenRepositoryKnowledgeService {
             final boolean force,
             final Consumer<String> progress,
             final Consumer<String> onFinished,
-            final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
+            final ChatSettings settings) {
         if (!enabled()) {
             return List.of("maven repository knowledge is disabled");
         }

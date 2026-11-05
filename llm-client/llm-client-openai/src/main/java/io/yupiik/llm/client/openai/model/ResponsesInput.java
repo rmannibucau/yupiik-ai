@@ -18,6 +18,8 @@ package io.yupiik.llm.client.openai.model;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.framework.build.api.json.JsonOthers;
 import io.yupiik.fusion.framework.build.api.json.JsonProperty;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -131,8 +133,8 @@ public record ResponsesInput(
      */
     public static ResponsesInput reasoning(
             final String id, final Object summary, final String encryptedContent, final Map<String, Object> extras) {
-        final var others = new java.util.LinkedHashMap<String, Object>();
-        others.put("summary", summary == null ? java.util.List.of() : summary);
+        final var others = new LinkedHashMap<String, Object>();
+        others.put("summary", summary == null ? List.of() : summary);
         if (encryptedContent != null && !encryptedContent.isEmpty()) {
             others.put("encrypted_content", encryptedContent);
         }

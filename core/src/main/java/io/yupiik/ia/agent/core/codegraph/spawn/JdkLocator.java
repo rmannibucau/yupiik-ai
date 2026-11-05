@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.codegraph.spawn;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -26,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
@@ -103,7 +105,7 @@ public class JdkLocator {
     public JdkLocator(final Function<String, InputStream> classResource, final Settings settings) {
         this.classResource = classResource;
         this.settings = settings;
-        this.osName = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        this.osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
     }
 
     /** The JVM that runs the parser jar (floor = V1), or {@code null} when none clears the parser floor. */
@@ -505,7 +507,7 @@ public class JdkLocator {
         }
         final var path = env("PATH");
         if (path != null) {
-            for (final var dir : path.split(java.io.File.pathSeparator)) {
+            for (final var dir : path.split(File.pathSeparator)) {
                 if (dir != null && !dir.isBlank()) {
                     addExec(out, seen, Path.of(dir, "java"));
                 }

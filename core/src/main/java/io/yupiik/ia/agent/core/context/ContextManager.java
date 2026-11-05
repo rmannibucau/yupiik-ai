@@ -23,7 +23,9 @@ import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -338,10 +340,7 @@ public class ContextManager {
             }
             return launched;
         } catch (final RuntimeException e) {
-            LOGGER.log(
-                    java.util.logging.Level.FINE,
-                    "Speculative compaction preparation failed; continuing foreground",
-                    e);
+            LOGGER.log(Level.FINE, "Speculative compaction preparation failed; continuing foreground", e);
             return false;
         }
     }
@@ -371,8 +370,8 @@ public class ContextManager {
         }
         final var started = System.nanoTime();
         final var candidate = manager.take(source, cancelled).orElse(null);
-        LOGGER.fine(() -> "Speculative compaction wait ms="
-                + java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+        LOGGER.fine(
+                () -> "Speculative compaction wait ms=" + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
         if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) {
             return new CompactionResult(messages, CompactionResult.Mode.NONE, "cancelled");
         }

@@ -17,6 +17,8 @@ package io.yupiik.ia.agent.tui;
 
 import static java.util.stream.Collectors.joining;
 
+import dev.tamboui.buffer.Buffer;
+import dev.tamboui.buffer.Cell;
 import dev.tamboui.layout.Constraint;
 import dev.tamboui.layout.Layout;
 import dev.tamboui.layout.Padding;
@@ -25,6 +27,7 @@ import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Color;
 import dev.tamboui.style.Overflow;
 import dev.tamboui.style.Style;
+import dev.tamboui.terminal.Frame;
 import dev.tamboui.text.CharWidth;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
@@ -37,6 +40,8 @@ import dev.tamboui.tui.event.MouseEvent;
 import dev.tamboui.tui.event.MouseEventKind;
 import dev.tamboui.tui.event.PasteEvent;
 import dev.tamboui.tui.event.TickEvent;
+import dev.tamboui.widget.Widget;
+import dev.tamboui.widgets.Clear;
 import dev.tamboui.widgets.block.Block;
 import dev.tamboui.widgets.block.BorderSet;
 import dev.tamboui.widgets.block.BorderType;
@@ -94,6 +99,7 @@ import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.CompletionEngine;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
+import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.util.OpenBrowser;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
@@ -108,6 +114,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -164,10 +171,6 @@ public class TuiCommand implements Runnable {
 
     private static final Logger LOG = Logger.getLogger(TuiCommand.class.getName());
 
-    private String help() {
-        return "\n\n" + slashRegistry.helpMarkdown();
-    }
-
     private final TuiConf conf;
     private final TuiConfiguration tuiConfiguration;
     private final CodingAgentConfiguration configuration;
@@ -176,7 +179,7 @@ public class TuiCommand implements Runnable {
     private final SessionStore sessionStore;
     private final SessionLifecycle sessionLifecycle;
     private final ChatClient chatClient;
-    private final io.yupiik.ia.agent.core.style.ModelStyleService modelStyleService;
+    private final ModelStyleService modelStyleService;
     private final SpeakerLabels speakerLabels;
     private final AutoLogConfigurer autoLogConfigurer;
     private final McpManager mcpManager;
@@ -286,7 +289,7 @@ public class TuiCommand implements Runnable {
             final SessionStore sessionStore,
             final SessionLifecycle sessionLifecycle,
             final ChatClient chatClient,
-            final io.yupiik.ia.agent.core.style.ModelStyleService modelStyleService,
+            final ModelStyleService modelStyleService,
             final SpeakerLabels speakerLabels,
             final AutoLogConfigurer autoLogConfigurer,
             final McpManager mcpManager,
@@ -623,7 +626,7 @@ public class TuiCommand implements Runnable {
         }
         // the sessions touched by this run are named once the terminal is released (see the
         // logOpenedSessions call after the try-with-resources below)
-        List<UiState> openStates = List.of();
+        List<UiState> openStates;
         try (final var tui = tuiRunnerFactory.create(conf, tuiConfiguration.hideCursor())) {
             // the manager is application-scoped: clear any state left by a previous run
             tabManager.reset();
@@ -1304,10 +1307,6 @@ public class TuiCommand implements Runnable {
 
     private static boolean ownEntrySelected(final FeedbackQuestion fq) {
         return TuiFeedbackSupport.ownEntrySelected(fq);
-    }
-
-    private static void setOptionFocus(final FeedbackPrompt prompt, final FeedbackQuestion fq, final int idx) {
-        TuiFeedbackSupport.setOptionFocus(prompt, fq, idx);
     }
 
     private static void activateCheckbox(final FeedbackQuestion fq, final int idx) {
@@ -3663,47 +3662,6 @@ public class TuiCommand implements Runnable {
         state.yankArmed = true;
     }
 
-    private void models(final TuiRunner runner, final UiState state) {
-        executor.execute(() -> {
-            try {
-                final var ids = chatClient
-                        .models(state.session == null ? null : state.session.chatSettings())
-                        .ids();
-                runLater(state, () -> openModelPicker(state, ids));
-            } catch (final Exception e) {
-                runLater(state, () -> modelError(state, "models failed: " + e.getMessage(), e));
-            }
-        });
-    }
-
-    private void openModelPicker(final UiState state, final List<String> ids) {
-        if (ids == null || ids.isEmpty()) {
-            notify(state, "no models available");
-            return;
-        }
-        openPicker(
-                state,
-                "model",
-                ids,
-                0,
-                selected -> {
-                    try {
-                        // same reset semantics as AgentSessionService.setModel: a model
-                        // change drops any stale variant/sampling override of the old model
-                        final var updated = state.session
-                                .chatSettings()
-                                .withModel(selected)
-                                .withVariant(null)
-                                .withSampling(null);
-                        state.session.runtime().updateChatSettings(updated);
-                        notify(state, "model: " + selected);
-                    } catch (final RuntimeException e) {
-                        notify(state, "model failed: " + e.getMessage());
-                    }
-                },
-                () -> notify(state, "model picker cancelled"));
-    }
-
     private void editPlan(final String arg, final TuiRunner runner, final UiState state) {
         if (state.model.busy()) {
             notify(state, "editplan is not available while busy");
@@ -3779,7 +3737,7 @@ public class TuiCommand implements Runnable {
         notify(state, "plan edit cancelled");
     }
 
-    private void renderEditPlan(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderEditPlan(final Frame frame, final UiState state) {
         final var pending = state.editPlan;
         final var accent = Color.hex(palette.accent());
         final var warning = Color.hex(palette.warning());
@@ -3841,25 +3799,6 @@ public class TuiCommand implements Runnable {
                 cancelLine);
     }
 
-    private void resyncGraph(final TuiRunner runner, final UiState state) {
-        if (state.model.busy()) {
-            notify(state, "cannot resync the graph while busy");
-            return;
-        }
-        waiting(state, "resyncing structural code graph...", SpinnerStyle.BOUNCING_BALL);
-        executor.execute(() -> {
-            try {
-                final var result = agentSessionService.resyncGraph();
-                runLater(state, () -> {
-                    notify(state, "structural code graph resynced");
-                    state.model.appendTranscript("\n\n> structural code graph: `" + result + "`\n");
-                });
-            } catch (final RuntimeException e) {
-                runLater(state, () -> modelError(state, "resync failed: " + e.getMessage()));
-            }
-        });
-    }
-
     private void compact(final TuiRunner runner, final UiState state) {
         if (state.model.busy()) {
             // deferred: the loop applies the operation at the next safe checkpoint, at most one per turn
@@ -3893,14 +3832,14 @@ public class TuiCommand implements Runnable {
         });
     }
 
-    private void render(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void render(final Frame frame, final UiState state) {
         state.lastRenderTick = clock.millis();
         state.dirty = false;
         frameZones.clear();
         if (screenBackground != null) {
             // paint the configured viewport background before any widget so blank screen areas
             // match the palette; widgets with their own background draw over it
-            frame.buffer().fill(frame.area(), new dev.tamboui.buffer.Cell(" ", Style.EMPTY.bg(screenBackground)));
+            frame.buffer().fill(frame.area(), new Cell(" ", Style.EMPTY.bg(screenBackground)));
         }
         // a busy-but-inert turn (mid-round wait: no tool, no reasoning stream) still needs its
         // spinner to advance: the gate must not rely solely on runningTool/activeWait/thinkingLength,
@@ -4073,8 +4012,7 @@ public class TuiCommand implements Runnable {
      *
      * @return the inner drawable area, or null when the box is too small to host content
      */
-    private Rect modal(
-            final dev.tamboui.terminal.Frame frame, final Rect rect, final String title, final Color borderColor) {
+    private Rect modal(final Frame frame, final Rect rect, final String title, final Color borderColor) {
         final var inner = Modal.box(frame, rect, title, borderColor);
         if (inner != null) {
             frameZones.add(inner);
@@ -4094,7 +4032,7 @@ public class TuiCommand implements Runnable {
      * accent color, a spinner-like dot while a background turn runs. The hit rects
      * are kept so a mouse press can switch tabs.
      */
-    private void renderTabBar(final Rect rect, final dev.tamboui.terminal.Frame frame) {
+    private void renderTabBar(final Rect rect, final Frame frame) {
         tabRects.clear();
         tabCloseRects.clear();
         final var open = tabManager.list();
@@ -4189,7 +4127,7 @@ public class TuiCommand implements Runnable {
         return title != null ? title : agent != null && !agent.isBlank() ? agent : "new session";
     }
 
-    private void renderSidebar(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderSidebar(final Rect rect, final Frame frame, final UiState state) {
         final var title =
                 state.title == null || state.title.isBlank() ? " yca " : " " + ellipsize(state.title, 24) + " ";
         final var block = block(title);
@@ -4434,7 +4372,7 @@ public class TuiCommand implements Runnable {
         return TuiQuotaRender.formatQuotaReset(resetAt);
     }
 
-    private void renderTranscript(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderTranscript(final Rect rect, final Frame frame, final UiState state) {
         final var block = conversationBlock();
         frame.renderWidget(block, rect);
         final var inner = block.inner(rect);
@@ -4524,7 +4462,7 @@ public class TuiCommand implements Runnable {
         var chunkTop = 0;
         final var copyBoxes = new ArrayList<SelectionState.CopyBox>();
         final var kinds = new SelectionState.RowKind[frame.height()];
-        java.util.Arrays.fill(kinds, SelectionState.RowKind.HARD);
+        Arrays.fill(kinds, SelectionState.RowKind.HARD);
         for (final var chunk : chunks) {
             final var top = chunkTop - viewOffset;
             chunkTop += chunk.height();
@@ -4621,15 +4559,12 @@ public class TuiCommand implements Runnable {
     }
 
     private record RenderedChunk(
-            int height,
-            IntFunction<dev.tamboui.widget.Widget> supplier,
-            BoxChrome box,
-            SelectionState.RowKind[] rowKinds) {
-        RenderedChunk(final int height, final IntFunction<dev.tamboui.widget.Widget> supplier, final BoxChrome box) {
+            int height, IntFunction<Widget> supplier, BoxChrome box, SelectionState.RowKind[] rowKinds) {
+        RenderedChunk(final int height, final IntFunction<Widget> supplier, final BoxChrome box) {
             this(height, supplier, box, null);
         }
 
-        dev.tamboui.widget.Widget widget(final int skip) {
+        Widget widget(final int skip) {
             return supplier.apply(skip);
         }
 
@@ -5775,8 +5710,7 @@ public class TuiCommand implements Runnable {
         return out;
     }
 
-    private void renderTodos(
-            final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state, final String todosRender) {
+    private void renderTodos(final Rect rect, final Frame frame, final UiState state, final String todosRender) {
         final var block = Block.builder()
                 .title(" todos " + (state.showTodosCollapsed ? " (Ctrl+P to expand) " : " (Ctrl+P to collapse) "))
                 .borders(Borders.ALL)
@@ -5794,7 +5728,7 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(Paragraph.builder().text(text).scroll(overflow).build(), inner);
     }
 
-    private void renderInput(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderInput(final Rect rect, final Frame frame, final UiState state) {
         final var withGutter = Layout.horizontal()
                 .constraints(Constraint.length(2), Constraint.fill())
                 .split(rect);
@@ -6086,8 +6020,7 @@ public class TuiCommand implements Runnable {
      * the caret's display column so multi-word lines (e.g. {@code /model glm})
      * show candidates under the token being completed, not at the line's left edge.
      */
-    private void renderCompletionPopup(
-            final Rect inputRect, final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderCompletionPopup(final Rect inputRect, final Frame frame, final UiState state) {
         final var suggestion = state.completion;
         if (suggestion == null || suggestion.empty()) {
             return;
@@ -6105,7 +6038,7 @@ public class TuiCommand implements Runnable {
         final var y = Math.max(0, inputRect.y() - height);
         final var rect = new Rect(x, y, width, height);
         state.completionRect = rect;
-        frame.renderWidget(dev.tamboui.widgets.Clear.INSTANCE, rect);
+        frame.renderWidget(Clear.INSTANCE, rect);
         final var accent = Style.EMPTY.fg(Color.hex(palette.accent()));
         final var textStyle = Style.EMPTY.fg(Color.hex(palette.text()));
         final var block = Block.builder()
@@ -6147,12 +6080,12 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(lines.toArray(Line[]::new)))
-                        .overflow(dev.tamboui.style.Overflow.CLIP)
+                        .overflow(Overflow.CLIP)
                         .build(),
                 inner);
     }
 
-    private void renderCalling(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderCalling(final Rect rect, final Frame frame, final UiState state) {
         final var accent = Style.EMPTY.fg(Color.hex(palette.accent()));
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var hint = "esc to interrupt";
@@ -6171,7 +6104,7 @@ public class TuiCommand implements Runnable {
                 frame.renderWidget(
                         Paragraph.builder()
                                 .text(Text.from(line))
-                                .overflow(dev.tamboui.style.Overflow.ELLIPSIS)
+                                .overflow(Overflow.ELLIPSIS)
                                 .build(),
                         halves.getFirst());
             } else {
@@ -6184,7 +6117,7 @@ public class TuiCommand implements Runnable {
                 frame.renderWidget(
                         Paragraph.builder()
                                 .text(Text.from(line))
-                                .overflow(dev.tamboui.style.Overflow.ELLIPSIS)
+                                .overflow(Overflow.ELLIPSIS)
                                 .build(),
                         halves.getFirst());
             }
@@ -6192,14 +6125,13 @@ public class TuiCommand implements Runnable {
             frame.renderWidget(
                     Paragraph.builder()
                             .text(Text.from(hintLine))
-                            .overflow(dev.tamboui.style.Overflow.CLIP)
+                            .overflow(Overflow.CLIP)
                             .build(),
                     halves.get(1));
         }
     }
 
-    private void renderStatus(
-            final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state, final boolean narrow) {
+    private void renderStatus(final Rect rect, final Frame frame, final UiState state, final boolean narrow) {
         // reset the error-banner close zone each frame: it is meaningful only while a banner is drawn below
         state.errorCloseRect = null;
         final var statusColor = Color.hex(
@@ -6332,7 +6264,7 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(line))
-                        .overflow(dev.tamboui.style.Overflow.WRAP_WORD)
+                        .overflow(Overflow.WRAP_WORD)
                         .build(),
                 statusSplit.getFirst());
         if (state.shortcutRect != null) {
@@ -6341,7 +6273,7 @@ public class TuiCommand implements Runnable {
                             .text(Text.from(Line.from(Span.styled(
                                     helpText,
                                     Style.EMPTY.fg(Color.hex(palette.accent())).bold()))))
-                            .overflow(dev.tamboui.style.Overflow.CLIP)
+                            .overflow(Overflow.CLIP)
                             .build(),
                     state.shortcutRect);
         }
@@ -6356,7 +6288,7 @@ public class TuiCommand implements Runnable {
             frame.renderWidget(
                     Paragraph.builder()
                             .text(Text.from(banner))
-                            .overflow(dev.tamboui.style.Overflow.CLIP)
+                            .overflow(Overflow.CLIP)
                             .build(),
                     new Rect(rect.x(), rect.y() + rect.height() - 1, rect.width(), 1));
         }
@@ -6381,7 +6313,7 @@ public class TuiCommand implements Runnable {
                 frame.renderWidget(
                         Paragraph.builder()
                                 .text(Text.from(err))
-                                .overflow(dev.tamboui.style.Overflow.ELLIPSIS)
+                                .overflow(Overflow.ELLIPSIS)
                                 .build(),
                         inner);
             }
@@ -6389,7 +6321,7 @@ public class TuiCommand implements Runnable {
     }
 
     /** Floating find bar popup shown while Ctrl+F search is open. */
-    private void renderSearchBar(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderSearchBar(final Frame frame, final UiState state) {
         final var width = Math.min(66, frame.width() - 4);
         final var height = Math.min(3, frame.height());
         final var rect = Modal.rect(frame, width, height, 0.72);
@@ -6411,7 +6343,7 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(hints))
-                        .overflow(dev.tamboui.style.Overflow.ELLIPSIS)
+                        .overflow(Overflow.ELLIPSIS)
                         .build(),
                 inner);
     }
@@ -6482,7 +6414,7 @@ public class TuiCommand implements Runnable {
     }
 
     /** Scrollable modal listing every documented key binding, opened by the "?" affordance. */
-    private void renderShortcutsOverlay(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderShortcutsOverlay(final Frame frame, final UiState state) {
         final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(12, frame.height() * 4 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.12);
@@ -6530,7 +6462,7 @@ public class TuiCommand implements Runnable {
     }
 
     /** Modal listing every open tab with its full title; opened by "/tabs" (or an arg to switch directly). */
-    private void renderTabTooltip(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderTabTooltip(final Frame frame, final UiState state) {
         final var title = state.hoverTitle;
         if (title == null || title.isBlank()) {
             return;
@@ -6558,7 +6490,7 @@ public class TuiCommand implements Runnable {
      * without covering the account-share bar, clamped to the frame so it never escapes the
      * viewport (the sidebar is bottom-left, so the chip grows upward when near the bottom edge).
      */
-    private void renderQuotaTooltip(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderQuotaTooltip(final Frame frame, final UiState state) {
         final var caption = state.hoverQuotaReset;
         final var rect = state.hoverQuotaRect;
         if (caption == null || caption.isBlank() || rect == null) {
@@ -6593,7 +6525,7 @@ public class TuiCommand implements Runnable {
      * clamped to the frame like the quota reset tooltip (the sidebar is bottom-left, so the
      * chip grows upward when near the bottom edge).
      */
-    private void renderContextTooltip(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderContextTooltip(final Frame frame, final UiState state) {
         final var caption = state.hoverContextSize;
         final var rect = state.contextGaugeRect;
         if (caption == null || caption.isBlank() || rect == null) {
@@ -6615,7 +6547,7 @@ public class TuiCommand implements Runnable {
                 new Rect(x, y, width, 1));
     }
 
-    private void renderToolOverlayTooltip(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderToolOverlayTooltip(final Frame frame, final UiState state) {
         final var cmd = state.hoverToolCmd;
         final var footer = state.toolOverlayFooter;
         if (cmd == null || cmd.isBlank() || footer == null) {
@@ -6650,7 +6582,7 @@ public class TuiCommand implements Runnable {
                 new Rect(x, y, wrapWidth, height));
     }
 
-    private void renderTabsListOverlay(final dev.tamboui.terminal.Frame frame) {
+    private void renderTabsListOverlay(final Frame frame) {
         final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(10, frame.height() * 4 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.12);
@@ -6753,7 +6685,7 @@ public class TuiCommand implements Runnable {
     }
 
     /** Modal showing the session subagents; with an id, the live transcript of one of them. */
-    private void renderSubagentsOverlay(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderSubagentsOverlay(final Frame frame, final UiState state) {
         final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(12, frame.height() * 4 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.12);
@@ -6932,7 +6864,7 @@ public class TuiCommand implements Runnable {
         rows.addAll(body);
     }
 
-    private void renderBtw(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderBtw(final Frame frame, final UiState state) {
         final var btw = state.btw;
         final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(12, frame.height() * 3 / 5), frame.height());
@@ -6985,7 +6917,7 @@ public class TuiCommand implements Runnable {
     }
 
     /** Renders the /executing-tools modal overlay: a centered box with the running-tools table (scrollable). */
-    private void renderExecutingTools(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderExecutingTools(final Frame frame, final UiState state) {
         final var overlay = state.executingTools;
         final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(12, frame.height() * 3 / 5), frame.height());
@@ -7396,7 +7328,7 @@ public class TuiCommand implements Runnable {
         return rest.stripLeading();
     }
 
-    private void renderToolOverlay(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderToolOverlay(final Frame frame, final UiState state) {
         final var entry = state.toolOverlay.entry();
         final var width = Math.min(Math.max(70, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(14, frame.height() * 4 / 5), frame.height());
@@ -7524,7 +7456,7 @@ public class TuiCommand implements Runnable {
     }
 
     /** Scrollable modal with the last error message and (when available) its stack trace. */
-    private void renderErrorDetail(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderErrorDetail(final Frame frame, final UiState state) {
         final var detail = state.errorDetail;
         final var width = Math.min(Math.max(70, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(12, frame.height() * 3 / 5), frame.height());
@@ -7674,7 +7606,7 @@ public class TuiCommand implements Runnable {
     }
 
     /** Compact strip above the prompt listing queued prompts (click a row or Ctrl+X to remove). */
-    private void renderQueue(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderQueue(final Rect rect, final Frame frame, final UiState state) {
         state.queueRects.clear();
         final var items = List.copyOf(state.pendingPrompts);
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
@@ -7698,7 +7630,7 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private void renderToast(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderToast(final Frame frame, final UiState state) {
         final var toast = state.toast;
         if (toast == null || tuiConfiguration.toastDurationMillis() <= 0) {
             return;
@@ -7721,7 +7653,7 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(line))
-                        .overflow(dev.tamboui.style.Overflow.CLIP)
+                        .overflow(Overflow.CLIP)
                         .build(),
                 inner);
     }
@@ -7921,7 +7853,7 @@ public class TuiCommand implements Runnable {
         state.errorOpen = false;
     }
 
-    private void renderApproval(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderApproval(final Frame frame, final UiState state) {
         final var approval = state.approvals.peek();
         final var width = Math.min(Math.max(60, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(12, frame.height() * 2 / 3), frame.height());
@@ -7943,8 +7875,7 @@ public class TuiCommand implements Runnable {
         renderApprovalActions(frame, approval, new Rect(inner.x(), actionsY, inner.width(), 1));
     }
 
-    private void renderApprovalDetail(
-            final dev.tamboui.terminal.Frame frame, final Approval approval, final Rect rect) {
+    private void renderApprovalDetail(final Frame frame, final Approval approval, final Rect rect) {
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var lines = detailLines(approval.detail());
         if (lines.isEmpty()) {
@@ -7982,8 +7913,7 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private void renderApprovalActions(
-            final dev.tamboui.terminal.Frame frame, final Approval approval, final Rect rect) {
+    private void renderApprovalActions(final Frame frame, final Approval approval, final Rect rect) {
         final var actions = Approval.Action.values();
         final var accent = Color.hex(palette.accent());
         final var muted = Color.hex(palette.textMuted());
@@ -8037,7 +7967,7 @@ public class TuiCommand implements Runnable {
                 });
     }
 
-    private void renderPicker(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderPicker(final Frame frame, final UiState state) {
         final var picker = state.picker;
         final var accent = Color.hex(palette.accent());
         final var textColor = Color.hex(palette.text());
@@ -8062,7 +7992,7 @@ public class TuiCommand implements Runnable {
                                         filterRect.width() <= filterLabel.length()
                                                 ? Style.EMPTY.fg(textColor)
                                                 : Style.EMPTY.fg(accent).bold()))))
-                        .overflow(dev.tamboui.style.Overflow.CLIP)
+                        .overflow(Overflow.CLIP)
                         .build(),
                 filterRect);
         // items
@@ -8074,13 +8004,13 @@ public class TuiCommand implements Runnable {
                 Paragraph.builder()
                         .text(Text.from(Line.from(Span.styled(
                                 "type to filter | Up/Down move | Enter select | Esc cancel", Style.EMPTY.fg(muted)))))
-                        .overflow(dev.tamboui.style.Overflow.CLIP)
+                        .overflow(Overflow.CLIP)
                         .build(),
                 footerRect);
     }
 
     private void renderPickerList(
-            final dev.tamboui.terminal.Frame frame,
+            final Frame frame,
             final PickerPrompt picker,
             final Rect rect,
             final Color textColor,
@@ -8124,7 +8054,7 @@ public class TuiCommand implements Runnable {
                             .text(Text.from(Line.from(
                                     Span.styled(marker, selected ? style : Style.EMPTY.fg(muted)),
                                     Span.styled(ellipsize(value, Math.max(1, rect.width() - 2)), style))))
-                            .overflow(dev.tamboui.style.Overflow.CLIP)
+                            .overflow(Overflow.CLIP)
                             .build(),
                     lineRect);
         }
@@ -8168,7 +8098,7 @@ public class TuiCommand implements Runnable {
         return true;
     }
 
-    private void renderFeedbackPrompt(final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderFeedbackPrompt(final Frame frame, final UiState state) {
         final var prompt = state.feedbackPrompt;
         final var textStyle = Style.EMPTY.fg(Color.hex(palette.text()));
         final var warning = Color.hex(palette.warning());
@@ -8292,7 +8222,7 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private void buildTabs(final dev.tamboui.buffer.Buffer buffer, final FeedbackPrompt prompt, final Rect tabsRect) {
+    private void buildTabs(final Buffer buffer, final FeedbackPrompt prompt, final Rect tabsRect) {
         final var tabs = Tabs.from(buildTitles(prompt));
         tabs.render(tabsRect, buffer, new TabsState(prompt.tab()));
     }
@@ -8315,10 +8245,7 @@ public class TuiCommand implements Runnable {
     }
 
     private void renderFeedbackOptions(
-            final dev.tamboui.terminal.Frame frame,
-            final Rect rect,
-            final FeedbackQuestion fq,
-            final FeedbackPrompt prompt) {
+            final Frame frame, final Rect rect, final FeedbackQuestion fq, final FeedbackPrompt prompt) {
         final var accent = Color.hex(palette.accent());
         final var muted = Color.hex(palette.textMuted());
         final var textColor = Color.hex(palette.text());
@@ -8532,7 +8459,7 @@ public class TuiCommand implements Runnable {
                 .build();
     }
 
-    private Rect accentGutter(final Rect rect, final dev.tamboui.terminal.Frame frame) {
+    private Rect accentGutter(final Rect rect, final Frame frame) {
         final var parts = Layout.horizontal()
                 .constraints(Constraint.length(1), Constraint.fill())
                 .split(rect);
@@ -8610,14 +8537,6 @@ public class TuiCommand implements Runnable {
         return Color.hex(planMode() ? palette.warning() : palette.accent());
     }
 
-    /** Human label for a context-appliance mode (CLEARED/SUMMARY/...) used in the sidebar line. */
-    private static String modeLabel(final String mode) {
-        if (mode == null || mode.isBlank()) {
-            return "";
-        }
-        return mode.toLowerCase(Locale.ROOT);
-    }
-
     private static String ellipsize(final String text, final int max) {
         return TuiTextRender.ellipsize(text, max);
     }
@@ -8670,10 +8589,6 @@ public class TuiCommand implements Runnable {
         return configuration == null || configuration.pruning() == null
                 ? 65
                 : configuration.pruning().thresholdPercent();
-    }
-
-    private static String cap(final String text, final int max) {
-        return text.length() <= max ? text : text.substring(0, max) + "...";
     }
 
     private String workingDirectory() {

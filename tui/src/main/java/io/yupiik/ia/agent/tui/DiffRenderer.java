@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
 import java.util.ArrayList;
@@ -185,8 +186,7 @@ public class DiffRenderer {
         return spans;
     }
 
-    private void appendClipped(
-            final List<Span> spans, final String text, final dev.tamboui.style.Style style, final int budget) {
+    private void appendClipped(final List<Span> spans, final String text, final Style style, final int budget) {
         if (text.isEmpty() || budget <= 0) {
             return;
         }

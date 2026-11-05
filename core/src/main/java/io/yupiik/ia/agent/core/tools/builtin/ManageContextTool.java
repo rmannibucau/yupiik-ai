@@ -20,6 +20,8 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.ContextView;
+import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -168,9 +170,7 @@ public class ManageContextTool implements EmbeddedTool {
     }
 
     private ToolResult status(
-            final ContextView contextView,
-            final io.yupiik.ia.agent.core.context.UsageTracker usageTracker,
-            final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
+            final ContextView contextView, final UsageTracker usageTracker, final ChatSettings settings) {
         final var compression = contextView.compression();
         final var messages = contextView.messages();
         final var snapshot = contextView.snapshot();

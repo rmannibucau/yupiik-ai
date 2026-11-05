@@ -21,7 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
@@ -215,20 +214,6 @@ class SubagentIntegrationTest {
             @Override
             public synchronized List<TodoItem> replace(final List<TodoItem> items) {
                 return items;
-            }
-        };
-    }
-
-    private ContextManager noPruningManager() {
-        return new ContextManager() {
-            @Override
-            public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
-                return false;
-            }
-
-            @Override
-            public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
-                return false;
             }
         };
     }
@@ -515,15 +500,6 @@ class SubagentIntegrationTest {
 
     private SubagentRegistry newRegistry(final CodingAgentConfiguration cfg, final int providerMaxConcurrent) {
         return new SubagentRegistry(cfg, providerManager(providerMaxConcurrent));
-    }
-
-    private SystemPromptBuilder mockPromptBuilder() {
-        return new SystemPromptBuilder() {
-            @Override
-            public String build(final String prompt, final AgentConfiguration agent) {
-                return "You are a test agent.\n" + (prompt != null ? prompt : "");
-            }
-        };
     }
 
     private TestSubagentRunner newRunner(

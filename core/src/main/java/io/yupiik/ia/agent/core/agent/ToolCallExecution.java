@@ -39,7 +39,9 @@ import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -145,10 +147,6 @@ public class ToolCallExecution {
     /** Whether the tool call with the given ordinal is still running. */
     public boolean isToolRunning(final long ordinal) {
         return runningToolCancels.containsKey(ordinal);
-    }
-
-    private void registerRunningTool(final long ordinal) {
-        runningToolCancels.put(ordinal, new AtomicBoolean());
     }
 
     private void registerRunningTool(final long ordinal, final AtomicBoolean cancel) {
@@ -267,7 +265,7 @@ public class ToolCallExecution {
         final Map<String, Object> args;
         try {
             final var parsed = mapper.fromString(Object.class, argsJson.isBlank() ? "{}" : argsJson);
-            args = parsed instanceof Map<?, ?> m ? cast(m) : new java.util.LinkedHashMap<>();
+            args = parsed instanceof Map<?, ?> m ? cast(m) : new LinkedHashMap<>();
         } catch (final RuntimeException e) {
             final var diagnostic = "Invalid tool arguments JSON: " + argsJson;
             unregisterRunningTool(ordinal);
@@ -507,7 +505,7 @@ public class ToolCallExecution {
         }
         final var mode = permissionService == null
                 ? "this"
-                : permissionService.mode().name().toLowerCase(java.util.Locale.ROOT);
+                : permissionService.mode().name().toLowerCase(Locale.ROOT);
         return "\"" + name + "\" was not offered in this request's tools field and cannot be called in " + mode
                 + " mode. Describe what you intended instead and wait for an appropriate mode.";
     }

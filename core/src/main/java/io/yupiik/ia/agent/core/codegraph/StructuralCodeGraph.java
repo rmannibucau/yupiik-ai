@@ -1564,17 +1564,6 @@ public class StructuralCodeGraph implements AutoCloseable {
         }
     }
 
-    private void enrichConceptsIfEnabled() {
-        if (!enabled() || !configuration.structuralCodeGraph().enrich()) {
-            return;
-        }
-        try {
-            docEnricher.enrichConcepts();
-        } catch (final RuntimeException e) {
-            LOGGER.warning("Concept-node pass failed: " + e.getMessage());
-        }
-    }
-
     /** Enqueues the concept enrichment to run asynchronously on the enricher's executor. */
     private void enqueueConceptEnrichment() {
         if (!enabled() || !configuration.structuralCodeGraph().enrich()) {

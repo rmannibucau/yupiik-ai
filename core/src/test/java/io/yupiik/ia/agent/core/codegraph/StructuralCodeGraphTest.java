@@ -945,15 +945,9 @@ class StructuralCodeGraphTest {
                 awaitNonEmpty(third).symbols().size());
     }
 
-    private static String safeRead(final Path p) {
-        try {
-            return Files.isRegularFile(p) ? Files.readString(p) : "";
-        } catch (final Exception e) {
-            return "";
-        }
-    }
-
-    /** Deterministic LLM double: no network, scripted per prompt marker. */
+    /**
+     * Deterministic LLM double: no network, scripted per prompt marker.
+     */
     private static final class FakeChatClient extends ChatClient {
         final AtomicInteger calls = new AtomicInteger();
 

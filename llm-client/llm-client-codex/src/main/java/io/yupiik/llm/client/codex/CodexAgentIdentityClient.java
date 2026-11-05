@@ -26,11 +26,14 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletionException;
 
@@ -254,9 +257,9 @@ public class CodexAgentIdentityClient {
             if (parts.length < 2) {
                 return false;
             }
-            final byte[] decoded = java.util.Base64.getUrlDecoder().decode(parts[1]);
-            final IdTokenPayload payload = mapper.fromString(
-                    IdTokenPayload.class, new String(decoded, java.nio.charset.StandardCharsets.UTF_8));
+            final byte[] decoded = Base64.getUrlDecoder().decode(parts[1]);
+            final IdTokenPayload payload =
+                    mapper.fromString(IdTokenPayload.class, new String(decoded, StandardCharsets.UTF_8));
             return payload != null
                     && payload.organizations() != null
                     && payload.organizations().stream().anyMatch(org -> workspaceId.equals(org.id()));
@@ -291,7 +294,7 @@ public class CodexAgentIdentityClient {
     private String runningLocation() {
         return config.agentHarnessId() + "-"
                 + System.getProperty("os.name", "unknown")
-                        .toLowerCase(java.util.Locale.ROOT)
+                        .toLowerCase(Locale.ROOT)
                         .replace(' ', '_');
     }
 

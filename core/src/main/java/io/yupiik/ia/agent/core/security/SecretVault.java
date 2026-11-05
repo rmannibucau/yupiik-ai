@@ -20,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 
 /**
  * Per-session provenance vault: the {@code Map<fake, real>} of every format-preserving replacement
@@ -71,13 +72,13 @@ public class SecretVault {
     }
 
     /** Invokes {@code consumer} for every recorded {@code (fake, real)} pair, longest fake first. */
-    public void forEachFake(final String sessionId, final java.util.function.BiConsumer<String, String> consumer) {
+    public void forEachFake(final String sessionId, final BiConsumer<String, String> consumer) {
         final var map = bySession.get(safe(sessionId));
         if (map == null) {
             return;
         }
         map.fakeToReal.entrySet().stream()
-                .sorted(java.util.Map.Entry.<String, String>comparingByKey().reversed())
+                .sorted(Map.Entry.<String, String>comparingByKey().reversed())
                 .forEach(e -> consumer.accept(e.getKey(), e.getValue()));
     }
 

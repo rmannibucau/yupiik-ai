@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
@@ -95,8 +96,7 @@ class CodexOAuthMalformedResponseTest {
         assertTrue(e.bodyExcerpt().contains("authorization_code"), "excerpt: " + e.bodyExcerpt());
     }
 
-    private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status, final String body)
-            throws IOException {
+    private static void respond(final HttpExchange exchange, final int status, final String body) throws IOException {
         final var bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);

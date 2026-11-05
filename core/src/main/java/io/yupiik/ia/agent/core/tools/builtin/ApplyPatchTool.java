@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContainment;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
@@ -345,7 +346,7 @@ public class ApplyPatchTool implements EmbeddedTool {
         if (!candidate.startsWith(base)) {
             throw new PatchException("Patch path escapes the project directory: '" + raw + "'");
         }
-        final var symlinkEscape = io.yupiik.ia.agent.core.tools.ToolContainment.symlinkEscapeError(base, candidate);
+        final var symlinkEscape = ToolContainment.symlinkEscapeError(base, candidate);
         if (symlinkEscape != null) {
             throw new PatchException(symlinkEscape);
         }

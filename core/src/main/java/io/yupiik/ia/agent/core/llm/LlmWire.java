@@ -17,6 +17,8 @@ package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.ia.agent.core.configuration.ReasoningFormat;
 import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
+import io.yupiik.llm.client.ContextWindowExceededException;
+import io.yupiik.llm.client.DialectNotSupportedException;
 import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmModels;
@@ -31,6 +33,7 @@ import io.yupiik.llm.client.model.LlmStreamEvent.ToolCallDelta;
 import io.yupiik.llm.client.model.LlmTool;
 import io.yupiik.llm.client.model.LlmToolCall;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -90,7 +93,7 @@ public final class LlmWire {
                 "prompt_cache_key",
                 java.util
                         .UUID
-                        .nameUUIDFromBytes(request.sessionId().getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                        .nameUUIDFromBytes(request.sessionId().getBytes(StandardCharsets.UTF_8))
                         .toString());
         return wire.with(extensions);
     }
@@ -544,8 +547,7 @@ public final class LlmWire {
      * message (status prefix parsing depends on it).
      */
     private static IOException translate(final Throwable error) {
-        if (error instanceof io.yupiik.llm.client.DialectNotSupportedException
-                || error instanceof io.yupiik.llm.client.ContextWindowExceededException) {
+        if (error instanceof DialectNotSupportedException || error instanceof ContextWindowExceededException) {
             return (IOException) error;
         }
         if (error instanceof IOException io) {

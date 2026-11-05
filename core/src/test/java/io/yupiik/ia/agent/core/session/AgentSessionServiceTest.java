@@ -709,10 +709,6 @@ class AgentSessionServiceTest {
         return new AgentSessionService(null, null, null, store, null, null, null, null, cfg(), null);
     }
 
-    private static AgentSessionService service(final MemoryStore memoryStore) {
-        return new AgentSessionService(null, null, null, null, memoryStore, null, null, null, cfg(), null);
-    }
-
     private static AgentSessionService service(final StructuralCodeGraph graph) {
         return new AgentSessionService(null, null, null, null, null, graph, null, null, cfg(), null);
     }

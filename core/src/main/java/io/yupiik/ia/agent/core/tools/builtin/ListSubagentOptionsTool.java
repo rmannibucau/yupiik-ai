@@ -19,21 +19,28 @@ import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.agent.AgentModelResolver;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.agent.SubagentModelPolicy;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.SpawnSubagentToolConfiguration;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 
 /** On-demand, bounded catalog of agent profiles and configured model routes. */
 @ApplicationScoped
@@ -47,14 +54,14 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
     private final ProviderManager providerManager;
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
-    private final io.yupiik.ia.agent.core.agent.AgentModelResolver agentModelResolver;
+    private final AgentModelResolver agentModelResolver;
 
     public ListSubagentOptionsTool(
             final AgentProvider agentProvider,
             final ProviderManager providerManager,
             final CodingAgentConfiguration configuration,
             final JsonMapper mapper,
-            final io.yupiik.ia.agent.core.agent.AgentModelResolver agentModelResolver) {
+            final AgentModelResolver agentModelResolver) {
         this.agentProvider = agentProvider;
         this.providerManager = providerManager;
         this.configuration = configuration;
@@ -163,13 +170,11 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
                     continue;
                 }
                 final var description = compactDescription(agent.description());
-                final var resolver = agentModelResolver == null
-                        ? new io.yupiik.ia.agent.core.agent.AgentModelResolver(providerManager)
-                        : agentModelResolver;
-                final var effective =
-                        resolver.resolve(io.yupiik.ia.agent.core.llm.ChatSettings.EMPTY, agent, null, profileDefault);
+                final var resolver =
+                        agentModelResolver == null ? new AgentModelResolver(providerManager) : agentModelResolver;
+                final var effective = resolver.resolve(ChatSettings.EMPTY, agent, null, profileDefault);
                 final var model = effective.reference();
-                if (!io.yupiik.ia.agent.core.agent.SubagentModelPolicy.allows(policy, effective)) {
+                if (!SubagentModelPolicy.allows(policy, effective)) {
                     continue;
                 }
                 if (providerFilter != null
@@ -214,7 +219,7 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
                 || providerFilter != null && !providerFilter.isBlank() && !providerFilter.equals(providerId)) {
             return;
         }
-        final var models = new java.util.LinkedHashSet<String>();
+        final var models = new LinkedHashSet<String>();
         if (provider.model() != null && !provider.model().isBlank()) {
             models.add(provider.model().strip());
         }
@@ -223,7 +228,7 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
             final var configured = provider.defaultSubagentModel().strip();
             final var routed = configured.startsWith("$")
                     ? configured
-                    : java.util.Objects.requireNonNullElseGet(
+                    : Objects.requireNonNullElseGet(
                             providerManager.toRoutedReference(configured), () -> "$" + providerId + "/" + configured);
             final var resolved = providerManager.resolve(routed);
             final var target = resolved.provider() == null ? providerId : providerId(resolved.provider());
@@ -270,30 +275,12 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
         entries.add(entry);
     }
 
-    private boolean allowsModel(final SpawnSubagentToolConfiguration policy, final String model) {
-        final var routed = providerManager.toRoutedReference(model);
-        if (!policy.allowsModel(model) && (routed == null || !policy.allowsModel(routed))) {
-            return false;
-        }
-        if (policy.allowedProviders() == null || policy.allowedProviders().isEmpty()) {
-            return true;
-        }
-        if (routed != null && routed.startsWith("$")) {
-            final var slash = routed.indexOf('/');
-            final var id = routed.substring(1, slash > 1 ? slash : routed.length());
-            return policy.allowsProvider(id);
-        }
-        return false;
-    }
-
     private static String providerId(final ProviderConfiguration provider) {
         return provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
     }
 
     private String effectiveProviderDefault() {
-        return providerManager == null
-                ? null
-                : providerManager.effectiveSubagentDefault(io.yupiik.ia.agent.core.llm.ChatSettings.EMPTY);
+        return providerManager == null ? null : providerManager.effectiveSubagentDefault(ChatSettings.EMPTY);
     }
 
     private SpawnSubagentToolConfiguration policy() {
@@ -318,9 +305,9 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
         }
         final long numeric;
         try {
-            if (number instanceof java.math.BigDecimal decimal) {
+            if (number instanceof BigDecimal decimal) {
                 numeric = decimal.longValueExact();
-            } else if (number instanceof java.math.BigInteger integer) {
+            } else if (number instanceof BigInteger integer) {
                 numeric = integer.longValueExact();
             } else if (number instanceof Byte
                     || number instanceof Short

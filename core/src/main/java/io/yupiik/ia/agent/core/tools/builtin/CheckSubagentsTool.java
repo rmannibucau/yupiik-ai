@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
 
@@ -203,7 +204,7 @@ public class CheckSubagentsTool implements EmbeddedTool {
                         "artifacts",
                         result.artifacts(),
                         "status",
-                        result.status().name().toLowerCase(java.util.Locale.ROOT),
+                        result.status().name().toLowerCase(Locale.ROOT),
                         "completed",
                         true)));
             } catch (final RuntimeException e) {
@@ -217,7 +218,7 @@ public class CheckSubagentsTool implements EmbeddedTool {
                     "error",
                     result.error(),
                     "status",
-                    result.status().name().toLowerCase(java.util.Locale.ROOT),
+                    result.status().name().toLowerCase(Locale.ROOT),
                     "completed",
                     true)));
         } catch (final RuntimeException e) {

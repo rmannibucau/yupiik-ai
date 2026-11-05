@@ -29,11 +29,14 @@ import java.net.http.HttpResponse;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.CompletionException;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /**
  * OAuth2 client for the ChatGPT-backed Codex backend (the flow used by the Codex CLI and the VS Code
@@ -131,7 +134,7 @@ public class CodexOAuthClient {
             // NOT be masked as "device disabled". Surface those as-is; only wrap a plain 4xx (device
             // grants not served for this account/client) into the device-disabled hint.
             if (e.getMessage() == null
-                    || e.getMessage().toLowerCase(java.util.Locale.ROOT).contains("policy_denied")
+                    || e.getMessage().toLowerCase(Locale.ROOT).contains("policy_denied")
                     || e.getMessage().contains("3p_delegated_access")
                     || !e.getMessage().startsWith("Codex OAuth HTTP")) {
                 throw e;
@@ -215,8 +218,7 @@ public class CodexOAuthClient {
      * @param cancelled cancellation probe.
      * @return the exchanged token store.
      */
-    public CodexTokenStore browserFlow(
-            final java.util.function.Consumer<String> authorised, final Predicate<Boolean> cancelled) {
+    public CodexTokenStore browserFlow(final Consumer<String> authorised, final Predicate<Boolean> cancelled) {
         return CodexBrowserFlow.run(this, authorised, cancelled);
     }
 
@@ -382,8 +384,7 @@ public class CodexOAuthClient {
             }
             final byte[] decoded = Base64.getUrlDecoder().decode(parts[1]);
             final var json = new String(decoded, UTF_8);
-            final var exp =
-                    java.util.regex.Pattern.compile("\"exp\"\\s*:\\s*([0-9]+)").matcher(json);
+            final var exp = Pattern.compile("\"exp\"\\s*:\\s*([0-9]+)").matcher(json);
             return exp.find() ? Long.parseLong(exp.group(1)) * 1000 : null;
         } catch (final RuntimeException e) {
             LOGGER.fine(() -> "Cannot decode access token exp claim: " + e.getMessage());
@@ -423,7 +424,7 @@ public class CodexOAuthClient {
             if (planType == null || planType.isBlank()) {
                 return false;
             }
-            final var p = planType.toLowerCase(java.util.Locale.ROOT);
+            final var p = planType.toLowerCase(Locale.ROOT);
             return p.contains("business") || p.contains("enterprise") || p.contains("team") || p.contains("edu");
         }
     }

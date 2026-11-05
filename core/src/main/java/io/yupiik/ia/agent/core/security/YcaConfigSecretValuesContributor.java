@@ -26,6 +26,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -278,7 +279,7 @@ public class YcaConfigSecretValuesContributor implements SecretValuesContributor
     }
 
     private static Set<String> lower(final List<String> names) {
-        final var out = new java.util.HashSet<String>();
+        final var out = new HashSet<String>();
         for (final var n : names) {
             if (n != null) {
                 out.add(n.trim().toLowerCase(Locale.ROOT));

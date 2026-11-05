@@ -20,6 +20,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.session.SessionStorageLayout;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -172,7 +173,7 @@ public class SnapshotStore {
             Files.writeString(tmp, sb.toString());
             try {
                 Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
+            } catch (final AtomicMoveNotSupportedException e) {
                 Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
             }
             lastSeenModified.put(sessionId, Files.getLastModifiedTime(file).toMillis());

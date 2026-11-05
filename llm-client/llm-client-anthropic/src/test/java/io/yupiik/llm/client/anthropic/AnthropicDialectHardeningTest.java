@@ -18,6 +18,7 @@ package io.yupiik.llm.client.anthropic;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
@@ -199,16 +200,14 @@ class AnthropicDialectHardeningTest {
         return "http://localhost:" + server.getAddress().getPort();
     }
 
-    private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status, final String body)
-            throws IOException {
+    private static void respond(final HttpExchange exchange, final int status, final String body) throws IOException {
         final var bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);
         exchange.close();
     }
 
-    private static void respondSse(final com.sun.net.httpserver.HttpExchange exchange, final String body)
-            throws IOException {
+    private static void respondSse(final HttpExchange exchange, final String body) throws IOException {
         final var bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
         exchange.sendResponseHeaders(200, bytes.length);

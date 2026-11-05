@@ -532,7 +532,7 @@ public class AgentSessionService {
      * from and distinguish "no facts yet" from "file not found".
      */
     public MemoryContent memory() {
-        final var globalFile = java.nio.file.Path.of(configuration.resolveStorageHome(), "memory", "MEMORY.md");
+        final var globalFile = Path.of(configuration.resolveStorageHome(), "memory", "MEMORY.md");
         final var projectFile = configuration
                 .resolveWorkingDir()
                 .resolve(".yca")
@@ -543,8 +543,8 @@ public class AgentSessionService {
                 memoryStore.readProject(),
                 globalFile.toAbsolutePath().normalize().toString(),
                 projectFile.toAbsolutePath().normalize().toString(),
-                java.nio.file.Files.isRegularFile(globalFile),
-                java.nio.file.Files.isRegularFile(projectFile));
+                Files.isRegularFile(globalFile),
+                Files.isRegularFile(projectFile));
     }
 
     public record MemoryStats(

@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.codegraph.spawn;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
@@ -60,7 +61,7 @@ public final class ParserClassSet {
                     if (in == null) {
                         throw new IOException("Missing bundled parser class resource: '" + piece + "'");
                     }
-                    digest.update(piece.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    digest.update(piece.getBytes(StandardCharsets.UTF_8));
                     digest.update((byte) 0);
                     digest.update(in.readAllBytes());
                 }

@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
@@ -50,6 +51,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Handler;
 import java.util.logging.Level;
@@ -110,16 +112,14 @@ class AnthropicDialectTest {
                 Map.of());
     }
 
-    private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status, final String body)
-            throws IOException {
+    private static void respond(final HttpExchange exchange, final int status, final String body) throws IOException {
         final var bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);
         exchange.close();
     }
 
-    private static void respondSse(final com.sun.net.httpserver.HttpExchange exchange, final String body)
-            throws IOException {
+    private static void respondSse(final HttpExchange exchange, final String body) throws IOException {
         final var bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
         exchange.sendResponseHeaders(200, bytes.length);
@@ -525,7 +525,7 @@ class AnthropicDialectTest {
     @Test
     void modelsSinglePageHasNoCursorParams(final JsonMapper mapper) throws Exception {
         final var queries = new CopyOnWriteArrayList<String>();
-        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        final var hits = new AtomicInteger();
         server.createContext("/v1/models", exchange -> {
             try {
                 hits.incrementAndGet();
@@ -553,7 +553,7 @@ class AnthropicDialectTest {
     @Test
     void modelsFollowsCursorAcrossTwoPages(final JsonMapper mapper) throws Exception {
         final var queries = new CopyOnWriteArrayList<String>();
-        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        final var hits = new AtomicInteger();
         server.createContext("/v1/models", exchange -> {
             try {
                 final var query = exchange.getRequestURI().getQuery();
@@ -585,7 +585,7 @@ class AnthropicDialectTest {
 
     @Test
     void modelsStopsWhenNextPageIsEmptyDespiteHasMore(final JsonMapper mapper) throws Exception {
-        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        final var hits = new AtomicInteger();
         server.createContext("/v1/models", exchange -> {
             try {
                 final int n = hits.incrementAndGet();
@@ -610,7 +610,7 @@ class AnthropicDialectTest {
 
     @Test
     void modelsStopsWhenCursorFailsToAdvance(final JsonMapper mapper) throws Exception {
-        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        final var hits = new AtomicInteger();
         server.createContext("/v1/models", exchange -> {
             try {
                 final int n = hits.incrementAndGet();
@@ -635,7 +635,7 @@ class AnthropicDialectTest {
 
     @Test
     void modelsDeduplicatesAcrossPagesKeepingOrder(final JsonMapper mapper) throws Exception {
-        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        final var hits = new AtomicInteger();
         server.createContext("/v1/models", exchange -> {
             try {
                 final int n = hits.incrementAndGet();

@@ -17,6 +17,8 @@ package io.yupiik.ia.agent.web;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -32,8 +34,10 @@ import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -509,8 +513,8 @@ public class WebSessionManager implements AutoCloseable {
                 final var quota = webSession.runtime.quotaSnapshot();
                 if (usage.completionTokens() > 0 || usage.promptTokens() > 0 || quota.visible()) {
                     final var effective = usage.effectiveContext(messages, 0);
-                    final var usagePayload = WebEventDto.of(new io.yupiik.ia.agent.core.agent.AgentEvent.UsageUpdated(
-                            new io.yupiik.ia.agent.core.llm.Usage(
+                    final var usagePayload = WebEventDto.of(new AgentEvent.UsageUpdated(
+                            new Usage(
                                     (int) usage.promptTokens(),
                                     (int) usage.completionTokens(),
                                     (int) (usage.promptTokens() + usage.completionTokens()),
@@ -569,7 +573,7 @@ public class WebSessionManager implements AutoCloseable {
         // prompts typed while a turn runs, drained by the running loop at its next checkpoint
         // (mirrors the TUI's pending-prompts queue). Guarded by its own monitor: RPC threads may
         // list/remove queued prompts while the running turn's loop polls it.
-        private final java.util.Deque<String> pendingPrompts = new java.util.ArrayDeque<>();
+        private final Deque<String> pendingPrompts = new ArrayDeque<>();
         // the current /btw side question (latest-wins single slot), or null when none is active/open.
         // Guarded by the WebSession instance lock; never written from a turn thread without it.
         private volatile BtwState btw;

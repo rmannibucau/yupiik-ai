@@ -18,24 +18,35 @@ package io.yupiik.llm.client.codex;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.llm.client.LlmHttpFailureException;
+import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmModels;
+import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
+import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.test.TestJsonMapper;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -75,7 +86,7 @@ class CodexDialectTest {
 
     @Test
     void cacheAffinityFollowsEachRequestWithoutLeakingAcrossSessions(final JsonMapper mapper) throws Exception {
-        final var sessions = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        final var sessions = new CopyOnWriteArrayList<String>();
         server.createContext("/codex/responses", exchange -> {
             sessions.add(String.valueOf(exchange.getRequestHeaders().getFirst("session-id")));
             exchange.getRequestBody().readAllBytes();
@@ -84,7 +95,7 @@ class CodexDialectTest {
         final var dialect =
                 new CodexDialect(mapper, client, new ProviderSpec(base + "/codex/responses", "key", null, null, null));
         for (final var key : List.of("session-a", "session-b", "session-a")) {
-            dialect.chat(request().with(java.util.Map.of("prompt_cache_key", key)), () -> false)
+            dialect.chat(request().with(Map.of("prompt_cache_key", key)), () -> false)
                     .toCompletableFuture()
                     .get(5, TimeUnit.SECONDS);
         }
@@ -176,38 +187,35 @@ class CodexDialectTest {
                 new ProviderSpec(
                         base + "/codex/responses", "key", null, null, b -> b.setHeader("authorization", "Bearer t")));
         final var sb = new StringBuilder();
-        final var latch = new java.util.concurrent.CountDownLatch(1);
-        final var err = new java.util.concurrent.atomic.AtomicReference<Throwable>();
-        dialect.stream(request(), () -> false)
-                .toCompletableFuture()
-                .join()
-                .subscribe(new java.util.concurrent.Flow.Subscriber<>() {
-                    @Override
-                    public void onSubscribe(java.util.concurrent.Flow.Subscription s) {
-                        s.request(Long.MAX_VALUE);
-                    }
+        final var latch = new CountDownLatch(1);
+        final var err = new AtomicReference<Throwable>();
+        dialect.stream(request(), () -> false).toCompletableFuture().join().subscribe(new Flow.Subscriber<>() {
+            @Override
+            public void onSubscribe(Flow.Subscription s) {
+                s.request(Long.MAX_VALUE);
+            }
 
-                    @Override
-                    public void onNext(io.yupiik.llm.client.model.LlmStreamEvent e) {
-                        if (e instanceof io.yupiik.llm.client.model.LlmStreamEvent.TextDelta t) {
-                            sb.append(t.text());
-                        }
-                    }
+            @Override
+            public void onNext(LlmStreamEvent e) {
+                if (e instanceof LlmStreamEvent.TextDelta t) {
+                    sb.append(t.text());
+                }
+            }
 
-                    @Override
-                    public void onError(Throwable t) {
-                        err.set(t);
-                        latch.countDown();
-                    }
+            @Override
+            public void onError(Throwable t) {
+                err.set(t);
+                latch.countDown();
+            }
 
-                    @Override
-                    public void onComplete() {
-                        latch.countDown();
-                    }
-                });
+            @Override
+            public void onComplete() {
+                latch.countDown();
+            }
+        });
         latch.await();
         assertEquals("hello world", sb.toString(), "the streamed text must be produced, not buffered as an error");
-        org.junit.jupiter.api.Assertions.assertNull(err.get(), "no stream error expected: " + err.get());
+        Assertions.assertNull(err.get(), "no stream error expected: " + err.get());
     }
 
     @Test
@@ -225,16 +233,16 @@ class CodexDialectTest {
                 client,
                 new ProviderSpec(
                         base + "/codex/responses", "key", null, null, b -> b.setHeader("authorization", "Bearer t")));
-        dialect.chat(request(), () -> false).toCompletableFuture().get(5, java.util.concurrent.TimeUnit.SECONDS);
+        dialect.chat(request(), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
 
         final var body = reqBody.get();
-        org.junit.jupiter.api.Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
+        Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
         assertTrue(body.contains("\"stream\":true"), "codex chat must send stream:true, got: " + body);
     }
 
     @Test
     void replaysReasoningItemsWithRequiredSummaryForChatAndStream(final JsonMapper mapper) throws Exception {
-        final var bodies = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        final var bodies = new CopyOnWriteArrayList<String>();
         final var calls = new AtomicInteger();
         server.createContext("/codex/responses", exchange -> {
             final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
@@ -252,29 +260,24 @@ class CodexDialectTest {
             exchange.close();
         });
 
-        final var nullSummary = new java.util.LinkedHashMap<String, Object>();
+        final var nullSummary = new LinkedHashMap<String, Object>();
         nullSummary.put("id", "rs_null");
         nullSummary.put("summary", null);
         nullSummary.put("encrypted_content", "blob-null");
         final var items = List.of(
-                java.util.Map.of("id", "rs_missing", "encrypted_content", "blob-missing"),
+                Map.of("id", "rs_missing", "encrypted_content", "blob-missing"),
                 nullSummary,
-                java.util.Map.of("id", "rs_empty", "summary", List.of(), "encrypted_content", "blob-empty"),
-                java.util.Map.of(
+                Map.of("id", "rs_empty", "summary", List.of(), "encrypted_content", "blob-empty"),
+                Map.of(
                         "id", "rs_populated",
-                        "summary", List.of(java.util.Map.of("type", "summary_text", "text", "summary")),
+                        "summary", List.of(Map.of("type", "summary_text", "text", "summary")),
                         "encrypted_content", "blob-populated"));
-        final var request = new io.yupiik.llm.client.model.LlmRequest(
+        final var request = new LlmRequest(
                 "gpt-6-luna",
                 List.of(
-                        new io.yupiik.llm.client.model.LlmMessage(
-                                "assistant",
-                                "previous answer",
-                                null,
-                                null,
-                                null,
-                                java.util.Map.of("reasoningItems", items)),
-                        new io.yupiik.llm.client.model.LlmMessage("user", "next", null, null, null, null)),
+                        new LlmMessage(
+                                "assistant", "previous answer", null, null, null, Map.of("reasoningItems", items)),
+                        new LlmMessage("user", "next", null, null, null, null)),
                 null,
                 null,
                 null,
@@ -284,7 +287,7 @@ class CodexDialectTest {
                 null,
                 null,
                 true,
-                java.util.Map.of());
+                Map.of());
         final var dialect = new CodexDialect(
                 mapper,
                 client,
@@ -292,19 +295,19 @@ class CodexDialectTest {
                         base + "/codex/responses", "key", null, null, b -> b.setHeader("authorization", "Bearer t")));
 
         dialect.chat(request, () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
-        final var streamDone = new java.util.concurrent.CountDownLatch(1);
-        final var streamError = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        final var streamDone = new CountDownLatch(1);
+        final var streamError = new AtomicReference<Throwable>();
         dialect.stream(request, () -> false)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS)
-                .subscribe(new java.util.concurrent.Flow.Subscriber<>() {
+                .subscribe(new Flow.Subscriber<>() {
                     @Override
-                    public void onSubscribe(final java.util.concurrent.Flow.Subscription subscription) {
+                    public void onSubscribe(final Flow.Subscription subscription) {
                         subscription.request(Long.MAX_VALUE);
                     }
 
                     @Override
-                    public void onNext(final io.yupiik.llm.client.model.LlmStreamEvent event) {}
+                    public void onNext(final LlmStreamEvent event) {}
 
                     @Override
                     public void onError(final Throwable error) {
@@ -317,9 +320,8 @@ class CodexDialectTest {
                         streamDone.countDown();
                     }
                 });
-        org.junit.jupiter.api.Assertions.assertTrue(streamDone.await(5, TimeUnit.SECONDS), "stream did not complete");
-        org.junit.jupiter.api.Assertions.assertNull(
-                streamError.get(), "valid reasoning replay should stream successfully");
+        Assertions.assertTrue(streamDone.await(5, TimeUnit.SECONDS), "stream did not complete");
+        Assertions.assertNull(streamError.get(), "valid reasoning replay should stream successfully");
 
         assertEquals(2, calls.get(), "both chat and stream should succeed on the first valid request");
         for (final var body : bodies) {
@@ -352,9 +354,9 @@ class CodexDialectTest {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(exchange, 200, "{}");
         });
-        final var request = new io.yupiik.llm.client.model.LlmRequest(
+        final var request = new LlmRequest(
                 "gpt-6-luna",
-                List.of(new io.yupiik.llm.client.model.LlmMessage("user", "hi", null, null, null, null)),
+                List.of(new LlmMessage("user", "hi", null, null, null, null)),
                 null,
                 null,
                 null,
@@ -364,20 +366,20 @@ class CodexDialectTest {
                 null,
                 "medium",
                 true,
-                java.util.Map.of());
+                Map.of());
 
         final CodexDialect dialect = new CodexDialect(
                 mapper,
                 client,
                 new ProviderSpec(
                         base + "/codex/responses", "key", null, null, b -> b.setHeader("authorization", "Bearer t")));
-        dialect.chat(request, () -> false).toCompletableFuture().get(5, java.util.concurrent.TimeUnit.SECONDS);
+        dialect.chat(request, () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
 
         final var body = reqBody.get();
-        org.junit.jupiter.api.Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
+        Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
         assertTrue(body.contains("\"effort\":\"medium\""), body);
         assertTrue(body.contains("\"summary\":\"detailed\""), body);
-        org.junit.jupiter.api.Assertions.assertFalse(
+        Assertions.assertFalse(
                 body.contains("reasoning.encrypted_content"),
                 "codex must NOT request the encrypted reasoning blob by default: " + body);
     }
@@ -391,9 +393,9 @@ class CodexDialectTest {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(exchange, 200, "{}");
         });
-        final var request = new io.yupiik.llm.client.model.LlmRequest(
+        final var request = new LlmRequest(
                 "gpt-6-luna",
-                List.of(new io.yupiik.llm.client.model.LlmMessage("user", "hi", null, null, null, null)),
+                List.of(new LlmMessage("user", "hi", null, null, null, null)),
                 null,
                 null,
                 null,
@@ -403,7 +405,7 @@ class CodexDialectTest {
                 null,
                 "medium",
                 true,
-                java.util.Map.of());
+                Map.of());
 
         // drive the option through the ProviderSpec options map (how ChatClient wires providerSpecificOptions)
         final CodexDialect dialect = new CodexDialect(
@@ -413,14 +415,14 @@ class CodexDialectTest {
                         base + "/codex/responses",
                         "key",
                         null,
-                        java.util.Map.of(CodexDialect.REASONING_INCLUDE_KEY, true),
+                        Map.of(CodexDialect.REASONING_INCLUDE_KEY, true),
                         b -> b.setHeader("authorization", "Bearer t")),
                 CodexDialect.DEFAULT_CLIENT_VERSION,
                 null);
-        dialect.chat(request, () -> false).toCompletableFuture().get(5, java.util.concurrent.TimeUnit.SECONDS);
+        dialect.chat(request, () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
 
         final var body = reqBody.get();
-        org.junit.jupiter.api.Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
+        Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
         assertTrue(body.contains("\"effort\":\"medium\""), body);
         assertTrue(body.contains("\"summary\":\"detailed\""), body);
         assertTrue(
@@ -464,13 +466,13 @@ class CodexDialectTest {
 
         assertEquals("hello world", response.text(), "text deltas must be assembled into a single response");
         final var first = response.first();
-        org.junit.jupiter.api.Assertions.assertNotNull(first, "expected at least one choice");
+        Assertions.assertNotNull(first, "expected at least one choice");
         assertEquals(1, first.message().toolCalls().size(), "the streamed function call must survive assembly");
         final var call = first.message().toolCalls().get(0);
         assertEquals("call_1", call.id());
         assertEquals("bash", call.function().name());
         assertEquals("{\"command\":\"ls\"}", call.function().arguments());
-        org.junit.jupiter.api.Assertions.assertNotNull(response.usage(), "usage from the completed event must be kept");
+        Assertions.assertNotNull(response.usage(), "usage from the completed event must be kept");
         assertEquals(8L, response.usage().total());
         assertEquals(3L, response.usage().prompt(), "nested response.usage.input_tokens must reach the response");
         assertEquals(5L, response.usage().completion(), "nested response.usage.output_tokens must reach the response");
@@ -522,35 +524,32 @@ class CodexDialectTest {
                 });
 
         final var sb = new StringBuilder();
-        final var err = new java.util.concurrent.atomic.AtomicReference<Throwable>();
-        final var latch = new java.util.concurrent.CountDownLatch(1);
-        dialect.stream(request(), () -> false)
-                .toCompletableFuture()
-                .join()
-                .subscribe(new java.util.concurrent.Flow.Subscriber<>() {
-                    @Override
-                    public void onSubscribe(java.util.concurrent.Flow.Subscription s) {
-                        s.request(Long.MAX_VALUE);
-                    }
+        final var err = new AtomicReference<Throwable>();
+        final var latch = new CountDownLatch(1);
+        dialect.stream(request(), () -> false).toCompletableFuture().join().subscribe(new Flow.Subscriber<>() {
+            @Override
+            public void onSubscribe(Flow.Subscription s) {
+                s.request(Long.MAX_VALUE);
+            }
 
-                    @Override
-                    public void onNext(io.yupiik.llm.client.model.LlmStreamEvent e) {
-                        if (e instanceof io.yupiik.llm.client.model.LlmStreamEvent.TextDelta t) {
-                            sb.append(t.text());
-                        }
-                    }
+            @Override
+            public void onNext(LlmStreamEvent e) {
+                if (e instanceof LlmStreamEvent.TextDelta t) {
+                    sb.append(t.text());
+                }
+            }
 
-                    @Override
-                    public void onError(Throwable t) {
-                        err.set(t);
-                        latch.countDown();
-                    }
+            @Override
+            public void onError(Throwable t) {
+                err.set(t);
+                latch.countDown();
+            }
 
-                    @Override
-                    public void onComplete() {
-                        latch.countDown();
-                    }
-                });
+            @Override
+            public void onComplete() {
+                latch.countDown();
+            }
+        });
         latch.await();
 
         assertEquals("Bearer oauth-token", firstAuth.get(), "the original request sends the OAuth bearer");
@@ -560,7 +559,7 @@ class CodexDialectTest {
                 "the retried request must carry the signed AgentAssertion header");
         assertEquals(1, upgradeCalls.get(), "the upgrader must be invoked exactly once");
         assertEquals("ok", sb.toString(), "the successful retried stream is surfaced");
-        org.junit.jupiter.api.Assertions.assertNull(err.get(), "no error after the auto-upgrade");
+        Assertions.assertNull(err.get(), "no error after the auto-upgrade");
     }
 
     @Test
@@ -594,12 +593,9 @@ class CodexDialectTest {
                 .join();
 
         assertEquals(0, upgradeCalls.get(), "a non-delegated 4xx must not trigger the upgrader");
-        final Throwable cause = stageError.get() instanceof java.util.concurrent.CompletionException ce
-                ? ce.getCause()
-                : stageError.get();
-        org.junit.jupiter.api.Assertions.assertTrue(
-                cause instanceof io.yupiik.llm.client.LlmHttpFailureException, "" + cause);
-        assertEquals(429, ((io.yupiik.llm.client.LlmHttpFailureException) cause).status());
+        final Throwable cause = stageError.get() instanceof CompletionException ce ? ce.getCause() : stageError.get();
+        Assertions.assertTrue(cause instanceof LlmHttpFailureException, "" + cause);
+        assertEquals(429, ((LlmHttpFailureException) cause).status());
         assertEquals(1, authCount.get(), "only the original request is sent, no silent retry");
     }
 
@@ -612,9 +608,9 @@ class CodexDialectTest {
         final AtomicReference<String> firstBody = new AtomicReference<>();
         final AtomicReference<String> secondBody = new AtomicReference<>();
         final AtomicInteger calls = new AtomicInteger();
-        final var request = new io.yupiik.llm.client.model.LlmRequest(
+        final var request = new LlmRequest(
                 "gpt-6-luna",
-                List.of(new io.yupiik.llm.client.model.LlmMessage("user", "hi", null, null, null, null)),
+                List.of(new LlmMessage("user", "hi", null, null, null, null)),
                 null,
                 null,
                 null,
@@ -624,7 +620,7 @@ class CodexDialectTest {
                 null,
                 "medium",
                 true,
-                java.util.Map.of());
+                Map.of());
         server.createContext("/codex/responses", exchange -> {
             final var b = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             if (calls.incrementAndGet() == 1) {
@@ -662,7 +658,7 @@ class CodexDialectTest {
         assertTrue(
                 !secondBody.get().contains("reasoning.encrypted_content"),
                 "the retried request must drop the include directive: " + secondBody.get());
-        org.junit.jupiter.api.Assertions.assertNull(stageError.get(), "no error after the auto-downgrade");
+        Assertions.assertNull(stageError.get(), "no error after the auto-downgrade");
 
         // the backend rejection is memoized: a second chat must NOT send the include directive again
         final var secondStageError = new AtomicReference<Throwable>();
@@ -675,13 +671,13 @@ class CodexDialectTest {
         assertTrue(
                 !secondBody.get().contains("reasoning.encrypted_content"),
                 "the second request must also drop the include directive: " + secondBody.get());
-        org.junit.jupiter.api.Assertions.assertNull(secondStageError.get(), "no error on the second request");
+        Assertions.assertNull(secondStageError.get(), "no error on the second request");
     }
 
-    private io.yupiik.llm.client.model.LlmRequest request() {
-        return new io.yupiik.llm.client.model.LlmRequest(
+    private LlmRequest request() {
+        return new LlmRequest(
                 "gpt-6-luna",
-                List.of(new io.yupiik.llm.client.model.LlmMessage("user", "hi", null, null, null, null)),
+                List.of(new LlmMessage("user", "hi", null, null, null, null)),
                 null,
                 null,
                 null,
@@ -691,11 +687,10 @@ class CodexDialectTest {
                 null,
                 null,
                 true,
-                java.util.Map.of());
+                Map.of());
     }
 
-    private static void respond(
-            final com.sun.net.httpserver.HttpExchange exchange, final int status, final String body) {
+    private static void respond(final HttpExchange exchange, final int status, final String body) {
         try {
             final byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("content-type", "application/json");

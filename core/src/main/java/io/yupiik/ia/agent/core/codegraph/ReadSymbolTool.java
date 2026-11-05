@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.codegraph;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -133,8 +134,7 @@ public class ReadSymbolTool implements EmbeddedTool {
         return ToolResult.ok(header + rendered.output());
     }
 
-    private GraphModel.Symbol resolve(
-            final io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex idx, final String symbol) {
+    private GraphModel.Symbol resolve(final CodeGraphIndex idx, final String symbol) {
         final var exact = idx.resolve(symbol);
         if (exact != null) {
             return exact;

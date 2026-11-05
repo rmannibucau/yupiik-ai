@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.shell;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.Usage;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -523,7 +524,7 @@ public class ConversationTranscript {
         } else if (event
                 instanceof
                 AgentEvent.UsageUpdated(
-                        io.yupiik.ia.agent.core.llm.Usage usage,
+                        Usage usage,
                         int estimatedContextTokens,
                         double percent,
                         int lastRealPromptTokens,

@@ -21,6 +21,7 @@ import io.yupiik.fusion.http.server.api.Request;
 import io.yupiik.fusion.http.server.api.Response;
 import io.yupiik.fusion.http.server.spi.Endpoint;
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
@@ -114,7 +115,7 @@ public class SseExchangeHandler implements Endpoint {
         private static final int MAX_QUEUED_FRAMES = 1024;
 
         private final Object monitor = new Object();
-        private final java.util.ArrayDeque<Frame> queue = new java.util.ArrayDeque<>(MAX_QUEUED_FRAMES + 1);
+        private final ArrayDeque<Frame> queue = new ArrayDeque<>(MAX_QUEUED_FRAMES + 1);
         private long demand;
         private boolean closed;
 

@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.tools;
 
+import io.yupiik.ia.agent.core.agent.SubagentBudget;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
@@ -81,7 +82,7 @@ public record ToolContext(
         Set<String> allowedTools,
         // the spawning session's sub-agent admission budget (per-session cap); null when the context
         // belongs to no session-capable owner (standalone/btw invocations, sub-agent child turns)
-        io.yupiik.ia.agent.core.agent.SubagentBudget subagentBudget) {
+        SubagentBudget subagentBudget) {
 
     /** Backward-compatible convenience: builds a context without per-session provider/model settings. */
     public ToolContext(
@@ -163,7 +164,7 @@ public record ToolContext(
             final ChatSettings settings,
             final BooleanSupplier callCancelled,
             final Path projectDir,
-            final io.yupiik.ia.agent.core.agent.SubagentBudget subagentBudget) {
+            final SubagentBudget subagentBudget) {
         this(
                 sessionId,
                 subagentId,
@@ -284,6 +285,6 @@ public record ToolContext(
      * may surface that to the caller so the re-rooting is visible rather than silent.
      */
     public boolean reRoutedToSessionRoot(final String raw) {
-        return projectDir != null && !java.nio.file.Path.of(raw).isAbsolute();
+        return projectDir != null && !Path.of(raw).isAbsolute();
     }
 }

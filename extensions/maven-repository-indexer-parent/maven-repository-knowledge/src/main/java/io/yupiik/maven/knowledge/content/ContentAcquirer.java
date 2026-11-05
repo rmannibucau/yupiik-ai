@@ -16,6 +16,7 @@
 package io.yupiik.maven.knowledge.content;
 
 import io.yupiik.htmltomarkdown.HtmlLightParser;
+import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.bytecode.BytecodeAnalyzer;
 import io.yupiik.maven.knowledge.bytecode.ClassApiCodeGraphs;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
@@ -34,6 +35,8 @@ import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import org.w3c.dom.Document;
 
 /**
  * Acquires documentation content for an artifact following the locked fallback chain:
@@ -96,13 +99,13 @@ public class ContentAcquirer {
             factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
             factory.setXIncludeAware(false);
             factory.setExpandEntityReferences(false);
-        } catch (final javax.xml.parsers.ParserConfigurationException e) {
+        } catch (final ParserConfigurationException e) {
             throw new IllegalStateException(e);
         }
         return factory;
     }
 
-    public ContentAcquired acquire(final io.yupiik.maven.knowledge.Gav gav) {
+    public ContentAcquired acquire(final Gav gav) {
         final var artifact = repository.resolve(gav);
         if (!artifact.present()) {
             return ContentAcquired.none(gav);
@@ -147,7 +150,7 @@ public class ContentAcquirer {
      * Returns an empty list when no main jar is present or nothing usable is found; the caller may combine
      * this with descriptor-derived entries (a plugin's mojo implementations) if needed.
      */
-    public List<String> entryPoints(final io.yupiik.maven.knowledge.Gav gav) {
+    public List<String> entryPoints(final Gav gav) {
         final var artifact = repository.resolve(gav);
         final var main = artifact == null ? null : artifact.mainJar();
         if (main == null || !Files.isRegularFile(main)) {
@@ -165,7 +168,7 @@ public class ContentAcquirer {
      * Always present while a main jar exists, so the generated {@code api} knowledge file is substantive even
      * when the artifact ships neither sources, javadoc nor a doc page. Empty when no main jar is available.
      */
-    public String api(final io.yupiik.maven.knowledge.Gav gav) {
+    public String api(final Gav gav) {
         final var artifact = repository.resolve(gav);
         final var main = artifact == null ? null : artifact.mainJar();
         if (main == null || !Files.isRegularFile(main)) {
@@ -185,7 +188,7 @@ public class ContentAcquirer {
      * so the runtime can mmap it; empty array when no main jar is present. Kind/type ordinals follow the shared
      * scheme ({@code TYPE=0, METHOD=1, ENUM=4, INTERFACE=6, ANNOTATION=7}; {@code EXTENDS=2, IMPLEMENTS=3}).
      */
-    public byte[] codeGraph(final io.yupiik.maven.knowledge.Gav gav) {
+    public byte[] codeGraph(final Gav gav) {
         final var artifact = repository.resolve(gav);
         final var main = artifact == null ? null : artifact.mainJar();
         if (main == null || !Files.isRegularFile(main)) {
@@ -206,7 +209,7 @@ public class ContentAcquirer {
      * descriptors are NOT emitted as siblings - their config is folded into the knowledge index instead (see
      * {@link #moduleConfig(Gav)}). The caller combines this with {@link #api(Gav)} and {@link #entryPoints(Gav)}.
      */
-    public List<ContentPart> contentParts(final io.yupiik.maven.knowledge.Gav gav) {
+    public List<ContentPart> contentParts(final Gav gav) {
         final var artifact = repository.resolve(gav);
         if (artifact == null || !artifact.present()) {
             return List.of();
@@ -248,7 +251,7 @@ public class ContentAcquirer {
      * override when any, default when any and description) or an extension's descriptor, folded into the knowledge
      * index. Empty for artifacts that are neither plugins nor extensions.
      */
-    public String moduleConfig(final io.yupiik.maven.knowledge.Gav gav) {
+    public String moduleConfig(final Gav gav) {
         final var artifact = repository.resolve(gav);
         final var main = artifact == null ? null : artifact.mainJar();
         if (main == null || !Files.isRegularFile(main)) {
@@ -370,7 +373,7 @@ public class ContentAcquirer {
         }
     }
 
-    private String readDoc(final Path pom, final io.yupiik.maven.knowledge.Gav gav) {
+    private String readDoc(final Path pom, final Gav gav) {
         try {
             final var doc = documentBuilderFactory.newDocumentBuilder().parse(pom.toFile());
             final var url = firstText(doc, "url");
@@ -529,12 +532,12 @@ public class ContentAcquirer {
         }
     }
 
-    private static String firstText(final org.w3c.dom.Document doc, final String tag) {
+    private static String firstText(final Document doc, final String tag) {
         final var list = doc.getElementsByTagName(tag);
         return list.getLength() == 0 ? null : list.item(0).getTextContent();
     }
 
-    private String fromSourcesJar(final Path jar, final io.yupiik.maven.knowledge.Gav gav) {
+    private String fromSourcesJar(final Path jar, final Gav gav) {
         final var sb = new StringBuilder();
         sb.append("Artifact: ").append(gav.coordinate()).append('\n');
         final int budget = config.maxContentBytes() > 0 ? config.maxContentBytes() : Integer.MAX_VALUE;

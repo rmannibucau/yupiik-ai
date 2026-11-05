@@ -28,6 +28,7 @@ import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.Charset;
@@ -189,7 +190,7 @@ public class WebFetchTool implements EmbeddedTool {
         final InetAddress[] resolved;
         try {
             resolved = InetAddress.getAllByName(uri.getHost());
-        } catch (final java.net.UnknownHostException e) {
+        } catch (final UnknownHostException e) {
             return "Cannot resolve host " + uri.getHost();
         }
         for (final var address : resolved) {

@@ -20,6 +20,7 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -112,7 +113,7 @@ public class JavaFind implements JavaCommand {
         } catch (final Exception e) {
             return;
         }
-        java.util.Collections.sort(children);
+        Collections.sort(children);
         for (final var child : children) {
             final var isDir = Files.isDirectory(child);
             final var matchesType = type == null || (type == 'd' && isDir) || (type == 'f' && !isDir);

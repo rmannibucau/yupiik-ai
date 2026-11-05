@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import java.util.Locale;
 
 /**
  * When the durable memory is flushed to disk. The prompt prefix is built once per
@@ -46,7 +47,7 @@ public enum MemoryMode {
             return AUTO;
         }
         try {
-            return valueOf(value.strip().toUpperCase(java.util.Locale.ROOT));
+            return valueOf(value.strip().toUpperCase(Locale.ROOT));
         } catch (final IllegalArgumentException e) {
             return AUTO;
         }

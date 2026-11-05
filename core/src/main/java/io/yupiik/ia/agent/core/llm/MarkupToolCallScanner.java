@@ -84,7 +84,7 @@ public class MarkupToolCallScanner {
             if (c == '<') {
                 final var dsml = dsmlTag(raw, i);
                 if (dsml != null) {
-                    final var res = parseDsmlBlock(raw, i, dsml, out);
+                    final var res = parseDsmlBlock(raw, dsml, out);
                     i = res;
                 } else if (startsWith(raw, i, "<tool_call>")) {
                     final var res = parseJsonOrGlmTag(raw, i, out);
@@ -143,7 +143,7 @@ public class MarkupToolCallScanner {
             if (c == '<') {
                 final var dsml = dsmlTag(raw, i);
                 if (dsml != null) {
-                    final var res = skipDsmlBlock(raw, i, dsml);
+                    final var res = skipDsmlBlock(raw, dsml);
                     i = res == i ? i + 1 : res;
                     continue;
                 }
@@ -237,17 +237,14 @@ public class MarkupToolCallScanner {
         return off + literal.length() <= raw.length() && raw.regionMatches(off, literal, 0, literal.length());
     }
 
-    /** Reads the DSML block starting at {@code i} (the {@code tool_calls} opener), appends calls. */
-    private static int parseDsmlBlock(
-            final String raw, final int i, final DsmlMarker opener, final List<ToolCall> out) {
-        var p = i;
+    /** Reads the DSML block starting at the {@code tool_calls} opener, appends calls. */
+    private static int parseDsmlBlock(final String raw, final DsmlMarker opener, final List<ToolCall> out) {
         final var len = raw.length();
-        // header is <pipe>[DSML|pipe]tool_calls ...>; find the '>' closing the header
         var gt = raw.indexOf('>', opener.pos);
         if (gt < 0) {
             return len; // never closed header: rest is consumed
         }
-        p = gt + 1;
+        var p = gt + 1;
         final var blockEnd = len;
         String currentName = null;
         final var currentArgs = new ArrayList<String[]>();
@@ -308,12 +305,12 @@ public class MarkupToolCallScanner {
         // flush a trailing unclosed invoke
         if (currentName != null) {
             out.add(new ToolCall(
-                    "btw-" + id++, "function", new ToolCall.FunctionCall(currentName, marshalArgs(currentArgs)), null));
+                    "btw-" + id, "function", new ToolCall.FunctionCall(currentName, marshalArgs(currentArgs)), null));
         }
         return blockEnd;
     }
 
-    private static int skipDsmlBlock(final String raw, final int i, final DsmlMarker opener) {
+    private static int skipDsmlBlock(final String raw, final DsmlMarker opener) {
         final var gt = raw.indexOf('>', opener.pos);
         if (gt < 0) {
             return raw.length();
@@ -562,18 +559,6 @@ public class MarkupToolCallScanner {
         end = nl < 0
                 ? (nextClose < 0 ? raw.length() : nextClose)
                 : Math.min(nl, nextClose < 0 ? Integer.MAX_VALUE : nextClose);
-        final var body = raw.substring(gt + 1, end);
-        final var idx = body.indexOf("name=");
-        return idx < 0 ? null : body.substring(idx + 5).strip();
-    }
-
-    /** Bounded variant of {@link #legacyName}: the name is sought only within {@code [invokeStart, bound)}. */
-    private static String legacyName(final String raw, final int invokeStart, final int bound) {
-        final var gt = raw.indexOf('>', invokeStart);
-        if (gt < 0 || gt >= bound) {
-            return null;
-        }
-        final int end = Math.min(bound, raw.length());
         final var body = raw.substring(gt + 1, end);
         final var idx = body.indexOf("name=");
         return idx < 0 ? null : body.substring(idx + 5).strip();

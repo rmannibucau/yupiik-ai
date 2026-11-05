@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.llm.client.model.LlmMessage;
+import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
@@ -264,8 +265,8 @@ class LlmClientResilienceWrapperHardeningTest {
         }
 
         @Override
-        public CompletionStage<io.yupiik.llm.client.model.LlmModels> models() {
-            return CompletableFuture.completedFuture(new io.yupiik.llm.client.model.LlmModels(List.of()));
+        public CompletionStage<LlmModels> models() {
+            return CompletableFuture.completedFuture(new LlmModels(List.of()));
         }
 
         @Override

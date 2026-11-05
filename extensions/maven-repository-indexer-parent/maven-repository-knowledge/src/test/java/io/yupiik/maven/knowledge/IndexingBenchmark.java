@@ -16,6 +16,7 @@
 package io.yupiik.maven.knowledge;
 
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
+import io.yupiik.maven.knowledge.config.TokenBudget;
 import io.yupiik.maven.knowledge.content.ContentAcquirer;
 import io.yupiik.maven.knowledge.content.LocalRepository;
 import io.yupiik.maven.knowledge.content.WebFetch;
@@ -96,10 +97,7 @@ class IndexingBenchmark {
         // contextWindow=1000000, output budget 32000, concurrency=4.
         {
             final long t = System.nanoTime();
-            final var r = runIndexer(
-                    config(m2, 4, 256, -1, new io.yupiik.maven.knowledge.config.TokenBudget(1_000_000, 32_000)),
-                    cohort,
-                    m2);
+            final var r = runIndexer(config(m2, 4, 256, -1, new TokenBudget(1_000_000, 32_000)), cohort, m2);
             final long ms = toMs(t);
             System.out.printf(
                     "    maxBatchChars= -1 (auto, ctx=1M, out=32k) : %6d ms | indexed=%d skipped=%d | %3d bulk calls | speedup x%.2f over "
@@ -128,7 +126,7 @@ class IndexingBenchmark {
             final int concurrency,
             final int batchSize,
             final int maxBatchChars,
-            final io.yupiik.maven.knowledge.config.TokenBudget budget) {
+            final TokenBudget budget) {
         final var repo = new LocalRepository(m2);
         return new KnowledgeConfig(
                 repo.root(),

@@ -29,6 +29,7 @@ import io.yupiik.maven.knowledge.config.KnowledgeConfig;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig.BoundedFetch;
 import io.yupiik.maven.knowledge.content.ContentAcquirer;
 import io.yupiik.maven.knowledge.content.LocalRepository;
+import io.yupiik.maven.knowledge.content.WebFetch;
 import io.yupiik.maven.knowledge.index.Indexer;
 import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
 import io.yupiik.maven.knowledge.mcp.configuration.MavenKnowledgeConfiguration;
@@ -241,7 +242,7 @@ public class MavenKnowledgeTools {
     }
 
     private Indexer newIndexer(final KnowledgeConfig effective, final KnowledgeLlm llm) {
-        final io.yupiik.maven.knowledge.content.WebFetch webfetch = (url, timeout, bytes) -> {
+        final WebFetch webfetch = (url, timeout, bytes) -> {
             final var request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .timeout(Duration.ofMillis(timeout))

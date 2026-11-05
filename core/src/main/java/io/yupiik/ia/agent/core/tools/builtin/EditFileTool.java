@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContainment;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
@@ -149,7 +150,7 @@ public class EditFileTool implements EmbeddedTool {
         if (!path.toAbsolutePath().normalize().startsWith(base)) {
             return "path '" + raw + "' escapes the session project directory";
         }
-        return io.yupiik.ia.agent.core.tools.ToolContainment.symlinkEscapeError(context.projectDir(), path);
+        return ToolContainment.symlinkEscapeError(context.projectDir(), path);
     }
 
     /**

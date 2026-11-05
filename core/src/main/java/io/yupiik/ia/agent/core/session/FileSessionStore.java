@@ -26,8 +26,10 @@ import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -38,6 +40,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantLock;
@@ -358,7 +361,7 @@ public class FileSessionStore implements SessionStore {
                 // reverse line scan on the plain file: read only the last `count` non-blank lines
                 final var path = source.path();
                 final var size = Files.size(path);
-                final var raf = new java.io.RandomAccessFile(path.toFile(), "r");
+                final var raf = new RandomAccessFile(path.toFile(), "r");
                 try {
                     long pos = size;
                     var pending = new StringBuilder();
@@ -502,7 +505,7 @@ public class FileSessionStore implements SessionStore {
             }
             // preserve the persisted timestamp inside others (reserved key), so a later
             // replace() can round-trip it instead of re-stamping history with now()
-            final var others = e.others() == null ? null : new java.util.LinkedHashMap<>(e.others());
+            final var others = e.others() == null ? null : new LinkedHashMap<>(e.others());
             if (others != null) {
                 others.put(PERSISTED_AT_KEY, e.at());
             }
@@ -560,7 +563,7 @@ public class FileSessionStore implements SessionStore {
                 // persisted "at" in others so a flush/compact/prune does not rewrite history
                 final var at = m.others() == null ? null : m.others().get(PERSISTED_AT_KEY);
                 final var stamp = at instanceof final Number n ? n.longValue() : now();
-                final var others = m.others() == null ? null : new java.util.LinkedHashMap<>(m.others());
+                final var others = m.others() == null ? null : new LinkedHashMap<>(m.others());
                 if (others != null) {
                     others.remove(PERSISTED_AT_KEY);
                 }
@@ -585,7 +588,7 @@ public class FileSessionStore implements SessionStore {
                 Files.writeString(tmp, sb.toString());
                 try {
                     Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-                } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
+                } catch (final AtomicMoveNotSupportedException e) {
                     Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
                 }
             } catch (final IOException e) {

@@ -32,12 +32,15 @@ import io.yupiik.fusion.mcp.client.MCPClient;
 import io.yupiik.fusion.testing.Fusion;
 import io.yupiik.fusion.testing.FusionSupport;
 import io.yupiik.maven.knowledge.test.FakeMavenRepo;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -80,10 +83,10 @@ class MavenKnowledgeToolsMCPTest {
     private static void deleteRecursively(final Path path) throws Exception {
         if (Files.exists(path)) {
             try (final var walk = Files.walk(path)) {
-                walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                walk.sorted(Comparator.reverseOrder()).forEach(p -> {
                     try {
                         Files.deleteIfExists(p);
-                    } catch (final java.io.IOException e) {
+                    } catch (final IOException e) {
                         throw new IllegalStateException(e);
                     }
                 });
@@ -181,7 +184,7 @@ class MavenKnowledgeToolsMCPTest {
         public Stream<FusionBean<?>> beans() {
             return Stream.of(
                     new BaseBean<ExtendedHttpClient>(
-                            ExtendedHttpClient.class, DefaultScoped.class, 2_000, java.util.Map.of()) {
+                            ExtendedHttpClient.class, DefaultScoped.class, 2_000, Map.of()) {
                         @Override
                         public ExtendedHttpClient create(
                                 final RuntimeContainer container, final List<Instance<?>> dependents) {

@@ -30,6 +30,9 @@ import io.yupiik.llm.client.codex.model.CodexTokenStore;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -513,7 +516,7 @@ public class CodexAuthTemplateHelper {
             Files.write(tmp, mapper.toBytes(store));
             restrictToOwner(tmp);
             try {
-                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
             } catch (final IOException moveFailure) {
                 Files.deleteIfExists(tmp);
                 throw moveFailure;
@@ -530,11 +533,8 @@ public class CodexAuthTemplateHelper {
      */
     private static void restrictToOwner(final Path path) {
         try {
-            final java.nio.file.attribute.PosixFilePermission[] owner = {
-                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
-                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE
-            };
-            Files.setPosixFilePermissions(path, java.util.Set.of(owner));
+            final PosixFilePermission[] owner = {PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE};
+            Files.setPosixFilePermissions(path, Set.of(owner));
         } catch (final UnsupportedOperationException | IOException ignored) {
             // non-POSIX filesystem: best effort
         }

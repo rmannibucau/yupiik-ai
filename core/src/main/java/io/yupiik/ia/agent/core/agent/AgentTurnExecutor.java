@@ -28,9 +28,9 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
+import io.yupiik.ia.agent.core.security.InboundLlmResponse;
 import io.yupiik.ia.agent.core.security.OutboundLlmRequest;
 import io.yupiik.ia.agent.core.session.SessionEntry;
-import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.llm.client.ContextWindowExceededException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
@@ -53,6 +53,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.logging.Level;
+import java.util.stream.Collectors;
 
 /**
  * Turn-execution runtime: the loop window, the round pipeline and the tool-result landing,
@@ -751,7 +752,7 @@ public class AgentTurnExecutor {
         // to auto-reject (never gate). Bare/empty test registries simply serve nothing and stay unaffected.
         host.servedToolNames = host.toolRegistry.toWireTools().stream()
                 .map(t -> t.function().name())
-                .collect(java.util.stream.Collectors.toSet());
+                .collect(Collectors.toSet());
         var overflowRetried = false;
         // turns the pair old assistant tool-call/result history was healed at most once per turn, so a
         // tool-pairing 400 (Azure/litellm "tool_calls must be followed by tool messages") can be repaired
@@ -1213,7 +1214,7 @@ public class AgentTurnExecutor {
                 host.emitPhase(AgentEvent.Phase.STREAM_COMPLETE);
                 // inbound restore: replace provenance fakes in the assistant reply with the real
                 // values (only what we emitted outbound; model-invented token shapes stay as-is)
-                final var inbound = new io.yupiik.ia.agent.core.security.InboundLlmResponse(
+                final var inbound = new InboundLlmResponse(
                         assistant.content() instanceof String s ? s : host.str(assistant.content()), sessionId);
                 host.emitter.emit(inbound);
                 final var restored = inbound.restored();
@@ -1720,39 +1721,6 @@ public class AgentTurnExecutor {
                 name, output, success, pending, ordinal, host.currentSessionId, host.subagentId, host.subagentName);
     }
 
-    private static List<String> touchedPaths(final String name, final Map<String, Object> args) {
-        if ("apply_patch".equals(name)) {
-            if (!(args.get("patch") instanceof final String patch)) {
-                return List.of();
-            }
-            final var out = new ArrayList<String>();
-            for (final var line : patch.split("\n", -1)) {
-                final var stripped = line.strip();
-                if (!stripped.startsWith("+++ ")) {
-                    continue;
-                }
-                var file = stripped.substring(4).strip();
-                final var tab = file.indexOf('\t');
-                if (tab >= 0) {
-                    file = file.substring(0, tab).strip();
-                }
-                if (file.startsWith("b/")) {
-                    file = file.substring(2);
-                }
-                if (!file.isBlank() && !"/dev/null".equals(file)) {
-                    out.add(file);
-                }
-            }
-            return out;
-        }
-        if ((AgentLoop.FILE_READ_TOOLS.contains(name) || AgentLoop.FILE_WRITE_TOOLS.contains(name))
-                && args.get("path") instanceof final String path
-                && !path.isBlank()) {
-            return List.of(path);
-        }
-        return List.of();
-    }
-
     void attachSessionSettings(final ChatSettings settings) {
         if (host.usageTracker != null) {
             host.usageTracker.attach(settings);
@@ -1928,31 +1896,6 @@ public class AgentTurnExecutor {
 
     AgentEvent.ThinkingDelta thinkingDelta(final String delta) {
         return new AgentEvent.ThinkingDelta(delta, host.currentSessionId, host.subagentId, host.subagentName);
-    }
-
-    /** Builds a ToolStarted event with the given pre-assigned ordinal (the TUI card #). */
-    private ToolContext toolContext(
-            final BooleanSupplier cancelled,
-            final BooleanSupplier callCancelled,
-            final long ordinal,
-            final ChatSettings settings) {
-        return new ToolContext(
-                host.currentSessionId,
-                host.subagentId,
-                host.subagentName,
-                host.permissionService,
-                host.userFeedbackService,
-                host.todoStore,
-                host.statusReporter,
-                host.usageTracker,
-                host.contextView,
-                cancelled,
-                settings,
-                callCancelled,
-                host.sessionWorkdir,
-                ordinal,
-                host.effectiveAllowedTools(),
-                host.subagentBudget);
     }
 
     /**

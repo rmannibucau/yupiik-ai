@@ -23,12 +23,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.llm.client.model.LlmMessage;
+import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.StreamAttempt;
+import io.yupiik.llm.client.spi.Streams;
 import java.io.IOException;
+import java.io.Reader;
+import java.io.Writer;
 import java.lang.reflect.Type;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
@@ -186,8 +190,8 @@ class LlmClientResilienceWrapperTest {
             }
 
             @Override
-            public CompletionStage<io.yupiik.llm.client.model.LlmModels> models() {
-                return CompletableFuture.completedFuture(new io.yupiik.llm.client.model.LlmModels(List.of()));
+            public CompletionStage<LlmModels> models() {
+                return CompletableFuture.completedFuture(new LlmModels(List.of()));
             }
 
             @Override
@@ -748,12 +752,12 @@ class LlmClientResilienceWrapperTest {
         }
 
         @Override
-        public <A> A read(final Type type, final java.io.Reader reader) {
+        public <A> A read(final Type type, final Reader reader) {
             throw new UnsupportedOperationException("not needed");
         }
 
         @Override
-        public <A> A read(final Class<A> type, final java.io.Reader reader) {
+        public <A> A read(final Class<A> type, final Reader reader) {
             throw new UnsupportedOperationException("not needed");
         }
 
@@ -763,7 +767,7 @@ class LlmClientResilienceWrapperTest {
         }
 
         @Override
-        public <A> void write(final A value, final java.io.Writer writer) {
+        public <A> void write(final A value, final Writer writer) {
             throw new UnsupportedOperationException("not needed");
         }
 
@@ -861,7 +865,7 @@ class LlmClientResilienceWrapperTest {
             // success: an SSE stream of a single "ok" fragment then end
             final var buffers = ByteBuffer.wrap(
                     "data: {\"id\":\"1\",\"model\":\"m\",\"choices\":[]}\n\n".getBytes(StandardCharsets.UTF_8));
-            return CompletableFuture.completedFuture(io.yupiik.llm.client.spi.Streams.toEvents(
+            return CompletableFuture.completedFuture(Streams.toEvents(
                     subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
                         @Override
                         public void request(final long n) {
@@ -880,8 +884,8 @@ class LlmClientResilienceWrapperTest {
         }
 
         @Override
-        public CompletionStage<io.yupiik.llm.client.model.LlmModels> models() {
-            return CompletableFuture.completedFuture(new io.yupiik.llm.client.model.LlmModels(List.of()));
+        public CompletionStage<LlmModels> models() {
+            return CompletableFuture.completedFuture(new LlmModels(List.of()));
         }
 
         @Override

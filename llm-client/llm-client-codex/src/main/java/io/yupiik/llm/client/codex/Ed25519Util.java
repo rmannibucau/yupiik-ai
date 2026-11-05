@@ -19,9 +19,12 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 import java.io.ByteArrayOutputStream;
 import java.math.BigInteger;
+import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Signature;
@@ -82,7 +85,7 @@ public final class Ed25519Util {
             final KeyPair pair = generator.generateKeyPair();
             final byte[] pkcs8 = pair.getPrivate().getEncoded();
             return new KeyMaterial(Base64.getEncoder().encodeToString(pkcs8), sshPublicKey(pair.getPublic()));
-        } catch (final java.security.GeneralSecurityException e) {
+        } catch (final GeneralSecurityException e) {
             throw new IllegalStateException("Cannot generate an Ed25519 key: " + e.getMessage(), e);
         }
     }
@@ -94,7 +97,7 @@ public final class Ed25519Util {
             signature.initSign(privateKey(privateKeyPkcs8Base64));
             signature.update(payload.getBytes(UTF_8));
             return Base64.getEncoder().encodeToString(signature.sign());
-        } catch (final java.security.GeneralSecurityException e) {
+        } catch (final GeneralSecurityException e) {
             throw new IllegalStateException("Cannot sign with the agent identity key: " + e.getMessage(), e);
         }
     }
@@ -106,7 +109,7 @@ public final class Ed25519Util {
             verifier.initVerify(publicKey(privateKeyPkcs8Base64));
             verifier.update(payload.getBytes(UTF_8));
             return verifier.verify(Base64.getDecoder().decode(signatureB64));
-        } catch (final java.security.GeneralSecurityException | IllegalArgumentException e) {
+        } catch (final GeneralSecurityException | IllegalArgumentException e) {
             return false;
         }
     }
@@ -135,7 +138,7 @@ public final class Ed25519Util {
         try {
             final var spec = new EdECPrivateKeySpec(NamedParameterSpec.ED25519, seedOf(pkcs8Base64));
             return KeyFactory.getInstance("Ed25519").generatePrivate(spec);
-        } catch (final java.security.GeneralSecurityException e) {
+        } catch (final GeneralSecurityException e) {
             throw new IllegalStateException("Cannot rebuild the Ed25519 private key: " + e.getMessage(), e);
         }
     }
@@ -145,7 +148,7 @@ public final class Ed25519Util {
         try {
             final var spec = new EdECPublicKeySpec(NamedParameterSpec.ED25519, publicPoint(seedOf(pkcs8Base64)));
             return KeyFactory.getInstance("Ed25519").generatePublic(spec);
-        } catch (final java.security.GeneralSecurityException e) {
+        } catch (final GeneralSecurityException e) {
             throw new IllegalStateException("Cannot derive the Ed25519 public key: " + e.getMessage(), e);
         }
     }
@@ -236,8 +239,8 @@ public final class Ed25519Util {
 
     private static byte[] sha512(final byte[] input) {
         try {
-            return java.security.MessageDigest.getInstance("SHA-512").digest(input);
-        } catch (final java.security.NoSuchAlgorithmException e) {
+            return MessageDigest.getInstance("SHA-512").digest(input);
+        } catch (final NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
     }

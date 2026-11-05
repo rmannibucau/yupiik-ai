@@ -36,6 +36,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
@@ -140,7 +141,7 @@ public class CallbackRunner {
             try {
                 futures.add(executor.submit(() -> runOne(eventId, hook, timeoutSeconds, payload)));
                 timeouts.add(timeoutSeconds);
-            } catch (final java.util.concurrent.RejectedExecutionException e) {
+            } catch (final RejectedExecutionException e) {
                 // the executor is shutting down (app close): no point retrying, do not fail the turn
                 LOGGER.log(Level.WARNING, () -> "hook callback for " + eventId + " rejected: " + e.getMessage());
             }

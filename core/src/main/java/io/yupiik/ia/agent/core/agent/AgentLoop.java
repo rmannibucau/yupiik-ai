@@ -55,6 +55,7 @@ import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
+import io.yupiik.ia.agent.core.usage.QuotaSnapshotStore;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
@@ -156,7 +157,7 @@ public class AgentLoop {
     final CodingAgentConfiguration configuration;
     final PermissionService permissionService;
     final UsageTracker usageTracker;
-    final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore;
+    final QuotaSnapshotStore quotaStore;
     final ContextManager contextManager;
     final ContextView contextView;
     final SessionStore sessionStore;
@@ -211,14 +212,14 @@ public class AgentLoop {
      * {@link ToolContext} so file-rooted tools resolve paths against the session's
      * root. A mid-session change rebuilds the runtime rather than mutating this field.
      */
-    volatile java.nio.file.Path sessionWorkdir;
+    volatile Path sessionWorkdir;
     /**
      * The session's sub-agent admission budget (the {@code yca.subagents.maxConcurrent} per-session
      * cap), set once by {@code SessionRuntimeFactory} like {@link #sessionWorkdir}. Null for loops
      * that cannot spawn children (sub-agent child loops, standalone/btw contexts). Threaded into
      * every per-turn {@link ToolContext} so {@code spawn_subagent} can enforce the per-session limit.
      */
-    volatile io.yupiik.ia.agent.core.agent.SubagentBudget subagentBudget;
+    volatile SubagentBudget subagentBudget;
     /** Set when the loop/session is closed so {@link #close()} fires the SessionEnded hook only once. */
     volatile boolean closed;
     /** True when the last persistContext failed: the on-disk session lags the in-memory one until the next retry. */
@@ -467,7 +468,7 @@ public class AgentLoop {
             final CodingAgentConfiguration configuration,
             final PermissionService permissionService,
             final UsageTracker usageTracker,
-            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore,
+            final QuotaSnapshotStore quotaStore,
             final ContextManager contextManager,
             final ContextView contextView,
             final SessionStore sessionStore,
@@ -526,7 +527,7 @@ public class AgentLoop {
             final CodingAgentConfiguration configuration,
             final PermissionService permissionService,
             final UsageTracker usageTracker,
-            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore,
+            final QuotaSnapshotStore quotaStore,
             final ContextManager contextManager,
             final ContextView contextView,
             final SessionStore sessionStore,
@@ -600,7 +601,7 @@ public class AgentLoop {
             final CodingAgentConfiguration configuration,
             final PermissionService permissionService,
             final UsageTracker usageTracker,
-            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore,
+            final QuotaSnapshotStore quotaStore,
             final ContextManager contextManager,
             final ContextView contextView,
             final SessionStore sessionStore,
@@ -936,7 +937,7 @@ public class AgentLoop {
         if (runTools == null) {
             return profileTools;
         }
-        final var intersection = new java.util.HashSet<>(profileTools);
+        final var intersection = new HashSet<>(profileTools);
         intersection.retainAll(runTools);
         return Set.copyOf(intersection);
     }
@@ -1032,7 +1033,7 @@ public class AgentLoop {
         }
     }
 
-    public void sessionWorkdir(final java.nio.file.Path dir) {
+    public void sessionWorkdir(final Path dir) {
         this.sessionWorkdir = dir;
     }
 
@@ -1040,12 +1041,12 @@ public class AgentLoop {
      * The session's sub-agent admission budget, set once by {@code SessionRuntimeFactory}. Null for
      * loops that cannot spawn children (sub-agent child loops, standalone/btw contexts).
      */
-    public void subagentBudget(final io.yupiik.ia.agent.core.agent.SubagentBudget budget) {
+    public void subagentBudget(final SubagentBudget budget) {
         this.subagentBudget = budget;
     }
 
     /** The session's sub-agent admission budget, or null when the loop cannot spawn children. */
-    public io.yupiik.ia.agent.core.agent.SubagentBudget subagentBudget() {
+    public SubagentBudget subagentBudget() {
         return subagentBudget;
     }
 
@@ -1899,22 +1900,6 @@ public class AgentLoop {
 
     int compressionNudgeTier(final List<Message> messages, final int toolsTokens) {
         return contextGuidance.compressionNudgeTier(messages, toolsTokens);
-    }
-
-    private int iterationsSinceLastUser(final List<Message> messages) {
-        return contextGuidance.iterationsSinceLastUser(messages);
-    }
-
-    private int minNudgeTokens() {
-        return contextGuidance.minNudgeTokens();
-    }
-
-    private String manageContextActions() {
-        return contextGuidance.manageContextActions();
-    }
-
-    private String legacyPruningNudge(final List<Message> messages, final int toolsTokens) {
-        return contextGuidance.legacyPruningNudge(messages, toolsTokens);
     }
 
     String snapshotBlock(final String sessionId) {

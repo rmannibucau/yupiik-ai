@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.security;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -37,11 +38,14 @@ import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.crypto.Cipher;
+import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 import javax.xml.parsers.DocumentBuilderFactory;
+import org.w3c.dom.Document;
+import org.w3c.dom.Node;
 
 /**
  * Reads and decrypts Maven {@code settings.xml} secret values with the Maven 4 algorithm, and
@@ -223,7 +227,7 @@ public class MavenSecretService {
             final var doc = parse(xml);
             for (final var properties : descendantElements(doc.getDocumentElement(), "properties")) {
                 for (var child = properties.getFirstChild(); child != null; child = child.getNextSibling()) {
-                    if (child.getNodeType() != org.w3c.dom.Node.ELEMENT_NODE) {
+                    if (child.getNodeType() != Node.ELEMENT_NODE) {
                         continue;
                     }
                     final var key = child.getNodeName();
@@ -297,12 +301,11 @@ public class MavenSecretService {
     }
 
     /** Parses the settings XML into a DOM, wrapped so callers can treat a malformed doc as harmless. */
-    private static org.w3c.dom.Document parse(final String xml) {
+    private static Document parse(final String xml) {
         try {
             final var dbf = DocumentBuilderFactory.newInstance();
             dbf.setNamespaceAware(false);
-            return dbf.newDocumentBuilder()
-                    .parse(new java.io.ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+            return dbf.newDocumentBuilder().parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
         } catch (final Exception e) {
             throw new IllegalStateException("Invalid settings XML: " + e.getMessage(), e);
         }
@@ -400,8 +403,8 @@ public class MavenSecretService {
         try {
             final var dbf = DocumentBuilderFactory.newInstance();
             dbf.setNamespaceAware(false);
-            final var doc = dbf.newDocumentBuilder()
-                    .parse(new java.io.ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+            final var doc =
+                    dbf.newDocumentBuilder().parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
             for (final var server : descendantElements(doc.getDocumentElement(), "server")) {
                 final var id = childText(server, "id");
                 if (serverId.equals(id)) {
@@ -487,7 +490,7 @@ public class MavenSecretService {
         }
     }
 
-    private static javax.crypto.SecretKey getAesKey(final char[] password, final byte[] salt) throws Exception {
+    private static SecretKey getAesKey(final char[] password, final byte[] salt) throws Exception {
         final var spec = new PBEKeySpec(password, salt, PBE_ITERATIONS, PBE_KEY_SIZE);
         final var key = SecretKeyFactory.getInstance(PBKDF2).generateSecret(spec);
         return new SecretKeySpec(key.getEncoded(), "AES");
@@ -531,14 +534,14 @@ public class MavenSecretService {
         return new SecretConfig(defaultDispatcher, Map.of());
     }
 
-    private static String firstText(final org.w3c.dom.Document doc, final String tag, final String fallback) {
+    private static String firstText(final Document doc, final String tag, final String fallback) {
         final var list = doc.getElementsByTagName(tag);
         return list.getLength() > 0 ? textOf(list.item(0)) : fallback;
     }
 
-    private static String childText(final org.w3c.dom.Node parent, final String tag) {
+    private static String childText(final Node parent, final String tag) {
         for (var child = parent.getFirstChild(); child != null; child = child.getNextSibling()) {
-            if (child.getNodeType() == org.w3c.dom.Node.ELEMENT_NODE && tag.equals(child.getNodeName())) {
+            if (child.getNodeType() == Node.ELEMENT_NODE && tag.equals(child.getNodeName())) {
                 return textOf(child);
             }
         }
@@ -546,10 +549,10 @@ public class MavenSecretService {
     }
 
     /** All descendant elements with the given tag (depth-first), used for the nested properties block. */
-    private static List<org.w3c.dom.Node> descendantElements(final org.w3c.dom.Node parent, final String tag) {
-        final var out = new ArrayList<org.w3c.dom.Node>();
+    private static List<Node> descendantElements(final Node parent, final String tag) {
+        final var out = new ArrayList<Node>();
         for (var child = parent.getFirstChild(); child != null; child = child.getNextSibling()) {
-            if (child.getNodeType() == org.w3c.dom.Node.ELEMENT_NODE) {
+            if (child.getNodeType() == Node.ELEMENT_NODE) {
                 if (tag.equals(child.getNodeName())) {
                     out.add(child);
                 }
@@ -559,11 +562,10 @@ public class MavenSecretService {
         return out;
     }
 
-    private static String textOf(final org.w3c.dom.Node node) {
+    private static String textOf(final Node node) {
         final var sb = new StringBuilder();
         for (var child = node.getFirstChild(); child != null; child = child.getNextSibling()) {
-            if (child.getNodeType() == org.w3c.dom.Node.TEXT_NODE
-                    || child.getNodeType() == org.w3c.dom.Node.CDATA_SECTION_NODE) {
+            if (child.getNodeType() == Node.TEXT_NODE || child.getNodeType() == Node.CDATA_SECTION_NODE) {
                 sb.append(child.getNodeValue());
             }
         }

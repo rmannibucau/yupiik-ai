@@ -25,8 +25,14 @@ import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import io.yupiik.ia.agent.core.configuration.SecretRedactionMode;
+import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatRoutes;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.llm.CodexLoginService;
+import io.yupiik.ia.agent.core.security.SecretRedactor;
+import io.yupiik.ia.agent.core.security.SecretSessionModes;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
@@ -79,9 +85,9 @@ public class ConfigCommands implements SlashCommandSet {
             final ChatClient chatClient,
             final ProviderManager providerManager,
             final AgentProvider agentProvider,
-            final io.yupiik.ia.agent.core.security.SecretSessionModes secretModes,
-            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor,
-            final io.yupiik.ia.agent.core.llm.CodexLoginService codexLoginService) {
+            final SecretSessionModes secretModes,
+            final SecretRedactor secretRedactor,
+            final CodexLoginService codexLoginService) {
         this.agentSessionService = agentSessionService;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
@@ -91,9 +97,9 @@ public class ConfigCommands implements SlashCommandSet {
         this.codexLoginService = codexLoginService;
     }
 
-    private final io.yupiik.ia.agent.core.security.SecretSessionModes secretModes;
-    private final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
-    private final io.yupiik.ia.agent.core.llm.CodexLoginService codexLoginService;
+    private final SecretSessionModes secretModes;
+    private final SecretRedactor secretRedactor;
+    private final CodexLoginService codexLoginService;
 
     @Override
     public List<SlashCommand> commands() {
@@ -546,9 +552,8 @@ public class ConfigCommands implements SlashCommandSet {
     private ShellOutcome autoLoginCodex(final String effectiveProvider, final ShellEnv env) {
         final var provider = providerManager.provider(effectiveProvider);
         final boolean codex = provider != null
-                && (provider.api() == io.yupiik.ia.agent.core.llm.ApiFlavor.CODEX
-                        || io.yupiik.ia.agent.core.llm.ChatRoutes.detectFlavor(provider.baseUrl())
-                                == io.yupiik.ia.agent.core.llm.ApiFlavor.CODEX);
+                && (provider.api() == ApiFlavor.CODEX
+                        || ChatRoutes.detectFlavor(provider.baseUrl()) == ApiFlavor.CODEX);
         if (!codex || codexLoginService == null || codexLoginService.load(effectiveProvider) != null) {
             return ShellOutcome.status("provider: " + effectiveProvider);
         }
@@ -669,7 +674,7 @@ public class ConfigCommands implements SlashCommandSet {
                             ? "disabled"
                             : secretRedactor.modeFor(sessionId).name().toLowerCase(Locale.ROOT)));
         }
-        final var mode = io.yupiik.ia.agent.core.configuration.SecretRedactionMode.fromConfigurationString(value);
+        final var mode = SecretRedactionMode.fromConfigurationString(value);
         final var prev = secretModes.set(sessionId, mode);
         return ShellOutcome.status("secrets: " + mode.name().toLowerCase(Locale.ROOT)
                 + (prev == null ? " (session override)" : " (was " + prev.name().toLowerCase(Locale.ROOT) + ")"));

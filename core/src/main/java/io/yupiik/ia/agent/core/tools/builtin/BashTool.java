@@ -36,6 +36,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -52,7 +53,7 @@ public class BashTool implements EmbeddedTool {
     private final ProcessService processes;
     private final int maxOutputChars;
     /** Configured default working directory process, used when neither a workdir arg nor a session root apply. */
-    private final java.nio.file.Path fallbackDir;
+    private final Path fallbackDir;
 
     private final BashOverride bashOverride;
     private final ShellResolver shellResolver;
@@ -174,7 +175,7 @@ public class BashTool implements EmbeddedTool {
             // A candidate that no longer exists is skipped and the fallback is reported in the output
             // so the caller can see that the command did not run exactly where the session intended.
             final var candidates = candidateDirectories(context);
-            java.nio.file.Path skipped = null;
+            Path skipped = null;
             boolean used = false;
             for (final var candidate : candidates) {
                 if (Files.isDirectory(candidate)) {
@@ -205,7 +206,7 @@ public class BashTool implements EmbeddedTool {
         // not confidently recognized falls back to the real shell below.
         if (bashOverride != null && !command.isBlank()) {
             final var baseDir = pb.directory() == null
-                    ? java.nio.file.Path.of(".").toAbsolutePath().normalize()
+                    ? Path.of(".").toAbsolutePath().normalize()
                     : pb.directory().toPath().toAbsolutePath().normalize();
             final var rewritten = bashOverride.tryRewrite(command, baseDir);
             if (rewritten.isPresent()) {
@@ -305,8 +306,8 @@ public class BashTool implements EmbeddedTool {
      * no explicit {@code workdir} arg: the session's project root, then the configured working directory.
      * Missing or null candidates are skipped by the caller via {@link java.nio.file.Files#isDirectory}.
      */
-    private java.util.List<java.nio.file.Path> candidateDirectories(final ToolContext context) {
-        final var candidates = new java.util.ArrayList<java.nio.file.Path>(2);
+    private List<Path> candidateDirectories(final ToolContext context) {
+        final var candidates = new ArrayList<Path>(2);
         if (context.projectDir() != null) {
             candidates.add(context.projectDir().toAbsolutePath().normalize());
         }

@@ -20,6 +20,7 @@ import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import java.time.Instant;
 
 /**
  * Sidebar quota rendering: the compact window label, the single-row Unicode-block gauge bar and
@@ -106,7 +107,7 @@ final class TuiQuotaRender {
      * yields "now".
      */
     static String formatQuotaReset(final long resetAt) {
-        final var seconds = Math.max(0, resetAt - java.time.Instant.now().getEpochSecond());
+        final var seconds = Math.max(0, resetAt - Instant.now().getEpochSecond());
         if (seconds == 0) {
             return "now";
         }

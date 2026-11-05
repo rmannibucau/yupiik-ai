@@ -22,6 +22,7 @@ import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
 import io.yupiik.maven.knowledge.config.TokenBudget;
 import io.yupiik.maven.knowledge.content.ContentAcquired;
+import io.yupiik.maven.knowledge.content.ContentKind;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -39,10 +40,7 @@ class BatchSizerTest {
     private static Map<Gav, ContentAcquired> contentByGav(final List<Gav> gavs, final int perArtifactChars) {
         final var out = new LinkedHashMap<Gav, ContentAcquired>();
         for (final var gav : gavs) {
-            out.put(
-                    gav,
-                    ContentAcquired.of(
-                            gav, io.yupiik.maven.knowledge.content.ContentKind.DOC, contentOf(perArtifactChars)));
+            out.put(gav, ContentAcquired.of(gav, ContentKind.DOC, contentOf(perArtifactChars)));
         }
         return out;
     }

@@ -2398,26 +2398,6 @@ public class ChatClient implements AutoCloseable {
             final boolean stream,
             final Consumer<LlmStreamEvent> onDelta,
             final boolean reasoningAlreadyDropped,
-            final boolean argumentsAlreadyRepaired)
-            throws IOException, InterruptedException {
-        return doWithFallback(
-                request,
-                pauseListener,
-                cancelled,
-                stream,
-                onDelta,
-                reasoningAlreadyDropped,
-                argumentsAlreadyRepaired,
-                false);
-    }
-
-    private <A> A doWithFallback(
-            final ChatCompletionRequest request,
-            final Consumer<PauseEvent> pauseListener,
-            final BooleanSupplier cancelled,
-            final boolean stream,
-            final Consumer<LlmStreamEvent> onDelta,
-            final boolean reasoningAlreadyDropped,
             final boolean argumentsAlreadyRepaired,
             final boolean cooperative)
             throws IOException, InterruptedException {

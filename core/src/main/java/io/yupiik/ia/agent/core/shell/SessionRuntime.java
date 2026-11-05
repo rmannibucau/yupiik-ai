@@ -15,8 +15,11 @@
  */
 package io.yupiik.ia.agent.core.shell;
 
+import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.agent.SubagentBudget;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
+import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
@@ -102,7 +105,7 @@ public final class SessionRuntime {
     }
 
     /** The session's own cached quota snapshot; does not trigger a provider refresh. */
-    public io.yupiik.ia.agent.core.agent.AgentEvent.UsageUpdated.Quota quotaSnapshot() {
+    public AgentEvent.UsageUpdated.Quota quotaSnapshot() {
         return loop.cachedQuotaSnapshot();
     }
 
@@ -127,7 +130,7 @@ public final class SessionRuntime {
     }
 
     /** The session's shared context-compression ref source (live refs) for seam-scrub render surfaces. */
-    public io.yupiik.ia.agent.core.context.ContextCompression compression() {
+    public ContextCompression compression() {
         return loop.compression();
     }
 
@@ -146,7 +149,7 @@ public final class SessionRuntime {
      * cap), owned by the agent loop. Null for loops that cannot spawn children (sub-agent child
      * loops, standalone/btw contexts).
      */
-    public io.yupiik.ia.agent.core.agent.SubagentBudget subagentBudget() {
+    public SubagentBudget subagentBudget() {
         return loop.subagentBudget();
     }
 

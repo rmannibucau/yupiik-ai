@@ -26,11 +26,14 @@ import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.OutputKeys;
+import javax.xml.transform.TransformerConfigurationException;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import org.w3c.dom.Document;
+import org.xml.sax.InputSource;
 
 /**
  * Detects the format of raw tool outputs (cards and Ctrl+O overlay) and pretty-prints
@@ -299,7 +302,7 @@ public class ToolOutputFormat {
             final var builder = factory.newDocumentBuilder();
             final Document document;
             try (var reader = new StringReader(trimmed)) {
-                document = builder.parse(new org.xml.sax.InputSource(reader));
+                document = builder.parse(new InputSource(reader));
             }
             final var transformerFactory = TransformerFactory.newInstance();
             harden(transformerFactory);
@@ -317,12 +320,12 @@ public class ToolOutputFormat {
     }
 
     /** Returns the parsed XML document when the input is well-formed XML, else null (never throws). */
-    private static org.w3c.dom.Document parseXmlSecurely(final String raw) {
+    private static Document parseXmlSecurely(final String raw) {
         try {
             final var factory = DocumentBuilderFactory.newInstance();
             harden(factory);
             try (var reader = new StringReader(raw)) {
-                return factory.newDocumentBuilder().parse(new org.xml.sax.InputSource(reader));
+                return factory.newDocumentBuilder().parse(new InputSource(reader));
             }
         } catch (final Exception e) {
             return null;
@@ -338,7 +341,7 @@ public class ToolOutputFormat {
             factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
             factory.setXIncludeAware(false);
             factory.setExpandEntityReferences(false);
-        } catch (final javax.xml.parsers.ParserConfigurationException e) {
+        } catch (final ParserConfigurationException e) {
             throw new IllegalStateException(e);
         }
         factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
@@ -349,7 +352,7 @@ public class ToolOutputFormat {
     private static void harden(final TransformerFactory factory) {
         try {
             factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-        } catch (final javax.xml.transform.TransformerConfigurationException e) {
+        } catch (final TransformerConfigurationException e) {
             throw new IllegalStateException(e);
         }
         factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");

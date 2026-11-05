@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.tools.builtin.bashoverride;
 
 import java.nio.file.Path;
+import java.util.List;
 
 /**
  * A faithful, option-subset in-process reimplementation of a read-only bash command. Output must be
@@ -36,7 +37,7 @@ public interface JavaCommand {
      * command head, already unquoted). Returns false for unsupported options or unsafe/unsure arguments so the
      * caller triggers the real-bash fallback.
      */
-    boolean supports(Path cwd, java.util.List<String> args);
+    boolean supports(Path cwd, List<String> args);
 
     /**
      * Runs the command and appends its byte-faithful output (stdout) to {@code out}. Must not throw on
@@ -44,5 +45,5 @@ public interface JavaCommand {
      * survey semantics) and returns without error. Returns true when the invocation should count as
      * executed; false is not expected here but implemented defensively.
      */
-    boolean run(Path cwd, java.util.List<String> args, java.lang.StringBuilder out);
+    boolean run(Path cwd, List<String> args, StringBuilder out);
 }

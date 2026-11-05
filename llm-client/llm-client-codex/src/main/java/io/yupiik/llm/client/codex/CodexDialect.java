@@ -26,15 +26,18 @@ import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.openai.OpenAIResponsesDialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
+import io.yupiik.llm.client.spi.StreamAttempt;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 
 /**
  * The ChatGPT-subscription Codex backend dialect: the wire format is exactly the OpenAI Responses
@@ -71,7 +74,7 @@ public class CodexDialect extends OpenAIResponsesDialect {
      * header value for the retry (it lazily enrolls the enterprise identity on first use). {@code null}
      * (the default) disables the auto-upgrade, in which case the delegated-access 4xx surfaces as-is.
      */
-    private final java.util.function.Function<String, String> assertionUpgrader;
+    private final Function<String, String> assertionUpgrader;
 
     /**
      * Creates the dialect advertising the default Codex client version.
@@ -118,7 +121,7 @@ public class CodexDialect extends OpenAIResponsesDialect {
             final ExtendedHttpClient client,
             final ProviderSpec provider,
             final int clientVersion,
-            final java.util.function.Function<String, String> assertionUpgrader) {
+            final Function<String, String> assertionUpgrader) {
         this(mapper, client, provider, clientVersion, assertionUpgrader, false);
     }
 
@@ -142,7 +145,7 @@ public class CodexDialect extends OpenAIResponsesDialect {
             final ExtendedHttpClient client,
             final ProviderSpec provider,
             final int clientVersion,
-            final java.util.function.Function<String, String> assertionUpgrader,
+            final Function<String, String> assertionUpgrader,
             final boolean includeEncryptedReasoning) {
         this(
                 mapper,
@@ -179,7 +182,7 @@ public class CodexDialect extends OpenAIResponsesDialect {
             final ExtendedHttpClient client,
             final ProviderSpec provider,
             final int clientVersion,
-            final java.util.function.Function<String, String> assertionUpgrader,
+            final Function<String, String> assertionUpgrader,
             final boolean includeEncryptedReasoning,
             final List<String> enabledKeys,
             final boolean xClientRequestIdEnabled) {
@@ -265,18 +268,17 @@ public class CodexDialect extends OpenAIResponsesDialect {
      * codex, any 2xx to the streaming endpoint is a live SSE stream by definition.
      */
     @Override
-    protected CompletionStage<io.yupiik.llm.client.spi.StreamAttempt> openStream(
-            final byte[] payload, final BooleanSupplier cancelled) {
+    protected CompletionStage<StreamAttempt> openStream(final byte[] payload, final BooleanSupplier cancelled) {
         try {
-            return client.sendAsync(http(payload), java.net.http.HttpResponse.BodyHandlers.ofPublisher())
+            return client.sendAsync(http(payload), HttpResponse.BodyHandlers.ofPublisher())
                     .thenCompose(response -> {
                         if (response.statusCode() >= 200 && response.statusCode() <= 299) {
-                            return CompletableFuture.completedFuture(new io.yupiik.llm.client.spi.StreamAttempt(
+                            return CompletableFuture.completedFuture(new StreamAttempt(
                                     response.statusCode(), response.headers(), response.body(), null));
                         }
                         return collect(response.body())
-                                .thenApply(body -> new io.yupiik.llm.client.spi.StreamAttempt(
-                                        response.statusCode(), response.headers(), null, body));
+                                .thenApply(body ->
+                                        new StreamAttempt(response.statusCode(), response.headers(), null, body));
                     })
                     .thenCompose(attempt -> isDelegatedAccessBlocked(attempt)
                             ? retryWithAgentAssertion(payload, cancelled)
@@ -287,14 +289,14 @@ public class CodexDialect extends OpenAIResponsesDialect {
     }
 
     /** True when the failed stream attempt is the delegated-access (3p) workspace-policy rejection. */
-    private boolean isDelegatedAccessBlocked(final io.yupiik.llm.client.spi.StreamAttempt attempt) {
+    private boolean isDelegatedAccessBlocked(final StreamAttempt attempt) {
         if (attempt.statusCode() < 400
                 || assertionUpgrader == null
                 || attempt.errorBody() == null
                 || attempt.errorBody().length == 0) {
             return false;
         }
-        final var body = new String(attempt.errorBody(), java.nio.charset.StandardCharsets.UTF_8);
+        final var body = new String(attempt.errorBody(), StandardCharsets.UTF_8);
         return body.contains(DELEGATED_ACCESS_POLICY);
     }
 
@@ -305,7 +307,7 @@ public class CodexDialect extends OpenAIResponsesDialect {
      * The failure happened before any SSE event was produced, so re-sending the stream payload is safe.
      * If the upgrader itself fails, the original 4xx (the truthful cause) surfaces unchanged.
      */
-    private CompletionStage<io.yupiik.llm.client.spi.StreamAttempt> retryWithAgentAssertion(
+    private CompletionStage<StreamAttempt> retryWithAgentAssertion(
             final byte[] payload, final BooleanSupplier cancelled) {
         final String assertion;
         try {
@@ -325,15 +327,15 @@ public class CodexDialect extends OpenAIResponsesDialect {
         // apply it last so the enterprise signature replaces the rejected bearer
         builder.setHeader("authorization", assertion);
         try {
-            return client.sendAsync(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofPublisher())
+            return client.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofPublisher())
                     .thenCompose(response -> {
                         if (response.statusCode() >= 200 && response.statusCode() <= 299) {
-                            return CompletableFuture.completedFuture(new io.yupiik.llm.client.spi.StreamAttempt(
+                            return CompletableFuture.completedFuture(new StreamAttempt(
                                     response.statusCode(), response.headers(), response.body(), null));
                         }
                         return collect(response.body())
-                                .thenApply(body -> new io.yupiik.llm.client.spi.StreamAttempt(
-                                        response.statusCode(), response.headers(), null, body));
+                                .thenApply(body ->
+                                        new StreamAttempt(response.statusCode(), response.headers(), null, body));
                     });
         } catch (final RuntimeException e) {
             return failed(e);

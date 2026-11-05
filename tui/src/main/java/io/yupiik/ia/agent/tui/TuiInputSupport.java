@@ -190,7 +190,6 @@ public final class TuiInputSupport {
                     if (line.length() > 0) {
                         out.add(line.toString());
                         line.setLength(0);
-                        lineWidth = 0;
                     }
                     var rem = word;
                     while (!rem.isEmpty() && CharWidth.of(rem) > w) {

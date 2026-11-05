@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.usage.CodexUsageSnapshot;
 import java.util.List;
 import java.util.Objects;
 
@@ -206,18 +207,14 @@ public sealed interface AgentEvent {
                 }
             }
 
-            public static Quota of(
-                    final boolean enabled,
-                    final boolean supported,
-                    final io.yupiik.ia.agent.core.usage.CodexUsageSnapshot snapshot) {
+            public static Quota of(final boolean enabled, final boolean supported, final CodexUsageSnapshot snapshot) {
                 if (snapshot == null) {
                     return new Quota(false, false, null, null, 0, 0, null, null, false, List.of());
                 }
                 final var primary = snapshot.rateLimits() == null
                         ? null
                         : snapshot.rateLimits().stream()
-                                .filter(l -> io.yupiik.ia.agent.core.usage.CodexUsageSnapshot.RateLimit.PRIMARY.equals(
-                                        l.kind()))
+                                .filter(l -> CodexUsageSnapshot.RateLimit.PRIMARY.equals(l.kind()))
                                 .findFirst()
                                 .orElse(null);
                 final boolean unlimited = snapshot.credits() != null

@@ -19,6 +19,7 @@ import dev.tamboui.buffer.DiffResult;
 import dev.tamboui.layout.Position;
 import dev.tamboui.layout.Size;
 import dev.tamboui.terminal.Backend;
+import java.io.IOException;
 
 /**
  * Wraps the terminal {@link Backend} so a mouse report split by TamboUI's
@@ -66,7 +67,7 @@ public class MouseReportCoalescingBackend implements Backend {
     }
 
     @Override
-    public int read(final int timeoutMillis) throws java.io.IOException {
+    public int read(final int timeoutMillis) throws IOException {
         if (closed) {
             return -1;
         }
@@ -226,7 +227,7 @@ public class MouseReportCoalescingBackend implements Backend {
     }
 
     @Override
-    public int peek(final int timeoutMillis) throws java.io.IOException {
+    public int peek(final int timeoutMillis) throws IOException {
         if (closed) {
             return -1;
         }
@@ -251,177 +252,177 @@ public class MouseReportCoalescingBackend implements Backend {
     }
 
     @Override
-    public void draw(final DiffResult diff) throws java.io.IOException {
+    public void draw(final DiffResult diff) throws IOException {
         delegate.draw(diff);
     }
 
     @Override
-    public void flush() throws java.io.IOException {
+    public void flush() throws IOException {
         delegate.flush();
     }
 
     @Override
-    public void clear() throws java.io.IOException {
+    public void clear() throws IOException {
         delegate.clear();
     }
 
     @Override
-    public Size size() throws java.io.IOException {
+    public Size size() throws IOException {
         return delegate.size();
     }
 
     @Override
-    public void showCursor() throws java.io.IOException {
+    public void showCursor() throws IOException {
         delegate.showCursor();
     }
 
     @Override
-    public void hideCursor() throws java.io.IOException {
+    public void hideCursor() throws IOException {
         delegate.hideCursor();
     }
 
     @Override
-    public Position getCursorPosition() throws java.io.IOException {
+    public Position getCursorPosition() throws IOException {
         return delegate.getCursorPosition();
     }
 
     @Override
-    public void setCursorPosition(final Position position) throws java.io.IOException {
+    public void setCursorPosition(final Position position) throws IOException {
         delegate.setCursorPosition(position);
     }
 
     @Override
-    public void enterAlternateScreen() throws java.io.IOException {
+    public void enterAlternateScreen() throws IOException {
         delegate.enterAlternateScreen();
     }
 
     @Override
-    public void leaveAlternateScreen() throws java.io.IOException {
+    public void leaveAlternateScreen() throws IOException {
         delegate.leaveAlternateScreen();
     }
 
     @Override
-    public void enableRawMode() throws java.io.IOException {
+    public void enableRawMode() throws IOException {
         delegate.enableRawMode();
     }
 
     @Override
-    public void disableRawMode() throws java.io.IOException {
+    public void disableRawMode() throws IOException {
         delegate.disableRawMode();
     }
 
     @Override
-    public void enableMouseCapture() throws java.io.IOException {
+    public void enableMouseCapture() throws IOException {
         delegate.enableMouseCapture();
     }
 
     @Override
-    public void enableMouseCapture(final boolean motion) throws java.io.IOException {
+    public void enableMouseCapture(final boolean motion) throws IOException {
         delegate.enableMouseCapture(motion);
     }
 
     @Override
-    public void disableMouseCapture() throws java.io.IOException {
+    public void disableMouseCapture() throws IOException {
         delegate.disableMouseCapture();
     }
 
     @Override
-    public void beginSynchronizedUpdate() throws java.io.IOException {
+    public void beginSynchronizedUpdate() throws IOException {
         delegate.beginSynchronizedUpdate();
     }
 
     @Override
-    public void endSynchronizedUpdate() throws java.io.IOException {
+    public void endSynchronizedUpdate() throws IOException {
         delegate.endSynchronizedUpdate();
     }
 
     @Override
-    public void enableBracketedPaste() throws java.io.IOException {
+    public void enableBracketedPaste() throws IOException {
         delegate.enableBracketedPaste();
     }
 
     @Override
-    public void disableBracketedPaste() throws java.io.IOException {
+    public void disableBracketedPaste() throws IOException {
         delegate.disableBracketedPaste();
     }
 
     @Override
-    public void scrollUp(final int lines) throws java.io.IOException {
+    public void scrollUp(final int lines) throws IOException {
         delegate.scrollUp(lines);
     }
 
     @Override
-    public void scrollDown(final int lines) throws java.io.IOException {
+    public void scrollDown(final int lines) throws IOException {
         delegate.scrollDown(lines);
     }
 
     @Override
-    public void writeRaw(final byte[] bytes) throws java.io.IOException {
+    public void writeRaw(final byte[] bytes) throws IOException {
         delegate.writeRaw(bytes);
     }
 
     @Override
-    public void writeRaw(final String text) throws java.io.IOException {
+    public void writeRaw(final String text) throws IOException {
         delegate.writeRaw(text);
     }
 
     @Override
-    public void writeRaw(final CharSequence text) throws java.io.IOException {
+    public void writeRaw(final CharSequence text) throws IOException {
         delegate.writeRaw(text);
     }
 
     @Override
-    public void insertLines(final int lines) throws java.io.IOException {
+    public void insertLines(final int lines) throws IOException {
         delegate.insertLines(lines);
     }
 
     @Override
-    public void deleteLines(final int lines) throws java.io.IOException {
+    public void deleteLines(final int lines) throws IOException {
         delegate.deleteLines(lines);
     }
 
     @Override
-    public void moveCursorUp(final int lines) throws java.io.IOException {
+    public void moveCursorUp(final int lines) throws IOException {
         delegate.moveCursorUp(lines);
     }
 
     @Override
-    public void moveCursorDown(final int lines) throws java.io.IOException {
+    public void moveCursorDown(final int lines) throws IOException {
         delegate.moveCursorDown(lines);
     }
 
     @Override
-    public void moveCursorRight(final int columns) throws java.io.IOException {
+    public void moveCursorRight(final int columns) throws IOException {
         delegate.moveCursorRight(columns);
     }
 
     @Override
-    public void moveCursorLeft(final int columns) throws java.io.IOException {
+    public void moveCursorLeft(final int columns) throws IOException {
         delegate.moveCursorLeft(columns);
     }
 
     @Override
-    public void eraseToEndOfLine() throws java.io.IOException {
+    public void eraseToEndOfLine() throws IOException {
         delegate.eraseToEndOfLine();
     }
 
     @Override
-    public void setWindowTitle(final String title) throws java.io.IOException {
+    public void setWindowTitle(final String title) throws IOException {
         delegate.setWindowTitle(title);
     }
 
     @Override
-    public void saveWindowTitle() throws java.io.IOException {
+    public void saveWindowTitle() throws IOException {
         delegate.saveWindowTitle();
     }
 
     @Override
-    public void restoreWindowTitle() throws java.io.IOException {
+    public void restoreWindowTitle() throws IOException {
         delegate.restoreWindowTitle();
     }
 
     @Override
-    public void carriageReturn() throws java.io.IOException {
+    public void carriageReturn() throws IOException {
         delegate.carriageReturn();
     }
 
@@ -431,7 +432,7 @@ public class MouseReportCoalescingBackend implements Backend {
     }
 
     @Override
-    public void close() throws java.io.IOException {
+    public void close() throws IOException {
         closed = true;
         delegate.close();
     }

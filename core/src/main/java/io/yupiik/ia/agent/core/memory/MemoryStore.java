@@ -25,6 +25,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -246,7 +247,7 @@ public class MemoryStore {
         final var max = budget;
         final var globalText = withScope("global", global);
         final var projectText = withScope("project", project);
-        final var selected = select(globalText, projectText, global, project, prompt, max, currentPaths);
+        final var selected = select(globalText, projectText, prompt, max, currentPaths);
         final var sb = new StringBuilder("<memory>\n");
         if (!selected.global().isBlank()) {
             sb.append("<global>\n").append(selected.global()).append("\n</global>\n");
@@ -286,18 +287,6 @@ public class MemoryStore {
     private ScopeSelection select(
             final String globalText,
             final String projectText,
-            final String globalRaw,
-            final String projectRaw,
-            final String prompt,
-            final int max) {
-        return select(globalText, projectText, globalRaw, projectRaw, prompt, max, null);
-    }
-
-    private ScopeSelection select(
-            final String globalText,
-            final String projectText,
-            final String globalRaw,
-            final String projectRaw,
             final String prompt,
             final int max,
             final List<String> currentPaths) {
@@ -374,7 +363,7 @@ public class MemoryStore {
                 // real freshness via the envelope date, not file position: a recently stamped
                 // durable fact wins over an equally-relevant older one, without overriding relevance
                 final var date = entry.index() < lineDates.size() ? lineDates.get(entry.index()) : today;
-                final var ageDays = Math.min(30, java.time.temporal.ChronoUnit.DAYS.between(date, today));
+                final var ageDays = Math.min(30, ChronoUnit.DAYS.between(date, today));
                 score *= 1 + 0.02 * (30 - ageDays);
             }
             boosted.add(new Entry(entry.line(), score, entry.index()));

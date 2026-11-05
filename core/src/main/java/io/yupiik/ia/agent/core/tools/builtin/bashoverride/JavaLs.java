@@ -16,8 +16,10 @@
 package io.yupiik.ia.agent.core.tools.builtin.bashoverride;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 
@@ -84,11 +86,11 @@ public class JavaLs implements JavaCommand {
         if (!Files.isDirectory(target)) {
             return;
         }
-        final List<java.io.File> entries;
+        final List<File> entries;
         try (final var stream = Files.list(target)) {
             entries = stream.map(Path::toFile)
                     .filter(f -> all || !f.getName().startsWith("."))
-                    .sorted(Comparator.comparing(java.io.File::getName))
+                    .sorted(Comparator.comparing(File::getName))
                     .toList();
         } catch (final Exception e) {
             return;
@@ -98,13 +100,13 @@ public class JavaLs implements JavaCommand {
         }
     }
 
-    private static String longLine(final java.io.File f) {
+    private static String longLine(final File f) {
         // mode (rwxr-xr-x) + owner/user + size + mtime + name - a stable approximation of "ls -l" columns
         final var mode = (f.isDirectory() ? "d" : "-")
                 + perms(f.canRead(), 'r') + perms(f.canWrite(), 'w') + perms(f.canExecute(), 'x')
                 + "r-xr-xr-x";
         return mode + " 1 owner group " + String.format("%10d", f.length()) + " "
-                + java.time.Instant.ofEpochMilli(f.lastModified()).toString().substring(0, 10) + " " + f.getName();
+                + Instant.ofEpochMilli(f.lastModified()).toString().substring(0, 10) + " " + f.getName();
     }
 
     private static String perms(final boolean on, final char c) {

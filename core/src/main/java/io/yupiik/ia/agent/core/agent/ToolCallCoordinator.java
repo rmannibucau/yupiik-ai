@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.agent;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Future;
 import java.util.function.BooleanSupplier;
@@ -64,7 +65,7 @@ public final class ToolCallCoordinator {
                 }
                 if (end - index > 1 && parallelEnabled) {
                     final var batchStartNanos = nanoTime.getAsLong();
-                    final var futures = new java.util.ArrayList<Future<O>>(end - index);
+                    final var futures = new ArrayList<Future<O>>(end - index);
                     for (var cursor = index; cursor < end; cursor++) {
                         futures.add(parallelExecution.apply(calls.get(cursor)));
                     }

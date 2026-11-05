@@ -28,10 +28,14 @@ import io.yupiik.ia.agent.core.configuration.SummarizerConfiguration;
 import io.yupiik.ia.agent.core.configuration.TailConfiguration;
 import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
 import io.yupiik.ia.agent.core.context.SpeculativeCompaction.Candidate;
+import io.yupiik.ia.agent.core.events.CompactionStartingEvent;
+import io.yupiik.ia.agent.core.events.EventContext;
+import io.yupiik.ia.agent.core.events.HookResult;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.RetryMode;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -40,10 +44,14 @@ import io.yupiik.llm.client.ContextWindowExceededException;
 import io.yupiik.llm.client.LlmHttpFailureException;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -251,12 +259,12 @@ public class CompactionCoordinator {
     }
 
     /** Captures immutable source and resolved summarizer inputs on the foreground thread. */
-    public java.util.Optional<SpeculativeCompaction.Prepared> prepareSpeculation(
+    public Optional<SpeculativeCompaction.Prepared> prepareSpeculation(
             final List<Message> messages, final ChatSettings settings, final int extraToolTokens) {
         final var cutoff = eligibleCutoff(messages);
         final var from = leadingSystemMessages(messages).size();
         if (cutoff <= from) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
         try {
             final var prefix = SpeculativeCompaction.snapshot(messages.subList(0, cutoff));
@@ -264,7 +272,7 @@ public class CompactionCoordinator {
             final var model = compactModelReference(routed);
             final var template = summaryRequest(model, configSystemPrompt(), "", routed);
             final var chunkCap = effectiveChunkCap(model);
-            return java.util.Optional.of(new SpeculativeCompaction.Prepared(
+            return Optional.of(new SpeculativeCompaction.Prepared(
                     from,
                     prefix,
                     previousSummary(prefix),
@@ -276,7 +284,7 @@ public class CompactionCoordinator {
                     usageTracker == null ? 0 : usageTracker.estimateContext(messages, extraToolTokens)));
         } catch (final IllegalArgumentException e) {
             LOGGER.fine("Skipping speculative compaction: unsupported snapshot payload");
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
     }
 
@@ -296,7 +304,7 @@ public class CompactionCoordinator {
         if (cutoff < messages.size() && "tool".equals(messages.get(cutoff).role())) {
             return false;
         }
-        final var outstanding = new java.util.HashSet<String>();
+        final var outstanding = new HashSet<String>();
         for (var i = 0; i < cutoff; i++) {
             final var message = messages.get(i);
             if (message.toolCalls() != null) {
@@ -318,9 +326,9 @@ public class CompactionCoordinator {
         if (emitter == null) {
             return false;
         }
-        final var hook = new io.yupiik.ia.agent.core.events.HookResult();
-        emitter.emit(new io.yupiik.ia.agent.core.events.CompactionStartingEvent(
-                new io.yupiik.ia.agent.core.events.EventContext(
+        final var hook = new HookResult();
+        emitter.emit(new CompactionStartingEvent(
+                new EventContext(
                         sessionId, null, null, configuration.resolveProjectDir().toString(), null, null, null, null),
                 hook));
         return hook.forbidden();
@@ -341,7 +349,6 @@ public class CompactionCoordinator {
                     chunks,
                     source.priorSummary(),
                     null,
-                    chunkCap,
                     cancelled,
                     source.settings(),
                     true,
@@ -353,10 +360,7 @@ public class CompactionCoordinator {
             }
             if (!outcome.summary().isBlank()) {
                 return new Candidate(
-                        source,
-                        outcome.summary(),
-                        calls,
-                        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+                        source, outcome.summary(), calls, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
             }
             if (!outcome.sizeError() || chunkCap <= source.minimumChunkCap()) {
                 return null;
@@ -809,7 +813,7 @@ public class CompactionCoordinator {
      * anchor: never paraphrased away, only pruned by {@code purgeDeliveredSubagents} once old).
      */
     private static List<Message> subagentBlocks(final List<Message> region) {
-        final var out = new java.util.ArrayList<Message>();
+        final var out = new ArrayList<Message>();
         for (final var m : region) {
             final var content = m.content() instanceof String s ? s : null;
             if (m.role() != null && "user".equals(m.role()) && content != null && content.startsWith("<subagent ")) {
@@ -1002,7 +1006,6 @@ public class CompactionCoordinator {
                 chunks,
                 priorSummary,
                 focus,
-                chunkCap,
                 cancelled,
                 settings,
                 quiet,
@@ -1036,7 +1039,6 @@ public class CompactionCoordinator {
             final List<String> chunks,
             final String priorSummary,
             final String focus,
-            final int chunkCap,
             final BooleanSupplier cancelled,
             final ChatSettings settings,
             final boolean quiet,
@@ -1078,7 +1080,7 @@ public class CompactionCoordinator {
                             pause -> {
                                 if (!quiet) {
                                     emit(new AgentEvent.Pause(
-                                            pause.kind() == io.yupiik.ia.agent.core.llm.PauseEvent.Pause.THROTTLE
+                                            pause.kind() == PauseEvent.Pause.THROTTLE
                                                     ? AgentEvent.Pause.Kind.THROTTLE
                                                     : AgentEvent.Pause.Kind.RETRY,
                                             label + ": " + pause.message(),
@@ -1312,7 +1314,7 @@ public class CompactionCoordinator {
         if (body == null || body.isBlank()) {
             return false;
         }
-        final var lower = body.toLowerCase(java.util.Locale.ROOT);
+        final var lower = body.toLowerCase(Locale.ROOT);
         return lower.contains("context_length")
                 || lower.contains("context length")
                 || lower.contains("context window")

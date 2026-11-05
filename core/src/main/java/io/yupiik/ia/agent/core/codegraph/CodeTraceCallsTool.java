@@ -208,14 +208,6 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         return idx.resolveSuffix(symbol);
     }
 
-    private String edgeTypesLabel(final Set<GraphModel.EdgeType> edgeTypes) {
-        return edgeTypes.stream()
-                .map(t -> t.name().toLowerCase(Locale.ROOT))
-                .sorted()
-                .reduce((a, b) -> a + ", " + b)
-                .orElse("-");
-    }
-
     private Set<GraphModel.EdgeType> parseEdgeTypes(final String raw) {
         if (raw == null || raw.isBlank()) {
             return EnumSet.of(GraphModel.EdgeType.CALLS);

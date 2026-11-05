@@ -28,6 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+import javax.tools.JavaCompiler;
+import javax.tools.JavaFileObject;
 import javax.tools.SimpleJavaFileObject;
 import javax.tools.ToolProvider;
 import org.junit.jupiter.api.Test;
@@ -35,18 +37,18 @@ import org.junit.jupiter.api.io.TempDir;
 
 class BytecodeAnalyzerTest {
 
-    private static final javax.tools.JavaCompiler COMPILER = ToolProvider.getSystemJavaCompiler();
+    private static final JavaCompiler COMPILER = ToolProvider.getSystemJavaCompiler();
 
     static {
         warmJavac(COMPILER);
     }
 
-    private static void warmJavac(final javax.tools.JavaCompiler compiler) {
+    private static void warmJavac(final JavaCompiler compiler) {
         final var out = Path.of("target", "javac-warmup");
         try {
             Files.createDirectories(out);
             final var unit =
-                    new javax.tools.SimpleJavaFileObject(
+                    new SimpleJavaFileObject(
                             URI.create("string:///Warmup.java"), javax.tools.JavaFileObject.Kind.SOURCE) {
                         @Override
                         public CharSequence getCharContent(final boolean ignoreEncodingErrors) {
@@ -76,7 +78,7 @@ class BytecodeAnalyzerTest {
                 .map(e ->
                         new SimpleJavaFileObject(
                                 URI.create("string:///" + e.getKey().replace('.', '/') + ".java"),
-                                javax.tools.JavaFileObject.Kind.SOURCE) {
+                                JavaFileObject.Kind.SOURCE) {
                             @Override
                             public CharSequence getCharContent(final boolean ignoreEncodingErrors) {
                                 return e.getValue();
@@ -97,10 +99,6 @@ class BytecodeAnalyzerTest {
             }
         }
         return jar;
-    }
-
-    private String appMainSource(final String pkg, final String className) {
-        return "package " + pkg + "; public class " + className + " { public static void main(String[] args) {} }";
     }
 
     @Test

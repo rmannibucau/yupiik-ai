@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
@@ -32,12 +33,18 @@ import io.yupiik.llm.client.test.TestJsonMapper;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -81,7 +88,7 @@ class CodexOAuthClientTest {
         final String idTokenPayload =
                 "{\"https://api.openai.com/auth.chatgpt_account_id\":\"acc-123\"," + "\"sub\":\"user\"}";
         final String idToken = "header."
-                + java.util.Base64.getUrlEncoder()
+                + Base64.getUrlEncoder()
                         .withoutPadding()
                         .encodeToString(idTokenPayload.getBytes(StandardCharsets.UTF_8))
                 + ".sig";
@@ -171,7 +178,7 @@ class CodexOAuthClientTest {
     }
 
     private static String urlEncode(final String value) {
-        return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8);
+        return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
     @Test
@@ -179,7 +186,7 @@ class CodexOAuthClientTest {
         // a fake id_token carrying the chatgpt_account_id claim
         final String idTokenPayload = "{\"chatgpt_account_id\":\"acc-9\"}";
         final String idToken = "header."
-                + java.util.Base64.getUrlEncoder()
+                + Base64.getUrlEncoder()
                         .withoutPadding()
                         .encodeToString(idTokenPayload.getBytes(StandardCharsets.UTF_8))
                 + ".sig";
@@ -212,11 +219,11 @@ class CodexOAuthClientTest {
         assertNotNull(callbackPort.get(), "the authorize URL must expose the loopback port");
 
         final var http = HttpClient.newHttpClient();
-        final var callback = java.net.http.HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + callbackPort.get()
+        final var callback = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + callbackPort.get()
                         + "/auth/callback?state=" + callbackState.get() + "&code=thecode"))
                 .GET()
                 .build();
-        http.send(callback, java.net.http.HttpResponse.BodyHandlers.discarding());
+        http.send(callback, HttpResponse.BodyHandlers.discarding());
 
         final CodexTokenStore store = result.get(5, TimeUnit.SECONDS);
         assertEquals("acc", store.accessToken());
@@ -230,7 +237,7 @@ class CodexOAuthClientTest {
     private static int portOf(final String authorizeUrl) {
         final var uri = URI.create(authorizeUrl);
         final var query = uri.getRawQuery();
-        final var m = java.util.regex.Pattern.compile("redirect_uri=[^&]*127\\.0\\.0\\.1%3A(\\d+)[^&]*")
+        final var m = Pattern.compile("redirect_uri=[^&]*127\\.0\\.0\\.1%3A(\\d+)[^&]*")
                 .matcher(query);
         assertTrue(m.find(), "cannot find the port in " + authorizeUrl);
         return Integer.parseInt(m.group(1));
@@ -238,25 +245,21 @@ class CodexOAuthClientTest {
 
     private static String stateOf(final String authorizeUrl) {
         final var uri = URI.create(authorizeUrl);
-        final var m = java.util.regex.Pattern.compile("state=([^&]+)").matcher(uri.getRawQuery());
+        final var m = Pattern.compile("state=([^&]+)").matcher(uri.getRawQuery());
         assertTrue(m.find(), "cannot find the state in " + authorizeUrl);
-        return java.net.URLDecoder.decode(m.group(1), StandardCharsets.UTF_8);
+        return URLDecoder.decode(m.group(1), StandardCharsets.UTF_8);
     }
 
     @Test
     void accountIdExtraction(final JsonMapper mapper) {
         final String payload = "{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"ns-1\"}}";
-        final String token = "h."
-                + java.util.Base64.getUrlEncoder()
-                        .withoutPadding()
-                        .encodeToString(payload.getBytes(StandardCharsets.UTF_8));
+        final String token =
+                "h." + Base64.getUrlEncoder().withoutPadding().encodeToString(payload.getBytes(StandardCharsets.UTF_8));
         assertEquals("ns-1", CodexOAuthClient.extractAccountId(token, mapper));
 
         final String bare = "{\"chatgpt_account_id\":\"bare-1\"}";
-        final String bareToken = "h."
-                + java.util.Base64.getUrlEncoder()
-                        .withoutPadding()
-                        .encodeToString(bare.getBytes(StandardCharsets.UTF_8));
+        final String bareToken =
+                "h." + Base64.getUrlEncoder().withoutPadding().encodeToString(bare.getBytes(StandardCharsets.UTF_8));
         assertEquals("bare-1", CodexOAuthClient.extractAccountId(bareToken, mapper));
 
         assertNull(CodexOAuthClient.extractAccountId("not-a-jwt", mapper));
@@ -288,8 +291,7 @@ class CodexOAuthClientTest {
         assertFalse(gated.usableWith(150), "client version below the minimum is not usable");
     }
 
-    private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status, final String body)
-            throws IOException {
+    private static void respond(final HttpExchange exchange, final int status, final String body) throws IOException {
         final byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("content-type", "application/json");
         exchange.sendResponseHeaders(status, bytes.length);

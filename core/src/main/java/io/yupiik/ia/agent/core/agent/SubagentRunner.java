@@ -33,14 +33,17 @@ import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.InMemoryTodoStore;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
+import io.yupiik.ia.agent.core.usage.QuotaSnapshotStore;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.time.Clock;
@@ -49,8 +52,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BooleanSupplier;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class SubagentRunner {
@@ -73,8 +79,8 @@ public class SubagentRunner {
     protected final BackoffSleeper backoffSleeper;
     protected final ExecutorService executor;
     protected final SubagentRegistry subagentRegistry;
-    protected final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
-    protected final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore;
+    protected final SecretRedactor secretRedactor;
+    protected final QuotaSnapshotStore quotaStore;
 
     public SubagentRunner(
             final ChatClient chatClient,
@@ -96,8 +102,8 @@ public class SubagentRunner {
             final SubagentRegistry subagentRegistry,
             final PrecisionDurationMarkerProvider precisionDurationMarker,
             final BackoffSleeper backoffSleeper,
-            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor,
-            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore) {
+            final SecretRedactor secretRedactor,
+            final QuotaSnapshotStore quotaStore) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -197,7 +203,7 @@ public class SubagentRunner {
                     deliverToParent(state, message, false, wasCancelled);
                 }
             });
-        } catch (final java.util.concurrent.RejectedExecutionException e) {
+        } catch (final RejectedExecutionException e) {
             final var message = "Subagent could not be scheduled: " + e.getMessage();
             final var result = SubagentRegistry.SubagentResult.error(message, "");
             subagentRegistry.complete(state.id(), result);
@@ -251,10 +257,10 @@ public class SubagentRunner {
                 intersectToolCeilings(state.parentAllowedTools(), profileTools, state.allowedTools());
         if (state.parentAllowedTools() != null || profileTools != null || state.allowedTools() != null) {
             final var available = toolRegistry.tools().stream()
-                    .filter(io.yupiik.ia.agent.core.tools.EmbeddedTool::usable)
-                    .map(io.yupiik.ia.agent.core.tools.EmbeddedTool::name)
-                    .collect(java.util.stream.Collectors.toSet());
-            final var unknown = new java.util.TreeSet<String>();
+                    .filter(EmbeddedTool::usable)
+                    .map(EmbeddedTool::name)
+                    .collect(Collectors.toSet());
+            final var unknown = new TreeSet<String>();
             if (profileTools != null) {
                 unknown.addAll(profileTools);
             }
@@ -416,13 +422,13 @@ public class SubagentRunner {
 
     @SafeVarargs
     static Set<String> intersectToolCeilings(final Set<String>... ceilings) {
-        java.util.HashSet<String> result = null;
+        HashSet<String> result = null;
         for (final var ceiling : ceilings) {
             if (ceiling == null) {
                 continue;
             }
             if (result == null) {
-                result = new java.util.HashSet<>(ceiling);
+                result = new HashSet<>(ceiling);
             } else {
                 result.retainAll(ceiling);
             }

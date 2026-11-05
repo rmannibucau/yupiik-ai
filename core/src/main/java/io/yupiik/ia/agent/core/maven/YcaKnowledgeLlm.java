@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.maven.json.EntryPointsRoot;
 import io.yupiik.ia.agent.core.maven.json.SkillRoot;
 import io.yupiik.ia.agent.core.maven.json.SuggestRoot;
 import io.yupiik.maven.knowledge.Gav;
+import io.yupiik.maven.knowledge.config.TokenBudget;
 import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
 import io.yupiik.maven.knowledge.llm.LlmText;
 import io.yupiik.maven.knowledge.llm.MvnProjectDeps;
@@ -84,8 +85,8 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
     }
 
     @Override
-    public io.yupiik.maven.knowledge.config.TokenBudget tokenBudget() {
-        return new io.yupiik.maven.knowledge.config.TokenBudget(
+    public TokenBudget tokenBudget() {
+        return new TokenBudget(
                 chatClient == null ? 0 : chatClient.contextWindow(runSettings),
                 chatClient == null ? 0 : chatClient.outputTokens(runSettings));
     }

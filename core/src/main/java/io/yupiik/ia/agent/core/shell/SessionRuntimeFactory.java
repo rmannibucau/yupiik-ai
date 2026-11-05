@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.MemoryExtractor;
+import io.yupiik.ia.agent.core.agent.SubagentBudget;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.agent.TodoPromptResolver;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
@@ -44,13 +45,17 @@ import io.yupiik.ia.agent.core.permissions.BashRulesRegistry;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
+import io.yupiik.ia.agent.core.usage.QuotaSnapshotStore;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.concurrent.ExecutorService;
 
@@ -82,8 +87,8 @@ public class SessionRuntimeFactory {
     private final ExecutorService executor;
     private final BashRulesRegistry bashRulesRegistry;
     private final MemoryProductionPolicy memoryProductionPolicy;
-    private final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore;
-    private volatile io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
+    private final QuotaSnapshotStore quotaStore;
+    private volatile SecretRedactor secretRedactor;
     private final NotificationService notificationService;
 
     public SessionRuntimeFactory(
@@ -108,8 +113,8 @@ public class SessionRuntimeFactory {
             final ExecutorService executor,
             final BashRulesRegistry bashRulesRegistry,
             final MemoryProductionPolicy memoryProductionPolicy,
-            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore,
-            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor,
+            final QuotaSnapshotStore quotaStore,
+            final SecretRedactor secretRedactor,
             final NotificationService notificationService) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
@@ -228,8 +233,7 @@ public class SessionRuntimeFactory {
         // session object (dies with it, no registry-side map to clean up). Sub-agent child loops
         // (built directly by SubagentRunner) never get one: nested spawns are disabled anyway.
         if (configuration != null && configuration.subagents() != null) {
-            loop.subagentBudget(new io.yupiik.ia.agent.core.agent.SubagentBudget(
-                    configuration.subagents().maxConcurrent()));
+            loop.subagentBudget(new SubagentBudget(configuration.subagents().maxConcurrent()));
         }
         if (emitter != null) {
             emitter.emit(new SessionStartedEvent(
@@ -265,15 +269,15 @@ public class SessionRuntimeFactory {
      * the session was recorded) must never hand a dead path to tools, so it falls back to the configured
      * working directory instead.
      */
-    protected java.nio.file.Path resolveSessionWorkdir(final String sessionId) {
+    protected Path resolveSessionWorkdir(final String sessionId) {
         if (sessionStore == null || sessionId == null) {
             return null;
         }
         final var recorded = sessionStore.projectDirOf(sessionId);
         if (recorded != null && !recorded.isBlank()) {
             try {
-                final var dir = java.nio.file.Path.of(recorded).toAbsolutePath().normalize();
-                if (java.nio.file.Files.isDirectory(dir)) {
+                final var dir = Path.of(recorded).toAbsolutePath().normalize();
+                if (Files.isDirectory(dir)) {
                     return dir;
                 }
             } catch (final RuntimeException e) {

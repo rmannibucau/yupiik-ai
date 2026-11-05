@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
+import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.time.Clock;
@@ -156,7 +157,7 @@ public class MemoryExtractor {
     private final String sessionId;
     private final MemoryCompactor memoryCompactor;
     private final MemoryProductionPolicy productionPolicy;
-    private volatile io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
+    private volatile SecretRedactor secretRedactor;
     /** Serializes extraction and protects the successful input snapshot (in-memory watermark). */
     private final ReentrantLock extractionLock = new ReentrantLock();
 
@@ -175,7 +176,7 @@ public class MemoryExtractor {
             final String sessionId,
             final MemoryCompactor memoryCompactor,
             final MemoryProductionPolicy productionPolicy,
-            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
+            final SecretRedactor secretRedactor) {
         this.chatClient = chatClient;
         this.configuration = configuration;
         this.providerManager = providerManager;

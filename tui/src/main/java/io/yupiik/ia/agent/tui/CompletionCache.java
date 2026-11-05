@@ -16,8 +16,10 @@
 package io.yupiik.ia.agent.tui;
 
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Lazy completion value store for the TUI prompt. Each slice is populated on
@@ -60,14 +62,11 @@ public final class CompletionCache {
     private final ConcurrentMap<String, ConcurrentMap<String, List<String>>> variants = new ConcurrentHashMap<>();
 
     // in-flight guards so concurrent completions do not schedule duplicate warm-ups
-    private final java.util.concurrent.atomic.AtomicBoolean toolsLoading =
-            new java.util.concurrent.atomic.AtomicBoolean();
-    private final java.util.concurrent.atomic.AtomicBoolean serversLoading =
-            new java.util.concurrent.atomic.AtomicBoolean();
-    private final java.util.concurrent.atomic.AtomicBoolean sessionsLoading =
-            new java.util.concurrent.atomic.AtomicBoolean();
-    private final java.util.Set<String> modelsLoading = ConcurrentHashMap.newKeySet();
-    private final java.util.Set<String> variantsLoading = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean toolsLoading = new AtomicBoolean();
+    private final AtomicBoolean serversLoading = new AtomicBoolean();
+    private final AtomicBoolean sessionsLoading = new AtomicBoolean();
+    private final Set<String> modelsLoading = ConcurrentHashMap.newKeySet();
+    private final Set<String> variantsLoading = ConcurrentHashMap.newKeySet();
 
     public CompletionCache(final Runnable onChanged) {
         this.onChanged = onChanged == null ? () -> {} : onChanged;

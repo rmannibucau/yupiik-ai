@@ -17,6 +17,7 @@ package io.yupiik.maven.knowledge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import io.yupiik.codegraph.index.CodeGraphIndex;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
 import io.yupiik.maven.knowledge.content.ContentAcquirer;
 import io.yupiik.maven.knowledge.content.ContentKind;
@@ -162,7 +163,7 @@ class ContentAcquirerTest {
             assertEquals(false, bytes.length == 0, "codegraph must be produced for a jar with classes");
             // the fake jar embeds an invalid class entry, so BytecodeAnalyzer tolerates it and yields no symbols;
             // what matters is that the payload is a valid, loadable shared index (round-trips without error)
-            final var index = io.yupiik.codegraph.index.CodeGraphIndex.load(bytes);
+            final var index = CodeGraphIndex.load(bytes);
             assertEquals(0, index.symbolCount(), "invalid fake class is skipped, index still loads");
         }
     }

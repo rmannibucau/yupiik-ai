@@ -15,7 +15,9 @@
  */
 package io.yupiik.maven.knowledge.mcp.llm;
 
+import io.yupiik.fusion.http.server.api.Request;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.mcp.model.Content;
 import io.yupiik.fusion.mcp.model.CreateMessageResponse;
 import io.yupiik.fusion.mcp.model.CreateSamplingMessageParameters;
 import io.yupiik.fusion.mcp.model.Role;
@@ -47,7 +49,7 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
     private static final long MVN_TIMEOUT_MS = 300_000;
 
     private final MCPSessions sessions;
-    private final io.yupiik.fusion.http.server.api.Request request;
+    private final Request request;
     private final JsonMapper mapper;
     private final String projectDir;
     private final Path dependencyCache;
@@ -56,7 +58,7 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
 
     public MCPKnowledgeLlm(
             final MCPSessions sessions,
-            final io.yupiik.fusion.http.server.api.Request request,
+            final Request request,
             final JsonMapper mapper,
             final String projectDir,
             final Path dependencyCache,
@@ -151,7 +153,7 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
                     .createMessage(new CreateSamplingMessageParameters(
                             null,
                             8192,
-                            List.of(new SamplingMessage(Role.user, io.yupiik.fusion.mcp.model.Content.text(user))),
+                            List.of(new SamplingMessage(Role.user, Content.text(user))),
                             null,
                             null,
                             null,

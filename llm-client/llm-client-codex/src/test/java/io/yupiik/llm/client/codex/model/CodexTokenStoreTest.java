@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.llm.client.test.TestJsonMapper;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
@@ -33,7 +34,7 @@ class CodexTokenStoreTest {
                 .withProvenance("https://auth.openai.com", "app_EMoamEEZ73f0CkXaXp7hrann")
                 .withApiKey("openai-api-key-1");
         final String json = mapper.toString(store);
-        org.junit.jupiter.api.Assertions.assertTrue(json.contains("openai_api_key"), json);
+        Assertions.assertTrue(json.contains("openai_api_key"), json);
         final CodexTokenStore back = mapper.fromString(CodexTokenStore.class, json);
         assertEquals("acc", back.accessToken());
         assertEquals("openai-api-key-1", back.openaiApiKey());

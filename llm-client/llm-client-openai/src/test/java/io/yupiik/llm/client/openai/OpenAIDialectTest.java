@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
@@ -57,6 +58,7 @@ import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -116,16 +118,12 @@ class OpenAIDialectTest {
                 extensions);
     }
 
-    private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status, final String body)
-            throws IOException {
+    private static void respond(final HttpExchange exchange, final int status, final String body) throws IOException {
         respond(exchange, status, "application/json", body);
     }
 
     private static void respond(
-            final com.sun.net.httpserver.HttpExchange exchange,
-            final int status,
-            final String contentType,
-            final String body)
+            final HttpExchange exchange, final int status, final String contentType, final String body)
             throws IOException {
         final var bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", contentType);
@@ -961,7 +959,7 @@ class OpenAIDialectTest {
                 .orElseThrow();
         assertEquals("stop", end.finishReason());
         final var usage = end.usage();
-        org.junit.jupiter.api.Assertions.assertNotNull(usage, "nested response.usage must reach the End event");
+        Assertions.assertNotNull(usage, "nested response.usage must reach the End event");
         assertEquals(3L, usage.prompt(), "nested response.usage must reach the End event");
         assertEquals(5L, usage.completion());
         assertEquals(8L, usage.total());

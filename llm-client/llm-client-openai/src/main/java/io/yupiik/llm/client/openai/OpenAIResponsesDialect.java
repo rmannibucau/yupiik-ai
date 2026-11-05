@@ -32,8 +32,10 @@ import io.yupiik.llm.client.openai.model.ResponsesTool;
 import io.yupiik.llm.client.spi.AbstractDialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.spi.SseParser;
+import io.yupiik.llm.client.spi.StreamAttempt;
 import io.yupiik.llm.client.spi.Streams;
 import java.net.http.HttpRequest;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -49,6 +51,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.logging.Logger;
 
 /** OpenAI {@code /responses} reactive dialect mapping the neutral model to the Responses wire format. */
@@ -370,7 +373,7 @@ public class OpenAIResponsesDialect extends AbstractDialect {
      * Assembles a live SSE stream into a single {@link LlmResponse}.
      */
     private CompletionStage<LlmResponse> assembleEvents(
-            final Flow.Publisher<List<java.nio.ByteBuffer>> live, final BooleanSupplier cancelled) {
+            final Flow.Publisher<List<ByteBuffer>> live, final BooleanSupplier cancelled) {
         final var future = new CompletableFuture<LlmResponse>();
         Streams.toEvents(live, cancelled, mapEventCapture(ConcurrentHashMap.newKeySet()), () -> null, onRawLine)
                 .subscribe(new LlmResponseAssembler(future));
@@ -386,15 +389,14 @@ public class OpenAIResponsesDialect extends AbstractDialect {
      * @param streamedArgIds the per-stream delta-observed call-id set.
      * @return a mapper function bound to that set.
      */
-    private java.util.function.Function<SseParser.Event, List<LlmStreamEvent>> mapEventCapture(
-            final Set<String> streamedArgIds) {
+    private Function<SseParser.Event, List<LlmStreamEvent>> mapEventCapture(final Set<String> streamedArgIds) {
         return event -> mapEvent(event, streamedArgIds);
     }
 
     /**
      * Surfaces a failed single-shot stream attempt as a classified {@link LlmResponse} failure.
      */
-    private CompletionStage<LlmResponse> assembleFailure(final io.yupiik.llm.client.spi.StreamAttempt attempt) {
+    private CompletionStage<LlmResponse> assembleFailure(final StreamAttempt attempt) {
         return streamError(attempt)
                 .thenCompose(ignored -> failed(new LlmResponseParseException(
                         name(),
@@ -413,11 +415,11 @@ public class OpenAIResponsesDialect extends AbstractDialect {
      * @param attempt the failed stream attempt.
      * @return {@code true} when the error is a {@code reasoning.include} unknown-parameter rejection.
      */
-    protected boolean isReasoningIncludeRejected(final io.yupiik.llm.client.spi.StreamAttempt attempt) {
+    protected boolean isReasoningIncludeRejected(final StreamAttempt attempt) {
         if (attempt.statusCode() != 400 || attempt.errorBody() == null || attempt.errorBody().length == 0) {
             return false;
         }
-        final var body = new String(attempt.errorBody(), java.nio.charset.StandardCharsets.UTF_8);
+        final var body = new String(attempt.errorBody(), StandardCharsets.UTF_8);
         return isReasoningIncludeRejectedBody(body);
     }
 
@@ -463,7 +465,7 @@ public class OpenAIResponsesDialect extends AbstractDialect {
      * @param cancelled cancellation probe.
      * @return a stage completing with the retried stream attempt.
      */
-    protected CompletionStage<io.yupiik.llm.client.spi.StreamAttempt> retryWithoutEncryptedReasoning(
+    protected CompletionStage<StreamAttempt> retryWithoutEncryptedReasoning(
             final LlmRequest request, final boolean stream, final BooleanSupplier cancelled) {
         final var payload = mapper.toBytes(toWire(request, stream, false));
         return openStream(payload, cancelled);

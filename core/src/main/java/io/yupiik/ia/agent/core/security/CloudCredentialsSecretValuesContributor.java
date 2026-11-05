@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /**
  * Harvests secret values from the well-known cloud provider credential files (INI for AWS, JSON for
@@ -130,7 +131,7 @@ public class CloudCredentialsSecretValuesContributor implements SecretValuesCont
     }
 
     /** A leading {@code [section]} line: distinguishes an INI file from a JSON array. */
-    private static final java.util.regex.Pattern INI_SECTION = java.util.regex.Pattern.compile("\\[[A-Za-z0-9_.\\-]+]");
+    private static final Pattern INI_SECTION = Pattern.compile("\\[[A-Za-z0-9_.\\-]+]");
 
     private void harvest(final String location, final Collection<String> out) {
         final var path = SecretPaths.resolve(configuration, location);

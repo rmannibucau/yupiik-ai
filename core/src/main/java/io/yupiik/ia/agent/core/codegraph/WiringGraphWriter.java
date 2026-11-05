@@ -97,7 +97,7 @@ public class WiringGraphWriter {
                 m.put("owner", owner);
             }
             m.put("origin", "ast");
-            m.put("body_hash", symbolBodyHash(s, cache));
+            m.put("body_hash", symbolBodyHash(s));
             final var summary = cache == null ? null : cache.symbol(cache.symbolKey(s.file(), s.fqn()));
             if (summary != null) {
                 m.put("summary", summary.summary());
@@ -143,7 +143,7 @@ public class WiringGraphWriter {
      * from the symbol's own identity (fqn, kind, file, span, signature), so editing a definition changes its
      * hash and marks it {@code stale} until re-enriched.
      */
-    private static String symbolBodyHash(final GraphModel.Symbol symbol, final DocEnricherCache cache) {
+    private static String symbolBodyHash(final GraphModel.Symbol symbol) {
         return DocEnricherCache.symbolBodyDigest(symbol);
     }
 

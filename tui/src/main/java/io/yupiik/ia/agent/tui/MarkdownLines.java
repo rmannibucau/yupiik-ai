@@ -926,21 +926,6 @@ public final class MarkdownLines {
         };
     }
 
-    /**
-     * Wraps a single logical line of styled spans to {@code width}, applying
-     * {@code prefix.first()} on the first physical line and {@code prefix.cont()} on
-     * wrapped continuation lines. A single token wider than {@code width} is left
-     * alone when {@code breakWords} is false (prose) and hard-split when true (code).
-     */
-    private static void appendWrapped(
-            final List<Span> content,
-            final boolean breakWords,
-            final int width,
-            final Prefix prefix,
-            final List<Line> out) {
-        appendWrapped(content, breakWords, width, prefix, out, null);
-    }
-
     private static void appendWrapped(
             final List<Span> content,
             final boolean breakWords,
@@ -1014,17 +999,6 @@ public final class MarkdownLines {
         }
         final var t = text.toString();
         return t.indexOf("://") >= 0 || t.startsWith("www.");
-    }
-
-    /**
-     * Hard-splits a single over-wide word (URL/code token) into rows so no character is lost on
-     * selection or copy. The first row is {@code prefix} plus up to {@code width - prefixWidth}
-     * characters; further rows are flush-left {@code width}-wide chunks. Each row's spans keep their
-     * original style and any OSC-8 hyperlink, so wrapped long links stay clickable on every row.
-     */
-    private static void splitLongWord(
-            final List<Span> word, final List<Span> prefix, final int width, final List<Line> out) {
-        splitLongWord(word, prefix, width, out, null);
     }
 
     private static void splitLongWord(

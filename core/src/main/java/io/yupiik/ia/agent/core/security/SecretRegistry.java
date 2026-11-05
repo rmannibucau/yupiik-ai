@@ -25,6 +25,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -54,12 +56,12 @@ public class SecretRegistry {
     /** Exact harvested values, longest first (so the most specific substring wins). */
     private volatile List<String> harvestedValues = List.of();
 
-    private final java.util.Set<String> runtimeValues = new LinkedHashSet<>();
+    private final Set<String> runtimeValues = new LinkedHashSet<>();
 
     private volatile List<Pattern> customPatterns = List.of();
     private volatile List<Pattern> excludes = List.of();
     /** Guard so the harvest runs once (on Start, or lazily on first use when Start did not fire). */
-    private final java.util.concurrent.atomic.AtomicBoolean scanned = new java.util.concurrent.atomic.AtomicBoolean();
+    private final AtomicBoolean scanned = new AtomicBoolean();
 
     public SecretRegistry(
             final CodingAgentConfiguration configuration,
@@ -124,7 +126,7 @@ public class SecretRegistry {
         updateHarvest(base);
     }
 
-    private void updateHarvest(final java.util.Set<String> base) {
+    private void updateHarvest(final Set<String> base) {
         // longest first so substring replacement prefers the exact/longest match
         harvestedValues = base.stream()
                 .filter(v -> v != null && !v.isBlank() && v.length() >= minLength())

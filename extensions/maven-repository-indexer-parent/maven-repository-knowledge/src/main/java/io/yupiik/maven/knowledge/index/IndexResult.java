@@ -15,6 +15,7 @@
  */
 package io.yupiik.maven.knowledge.index;
 
+import io.yupiik.maven.knowledge.Gav;
 import java.util.List;
 
 /**
@@ -25,17 +26,17 @@ import java.util.List;
  * @param skipped    true when the artifact was present but skipped (immutable-skip or no usable content).
  * @param reason     human readable outcome for logging / feedback.
  */
-public record IndexResult(io.yupiik.maven.knowledge.Gav gav, boolean indexed, boolean skipped, String reason) {
+public record IndexResult(Gav gav, boolean indexed, boolean skipped, String reason) {
 
-    public static IndexResult indexed(final io.yupiik.maven.knowledge.Gav gav, final String reason) {
+    public static IndexResult indexed(final Gav gav, final String reason) {
         return new IndexResult(gav, true, false, reason);
     }
 
-    public static IndexResult skipped(final io.yupiik.maven.knowledge.Gav gav, final String reason) {
+    public static IndexResult skipped(final Gav gav, final String reason) {
         return new IndexResult(gav, false, true, reason);
     }
 
-    public static IndexResult missing(final io.yupiik.maven.knowledge.Gav gav) {
+    public static IndexResult missing(final Gav gav) {
         return new IndexResult(gav, false, true, "not present in local repository");
     }
 

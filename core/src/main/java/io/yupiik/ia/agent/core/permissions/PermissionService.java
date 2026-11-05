@@ -27,7 +27,9 @@ import io.yupiik.ia.agent.core.events.PermissionDeniedEvent;
 import io.yupiik.ia.agent.core.events.PermissionRequestedEvent;
 import io.yupiik.ia.agent.core.events.PermissionsChangedEvent;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -63,7 +65,7 @@ public class PermissionService {
      * ({@code SessionRuntimeFactory}); {@code null} means the process default
      * ({@code configuration.resolveProjectDir()}). Scope for the command allowlist hash.
      */
-    private volatile java.nio.file.Path projectDir;
+    private volatile Path projectDir;
 
     public PermissionService(final CodingAgentConfiguration configuration) {
         this(configuration, null, null);
@@ -93,7 +95,7 @@ public class PermissionService {
         this.grantingMatchers = effective == null || effective.isEmpty()
                 ? List.of()
                 : effective.stream()
-                        .sorted(java.util.Comparator.comparingInt(PermissionGrantingMatcherService::order))
+                        .sorted(Comparator.comparingInt(PermissionGrantingMatcherService::order))
                         .toList();
     }
 
@@ -105,7 +107,7 @@ public class PermissionService {
     }
 
     /** Set once when the session runtime is created so allowlist hashing scopes to the session's project. */
-    public void projectDir(final java.nio.file.Path dir) {
+    public void projectDir(final Path dir) {
         this.projectDir = dir == null ? null : dir.toAbsolutePath().normalize();
     }
 

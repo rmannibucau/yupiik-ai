@@ -233,7 +233,7 @@ public class SubagentUsageTracker extends UsageTracker {
      */
     public void mergeToParent() {
         if (parent != null) {
-            parent.recordAuxiliary(new io.yupiik.ia.agent.core.llm.Usage(
+            parent.recordAuxiliary(new Usage(
                     (int) promptTokens.get(),
                     (int) completionTokens.get(),
                     (int) (promptTokens.get() + completionTokens.get()),

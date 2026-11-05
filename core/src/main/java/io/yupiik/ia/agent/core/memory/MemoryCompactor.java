@@ -29,11 +29,13 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 /**
  * Periodic hygiene pass over the project memory file: when it grows past a size
@@ -169,7 +171,7 @@ public class MemoryCompactor {
             // envelope anywhere stays plain, so compaction never balloons a legacy file with metadata.
             final var existing = content.lines().filter(l -> !l.isBlank()).toList();
             final var useEnvelope = existing.stream().anyMatch(MemoryStore::isEnvelopedLine);
-            final var bullets = new java.util.ArrayList<String>(rawBullets.size());
+            final var bullets = new ArrayList<String>(rawBullets.size());
             for (final var raw : rawBullets) {
                 final var text = MemoryStore.textOf(raw);
                 if (text.isBlank() || MemoryStore.HEADER_LINE.equals(text)) {
@@ -226,7 +228,7 @@ public class MemoryCompactor {
                 .map(MemoryStore::textOf)
                 .filter(t -> !t.isBlank())
                 .map(l -> l.startsWith("-") || MemoryStore.HEADER_LINE.equals(l) ? l : "- " + l)
-                .collect(java.util.stream.Collectors.joining("\n"));
+                .collect(Collectors.joining("\n"));
         try {
             final var res = chatClient.chat(new ChatCompletionRequest(
                             model,
@@ -275,10 +277,6 @@ public class MemoryCompactor {
         }
     }
 
-    private void emitNotice(final String message) {
-        emitNotice(message, null);
-    }
-
     private void emitNotice(final String message, final Throwable cause) {
         if (emitter != null) {
             emitter.emit(
@@ -287,7 +285,7 @@ public class MemoryCompactor {
     }
 
     /** Whether any {@code bullets} still closely carries a keep line whose text matches {@code keepLine}. */
-    private static boolean bestExists(final String keepLine, final java.util.List<String> bullets) {
+    private static boolean bestExists(final String keepLine, final List<String> bullets) {
         final var text = MemoryStore.textOf(keepLine);
         for (final var b : bullets) {
             if (MemoryStore.textOf(b).equals(text) || (MemoryStore.bestMatch(text, List.of(b)) != null)) {

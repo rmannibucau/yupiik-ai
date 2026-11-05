@@ -76,7 +76,7 @@ final class TranscriptRenderer {
         private static final Rendered EMPTY = new Rendered(List.of(), List.of());
 
         private static List<SelectionState.RowKind> kindsOf(final List<Line> lines) {
-            return java.util.Collections.nCopies(lines.size(), SelectionState.RowKind.HARD);
+            return Collections.nCopies(lines.size(), SelectionState.RowKind.HARD);
         }
     }
 

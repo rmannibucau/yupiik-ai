@@ -26,6 +26,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -98,7 +99,7 @@ class MvnProjectDepsTest {
         final var first = MvnProjectDeps.fingerprint(tmp);
         assertEquals(first, MvnProjectDeps.fingerprint(tmp), "fingerprint must be stable for unchanged files");
         Files.writeString(pom, "<project><!-- changed --></project>");
-        org.junit.jupiter.api.Assertions.assertNotEquals(
+        Assertions.assertNotEquals(
                 first, MvnProjectDeps.fingerprint(tmp), "fingerprint must change when a build file changes");
     }
 

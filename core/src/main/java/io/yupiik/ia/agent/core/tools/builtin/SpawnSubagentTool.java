@@ -18,7 +18,10 @@ package io.yupiik.ia.agent.core.tools.builtin;
 import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.agent.AgentModelResolver;
 import io.yupiik.ia.agent.core.agent.AgentRunSpec;
+import io.yupiik.ia.agent.core.agent.EffectiveAgentModel;
+import io.yupiik.ia.agent.core.agent.SubagentModelPolicy;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.agent.SubagentRunner;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -33,6 +36,7 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class SpawnSubagentTool implements EmbeddedTool {
@@ -42,7 +46,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
     private final SnapshotStore snapshotStore;
     private final CodingAgentConfiguration configuration;
     private final ProviderManager providerManager;
-    private final io.yupiik.ia.agent.core.agent.AgentModelResolver agentModelResolver;
+    private final AgentModelResolver agentModelResolver;
 
     public SpawnSubagentTool(
             final SubagentRegistry subagentRegistry,
@@ -51,7 +55,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
             final SnapshotStore snapshotStore,
             final CodingAgentConfiguration configuration,
             final ProviderManager providerManager,
-            final io.yupiik.ia.agent.core.agent.AgentModelResolver agentModelResolver) {
+            final AgentModelResolver agentModelResolver) {
         this.subagentRegistry = subagentRegistry;
         this.subagentRunner = subagentRunner;
         this.sessionStore = sessionStore;
@@ -191,12 +195,10 @@ public class SpawnSubagentTool implements EmbeddedTool {
         final var providerDefault = providerManager == null
                 ? (context.settings() == null ? null : context.settings().model())
                 : providerManager.effectiveSubagentDefault(context.settings());
-        final var resolver = agentModelResolver == null
-                ? new io.yupiik.ia.agent.core.agent.AgentModelResolver(providerManager)
-                : agentModelResolver;
+        final var resolver = agentModelResolver == null ? new AgentModelResolver(providerManager) : agentModelResolver;
         final var effective = resolver.resolve(context.settings(), selectedProfile, normalizedModel, providerDefault);
         if (policy != null) {
-            if (!io.yupiik.ia.agent.core.agent.SubagentModelPolicy.allows(policy, effective)) {
+            if (!SubagentModelPolicy.allows(policy, effective)) {
                 return ToolResult.error("Model is not available for subagents: " + effective.routedReference());
             }
         }
@@ -208,7 +210,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
                 ? list.stream()
                         .filter(String.class::isInstance)
                         .map(String.class::cast)
-                        .collect(java.util.stream.Collectors.toUnmodifiableSet())
+                        .collect(Collectors.toUnmodifiableSet())
                 : args.containsKey("tools") ? Set.of() : null;
         final var start = subagentRegistry.start(
                 new AgentRunSpec(
@@ -240,9 +242,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
      * Actionable hint for the LLM explaining which of the two admission limits refused the spawn,
      * naming the limiting factor (the target provider's N-1 cap or the session's sub-agent cap).
      */
-    private String refusalMessage(
-            final io.yupiik.ia.agent.core.agent.SubagentRegistry.RefusalReason reason,
-            final io.yupiik.ia.agent.core.agent.EffectiveAgentModel effective) {
+    private String refusalMessage(final SubagentRegistry.RefusalReason reason, final EffectiveAgentModel effective) {
         final var providerId = effective == null || effective.settings() == null
                 ? null
                 : effective.settings().providerId();

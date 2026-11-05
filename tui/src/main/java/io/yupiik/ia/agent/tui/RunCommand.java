@@ -297,12 +297,6 @@ public class RunCommand implements Runnable {
         }
     }
 
-    private static void emitPhaseDetail(final Detail detail, final long started, final String name) {
-        if (detail != null) {
-            detail.phase(started, name);
-        }
-    }
-
     /**
      * Renders a rate for the machine readable metrics line: always a number so the output stays
      * parsable, {@code 0.0} meaning "not measured".

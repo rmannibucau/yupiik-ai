@@ -28,6 +28,9 @@ import io.yupiik.llm.client.codex.model.CodexTokenStore;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -134,7 +137,7 @@ public class CodexLoginService {
         if (!device) {
             // exchange the id token for an API-key token (upstream obtain_api_key); only the browser
             // flow does this (the device flow passes no key upstream), and the failure is tolerated.
-            String apiKey = null;
+            String apiKey;
             try {
                 apiKey = oauth.obtainApiKey(store.idToken());
             } catch (final RuntimeException ignored) {
@@ -248,7 +251,7 @@ public class CodexLoginService {
             final var tmp = file.resolveSibling(file.getFileName() + ".tmp");
             Files.write(tmp, mapper.toBytes(store));
             restrictToOwner(tmp);
-            Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
         } catch (final IOException e) {
             throw new IllegalStateException("Cannot persist the Codex session to " + file + ": " + e.getMessage(), e);
         }
@@ -258,10 +261,7 @@ public class CodexLoginService {
     private static void restrictToOwner(final Path path) {
         try {
             Files.setPosixFilePermissions(
-                    path,
-                    java.util.Set.of(
-                            java.nio.file.attribute.PosixFilePermission.OWNER_READ,
-                            java.nio.file.attribute.PosixFilePermission.OWNER_WRITE));
+                    path, Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
         } catch (final UnsupportedOperationException | IOException ignored) {
             // non-POSIX filesystem: no-op
         }

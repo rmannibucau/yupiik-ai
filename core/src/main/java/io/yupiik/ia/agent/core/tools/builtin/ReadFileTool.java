@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Map;
 
 @ApplicationScoped
@@ -104,7 +105,7 @@ public class ReadFileTool implements EmbeddedTool {
 
     /** Flat directory listing (opencode read parity): entries one per line, dirs end with '/', dirs first. */
     static ToolResult listDirectory(final Path dir, final int offset, final int limit) {
-        final var entries = new java.util.ArrayList<java.nio.file.Path>();
+        final var entries = new ArrayList<Path>();
         try (final var stream = Files.list(dir)) {
             stream.forEach(entries::add);
         } catch (final IOException | UncheckedIOException e) {

@@ -22,6 +22,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -33,6 +34,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 /**
@@ -65,9 +67,7 @@ final class CodexBrowserFlow {
      * @throws IllegalStateException when the flow fails or is cancelled.
      */
     static CodexTokenStore run(
-            final CodexOAuthClient oauth,
-            final java.util.function.Consumer<String> authorised,
-            final Predicate<Boolean> cancelled) {
+            final CodexOAuthClient oauth, final Consumer<String> authorised, final Predicate<Boolean> cancelled) {
         final SecureRandom random = new SecureRandom();
         final String verifier = base64Url(randomBytes(random, 32));
         final String challenge = sha256(verifier);
@@ -220,7 +220,7 @@ final class CodexBrowserFlow {
             }
             final int eq = pair.indexOf('=');
             final String key = eq < 0 ? pair : pair.substring(0, eq);
-            final String value = eq < 0 ? "" : java.net.URLDecoder.decode(pair.substring(eq + 1), UTF_8);
+            final String value = eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), UTF_8);
             map.putIfAbsent(key, value);
         }
         return map;

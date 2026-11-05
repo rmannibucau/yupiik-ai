@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.llm;
 
+import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -128,7 +129,7 @@ public record ChatCompletionRequest(
     }
 
     /** A copy recording this request's retry mode under a reserved {@code others} key (see {@link io.yupiik.ia.agent.core.llm.ChatClient#RETRY_MODE_OTHERS_KEY}). */
-    public ChatCompletionRequest withRetryMode(final io.yupiik.ia.agent.core.llm.RetryMode mode) {
+    public ChatCompletionRequest withRetryMode(final RetryMode mode) {
         return new ChatCompletionRequest(
                 model,
                 messages,
@@ -139,7 +140,7 @@ public record ChatCompletionRequest(
                 toolChoice,
                 maxTokens,
                 reasoningEffort,
-                putIfAbsent(others, io.yupiik.ia.agent.core.llm.ChatClient.RETRY_MODE_OTHERS_KEY, mode),
+                putIfAbsent(others, ChatClient.RETRY_MODE_OTHERS_KEY, mode),
                 sessionId,
                 settings);
     }
@@ -170,8 +171,7 @@ public record ChatCompletionRequest(
      * a real positive value and the wire never emits an invalid {@code max_tokens:-1} (rejected by
      * gateways such as freeinference with {@code 400 Invalid JSON or schema in request body}).
      */
-    public ChatCompletionRequest withTuning(
-            final io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration tuning) {
+    public ChatCompletionRequest withTuning(final ModelVariantConfiguration tuning) {
         if (tuning == null) {
             return this;
         }

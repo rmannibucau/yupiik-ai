@@ -33,6 +33,7 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -309,7 +310,7 @@ class CodexAgentIdentityClientTest {
     }
 
     private static String headerDot(final String jsonClaims) {
-        final var e = java.util.Base64.getUrlEncoder().withoutPadding();
+        final var e = Base64.getUrlEncoder().withoutPadding();
         return e.encodeToString("{}".getBytes(StandardCharsets.UTF_8)) + "."
                 + e.encodeToString(jsonClaims.getBytes(StandardCharsets.UTF_8));
     }

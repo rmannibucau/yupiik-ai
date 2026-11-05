@@ -19,6 +19,7 @@ import io.yupiik.ia.agent.core.configuration.CompressConfiguration;
 import io.yupiik.ia.agent.core.configuration.ContextLimit;
 import io.yupiik.ia.agent.core.llm.Message;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -29,6 +30,8 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -126,7 +129,7 @@ public final class ContextCompression {
      * bloating the persisted transcript. Render-surface agnostic: {@link ContextCompression}
      * never mixes with a UI; the TUI/web subscribe through it.
      */
-    private volatile java.util.function.Consumer<List<Range>> onUnknownRefs;
+    private volatile Consumer<List<Range>> onUnknownRefs;
 
     public ContextCompression(final CompressConfiguration configuration) {
         this.configuration = configuration;
@@ -166,7 +169,7 @@ public final class ContextCompression {
             // memory bound: refs are assigned once and never reused, so pruning a map entry whose
             // Message left the wire only frees the retained object - it never renumbers anything
             // (see refOf). This mirrors ConversationTranscript.trim()'s history head-truncation.
-            final var keep = java.util.Collections.newSetFromMap(new IdentityHashMap<Message, Boolean>());
+            final var keep = Collections.newSetFromMap(new IdentityHashMap<Message, Boolean>());
             for (final var message : published) {
                 if (message != null) {
                     keep.add(message);
@@ -199,7 +202,7 @@ public final class ContextCompression {
      * refs were not in the live conversation. The listener receives the bounded, guaranteed-valid
      * closed-turn pair list (see {@link #compressibleClosedTurns()}). A null value clears the listener.
      */
-    public void onUnknownRefs(final java.util.function.Consumer<List<Range>> listener) {
+    public void onUnknownRefs(final Consumer<List<Range>> listener) {
         this.onUnknownRefs = listener;
     }
 
@@ -863,7 +866,7 @@ public final class ContextCompression {
                 out.append(matcher.group());
                 continue;
             }
-            matcher.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(stripHeader(block.summary())));
+            matcher.appendReplacement(out, Matcher.quoteReplacement(stripHeader(block.summary())));
             if (block.status() == Status.ACTIVE && block.startRef() >= startRef && block.endRef() <= endRef) {
                 consumed.add(block.id());
                 replaceBlock(

@@ -21,7 +21,9 @@ import io.yupiik.fusion.framework.build.api.order.Order;
 import io.yupiik.ia.agent.core.configuration.SecretRedactionMode;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -173,11 +175,10 @@ public class SecretRedactor {
         // shares a prefix is restored before a shorter overlapping one is processed. This also
         // matches fakes embedded as `key=value` / inside URIs, which the tokenizer would have split.
         String out = text;
-        final var acc = new java.util.ArrayDeque<String[]>();
+        final var acc = new ArrayDeque<String[]>();
         vault.forEachFake(sessionId, (fake, real) -> acc.add(new String[] {fake, real}));
-        final java.util.List<String[]> fakes = new java.util.ArrayList<>(acc);
-        fakes.sort(
-                java.util.Comparator.comparingInt((String[] e) -> e[0].length()).reversed());
+        final List<String[]> fakes = new ArrayList<>(acc);
+        fakes.sort(Comparator.comparingInt((String[] e) -> e[0].length()).reversed());
         for (final var e : fakes) {
             final var fake = e[0];
             final var real = e[1];
