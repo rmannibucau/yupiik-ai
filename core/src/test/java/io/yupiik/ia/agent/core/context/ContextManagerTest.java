@@ -1018,6 +1018,69 @@ class ContextManagerTest {
                 "a compaction result notice must be emitted, got " + notices);
     }
 
+    @Test
+    void compactionProgressNoticeUsesTheCalibratedEffectiveContext() {
+        final var cfg = config(6, 128_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
+        final var events = new ArrayList<AgentEvent>();
+        final var chat = chatReturning("digest: summarized");
+        final var tracker = new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC());
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        tracker,
+                        providerManager(cfg),
+                        new Emitter() {
+                            @Override
+                            public <T> void emit(final T event) {
+                                if (event instanceof AgentEvent agentEvent) {
+                                    events.add(agentEvent);
+                                }
+                            }
+                        },
+                        "s1",
+                        new BackoffSleeper()));
+
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 8; i++) {
+            messages.add(Message.user("old step " + i + " " + "x".repeat(1_000)));
+            messages.add(Message.assistant("ack " + i, null));
+        }
+        messages.add(Message.user("current task"));
+
+        // anchor on a strict prefix: the anchor was set at the last real API call, after which
+        // more turns were appended - so the full list estimates above the anchor and the
+        // calibrated path applies (estimate <= anchor would fall back to raw, incl. equality)
+        final var anchorList = new ArrayList<>(messages.subList(0, messages.size() - 3));
+        final var rawAtAnchor = tracker.estimateContext(anchorList);
+        final var raw = tracker.estimateContext(messages);
+        assertTrue(raw > rawAtAnchor, "the full list must estimate above the anchor list");
+        // provider billed only a fraction of what the raw conservative heuristic guessed for the
+        // anchored list: ratio 0.25 clamps to 0.5, so the calibrated figure is strictly below raw
+        tracker.anchor(Math.max(1, rawAtAnchor / 4), rawAtAnchor);
+
+        final var result = manager.compact(messages, true);
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+
+        final var notices = events.stream()
+                .filter(AgentEvent.Notice.class::isInstance)
+                .map(AgentEvent.Notice.class::cast)
+                .toList();
+        final var progress = notices.get(0);
+        assertTrue(
+                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens\\)"),
+                "progress notice must carry a numeric estimate: " + progress.message());
+        final var real = Math.max(1, rawAtAnchor / 4);
+        final var expected = (int) Math.round(real + 0.5 * (raw - rawAtAnchor));
+        assertTrue(
+                progress.message().contains("≈" + expected + " estimated tokens"),
+                "progress notice must report the calibrated effectiveContext (" + expected + "), got: "
+                        + progress.message());
+    }
+
     private ContextManager manager(final CodingAgentConfiguration cfg, final ChatClient chat) {
         return new ContextManager(
                 cfg,

@@ -527,8 +527,13 @@ public class CompactionCoordinator {
         // user-visible lifecycle feedback: an INFO notice right before the first summarizer call, so
         // the UI can pin a "compacting..." indicator while the (potentially slow) LLM pass runs
         if (usageTracker != null) {
+            // effectiveContext is the same calibrated measurement as the usage gauge
+            // (anchored to the last real provider-billed prompt tokens when available), so the
+            // notice no longer over-reports against the gauge with the raw conservative upper
+            // bound; without an anchor it falls back to that raw estimate automatically.
             emit(AgentEvent.Notice.compactionStart(
-                    "Compaction in progress... (\u2248" + usageTracker.estimateContext(messages) + " estimated tokens)",
+                    "Compaction in progress... (\u2248" + usageTracker.effectiveContext(messages, 0)
+                            + " estimated tokens)",
                     sessionId));
         }
         Outcome outcome;
