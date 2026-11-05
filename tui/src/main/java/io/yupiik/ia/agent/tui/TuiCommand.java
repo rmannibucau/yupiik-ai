@@ -118,6 +118,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -247,6 +248,22 @@ public class TuiCommand implements Runnable {
     private final ReentrantLock contentLock = new ReentrantLock();
     private volatile ContentKey lastContentKey;
     private volatile ContentResult lastContent;
+    // bounded per-region render-unit cache: a stable region (thought, log or plain prose) is
+    // rendered once per (kind, text, width, theme) key and its chunks/rows are reused across
+    // frames; only the growing tail region re-renders each tick. Render-thread confined (like
+    // the live-thinking memo), so no lock; bounded both by entry count and by an approximate
+    // retained weight (see regionUnit), and oversized regions bypass the cache entirely.
+    private static final int MAX_REGION_UNIT_CACHE_ENTRIES = 256;
+    private static final long MAX_REGION_UNIT_CACHE_CHARS = 8L * 1024 * 1024;
+    private static final int MAX_REGION_UNIT_SOURCE_CHARS = 512 * 1024;
+    private final Map<RegionUnitKey, ContentPart> regionUnitCache = new LinkedHashMap<>(16, 0.75f, true);
+    private long regionUnitCacheChars;
+    // durable-head split memo: the head string instance changes only on durable transcript
+    // mutations (flush/trim/clear/replay), so its region list is split once per instance and
+    // the same Region objects (with the same text String instances) are reused frame after
+    // frame - the unit-cache lookup then short-circuits fast.
+    private String lastHeadInstance = "";
+    private List<ConversationTranscript.Region> lastHeadRegions = List.of();
     // incremental live-thinking memo: the flushed part of the growing stream is
     // rendered once per stable prefix and the last (still open) line re-rendered
     private String lastLiveThoughtPrefix = "";
@@ -4628,6 +4645,114 @@ public class TuiCommand implements Runnable {
             List<UiState.FooterLink> footerLinks,
             List<UiState.RunHeader> runHeaders) {}
 
+    /** The content-side outputs of rendering one {@link Region} (or one whole frame). */
+    private record ContentPart(List<RenderedChunk> chunks, List<String> rows, String lastCodeBlock) {
+        static final ContentPart EMPTY = new ContentPart(List.of(), List.of(), null);
+    }
+
+    /**
+     * Cache key of one rendered region: it must cover every input the render depends on.
+     * Kind plus source text identify the region content; {@code width} changes the wrap;
+     * {@code paletteId} covers theme switches (applyTheme() replaces palette, styles and
+     * code theme together, so the palette instance identity is a complete theme token);
+     * {@code markdownStylesId} covers any style object replacement outside a palette swap
+     * (the markdown styles are also replaced by applyTheme(), so either token alone would
+     * do - keeping both is cheap and makes the dependency explicit).
+     */
+    private record RegionUnitKey(
+            String kind,
+            String text,
+            int width,
+            int paletteId,
+            int markdownStylesId,
+            String userLabel,
+            String assistantLabel) {}
+
+    /**
+     * Renders one stable region (thought / log / plain prose) through a bounded content-keyed
+     * cache. A stable region's text (and the key) only changes when its content changed, so a
+     * streaming frame reuses every stable region's rendered chunks/rows and only the growing
+     * tail region re-renders - instead of re-parsing the whole transcript with the markdown
+     * engine, re-wrapping every line and re-allocating every span on each TextDelta tick. Tool
+     * regions are deliberately NOT cached: they flow through the existing run-grouping path so
+     * run borders, live cards, collapse state, tool tops/footer links and their absolute rows
+     * keep exactly the current semantics.
+     *
+     * <p>The cache is render-thread confined (like the live-thinking memo), bounded both by
+     * entry count and by a retained-weight approximation, and oversized regions bypass it
+     * entirely so a giant tool capture never pins a multi-megabyte widget.</p>
+     */
+    private ContentPart regionUnit(final String kind, final String text, final int width, final UiState state) {
+        if (text == null || text.isEmpty() || text.length() > MAX_REGION_UNIT_SOURCE_CHARS) {
+            return ContentPart.EMPTY;
+        }
+        final var key = new RegionUnitKey(
+                kind,
+                text,
+                width,
+                System.identityHashCode(palette),
+                System.identityHashCode(markdownStyles),
+                state.model.userLabel(),
+                state.model.assistantLabel());
+        final var cached = regionUnitCache.get(key);
+        if (cached != null) {
+            // touch the LRU order
+            regionUnitCache.remove(key);
+            regionUnitCache.put(key, cached);
+            // the cached render may have set the "last code block" copy target; later regions
+            // (rendered after this unit, top to bottom) override it, so restoring here keeps
+            // the value correct frame after frame without re-rendering the unit
+            if (cached.lastCodeBlock() != null) {
+                state.lastCodeBlock = cached.lastCodeBlock();
+            }
+            return cached;
+        }
+        final var local = new ArrayList<RenderedChunk>();
+        final var rows = new ArrayList<String>();
+        final var codeBefore = state.lastCodeBlock;
+        final String lastCodeBlock;
+        switch (kind) {
+            case "thought" -> addThoughtChunk(local, thoughtLines(text, Math.max(1, width - 2)), rows);
+            case "log" -> addMarkdownChunk(local, logLines(text, Math.max(1, width - 2)), rows);
+            case "prose" -> appendChunks(local, text, width, state, rows);
+            default -> throw new IllegalArgumentException("unknown region kind: " + kind);
+        }
+        lastCodeBlock = state.lastCodeBlock == codeBefore ? null : state.lastCodeBlock;
+        if (local.isEmpty()) {
+            return ContentPart.EMPTY;
+        }
+        final var part = new ContentPart(List.copyOf(local), List.copyOf(rows), lastCodeBlock);
+        regionUnitCache.put(key, part);
+        var weight = 0L;
+        for (final var row : rows) {
+            weight += 64 + row.length();
+        }
+        weight += 64L * local.size();
+        regionUnitCacheChars += weight;
+        while (regionUnitCache.size() > MAX_REGION_UNIT_CACHE_ENTRIES
+                || (regionUnitCacheChars > MAX_REGION_UNIT_CACHE_CHARS && regionUnitCache.size() > 1)) {
+            final var eldest = regionUnitCache.entrySet().iterator().next();
+            final var eldestValue = eldest.getValue();
+            var eldestWeight = 0L;
+            for (final var row : eldestValue.rows()) {
+                eldestWeight += 64 + row.length();
+            }
+            eldestWeight += 64L * eldestValue.chunks().size();
+            regionUnitCacheChars -= eldestWeight;
+            regionUnitCache.remove(eldest.getKey());
+        }
+        return part;
+    }
+
+    /** Appends one rendered region unit to the frame accumulators (rows are copied verbatim). */
+    private static void appendPart(final List<RenderedChunk> out, final List<String> rows, final ContentPart part) {
+        if (part == null || part.chunks().isEmpty()) {
+            return;
+        }
+        out.addAll(part.chunks());
+        rows.addAll(part.rows());
+    }
+
     private List<RenderedChunk> chunks(
             final String md,
             final int width,
@@ -4656,11 +4781,19 @@ public class TuiCommand implements Runnable {
     }
 
     /**
-     * Builds the stable chunk list (flushed regions only) with a single-entry memo:
-     * unless the markdown, width or any mutable render input changed since the last
-     * frame, the previous lists are reused verbatim. The live thinking tail and the
-     * spinner indicator are appended by {@link #chunks(String, int, UiState, List, List, List)}
-     * outside the cache because they change every tick.
+     * Builds the stable chunk list (flushed regions only). A frame whose transcript markdown
+     * and mutable render inputs are unchanged reuses the previous full result verbatim
+     * (single-entry memo). A growing stream reuses the rendered units of every stable region
+     * and re-renders only the tail: the durable head string instance is stable across
+     * TextDelta ticks (see {@code ConversationTranscript.markdownWithHead}), so the head
+     * regions split once per head instance and every stable region answers from the bounded
+     * per-region unit cache - no markdown re-parse, re-wrap or span re-allocation for the
+     * stable history on each tick. Tool regions always flow through the exact historical
+     * run-grouping path (consecutive finished cards accumulate into one collapsible run, a
+     * live card breaks the run), so run borders, card collapse, tool tops, footer links and
+     * their absolute rows keep the current semantics byte for byte. The live thinking tail
+     * and the spinner indicator are appended by {@link #chunks} outside the cache because
+     * they change every tick.
      */
     private void contentChunks(
             final List<RenderedChunk> out,
@@ -4721,16 +4854,53 @@ public class TuiCommand implements Runnable {
             }
             pendingRuns.clear();
         };
-        for (final var region : TuiTranscriptModel.regions(md)) {
+        // the assembled md is head + tail; the head is the stable scrubbed durable instance
+        final var head = state.model.markdownWithHead(RUNNING_TOOL_MARKER, WELCOME);
+        final var headString = head.head();
+        final var tailStart = head.tailStart();
+        if (headString != lastHeadInstance) {
+            lastHeadInstance = headString == null ? "" : headString;
+            lastHeadRegions = TuiTranscriptModel.regions(lastHeadInstance);
+        }
+        final var tailPart = md.substring(Math.min(tailStart, md.length()));
+        // the tail is the streaming part: split it fresh each frame (it may contain a whole
+        // completed region right after the head, plus the still-growing final one)
+        final var tailRegions = TuiTranscriptModel.regions(tailPart);
+        // the original renderer splits the whole md into regions, so a plain-prose region
+        // that straddles the head/tail cut (head's last flush + the streaming tail) was ONE
+        // markdown document: paragraph breaks and blank rows between its lines render as one
+        // block group. Rendering the two halves separately would lose that separation (and
+        // inserting guessed blank rows is fragile), so when both sides of the cut are plain
+        // prose the two region texts are merged back into a single render - the TranscriptRenderer
+        // prefix memo inside that render keeps the streaming cost O(delta) per frame.
+        final var headLast = lastHeadRegions.isEmpty() ? null : lastHeadRegions.get(lastHeadRegions.size() - 1);
+        final var headLastPlain = headLast != null
+                && !headLast.thought()
+                && !headLast.tool()
+                && !headLast.log()
+                && !headLast.text().isBlank();
+        final var tailFirst = tailRegions.isEmpty() ? null : tailRegions.get(0);
+        final var tailFirstPlain = tailFirst != null
+                && !tailFirst.thought()
+                && !tailFirst.tool()
+                && !tailFirst.log()
+                && !tailFirst.text().isBlank();
+        final var mergedTail = headLastPlain && tailFirstPlain;
+        final var headLastIndex = lastHeadRegions.size() - 1;
+        for (var i = 0; i < lastHeadRegions.size(); i++) {
+            final var region = lastHeadRegions.get(i);
+            if (mergedTail && i == headLastIndex) {
+                continue; // rendered merged with the tail's first region below
+            }
             if (region.thought()) {
                 flushRuns.run();
                 if (!state.showThinking) {
                     continue;
                 }
-                addThoughtChunk(local, thoughtLines(region.text(), contentWidth), localRows);
+                final var part = regionUnit("thought", region.text(), contentWidth, state);
+                appendPart(local, localRows, part);
             } else if (region.tool()) {
-                // consecutive tool regions accumulate into a run (rendered as one collapsible
-                // group); a live/running card breaks the run so it never shifts under streaming
+                // tool regions are NOT unit-cached: they keep the exact historical grouping
                 final var card = ToolCard.parse(region.text());
                 if (!card.running() && !pendingRuns.isEmpty()) {
                     pendingRuns.get(pendingRuns.size() - 1).add(new ToolRun.Member(card, region.text()));
@@ -4739,10 +4909,104 @@ public class TuiCommand implements Runnable {
                 }
             } else if (region.log()) {
                 flushRuns.run();
-                addMarkdownChunk(local, logLines(region.text(), contentWidth), localRows);
+                final var part = regionUnit("log", region.text(), contentWidth, state);
+                appendPart(local, localRows, part);
             } else if (!region.text().isBlank()) {
                 flushRuns.run();
-                appendChunks(local, region.text(), contentWidth, state, localRows);
+                final var part = regionUnit("prose", region.text(), contentWidth, state);
+                appendPart(local, localRows, part);
+            }
+        }
+        if (mergedTail) {
+            flushRuns.run();
+            // both halves are plain prose: restore the single-document semantics by rendering
+            // them as one region (head-last is stable, the tail half grows - the TranscriptRenderer
+            // prefix memo keeps the re-parse to the appended delta)
+            final var part = regionUnit("prose", headLast.text() + tailFirst.text(), contentWidth, state);
+            appendPart(local, localRows, part);
+        }
+        // if the head is empty (the whole md is streaming) or ends on a dangling open region
+        // (a begin marker without its end makes regions() swallow the tail into the last head
+        // region), re-split the whole md: the durable-head optimization is a fast path, never
+        // a correctness gate
+        if (lastHeadRegions.isEmpty() || !endsClosed(lastHeadRegions)) {
+            // whole-md fallback: fresh split, same rendering as before the optimization
+            local.clear();
+            localRows.clear();
+            localRunHeaders.clear();
+            localToolTops.clear();
+            localFooterLinks.clear();
+            final var allRegions = TuiTranscriptModel.regions(md);
+            for (final var region : allRegions) {
+                if (region.thought()) {
+                    flushRuns.run();
+                    if (!state.showThinking) {
+                        continue;
+                    }
+                    final var part = regionUnit("thought", region.text(), contentWidth, state);
+                    appendPart(local, localRows, part);
+                } else if (region.tool()) {
+                    final var card = ToolCard.parse(region.text());
+                    if (!card.running() && !pendingRuns.isEmpty()) {
+                        pendingRuns.get(pendingRuns.size() - 1).add(new ToolRun.Member(card, region.text()));
+                    } else {
+                        pendingRuns.add(ToolRun.builder(new ToolRun.Member(card, region.text())));
+                    }
+                } else if (region.log()) {
+                    flushRuns.run();
+                    final var part = regionUnit("log", region.text(), contentWidth, state);
+                    appendPart(local, localRows, part);
+                } else if (!region.text().isBlank()) {
+                    flushRuns.run();
+                    final var part = regionUnit("prose", region.text(), contentWidth, state);
+                    appendPart(local, localRows, part);
+                }
+            }
+            flushRuns.run();
+            final var fallbackResult = new ContentResult(
+                    List.copyOf(local),
+                    List.copyOf(localRows),
+                    List.copyOf(localToolTops),
+                    List.copyOf(localFooterLinks),
+                    List.copyOf(localRunHeaders));
+            contentLock.lock();
+            try {
+                lastContentKey = key;
+                lastContent = fallbackResult;
+            } finally {
+                contentLock.unlock();
+            }
+            out.addAll(fallbackResult.chunks());
+            rows.addAll(fallbackResult.rows());
+            toolTops.addAll(fallbackResult.toolTops());
+            footerLinks.addAll(fallbackResult.footerLinks());
+            runHeaders.addAll(fallbackResult.runHeaders());
+            return;
+        }
+        for (var i = mergedTail ? 1 : 0; i < tailRegions.size(); i++) {
+            final var region = tailRegions.get(i);
+            if (region.thought()) {
+                flushRuns.run();
+                if (!state.showThinking) {
+                    continue;
+                }
+                final var part = regionUnit("thought", region.text(), contentWidth, state);
+                appendPart(local, localRows, part);
+            } else if (region.tool()) {
+                final var card = ToolCard.parse(region.text());
+                if (!card.running() && !pendingRuns.isEmpty()) {
+                    pendingRuns.get(pendingRuns.size() - 1).add(new ToolRun.Member(card, region.text()));
+                } else {
+                    pendingRuns.add(ToolRun.builder(new ToolRun.Member(card, region.text())));
+                }
+            } else if (region.log()) {
+                flushRuns.run();
+                final var part = regionUnit("log", region.text(), contentWidth, state);
+                appendPart(local, localRows, part);
+            } else if (!region.text().isBlank()) {
+                flushRuns.run();
+                final var part = regionUnit("prose", region.text(), contentWidth, state);
+                appendPart(local, localRows, part);
             }
         }
         flushRuns.run();
@@ -4764,6 +5028,15 @@ public class TuiCommand implements Runnable {
         toolTops.addAll(result.toolTops());
         footerLinks.addAll(result.footerLinks());
         runHeaders.addAll(result.runHeaders());
+    }
+
+    /** True when no region of {@code regions} is left open by a dangling end marker. */
+    private static boolean endsClosed(final List<ConversationTranscript.Region> regions) {
+        if (regions.isEmpty()) {
+            return true;
+        }
+        final var last = regions.get(regions.size() - 1);
+        return !last.thought() && !last.tool() && !last.log();
     }
 
     /**

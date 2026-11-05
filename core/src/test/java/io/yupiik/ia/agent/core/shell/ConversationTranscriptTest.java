@@ -226,6 +226,56 @@ class ConversationTranscriptTest {
     }
 
     @Test
+    void markdownWithHeadExposesStableHeadInstanceAndTailSplit() {
+        final var t = new ConversationTranscript();
+        t.appendTranscript("\n**Assistant**\n\nstable head content\n");
+
+        // idle: no tail - the tail would start right at (or past) the end of the stripped md
+        final var idle = t.markdownWithHead("|", "");
+        assertTrue(idle.md().contains("stable head content"), idle.md());
+        assertTrue(idle.tailStart() >= idle.md().length(), "no streaming -> the tail starts at the end: " + idle);
+        // the head is the scrubbed durable transcript (un-stripped, may keep a trailing newline)
+        assertTrue(
+                idle.md().startsWith(idle.head().strip()),
+                "the stripped md must start with the stripped head: " + idle);
+
+        // streaming: the same head String instance is reused and only the tail moves
+        t.startUserTurn("go");
+        final var turnStart = t.markdownWithHead("|", "");
+        assertNotSame(idle.head(), turnStart.head(), "a user turn writes a durable marker: the head must rebuild");
+        t.onEvent(new AgentEvent.TextDelta("first chunk", "s1"));
+        final var s1 = t.markdownWithHead("|", "");
+        t.onEvent(new AgentEvent.TextDelta(" second", "s1"));
+        final var s2 = t.markdownWithHead("|", "");
+        assertSame(turnStart.head(), s1.head(), "a streaming tick must not rebuild the durable head instance");
+        assertSame(s1.head(), s2.head(), "the head instance must be stable across ticks");
+        assertTrue(s1.tailStart() < s1.md().length(), "the streaming tail must start before the end: " + s1);
+        assertTrue(s1.md().endsWith("first chunk"), s1.md());
+        assertTrue(s2.md().endsWith("first chunk second"), s2.md());
+        // the md is head + tail: the tail begins where the streaming content starts (markdown()
+        // prepends "\n\n" separators and, on the first chunk of a turn, the assistant marker)
+        assertTrue(
+                s2.md().substring(s2.tailStart()).contains("first chunk second"),
+                "the tail must contain the streaming chunk: " + s2);
+        assertTrue(
+                s2.tailStart() >= s2.head().length() - 1,
+                "the tail must start at (or right after) the durable head: " + s2);
+
+        // a durable mutation swaps the head instance
+        t.flushPending();
+        final var after = t.markdownWithHead("|", "");
+        assertNotSame(s2.head(), after.head(), "a flush must swap the durable head instance");
+
+        // trim() must also swap the head instance (the renderer drops its region memo on it)
+        t.appendTranscript("\n**Assistant**\n\nkept tail\n");
+        t.maxHistoryCharacters(12);
+        t.trim();
+        final var trimmed = t.markdownWithHead("|", "");
+        assertNotSame(after.head(), trimmed.head(), "trim must swap the durable head instance");
+        assertTrue(trimmed.md().contains("kept tail"), trimmed.md());
+    }
+
+    @Test
     void markdownIsCachedUntilContentActuallyChanges() {
         final var t = new ConversationTranscript();
         final var welcome = "> welcome";

@@ -346,5 +346,19 @@ final class TranscriptRenderer {
         return safe;
     }
 
+    /**
+     * Index just past the last {@code '\n'} of {@code text}, or {@code -1} when {@code text}
+     * has no newline. Used to split the transcript markdown at the durable-head boundary while
+     * streaming: the assembled md is {@code head + tail}, the head ends on a newline (transcript
+     * writes always terminate their lines), and the tail starts with {@code "\n\n"} separators -
+     * so cutting right after the first newline of the tail keeps both sides at a line boundary.
+     */
+    static int newlineBoundary(final String text) {
+        if (text == null) {
+            return -1;
+        }
+        return text.indexOf('\n');
+    }
+
     private record Key(String source, int width, Style base, MarkdownStyles styles) {}
 }

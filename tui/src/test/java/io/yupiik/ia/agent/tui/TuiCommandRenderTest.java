@@ -556,6 +556,117 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void streamingParagraphBreakAcrossFlushBoundaryIsPreserved() throws Exception {
+        // the durable head ends with a flushed chunk; the streaming tail continues the answer.
+        // The head/tail split re-renders only the tail, but the paragraph break between the
+        // flushed paragraph and the streamed one (a blank source line) must survive: the two
+        // prose halves render as one merged region, exactly like a cold render of the whole md.
+        final var shellRegistry = testRegistry();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                shellRegistry.onEvent(new AgentEvent.TextDelta("first paragraph", sessionId));
+                shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tool run\"}", sessionId));
+                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "done", true, sessionId));
+                // the pre-tool text was flushed into the durable head; the answer resumes streaming
+                shellRegistry.onEvent(new AgentEvent.TextDelta("\n\nsecond paragraph", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("first paragraph\n\nsecond paragraph", sessionId));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-flush-boundary-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("say hi"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("first paragraph");
+        awaitText("second paragraph");
+        awaitText("ready");
+
+        final var text = backend.text();
+        // both paragraphs render, and the tool output between them is present
+        assertTrue(text.contains("first paragraph"), text);
+        assertTrue(text.contains("second paragraph"), text);
+        assertTrue(text.contains("tool run"), text);
+        quit();
+    }
+
+    @Test
+    void trimDropsRenderedHeadWithoutStaleChunks() throws Exception {
+        // render a long transcript, then trim() the head: the frame must drop the cut content
+        // and keep rendering the surviving tail (the region-memo must be invalidated on the
+        // new head instance instead of replaying stale rows).
+        final var shellRegistry = testRegistry();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                // enough history that a small maxHistoryCharacters trims the head
+                shellRegistry.onEvent(new AgentEvent.TextDelta("trimmable head content", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("trimmable head content", sessionId));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-trim-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("say hi"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("trimmable head content");
+        awaitText("ready");
+
+        // shrink the history budget: the render loop calls trim() each frame, so the next
+        // repaint must drop the cut head and keep only the surviving tail
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var transcript = shellRegistry.active(sessionId).transcript();
+        ((TuiTranscriptModel) transcript).maxHistoryCharacters(8);
+        // force a repaint deterministically (a key event always renders): the render loop
+        // applies trim() on the frame it draws
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.LEFT));
+        awaitTextGoneWithin("trimmable head content", 4_000);
+        quit();
+    }
+
+    @Test
     void rendersSidebarAndAnswer() throws Exception {
         final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
