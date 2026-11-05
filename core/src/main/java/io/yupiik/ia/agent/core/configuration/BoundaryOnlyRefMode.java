@@ -17,7 +17,7 @@ package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
-/** Experimental presentation of compression references on outgoing requests. */
+/** Presentation of compression references; AUTO uses boundary pairs unless explicitly disabled. */
 @JsonModel
 public enum BoundaryOnlyRefMode {
     AUTO,

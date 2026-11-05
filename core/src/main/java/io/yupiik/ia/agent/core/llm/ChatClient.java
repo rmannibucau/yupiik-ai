@@ -1000,13 +1000,7 @@ public class ChatClient implements AutoCloseable {
         final var routed = resolveModel(request);
         final var provider = target(routed.request());
         final var mode = providerManager.compressionBoundaryOnly(provider, routed.model());
-        if (mode != BoundaryOnlyRefMode.AUTO) {
-            return mode == BoundaryOnlyRefMode.ENABLED;
-        }
-        final var variant = selectedVariant(provider, routed.model(), routed.request());
-        return routed.model().toLowerCase(Locale.ROOT).contains("deepseek-v4-flash")
-                && variant != null
-                && ("high".equalsIgnoreCase(variant.name()) || "max".equalsIgnoreCase(variant.name()));
+        return mode != BoundaryOnlyRefMode.DISABLED;
     }
 
     private ChatCompletionRequest useModel(final ChatCompletionRequest request) throws IOException {

@@ -591,3 +591,47 @@ You can also tune the nudge wording with
 merely wrapping up.
 The `%ACTIONS%` placeholder already renders a `manage_context` suggestion when
 the tool is exposed (see <<soft-context-usage-nudge>>).
+
+=== Closed-range boundary meta-data
+
+When `compress` uses `action=compress`, the model must name an inclusive
+range of *message ids*. To avoid forcing the model to reconstruct those ids,
+closed historical turns are advertised with an explicit, self-contained pair on
+the user message that opens the turn:
+
+[source,text]
+----
+compactIds=2187-2196
+----
+
+`2187` is the id of the user message that opens a completed turn and `2196` is
+the id of the last message of that same turn, just before the next user message
+(both endpoints inclusive). The model copies those exact numeric values into the
+`startId` and `endId` of its `compress` call - it never guesses them.
+
+Only structurally valid candidates are advertised: the current open turn
+(in-progress work), protected recent turns, volatile session tails, a previous
+`<compacted-context>` digest and any range already covered by an active
+compression block are excluded, so every advertised pair passes the `compress`
+validation without being snapped to different bounds. A candidate is *valid to
+compress*, not *required* to be compressed: the model still decides whether the
+chapter is genuinely finished, and otherwise continues the current task.
+
+When the nudge fires but no closed historical turn is eligible, the guidance
+says so explicitly and tells the model to keep working rather than guessing id
+references or triggering a whole-session `compact` just to meet the
+working-context target. The automatic model-window compaction still guards real
+capacity underneath.
+
+If the boundary meta-data is not visible (for example after a whole-context
+`compact` rewrote the turn boundaries), the model can call `compress` with
+`action=status` to list the exact `compressibleRanges` pairs; using them keeps
+the first attempt valid instead of guessing.
+
+By default, all models and variants receive boundary pairs.
+Provider tuning or model behavior `compressionBoundaryOnly=DISABLED` retains legacy per-message `@N@` seams, which the tool still accepts.
+`AUTO` and `ENABLED` use boundary pairs; model `AUTO` inherits provider tuning, while an explicit model setting overrides it.
+Both soft and hard nudges supply bounded candidate pairs with an omitted count when necessary.
+Internal session-state messages do not split historical turns and are never endpoints.
+Never echo injected metadata or compress ongoing work.
+Reference presentation does not change provider-specific capacity, compaction thresholds or summarizer tuning.

@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -40,6 +41,33 @@ import org.junit.jupiter.api.extension.ExtendWith;
 @ExtendWith(TestJsonMapper.class)
 class ManageContextToolTest {
     private JsonMapper mapper;
+
+    @Test
+    void statusBoundsCandidatesAndRefreshesAfterContextReplacement() {
+        final var cfg = config(true);
+        final var view = new ContextView(cfg.compression());
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 30; i++) {
+            messages.add(Message.user("sample " + i));
+            messages.add(Message.assistant("done", List.of()));
+        }
+        view.publishMessages(messages);
+        final var tool = new ManageContextTool(cfg, mapper, providerManager());
+        final var result = tool.execute(Map.of("action", "status"), context(view));
+        final var cap = view.compression().compressibleClosedTurns().size();
+        assertTrue(cap > 0 && cap < 29);
+        assertTrue(result.output().contains("\"compressibleRangeCount\":" + cap), result.output());
+        assertTrue(result.output().contains("\"compressibleRangeTotal\":29"), result.output());
+        assertTrue(result.output().contains("\"omittedCompressibleRangeCount\":" + (29 - cap)), result.output());
+        view.publishMessages(List.of(
+                Message.system("system"),
+                Message.user("<compacted-context>digest</compacted-context>"),
+                Message.user("current task")));
+        final var refreshed = tool.execute(Map.of("action", "status"), context(view));
+        assertTrue(refreshed.output().contains("\"compressibleRanges\":[]"), refreshed.output());
+        assertTrue(refreshed.output().contains("\"compressibleRangeTotal\":0"), refreshed.output());
+    }
 
     @BeforeEach
     void bindMapper(final JsonMapper mapper) {
@@ -73,6 +101,26 @@ class ManageContextToolTest {
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("contextWindow"), result.output());
         assertTrue(result.output().contains("\"messageCount\":0"), result.output());
+    }
+
+    @Test
+    void statusSurfacesClosedTurnRanges() {
+        final var cfg = config(true);
+        final var view = new ContextView(cfg.compression());
+        final var messages = List.of(
+                Message.system("system"),
+                Message.user("first task"),
+                Message.assistant("done", List.of()),
+                Message.user("next task"));
+        view.publishMessages(messages);
+        view.compression().renderRefs(messages); // assigns stable refs like the agent loop does
+        final var tool = new ManageContextTool(cfg, mapper, providerManager());
+        final var result = tool.execute(Map.of("action", "status"), context(view));
+        assertTrue(result.success(), result.output());
+        assertTrue(result.output().contains("\"compressibleRanges\""), result.output());
+        assertTrue(result.output().contains("\"startId\":\"1\""), result.output());
+        assertTrue(result.output().contains("\"endId\":\"2\""), result.output());
+        assertTrue(result.output().contains("\"compressibleRangeCount\":1"), result.output());
     }
 
     @Test

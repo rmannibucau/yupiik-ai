@@ -130,43 +130,52 @@ public class ContextGuidance {
                     .targets(usageTracker.get().contextWindowTokenCount().value(), resolvedContextLimit());
             return "\n<nudge>Working context is ~" + effective + " tokens (compress at " + targets.baseMin()
                     + " / must at " + targets.effectiveMax() + "). If a chapter is genuinely closed, call "
-                    + "`compress` on its range now and write an exhaustive summary; keep the current task "
-                    + "and its recent messages verbatim and do not block on it.</nudge>";
+                    + "`compress` on its exact inclusive range now (see the `compactIds=A-B` boundary"
+                    + " metadata on closed user turns, or call `compress` action=status for the exact"
+                    + " pairs) and write an exhaustive summary; keep the current task and its recent"
+                    + " messages verbatim and do not block on it. Never guess message references.</nudge>";
         }
         return "";
     }
 
     /**
-     * Bounded, guaranteed-valid user-turn ref guidance appended to the volatile session-state tail
-     * next to the strong compression nudge. Surfaces the exact refs a {@code compress} range may
-     * currently anchor on (oldest-first, capped), so a flash-class model stops guessing stale refs and
-     * correctly compresses on the first attempt. Rendered only when the hard tier fires ({@code tier == 2});
-     * an empty eligible set surfaces the "nothing left to safely compress" escalation
-     * instead of a bare ref list, and the case repeats deterministically every hard nudge rather than
-     * silently vanishing (the feedback-loop failure documented in PR #207).
+     * Bounded, guaranteed-valid closed-turn pairs appended to the volatile session-state tail next
+     * to either active compression nudge. The eligible set only contains fully-closed historical turns
+     * whose inclusive {@code (startId, endId)} references pass the {@code compress} validation
+     * without any snapping (the current open turn, protected recent turns, volatile tails, digests
+     * and active-block overlaps are all excluded), so a flash-class model stops guessing stale refs
+     * and compresses on the first attempt. Silent when no tier fires;
+     * an empty eligible set surfaces an explicit non-blocking "continue working" escalation instead
+     * of a bare list, and the case repeats deterministically every hard nudge rather than silently
+     * vanishing (the feedback-loop failure documented in PR #207).
      */
     public String compressionRefGuidance(final List<Message> messages, final int tier) {
         final var compression = configuration.compression();
-        if (compression == null || !compression.enabled() || contextView.get() == null || tier != 2) {
+        if (compression == null || !compression.enabled() || contextView.get() == null || tier < 1) {
             return "";
         }
-        final var refs = contextView.get().compression().compressibleUserTurnRefs();
-        if (refs.isEmpty()) {
-            return "\ncompressible user-turn starts: none - nothing left to safely compress; do not retry "
-                    + "the same ranges, run /compact or start a new session.";
+        final var ranges = contextView.get().compression().compressibleClosedTurns();
+        if (ranges.isEmpty()) {
+            return "\ncompressible ranges: none - no structurally eligible historical ranges are available"
+                    + " to summarize right now. Continue the current task; do not guess message"
+                    + " references or run a whole-session compact just to meet this working-context"
+                    + " target. The automatic model-window compaction still guards capacity.";
         }
-        final var sb = new StringBuilder("\ncompressible user-turn starts: ");
-        for (var i = 0; i < refs.size(); i++) {
+        final var sb = new StringBuilder("\ncompressible inclusive ranges: ");
+        for (var i = 0; i < ranges.size(); i++) {
             if (i > 0) {
                 sb.append(", ");
             }
-            sb.append('@').append(refs.get(i)).append('@');
+            final var range = ranges.get(i);
+            sb.append(range.startId()).append('-').append(range.endId());
         }
-        final var omitted = contextView.get().compression().compressibleUserTurnCount() - refs.size();
+        final var omitted = contextView.get().compression().compressibleClosedTurnCount() - ranges.size();
         if (omitted > 0) {
             sb.append(" (+").append(omitted).append(" omitted)");
         }
-        sb.append(" - start on one, end just before the next user message.");
+        sb.append(" - to summarize a genuinely closed historical turn, call `compress` with its"
+                + " exact startId/endId and an exhaustive summary; otherwise continue the current task"
+                + " and keep its recent messages verbatim.");
         return sb.toString();
     }
 

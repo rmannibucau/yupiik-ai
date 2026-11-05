@@ -37,7 +37,7 @@ class ChatClientCompressionBoundaryTest {
     Path storageHome;
 
     @Test
-    void autoUsesEffectiveVariantAndModel(final JsonMapper mapper) throws Exception {
+    void autoUsesBoundaryPairsForAllVariantsAndModels(final JsonMapper mapper) throws Exception {
         try (final var client = client(
                 mapper,
                 Map.ofEntries(
@@ -48,9 +48,10 @@ class ChatClientCompressionBoundaryTest {
                         Map.entry("yca.provider.providers.0.tuning.defaultVariant", "high")))) {
             assertTrue(client.compressionBoundaryOnly(request(null, ChatSettings.EMPTY)));
             assertTrue(client.compressionBoundaryOnly(request(null, ChatSettings.EMPTY.withVariant("max"))));
-            assertFalse(client.compressionBoundaryOnly(request(null, ChatSettings.EMPTY.withVariant("low"))));
-            assertFalse(client.compressionBoundaryOnly(request(null, ChatSettings.EMPTY.withVariant("missing"))));
-            assertFalse(client.compressionBoundaryOnly(request("other-model", ChatSettings.EMPTY.withVariant("high"))));
+            assertTrue(client.compressionBoundaryOnly(request(null, ChatSettings.EMPTY.withVariant("low"))));
+            assertTrue(client.compressionBoundaryOnly(request(null, ChatSettings.EMPTY.withVariant("missing"))));
+            assertTrue(client.compressionBoundaryOnly(request("other-model", ChatSettings.EMPTY.withVariant("high"))));
+            assertTrue(client.compressionBoundaryOnly(request("other-model", ChatSettings.EMPTY)));
         }
     }
 

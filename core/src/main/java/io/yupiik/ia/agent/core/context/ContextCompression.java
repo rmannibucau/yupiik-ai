@@ -126,7 +126,7 @@ public final class ContextCompression {
      * ones without bloating the persisted transcript. Render-surface agnostic: {@link ContextCompression}
      * never mixes with a UI; the TUI/web subscribe through it.
      */
-    private volatile java.util.function.Consumer<List<Integer>> onUnknownRefs;
+    private volatile java.util.function.Consumer<List<Range>> onUnknownRefs;
 
     public ContextCompression(final CompressConfiguration configuration) {
         this.configuration = configuration;
@@ -197,47 +197,19 @@ public final class ContextCompression {
     /**
      * Registers a listener invoked when a {@code compress} call skipped at least one range because its
      * refs were not in the live conversation. The listener receives the bounded, guaranteed-valid
-     * user-turn ref list (see {@link #compressibleUserTurnRefs()}). A null value clears the listener.
+     * user-turn ref list (see {@link #compressibleClosedTurns()}). A null value clears the listener.
      */
-    public void onUnknownRefs(final java.util.function.Consumer<List<Integer>> listener) {
+    public void onUnknownRefs(final java.util.function.Consumer<List<Range>> listener) {
         this.onUnknownRefs = listener;
     }
 
-    /**
-     * Symmetric counter of {@link #realUserMessages()} applied to digest-only transcripts: a user
-     * message whose content is a previous {@code <compacted-context>} digest cannot anchor a compress
-     * range and is excluded from the ref guidance.
-     */
+    /** Returns whether this user message is a synthetic compaction/pruning digest. */
     private static boolean isDigestOnlyUserMessage(final Message message) {
         if (message == null || !"user".equals(message.role())) {
             return false;
         }
         final var content = message.content() instanceof String s ? s : String.valueOf(message.content());
         return content.startsWith("<compacted-context>") || content.startsWith("<pruned-context>");
-    }
-
-    /**
-     * Number of real user messages in the published transcript, excluding the system prompt, the
-     * synthetic session-state tail and the {@code <compacted-context>} digest marker. A transcript
-     * whose only user content is a previous compaction digest cannot anchor a compress range: the
-     * compress tool guidance must then point at {@code /compact} instead of asking for more ranges.
-     */
-    private int realUserMessages() {
-        var count = 0;
-        for (final var message : published) {
-            if (message == null || !"user".equals(message.role())) {
-                continue;
-            }
-            if (isVolatileTail(message)) {
-                continue;
-            }
-            final var content = message.content() instanceof String s ? s : String.valueOf(message.content());
-            if (content.startsWith("<compacted-context>")) {
-                continue;
-            }
-            count++;
-        }
-        return count;
     }
 
     /**
@@ -302,58 +274,19 @@ public final class ContextCompression {
             final var out = new ArrayList<Message>(messages.size());
             final var refs = new HashSet<String>();
             refs.add("");
-            final var boundaries = new IdentityHashMap<Message, List<Integer>>();
-            if (boundaryOnly) {
-                // Assign in transcript order, including messages without textual content: an end
-                // boundary can be a tool call or result with no renderable body.
-                for (var i = 1; i < published.size(); i++) {
-                    final var message = published.get(i);
-                    if (message != null && !"system".equals(message.role()) && !isVolatileTail(message)) {
-                        refOf(message);
-                    }
+            // Boundary-only mode advertises each eligible fully-closed historical turn as one
+            // explicit inclusive pair ("compactIds=start-end") on the user message that opens it,
+            // so the model copies real boundaries instead of reconstructing them from scattered refs.
+            // Legacy mode keeps the per-message "@N@" seams for strong/other models that opt out.
+            final var closedTurns = boundaryOnly
+                    ? collectCompressibleClosedTurns(List.<Message>of(), Integer.MAX_VALUE)
+                    : List.<ClosedTurn>of();
+            final var compactIdsByMessage = new IdentityHashMap<Message, String>();
+            for (final var turn : closedTurns) {
+                if (messages != null && !messageVisible(messages, turn.startMessage())) {
+                    continue;
                 }
-                final var visible = java.util.Collections.newSetFromMap(new IdentityHashMap<Message, Boolean>());
-                visible.addAll(messages);
-                final var protectedFrom = configuration.turnProtection() && configuration.turnProtectionTurns() > 0
-                        ? protectedTurnStart(configuration.turnProtectionTurns())
-                        : -1;
-                for (var i = 1; i < published.size(); i++) {
-                    final var start = published.get(i);
-                    if (start == null
-                            || !"user".equals(start.role())
-                            || isVolatileTail(start)
-                            || isDigestOnlyUserMessage(start)
-                            || start.content() == null
-                            || !visible.contains(start)) {
-                        continue;
-                    }
-                    var end = i;
-                    while (end + 1 < published.size()
-                            && !isVolatileTail(published.get(end + 1))
-                            && !"user".equals(published.get(end + 1).role())) {
-                        end++;
-                    }
-                    if (end == i
-                            || (protectedFrom >= 0 && end >= protectedFrom)
-                            || overlapsActive(refOf(start), refOf(published.get(end)))) {
-                        continue;
-                    }
-                    boundaries
-                            .computeIfAbsent(start, ignored -> new ArrayList<>())
-                            .add(refOf(start));
-                    final var next = end + 1 < published.size() ? published.get(end + 1) : null;
-                    final var carrier = next != null
-                                    && "user".equals(next.role())
-                                    && !isVolatileTail(next)
-                                    && !isDigestOnlyUserMessage(next)
-                                    && next.content() != null
-                                    && visible.contains(next)
-                            ? next
-                            : start;
-                    boundaries
-                            .computeIfAbsent(carrier, ignored -> new ArrayList<>())
-                            .add(refOf(published.get(end)));
-                }
+                compactIdsByMessage.put(turn.startMessage(), turn.startRef() + "-" + turn.endRef());
             }
             for (var i = 0; i < messages.size(); i++) {
                 final var message = messages.get(i);
@@ -370,20 +303,16 @@ public final class ContextCompression {
                 }
                 final var content = message.content() instanceof String s ? s : String.valueOf(message.content());
                 if (boundaryOnly) {
-                    final var tags = boundaries.get(message);
-                    if (tags == null) {
+                    final var compactIds = compactIdsByMessage.get(message);
+                    if (compactIds == null) {
                         out.add(message);
                         continue;
                     }
-                    final var tagged = new StringBuilder(content);
-                    for (final var ref : tags) {
-                        final var tag = "@" + ref + "@";
-                        refs.add(tag);
-                        tagged.append('\n').append(tag);
-                    }
+                    final var tag = "compactIds=" + compactIds;
+                    refs.add(tag);
                     out.add(new Message(
                             message.role(),
-                            tagged.toString(),
+                            content + "\n" + tag,
                             message.name(),
                             message.toolCalls(),
                             message.toolCallId(),
@@ -669,13 +598,6 @@ public final class ContextCompression {
             }
         }
 
-        // a flash-class model that guessed refs no longer in the live conversation gets the real,
-        // guaranteed-valid user-turn ref list so it can correct in one round instead of guessing again
-        final var refListener = onUnknownRefs;
-        if (refLookupSkips > 0 && refListener != null) {
-            refListener.accept(compressibleUserTurnRefs());
-        }
-
         final var created = new ArrayList<String>();
         for (final var range : resolved) {
             final var blockId = "b" + nextBlock.getAndIncrement();
@@ -696,6 +618,11 @@ public final class ContextCompression {
             blocks.add(block);
             created.add("@" + blockId + "@");
         }
+        // Report candidates after this batch's successful ranges have become active blocks.
+        final var refListener = onUnknownRefs;
+        if (refLookupSkips > 0 && refListener != null) {
+            refListener.accept(compressibleClosedTurns());
+        }
         final var base = created.isEmpty()
                 ? "No ranges were compressed."
                 : "Compressed " + created.size() + " range(s): " + String.join(", ", created)
@@ -703,42 +630,33 @@ public final class ContextCompression {
         final var parts = new ArrayList<String>(2);
         parts.add(base);
         if (!skipped.isEmpty()) {
-            // a transcript whose only user content is a previous <compacted-context> digest leaves
-            // the generic "send several small disjoint ranges" guidance misleading: there is no
-            // real user turn to anchor a range on. Point the model at the compaction command that
-            // can actually shrink the digest-only round instead.
-            final var guidance = realUserMessages() < 2
-                    ? "the only user message is the compacted-context digest; run /compact to reduce the tool round"
-                    : "To free more closed history, send several small disjoint ranges as one array,"
-                            + " each starting on a user-message ref and ending just before the next user message.";
-            parts.add("skipped: " + String.join("; ", skipped) + ". " + guidance);
+            parts.add("skipped: " + String.join("; ", skipped) + ".");
         }
         if (!nudges.isEmpty()) {
             parts.add(String.join("\n", nudges));
         }
-        if (overlapSkips > 0) {
-            // overlap means every ref was valid, so the onUnknownRefs observer (refLookupSkips > 0)
-            // can never fire here. Surface the bounded, guaranteed-valid user-turn ref list directly
-            // so a strong model that wrote an overlapping batch can re-anchor in one round - the same
-            // list AgentLoop.compressionRefGuidance() renders on the hard tier.
-            final var refs = compressibleUserTurnRefs();
-            if (refs.isEmpty()) {
-                parts.add("Overlapping ranges were resolved; no user-turn start is currently"
-                        + " compressible, so do not retry the same ranges - run /compact or start"
-                        + " a new session.");
+        if (!skipped.isEmpty() || overlapSkips > 0) {
+            final var candidates = compressibleClosedTurns();
+            if (candidates.isEmpty()) {
+                parts.add(
+                        "No structurally eligible historical ranges are available. Continue the current task;"
+                                + " do not guess references or run a whole-session compact just to meet the working-context target.");
             } else {
-                final var refsText = new StringBuilder("compressible user-turn starts: ");
-                for (var i = 0; i < refs.size(); i++) {
+                final var refsText = new StringBuilder("compressible inclusive ranges: ");
+                for (var i = 0; i < candidates.size(); i++) {
                     if (i > 0) {
                         refsText.append(", ");
                     }
-                    refsText.append('@').append(refs.get(i)).append('@');
+                    refsText.append(candidates.get(i).startId())
+                            .append('-')
+                            .append(candidates.get(i).endId());
                 }
-                final var omitted = compressibleUserTurnCount() - refs.size();
+                final var omitted = compressibleClosedTurnCount() - candidates.size();
                 if (omitted > 0) {
                     refsText.append(" (+").append(omitted).append(" omitted)");
                 }
-                refsText.append(" - start on one, end just before the next user message.");
+                refsText.append(
+                        " - use exact startId/endId only for genuinely finished work; otherwise continue the current task.");
                 parts.add(refsText.toString());
             }
         }
@@ -919,6 +837,14 @@ public final class ContextCompression {
 
     private record ResolvedRange(int startRef, int endRef, String summary) {}
 
+    /**
+     * One structurally eligible, fully closed historical user turn: {@code startRef} is the user
+     * message that opens the turn, {@code endRef} is the last assistant/tool message before the next
+     * user message (both inclusive). Advertised only when passing the whole {@link #compress}
+     * validation without snapping.
+     */
+    private record ClosedTurn(int startRef, int endRef, Message startMessage) {}
+
     private String expandPlaceholders(
             final String summary,
             final int startRef,
@@ -1029,19 +955,22 @@ public final class ContextCompression {
     }
 
     /**
-     * The bounded, guaranteed-valid set of user-turn start references a {@code compress} range may
-     * currently anchor on, oldest-first and capped at {@link #MAX_GUIDANCE_REFS}. Only real user
-     * messages are listed (never the volatile session-state tail, never a {@code <compacted-context>}
-     * digest), and refs already covered by {@code turnProtection} or by an ACTIVE compression block
-     * are excluded so every {@code startId} shown passes the compress validation. Used by the
-     * {@code compress} tool's unknown-ref observer and by the hard compression nudge so a flash-class
-     * model stops guessing stale refs. Empty when nothing is currently safe to compress.
+     * The bounded, guaranteed-valid set of fully-closed historical turns a {@code compress} range may
+     * currently anchor on, oldest-first and capped at {@link #MAX_GUIDANCE_REFS}. Each entry is an
+     * inclusive {@code (startId, endId)} pair that passes the {@link #compress} validation without
+     * any snapping: the start is a real user message and the end is that same turn's last
+     * assistant/tool message just before the next user message. The current open turn, protected
+     * recent turns, volatile tails, {@code <compacted-context>} digests and turns overlapped by an
+     * ACTIVE compression block are all excluded. Empty when nothing is safe to compress.
      */
-    public List<Integer> compressibleUserTurnRefs() {
+    public List<Range> compressibleClosedTurns() {
         lock.lock();
         try {
-            final var out = new ArrayList<Integer>(MAX_GUIDANCE_REFS);
-            collectCompressibleUserTurnRefs(out, MAX_GUIDANCE_REFS);
+            final var turns = collectCompressibleClosedTurns(List.of(), MAX_GUIDANCE_REFS);
+            final var out = new ArrayList<Range>(turns.size());
+            for (final var turn : turns) {
+                out.add(new Range(Integer.toString(turn.startRef()), Integer.toString(turn.endRef()), null));
+            }
             return out;
         } finally {
             lock.unlock();
@@ -1049,58 +978,108 @@ public final class ContextCompression {
     }
 
     /**
-     * Total number of currently compressible user-turn starts (unbounded), so a caller that truncates
-     * the bounded guidance can report exactly how many refs were omitted rather than guessing.
+     * Total number of currently compressible fully-closed turns (unbounded), so a caller that
+     * truncates the bounded guidance can report exactly how many were omitted rather than guessing.
      */
-    public int compressibleUserTurnCount() {
+    public int compressibleClosedTurnCount() {
         lock.lock();
         try {
-            return collectCompressibleUserTurnRefs(new ArrayList<>(), Integer.MAX_VALUE);
+            return collectCompressibleClosedTurns(List.of(), Integer.MAX_VALUE).size();
         } finally {
             lock.unlock();
         }
     }
 
     /**
-     * Appends up to {@code max} oldest-first refs of the currently compressible user-turn starts to
-     * {@code sink} and returns how many were appended. Excludes the volatile session-state tail and
-     * {@code <compacted-context>} digests, refs covered by {@code turnProtection} and refs inside an
-     * ACTIVE compression block, so every returned ref passes the compress validation. Caller holds the
-     * lock.
+     * Discovers the currently eligible fully-closed historical turns, oldest-first, up to
+     * {@code max}. {@code visible} optionally constrains the start message to a specific
+     * (post-rewrite) wire list; an empty list means no visibility filter (status/guidance operate on
+     * the live published list). Every returned turn passes the {@link #compress} structural
+     * validation without snapping. Caller holds the lock.
      */
-    private int collectCompressibleUserTurnRefs(final List<Integer> sink, final int max) {
+    private List<ClosedTurn> collectCompressibleClosedTurns(final List<Message> visible, final int max) {
         if (!enabled() || published == null || max <= 0) {
-            return 0;
+            return List.of();
+        }
+        // Assign refs in transcript order (including assistant/tool messages with no textual body),
+        // so every discovered pair uses transcript-ordered ids that match the wire's stable refs.
+        for (var i = 1; i < published.size(); i++) {
+            final var message = published.get(i);
+            if (message != null && !"system".equals(message.role()) && !isVolatileTail(message)) {
+                refOf(message);
+            }
         }
         final var protectedFrom = configuration.turnProtection() && configuration.turnProtectionTurns() > 0
                 ? protectedTurnStart(configuration.turnProtectionTurns())
                 : -1;
-        final var activeBlocks =
-                blocks.stream().filter(b -> b.status() == Status.ACTIVE).toList();
-        var collected = 0;
-        for (var i = 0; i < published.size() && collected < max; i++) {
-            final var message = published.get(i);
-            if (message == null || !"user".equals(message.role())) {
-                continue;
+        final var out = new ArrayList<ClosedTurn>();
+        // The current open turn is the one opened by the last real user message in the published
+        // list: when a compression nudge fires we are mid-turn on it, so it is never advertised.
+        var lastEligibleUserStart = -1;
+        for (var i = 1; i < published.size(); i++) {
+            final var candidate = published.get(i);
+            if (isEligibleTurnStart(candidate, visible)) {
+                lastEligibleUserStart = i;
             }
-            if (isVolatileTail(message) || isDigestOnlyUserMessage(message)) {
-                continue;
-            }
-            // turnProtection shields a suffix: everything from the last-protected user turn onward
-            // (the protectedTurnStart index, matching compressLocked's effectiveEnd >= protectedFrom
-            // guard) is off-limits, so only the older, unprotected history stays eligible.
-            if (protectedFrom >= 0 && i >= protectedFrom) {
-                continue;
-            }
-            final var ref = refOf(message);
-            final var covered = activeBlocks.stream().anyMatch(b -> ref >= b.startRef() && ref <= b.endRef());
-            if (covered) {
-                continue;
-            }
-            sink.add(ref);
-            collected++;
         }
-        return collected;
+        for (var i = 1; i < published.size() && out.size() < max; i++) {
+            final var start = published.get(i);
+            if (!isEligibleTurnStart(start, visible)) {
+                continue;
+            }
+            // exclude the current open turn (the very last real user message)
+            if (i == lastEligibleUserStart) {
+                continue;
+            }
+            var end = i;
+            while (end + 1 < published.size()
+                    && (isVolatileTail(published.get(end + 1))
+                            || !"user".equals(published.get(end + 1).role()))) {
+                end++;
+            }
+            // Internal state is not a logical turn boundary, nor a valid range endpoint.
+            while (end > i && isVolatileTail(published.get(end))) {
+                end--;
+            }
+            // a closed turn must have a non-empty response span and end on a real turn boundary
+            if (end <= i || !turnBoundary(end) || end >= lastEligibleUserStart) {
+                continue;
+            }
+            if (protectedFrom >= 0 && end >= protectedFrom) {
+                continue;
+            }
+            final var endMessage = published.get(end);
+            if (overlapsActive(refOf(start), refOf(endMessage))) {
+                continue;
+            }
+            out.add(new ClosedTurn(refOf(start), refOf(endMessage), start));
+        }
+        return out;
+    }
+
+    /** True when {@code message} is a real, non-protected user message that can open a compress turn. */
+    private static boolean isEligibleTurnStart(final Message message, final List<Message> visible) {
+        if (message == null
+                || !"user".equals(message.role())
+                || isVolatileTail(message)
+                || isDigestOnlyUserMessage(message)
+                || message.content() == null) {
+            return false;
+        }
+        return visible.isEmpty() || messageVisible(visible, message);
+    }
+
+    /** True when {@code message} (by identity) is present in {@code list}. */
+    private static boolean messageVisible(final List<Message> list, final Message message) {
+        if (list == null || list.isEmpty()) {
+            return true;
+        }
+        for (final var m : list) {
+            if (m == message) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void markAbsorbed(final Block block) {

@@ -35,6 +35,38 @@ import org.junit.jupiter.api.Test;
 
 class ContextCompressionTest {
 
+    @Test
+    void closedTurnIncludesToolRoundsAcrossInternalStateMessages() {
+        final var compression = new ContextCompression(config());
+        final var call = new ToolCall("c1", "function", new ToolCall.FunctionCall("read", "{}"), 0);
+        final var messages = List.of(
+                Message.system("system"),
+                Message.user("inspect sample"),
+                Message.assistant("checking", List.of()),
+                new Message("user", "state", null, null, null, Map.of("volatileTail", true)),
+                Message.assistant("", List.of(call)),
+                Message.tool("c1", ""),
+                new Message("user", "updated state", null, null, null, Map.of("volatileTail", true)),
+                Message.user("next task"));
+        compression.publish(messages);
+        final var range = compression.compressibleClosedTurns().getFirst();
+        assertEquals(Integer.toString(compression.refOf(messages.get(1))), range.startId());
+        assertEquals(Integer.toString(compression.refOf(messages.get(5))), range.endId());
+        final var rendered = compression.renderRefs(messages, true);
+        assertTrue(
+                rendered.get(1).content().toString().contains("compactIds=" + range.startId() + "-" + range.endId()));
+        assertEquals(messages.get(3), rendered.get(3));
+        final var result = compression.compress(
+                "sample", List.of(new ContextCompression.Range(range.startId(), range.endId(), "inspection complete")));
+        assertTrue(result.success(), result.message());
+        assertFalse(result.message().contains("snapped"), result.message());
+        assertEquals(
+                Integer.parseInt(range.startId()),
+                compression.blocks().getFirst().startRef());
+        assertEquals(
+                Integer.parseInt(range.endId()), compression.blocks().getFirst().endRef());
+    }
+
     private static CompressConfiguration config() {
         return new CompressConfiguration(
                 true,
@@ -125,11 +157,11 @@ class ContextCompressionTest {
         final var messages = simpleConversation();
         compression.publish(messages);
         final var rendered = compression.renderRefs(messages, true);
-        assertTrue(rendered.get(1).content().toString().contains("@1@"));
+        // only the first (closed) turn is advertised, as one explicit inclusive pair
+        assertEquals("first task\ncompactIds=1-2", rendered.get(1).content());
         assertEquals("done", rendered.get(2).content());
-        assertTrue(rendered.get(3).content().toString().contains("@2@"));
-        assertTrue(rendered.get(3).content().toString().contains("@3@"));
-        assertTrue(rendered.get(3).content().toString().contains("@4@"));
+        // the second user turn is the current open turn: it must not be advertised
+        assertEquals("next task", rendered.get(3).content());
         assertEquals("also done", rendered.get(4).content());
         assertTrue(compression
                         .compress("first", List.of(new ContextCompression.Range("1", "2", "done")))
@@ -138,6 +170,7 @@ class ContextCompressionTest {
         final var rewritten = compression.renderRefs(compression.rewrite(messages), true);
         assertTrue(rewritten.get(1).content().toString().contains("@b1@"));
         assertFalse(rewritten.get(2).content().toString().contains("@2@"));
+        assertFalse(rewritten.get(2).content().toString().contains("compactIds="));
         assertTrue(compression.renderRefs(messages).get(2).content().toString().contains("@2@"));
     }
 
@@ -154,11 +187,77 @@ class ContextCompressionTest {
                 new Message("user", "tail", null, null, null, Map.of("volatileTail", true)));
         compression.publish(messages);
         final var rendered = compression.renderRefs(messages, true);
-        assertTrue(rendered.get(1).content().toString().contains("@1@"));
-        assertTrue(rendered.get(1).content().toString().contains("@2@"));
-        assertEquals(messages.get(3), rendered.get(3));
-        assertEquals(messages.get(4), rendered.get(4));
-        assertEquals(messages.get(6), rendered.get(6));
+        // the first turn is closed and not protected (turnProtection=1 shields only the last)
+        assertEquals("first\ncompactIds=1-2", rendered.get(1).content());
+        assertEquals(messages.get(3), rendered.get(3)); // digest-only user never advertised
+        assertEquals(messages.get(4), rendered.get(4)); // current open turn not advertised
+        assertEquals(messages.get(6), rendered.get(6)); // volatile tail never advertised
+    }
+
+    @Test
+    void compressibleClosedTurnsAdvertiseOnlyValidInclusivePairs() {
+        final var compression = new ContextCompression(config());
+        final var messages = toolConversation();
+        compression.publish(messages);
+        final var ranges = compression.compressibleClosedTurns();
+        assertEquals(1, ranges.size(), "only the first closed turn is eligible");
+        final var range = ranges.get(0);
+        assertEquals("1", range.startId(), "start is the user message opening the turn");
+        assertEquals("3", range.endId(), "end is the last tool result before the next user message");
+        // the advertised pair compresses its exact turn without snapping
+        final var result = compression.compress("t", List.of(range));
+        assertTrue(result.success(), result.message());
+        assertTrue(result.blockId() != null);
+        // after compression the first turn is covered by an ACTIVE block, so it stops being advertised
+        final var after = compression.compressibleClosedTurns();
+        assertTrue(after.isEmpty(), "the compressed turn is no longer eligible");
+        assertEquals(0, compression.compressibleClosedTurnCount());
+    }
+
+    @Test
+    void boundaryRenderingMarksEachClosedTurnWithItsOwnPair() {
+        final var compression = new ContextCompression(config());
+        final var messages = toolConversation();
+        compression.publish(messages);
+        final var rendered = compression.renderRefs(messages, true);
+        // only the first turn is closed; the second is the current open turn
+        assertEquals("task one\ncompactIds=1-3", rendered.get(1).content());
+        assertEquals("calling", rendered.get(2).content());
+        assertEquals("OK from my_tool", rendered.get(3).content());
+        assertEquals("task two", rendered.get(4).content());
+        assertEquals("done", rendered.get(5).content());
+        // no bare @N@ seams leak onto assistant/tool messages in boundary-only mode
+        for (final var m : rendered) {
+            if (m == messages.get(1)) {
+                continue;
+            }
+            assertFalse(m.content() instanceof String c && c.contains("\n@"), String.valueOf(m.content()));
+        }
+    }
+
+    @Test
+    void compressibleClosedTurnCountReflectsMultipleClosedTurns() {
+        final var compression = new ContextCompression(config());
+        final var messages = List.of(
+                Message.system("system"),
+                Message.user("q1"),
+                Message.assistant("a1", List.of()),
+                Message.user("q2"),
+                Message.assistant("a2", List.of()),
+                Message.user("q3"),
+                Message.assistant("a3", List.of()));
+        compression.publish(messages);
+        // turns for q1 and q2 are closed (each followed by a later user), q3 is the current open turn
+        assertEquals(2, compression.compressibleClosedTurnCount());
+        final var ranges = compression.compressibleClosedTurns();
+        assertEquals(2, ranges.size());
+        assertEquals("1", ranges.get(0).startId());
+        assertEquals("2", ranges.get(0).endId());
+        assertEquals("3", ranges.get(1).startId());
+        assertEquals("4", ranges.get(1).endId());
+        for (final var range : ranges) {
+            assertTrue(compression.compress("t", List.of(range)).success());
+        }
     }
 
     @Test
@@ -538,7 +637,7 @@ class ContextCompressionTest {
         assertTrue(result.success(), result.message());
         assertTrue(result.message().contains("straddles"), result.message());
         assertTrue(result.message().contains("kept the earlier range"), result.message());
-        assertTrue(result.message().contains("compressible user-turn starts: @5@"), result.message());
+        assertTrue(result.message().contains("No structurally eligible historical ranges"), result.message());
         assertEquals(1, compression.blocks().size(), "only the kept earlier range must create a block");
         assertEquals(1, compression.blocks().get(0).startRef());
         assertEquals(4, compression.blocks().get(0).endRef());
@@ -761,7 +860,7 @@ class ContextCompressionTest {
     }
 
     @Test
-    void digestOnlyTranscriptPointsAtCompactInsteadOfMoreRanges() {
+    void digestOnlyTranscriptContinuesWithoutWholeCompactEscalation() {
         // a transcript whose only user content is a previous <compacted-context> digest (the
         // digest-only dead-end: compaction folded the history, then a long tool-churn round) cannot
         // anchor a compress range. A skipped range must surface the digest diagnostic, not the
@@ -777,9 +876,9 @@ class ContextCompressionTest {
         final var result = compression.compress("t", List.of(new ContextCompression.Range("3", "3", "cannot snap")));
         assertTrue(result.success(), result.message());
         assertTrue(result.message().contains("skipped"), result.message());
-        assertTrue(
-                result.message().contains("the only user message is the compacted-context digest"),
-                "the digest diagnostic must replace the generic guidance, got: " + result.message());
+        assertTrue(result.message().contains("No structurally eligible historical ranges"), result.message());
+        assertTrue(result.message().contains("Continue the current task"), result.message());
+        assertFalse(result.message().contains("/compact"), result.message());
         assertFalse(
                 result.message().contains("send several small disjoint ranges"),
                 "the generic disjoint-ranges guidance must be absent for a digest-only transcript, got: "
@@ -787,7 +886,7 @@ class ContextCompressionTest {
     }
 
     @Test
-    void normalTranscriptKeepsTheGenericDisjointRangesGuidance() {
+    void normalTranscriptRecoversWithExactClosedPairs() {
         // control: a transcript with real user messages keeps the generic guidance on a skip.
         final var compression = new ContextCompression(config());
         final var messages = simpleConversation();
@@ -795,9 +894,7 @@ class ContextCompressionTest {
         final var result = compression.compress("t", List.of(new ContextCompression.Range("2", "2", "cannot snap")));
         assertTrue(result.success(), result.message());
         assertTrue(result.message().contains("skipped"), result.message());
-        assertTrue(
-                result.message().contains("send several small disjoint ranges"),
-                "a normal transcript must keep the disjoint-ranges guidance, got: " + result.message());
+        assertTrue(result.message().contains("compressible inclusive ranges: 1-2"), result.message());
     }
 
     @Test
@@ -911,16 +1008,16 @@ class ContextCompressionTest {
     }
 
     @Test
-    void compressibleUserTurnRefsListsOnlyRealUserTurnsOldestFirst() {
+    void compressibleClosedTurnsListsOnlyRealUserTurnsOldestFirst() {
         final var compression = new ContextCompression(config());
         final var messages = simpleConversation(); // refs: 1 user, 2 assistant, 3 user, 4 assistant
         assignedRefs(compression, messages);
-        assertEquals(List.of(1, 3), compression.compressibleUserTurnRefs());
-        assertEquals(2, compression.compressibleUserTurnCount());
+        assertEquals(List.of(new ContextCompression.Range("1", "2", null)), compression.compressibleClosedTurns());
+        assertEquals(1, compression.compressibleClosedTurnCount());
     }
 
     @Test
-    void compressibleUserTurnRefsExcludesVolatileTailAndDigestAndActiveBlocks() {
+    void compressibleClosedTurnsExcludesVolatileTailAndDigestAndActiveBlocks() {
         final var compression = new ContextCompression(config());
         final var messages = List.of(
                 Message.system("system"),
@@ -932,25 +1029,25 @@ class ContextCompressionTest {
                 new Message("user", "live session-state tail", null, null, null, Map.of("volatileTail", true)));
         assignedRefs(compression, messages);
         // eligible: ref 1 (first task) and ref 4 (third task); ref 3 is the digest, the tail is never ref'd
-        assertEquals(List.of(1, 4), compression.compressibleUserTurnRefs());
+        assertEquals(List.of(new ContextCompression.Range("1", "2", null)), compression.compressibleClosedTurns());
         // compress 1..2 -> block b1 covers ref 1; now only ref 4 stays eligible
         compression.compress("first", List.of(new ContextCompression.Range("1", "2", "first task done")));
-        assertEquals(List.of(4), compression.compressibleUserTurnRefs());
-        assertEquals(1, compression.compressibleUserTurnCount());
+        assertEquals(List.of(), compression.compressibleClosedTurns());
+        assertEquals(0, compression.compressibleClosedTurnCount());
     }
 
     @Test
-    void compressibleUserTurnRefsRespectsTurnProtectionSuffix() {
+    void compressibleClosedTurnsRespectsTurnProtectionSuffix() {
         final var compression = new ContextCompression(protectedConfig()); // turnProtection=1
         final var messages = simpleConversation(); // refs: 1 user, 2 assistant, 3 user(last), 4 assistant
         assignedRefs(compression, messages);
         // the last user turn (ref 3) is inside the protected suffix, ref 1 (older) stays eligible
-        assertEquals(List.of(1), compression.compressibleUserTurnRefs());
-        assertEquals(1, compression.compressibleUserTurnCount());
+        assertEquals(List.of(new ContextCompression.Range("1", "2", null)), compression.compressibleClosedTurns());
+        assertEquals(1, compression.compressibleClosedTurnCount());
     }
 
     @Test
-    void compressibleUserTurnRefsCapsAndReportsOmittedCount() {
+    void compressibleClosedTurnsCapsAndReportsOmittedCount() {
         final var compression = new ContextCompression(config());
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
@@ -959,11 +1056,13 @@ class ContextCompressionTest {
             messages.add(Message.assistant("done " + i, List.of()));
         }
         assignedRefs(compression, messages);
-        final var refs = compression.compressibleUserTurnRefs();
+        final var refs = compression.compressibleClosedTurns();
         assertEquals(ContextCompression.MAX_GUIDANCE_REFS, refs.size(), "the guidance list must be capped");
-        assertEquals(30, compression.compressibleUserTurnCount(), "the count must report the full eligible set");
-        assertEquals(1, (int) refs.get(0), "oldest-first ordering");
-        assertEquals(1 + 2 * (ContextCompression.MAX_GUIDANCE_REFS - 1), (int) refs.getLast(), "every other ref");
+        assertEquals(29, compression.compressibleClosedTurnCount(), "the current turn must be excluded");
+        assertEquals("1", refs.getFirst().startId(), "oldest-first ordering");
+        assertEquals(
+                Integer.toString(1 + 2 * (ContextCompression.MAX_GUIDANCE_REFS - 1)),
+                refs.getLast().startId());
     }
 
     @Test
@@ -971,7 +1070,7 @@ class ContextCompressionTest {
         final var compression = new ContextCompression(config());
         final var messages = simpleConversation();
         assignedRefs(compression, messages);
-        final var observed = new AtomicReference<List<Integer>>();
+        final var observed = new AtomicReference<List<ContextCompression.Range>>();
         final var fired = new AtomicBoolean(false);
         compression.onUnknownRefs(refs -> {
             fired.set(true);
@@ -983,7 +1082,7 @@ class ContextCompressionTest {
         assertTrue(skipped.success(), skipped.message());
         assertTrue(skipped.message().contains("not in the live conversation"), skipped.message());
         assertTrue(fired.get(), "the observer must fire on a ref-lookup skip");
-        assertEquals(List.of(1, 3), observed.get());
+        assertEquals(List.of(new ContextCompression.Range("1", "2", null)), observed.get());
 
         // a clean success must NOT fire the observer
         fired.set(false);
@@ -1007,7 +1106,7 @@ class ContextCompressionTest {
         assignedRefs(compression, messages);
         // compress the only eligible turn (ref 1) so an ACTIVE block covers it, leaving nothing eligible
         compression.compress("first", List.of(new ContextCompression.Range("1", "2", "done")));
-        assertEquals(0, compression.compressibleUserTurnCount());
+        assertEquals(0, compression.compressibleClosedTurnCount());
         final var fired = new AtomicBoolean(false);
         compression.onUnknownRefs(refs -> fired.set(true));
         final var skipped = compression.compress("t", List.of(new ContextCompression.Range("999", "999", "bogus")));
@@ -1022,6 +1121,21 @@ class ContextCompressionTest {
     }
 
     @Test
+    void unknownRefsObserverExcludesRangesCreatedInTheSameBatch() {
+        final var compression = new ContextCompression(config());
+        assignedRefs(compression, simpleConversation());
+        final var observed = new AtomicReference<List<ContextCompression.Range>>();
+        compression.onUnknownRefs(observed::set);
+        final var result = compression.compress(
+                "sample",
+                List.of(
+                        new ContextCompression.Range("1", "2", "finished"),
+                        new ContextCompression.Range("999", "999", "missing")));
+        assertTrue(result.success(), result.message());
+        assertEquals(List.of(), observed.get());
+    }
+
+    @Test
     void compressibleGuidanceIsDeterministicAcrossReadsWithoutMutation() {
         // the ACP #207 feedback-loop class of bug: a shared per-call baseline silently reset on
         // "nothing to compress" made guidance vanish or misfire. Here the guidance is a pure function
@@ -1032,16 +1146,19 @@ class ContextCompressionTest {
         final var messages = simpleConversation();
         assignedRefs(compression, messages);
 
-        assertEquals(List.of(1), compression.compressibleUserTurnRefs());
-        assertEquals(List.of(1), compression.compressibleUserTurnRefs(), "guidance must not drift between reads");
-        assertEquals(1, compression.compressibleUserTurnCount());
-        assertEquals(1, compression.compressibleUserTurnCount());
+        assertEquals(List.of(new ContextCompression.Range("1", "2", null)), compression.compressibleClosedTurns());
+        assertEquals(
+                List.of(new ContextCompression.Range("1", "2", null)),
+                compression.compressibleClosedTurns(),
+                "guidance must not drift between reads");
+        assertEquals(1, compression.compressibleClosedTurnCount());
+        assertEquals(1, compression.compressibleClosedTurnCount());
 
         // compress the only eligible turn: now the empty case must be stable too
         compression.compress("first", List.of(new ContextCompression.Range("1", "2", "done")));
-        assertEquals(0, compression.compressibleUserTurnCount());
-        assertEquals(0, compression.compressibleUserTurnCount(), "the empty case must stay empty, never flip");
-        assertEquals(List.of(), compression.compressibleUserTurnRefs());
-        assertEquals(List.of(), compression.compressibleUserTurnRefs());
+        assertEquals(0, compression.compressibleClosedTurnCount());
+        assertEquals(0, compression.compressibleClosedTurnCount(), "the empty case must stay empty, never flip");
+        assertEquals(List.of(), compression.compressibleClosedTurns());
+        assertEquals(List.of(), compression.compressibleClosedTurns());
     }
 }

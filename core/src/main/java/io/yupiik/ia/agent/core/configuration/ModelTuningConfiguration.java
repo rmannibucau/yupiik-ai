@@ -130,7 +130,7 @@ public record ModelTuningConfiguration(
         @Property(
                 defaultValue = "io.yupiik.ia.agent.core.configuration.BoundaryOnlyRefMode.AUTO",
                 documentation =
-                        "Experimental compression reference presentation: ENABLED exposes turn boundaries instead of tagging every message; DISABLED retains legacy tags. AUTO enables it for deepseek-v4-flash with selected high or max variants only. An explicit model setting overrides the provider setting; AUTO inherits the provider setting. Resolved independently for each session request.")
+                        "Compression reference presentation: AUTO and ENABLED expose compactIds=A-B on eligible historical turns for all models and variants; DISABLED retains legacy per-message tags. An explicit model setting overrides the provider setting; AUTO inherits the provider setting. Resolved independently for each session request.")
         BoundaryOnlyRefMode compressionBoundaryOnly) {
     public ModelTuningConfiguration(
             final String reasoningEffort,

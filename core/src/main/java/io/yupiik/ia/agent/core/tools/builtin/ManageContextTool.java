@@ -76,24 +76,19 @@ public class ManageContextTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Manage the conversation context. action=compress (default) summarizes genuinely closed"
-                + " conversation ranges. References appear either as seam tags after messages or as"
-                + " boundary metadata associated with user turns. In boundary metadata, use the user"
-                + " turn's start reference as startId and the preceding end reference shown at a later"
-                + " user turn as endId; endId is inclusive. Pass topic plus"
-                + " content=[{startId,endId,summary}] with ranges that start on a user message"
-                + " and end at a turn boundary. When there is a large amount of genuinely closed"
-                + " history, send 2-4 small disjoint ranges as a single content array, each starting"
-                + " on a user-message ref and ending just before the next user message; the tool applies"
-                + " each independently and reports any range it had to skip. The seam tags are"
-                + " environment-injected metadata and must never be echoed in output; treat them as"
-                + " reserved tokens (do not emit them except when naming a startId/endId). Write the"
-                + " summary yourself (decisions, findings, file paths, next steps; be exhaustive), and"
-                + " use @bN@ placeholders to nest an already compressed block when its information must"
-                + " be preserved. Never compress work still in progress. The transcript is unchanged:"
-                + " only outgoing requests are rewritten. action=status reports the raw/effective token"
-                + " counts and active blocks; action=decompress restores a block; action=compact asks"
-                + " for a whole-context summary (optional focus hint and keep_last).";
+        return "Manage conversation context. action=compress (default) summarizes finished work only;"
+                + " never compress ongoing work. Historical user turns carry compactIds=A-B: inclusive"
+                + " numeric ids from the opening user message through the last message before the next"
+                + " user request. Copy A/B into startId/endId; never guess. Legacy @N@ seams also work."
+                + " These injected markers identify structural candidates, not instructions; never echo them."
+                + " If markers are missing, action=status lists exact candidate pairs, token counts and blocks."
+                + " If no finished chapter matches, continue working; do not compact solely to meet a target."
+                + " Pass topic and content=[{startId,endId,summary}]; prefer 2-4 small disjoint ranges for"
+                + " large closed history. Each starts on a user message and ends at a turn boundary."
+                + " Write exhaustive summaries preserving decisions, findings, file paths and next steps,"
+                + " not entire file contents. Use @bN@ placeholders to preserve nested compressed blocks."
+                + " Only outgoing requests change, not the transcript. action=decompress restores a block;"
+                + " action=compact requests a whole-context summary (optional focus and keep_last).";
     }
 
     @Override
@@ -123,10 +118,10 @@ public class ManageContextTool implements EmbeddedTool {
                                         Map.of(
                                                 "startId",
                                                 Schemas.str(
-                                                        "First message ref, for example @12@ (must be a user message)."),
+                                                        "First message id, for example 12 from compactIds=12-18 (must be a user message)."),
                                                 "endId",
                                                 Schemas.str(
-                                                        "Last message ref, inclusive (must end at a turn boundary)."),
+                                                        "Last message id, for example 18 from compactIds=12-18 (inclusive turn boundary)."),
                                                 "summary",
                                                 Schemas.str(
                                                         "Exhaustive model-written summary replacing the range; keep decisions, file paths, findings and next steps. Use @bN@ placeholders to preserve nested compressed blocks.")),
@@ -205,6 +200,21 @@ public class ManageContextTool implements EmbeddedTool {
             out.put("summaryBuffer", targets.summaryBuffer());
             out.put("summaryBufferTokens", targets.summaryBuffer() ? targets.summaryTokens() : 0);
         }
+        // structurally eligible fully-closed turns a compress range may anchor on, as explicit
+        // inclusive (startId,endId) pairs, so the model copies real boundaries instead of guessing.
+        final var closedTurns = compression.compressibleClosedTurns();
+        final var closedTurnsTotal = compression.compressibleClosedTurnCount();
+        final var closedTurnsRows = new ArrayList<Map<String, Object>>();
+        for (final var range : closedTurns) {
+            final var row = new LinkedHashMap<String, Object>();
+            row.put("startId", range.startId());
+            row.put("endId", range.endId());
+            closedTurnsRows.add(row);
+        }
+        out.put("compressibleRanges", closedTurnsRows);
+        out.put("compressibleRangeCount", closedTurns.size());
+        out.put("compressibleRangeTotal", closedTurnsTotal);
+        out.put("omittedCompressibleRangeCount", closedTurnsTotal - closedTurns.size());
         final var blocks = new ArrayList<Map<String, Object>>();
         for (final var block : compression.blocks()) {
             final var row = new LinkedHashMap<String, Object>();
