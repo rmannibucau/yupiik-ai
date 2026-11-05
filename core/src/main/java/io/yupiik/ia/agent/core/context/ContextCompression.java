@@ -65,11 +65,11 @@ public final class ContextCompression {
     static final int MIN_GLUED_SEAM_DIGITS = 3;
 
     /**
-     * Upper bound on the user-turn refs surfaced by the {@code compress} unknown-ref observer and the
-     * hard compression nudge guidance, keeping the bounded helper line (and the persisted tool fallback)
-     * cheap. Oldest refs are listed first, so a large session never dumps its whole history to the model.
+     * Upper bound on the closed-turn pairs surfaced by the {@code compress} unknown-ref observer and the
+     * compression nudge guidance, keeping the bounded helper line (and the persisted tool fallback)
+     * cheap. Oldest pairs are listed first, so a large session never dumps its whole history to the model.
      */
-    static final int MAX_GUIDANCE_REFS = 16;
+    public static final int MAX_GUIDANCE_REFS = 16;
 
     public enum Status {
         ACTIVE,
@@ -122,8 +122,8 @@ public final class ContextCompression {
     /**
      * Optional subscriber notified when a {@code compress} call skipped at least one range because its
      * refs were not in the live conversation (the ref-lookup skip). Receives the bounded, guaranteed-
-     * valid user-turn ref list so a flash-class model that guessed wrong refs can be shown the real
-     * ones without bloating the persisted transcript. Render-surface agnostic: {@link ContextCompression}
+     * valid closed-turn pairs so a model that guessed wrong refs can be shown the real ones without
+     * bloating the persisted transcript. Render-surface agnostic: {@link ContextCompression}
      * never mixes with a UI; the TUI/web subscribe through it.
      */
     private volatile java.util.function.Consumer<List<Range>> onUnknownRefs;
@@ -197,7 +197,7 @@ public final class ContextCompression {
     /**
      * Registers a listener invoked when a {@code compress} call skipped at least one range because its
      * refs were not in the live conversation. The listener receives the bounded, guaranteed-valid
-     * user-turn ref list (see {@link #compressibleClosedTurns()}). A null value clears the listener.
+     * closed-turn pair list (see {@link #compressibleClosedTurns()}). A null value clears the listener.
      */
     public void onUnknownRefs(final java.util.function.Consumer<List<Range>> listener) {
         this.onUnknownRefs = listener;
@@ -420,12 +420,12 @@ public final class ContextCompression {
         final var nudges = new ArrayList<String>();
         final var skipped = new ArrayList<String>();
         // how many ranges failed purely because their refs were not in the live conversation; when any
-        // range fails this way the observer (if any) is handed the valid user-turn ref list so a
-        // flash-class model that guessed wrong refs can see the real ones without bloating the transcript
+        // range fails this way the observer (if any) is handed the valid closed-turn pairs so a
+        // model that guessed wrong refs can see the real ones without bloating the transcript
         var refLookupSkips = 0;
         // how many ranges were dropped or absorbed because they overlapped an already-resolved range
-        // from the same request (effective bounds); used to append the grounded user-turn ref list to
-        // the result message so a strong model that writes overlapping batches can re-anchor in one
+        // from the same request (effective bounds); used to append the grounded closed-turn pairs to
+        // the result message so a model that writes overlapping batches can re-anchor in one
         // round instead of being told the whole request failed
         var overlapSkips = 0;
         for (final var range : ranges) {

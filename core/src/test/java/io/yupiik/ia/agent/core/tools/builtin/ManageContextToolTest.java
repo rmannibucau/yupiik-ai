@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -55,8 +56,8 @@ class ManageContextToolTest {
         view.publishMessages(messages);
         final var tool = new ManageContextTool(cfg, mapper, providerManager());
         final var result = tool.execute(Map.of("action", "status"), context(view));
-        final var cap = view.compression().compressibleClosedTurns().size();
-        assertTrue(cap > 0 && cap < 29);
+        final var cap = ContextCompression.MAX_GUIDANCE_REFS;
+        assertTrue(cap < 29, "the fixture must exceed the bound so the cap is actually hit");
         assertTrue(result.output().contains("\"compressibleRangeCount\":" + cap), result.output());
         assertTrue(result.output().contains("\"compressibleRangeTotal\":29"), result.output());
         assertTrue(result.output().contains("\"omittedCompressibleRangeCount\":" + (29 - cap)), result.output());
