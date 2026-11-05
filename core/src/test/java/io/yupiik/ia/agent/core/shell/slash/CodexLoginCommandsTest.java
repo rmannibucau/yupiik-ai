@@ -34,7 +34,6 @@ import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.test.TestJsonMapper;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
@@ -43,14 +42,14 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 /** Wiring tests for the {@code /codex login} slash command: registration and argument validation. */
 @ExtendWith(TestJsonMapper.class)
 class CodexLoginCommandsTest {
 
     @Test
-    void registersCodexLogin(final JsonMapper mapper) throws Exception {
-        final var storage = Files.createTempDirectory("yca-codex-login-test");
+    void registersCodexLogin(final JsonMapper mapper, final @TempDir Path storage) throws Exception {
         final var commands = commands(mapper, storage);
         final var names =
                 commands.commands().stream().map(c -> c.spec().command()).toList();
@@ -58,8 +57,7 @@ class CodexLoginCommandsTest {
     }
 
     @Test
-    void missingProviderIsAnError(final JsonMapper mapper) throws Exception {
-        final var storage = Files.createTempDirectory("yca-codex-login-test");
+    void missingProviderIsAnError(final JsonMapper mapper, final @TempDir Path storage) throws Exception {
         final var commands = commands(mapper, storage);
         final var action = commands.commands().get(0).action();
         final CompletionStage<ShellOutcome> result = action.apply("", env());

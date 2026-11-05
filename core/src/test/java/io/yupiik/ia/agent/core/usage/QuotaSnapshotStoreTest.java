@@ -50,6 +50,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 /** Tests the per-session quota cache: TTL refresh, forced refresh and session isolation. */
 @ExtendWith(TestJsonMapper.class)
@@ -58,7 +59,10 @@ class QuotaSnapshotStoreTest {
     private HttpServer server;
     private ExecutorService serverExecutor;
     private String serverUrl;
-    private Path storage;
+
+    @TempDir
+    Path storage;
+
     private ExtendedHttpClient httpClient;
     private HttpClient delegate;
     private CodingAgentConfiguration configuration;
@@ -101,7 +105,6 @@ class QuotaSnapshotStoreTest {
         server.start();
         delegate = HttpClient.newBuilder().build();
         httpClient = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
-        storage = Files.createTempDirectory("yca-quota-store-test");
 
         final var props = new HashMap<String, String>();
         props.put("yca.storageHome", storage.toString());

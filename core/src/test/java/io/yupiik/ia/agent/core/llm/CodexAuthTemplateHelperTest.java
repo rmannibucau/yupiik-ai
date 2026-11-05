@@ -53,6 +53,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 /** Tests the {@code {{codexAuth}}} dynamic-header helper: token store persistence and lazy refresh. */
 @ExtendWith(TestJsonMapper.class)
@@ -60,7 +61,10 @@ class CodexAuthTemplateHelperTest {
 
     private HttpServer issuer;
     private String issuerUrl;
-    private Path storage;
+
+    @TempDir
+    Path storage;
+
     private ExtendedHttpClient client;
     private HttpClient delegate;
     private final AtomicInteger refreshCalls = new AtomicInteger();
@@ -103,7 +107,6 @@ class CodexAuthTemplateHelperTest {
         issuer.start();
         delegate = HttpClient.newBuilder().build();
         client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
-        storage = Files.createTempDirectory("yca-codex-auth-test");
     }
 
     @AfterEach

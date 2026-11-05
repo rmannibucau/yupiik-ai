@@ -41,6 +41,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 /** Tests the Codex usage quota client: endpoint path, auth headers and payload decoding. */
 @ExtendWith(TestJsonMapper.class)
@@ -48,7 +49,10 @@ class CodexUsageClientTest {
 
     private HttpServer server;
     private String serverUrl;
-    private Path storage;
+
+    @TempDir
+    Path storage;
+
     private ExtendedHttpClient httpClient;
     private HttpClient delegate;
     private final CopyOnWriteArrayList<String[]> requestHeaders = new CopyOnWriteArrayList<>();
@@ -79,7 +83,6 @@ class CodexUsageClientTest {
         server.start();
         delegate = HttpClient.newBuilder().build();
         httpClient = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
-        storage = Files.createTempDirectory("yca-usage-test");
     }
 
     @AfterEach

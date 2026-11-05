@@ -46,6 +46,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 /** Exercises the /usage slash command proxying a mock Codex usage backend. */
 @ExtendWith(TestJsonMapper.class)
@@ -53,7 +54,10 @@ class UsageCommandsTest {
 
     private HttpServer server;
     private String serverUrl;
-    private Path storage;
+
+    @TempDir
+    Path storage;
+
     private ExtendedHttpClient httpClient;
     private HttpClient delegate;
 
@@ -69,7 +73,6 @@ class UsageCommandsTest {
         server.start();
         delegate = HttpClient.newBuilder().build();
         httpClient = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
-        storage = Files.createTempDirectory("yca-usage-cmd-test");
     }
 
     @AfterEach

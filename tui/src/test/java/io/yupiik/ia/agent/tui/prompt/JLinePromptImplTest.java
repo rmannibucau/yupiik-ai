@@ -29,6 +29,7 @@ import java.io.StringWriter;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -43,6 +44,7 @@ import org.jline.reader.UserInterruptException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
 
@@ -232,8 +234,8 @@ class JLinePromptImplTest {
     }
 
     @Test
-    void traceRecordsTheWriteDecisionWithoutTouchingTheTerminal() throws Exception {
-        final var trace = Files.createTempDirectory("yca-prompt-trace").resolve("prompt-trace.log");
+    void traceRecordsTheWriteDecisionWithoutTouchingTheTerminal(final @TempDir Path temp) throws Exception {
+        final var trace = temp.resolve("prompt-trace.log");
         final var painted = new CountDownLatch(1);
         final var release = new CountDownLatch(1);
         final var above = new ArrayList<String>();

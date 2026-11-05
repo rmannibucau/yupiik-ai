@@ -51,6 +51,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * End-to-end {@link CodexLoginService} test against a local mock of {@code auth.openai.com}: verifies
@@ -62,7 +63,10 @@ class CodexLoginServiceTest {
 
     private HttpServer issuer;
     private String issuerUrl;
-    private Path storage;
+
+    @TempDir
+    Path storage;
+
     private ExtendedHttpClient client;
     private HttpClient delegate;
     private final AtomicInteger oauthTokenCalls = new AtomicInteger();
@@ -109,7 +113,6 @@ class CodexLoginServiceTest {
         issuer.start();
         delegate = HttpClient.newBuilder().build();
         client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
-        storage = Files.createTempDirectory("yca-codex-login-test");
     }
 
     @AfterEach
