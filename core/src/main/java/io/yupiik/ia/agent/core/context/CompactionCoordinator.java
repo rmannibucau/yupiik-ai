@@ -53,6 +53,7 @@ import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.function.IntConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -485,6 +486,20 @@ public class CompactionCoordinator {
     }
 
     /**
+     * The per-invocation progress hook of a compaction: the wire tool-schema token estimate to fold
+     * into the effective-context measurement the progress notice prints, plus an optional consumer
+     * that receives the exact same calibrated estimate so the caller can publish it as a fresh
+     * {@link io.yupiik.ia.agent.core.agent.AgentEvent.UsageUpdated} (keeping the frontends' context
+     * gauge aligned with the notice). {@code null} keeps the legacy behavior: the notice computes the
+     * estimate with zero extra tokens and no usage publication happens.
+     *
+     * @param extraToolTokens token contribution of the wire tool schemas injected into every request
+     * @param tokensPublished receives the effective estimate used by the notice, right before it is
+     *                        emitted; may be null to publish nothing
+     */
+    public record CompactionProgress(int extraToolTokens, IntConsumer tokensPublished) {}
+
+    /**
      * Compacts a context, with an {@code urgent} flag: a manual, user-requested compaction that
      * trades the non-destructive contract for guaranteed progress. When the summarizer fails
      * transiently (after all retries and the optional main-model fallback), a normal compaction
@@ -500,6 +515,24 @@ public class CompactionCoordinator {
             final boolean urgent,
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
+        return compact(messages, force, focus, keepLastOverride, urgent, cancelled, settings, null);
+    }
+
+    /**
+     * {@link #compact(List, boolean, String, int, BooleanSupplier, ChatSettings)} with a
+     * {@link CompactionProgress} hook: when the summarizer pass actually starts, the effective
+     * context (including the caller's wire tool tokens) is computed once, published through the
+     * hook and printed by the progress notice, so the frontends' gauge and the notice stay aligned.
+     */
+    public CompactionResult compact(
+            final List<Message> messages,
+            final boolean force,
+            final String focus,
+            final int keepLastOverride,
+            final boolean urgent,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings,
+            final CompactionProgress progress) {
         Objects.requireNonNull(cancelled, "cancelled");
         if (hookVetoed()) {
             return new CompactionResult(messages, Mode.NONE, "compaction vetoed by hook");
@@ -534,11 +567,17 @@ public class CompactionCoordinator {
             // effectiveContext is the same calibrated measurement as the usage gauge
             // (anchored to the last real provider-billed prompt tokens when available), so the
             // notice no longer over-reports against the gauge with the raw conservative upper
-            // bound; without an anchor it falls back to that raw estimate automatically.
+            // bound; without an anchor it falls back to that raw estimate automatically. The wire
+            // tool schemas are never part of the message list but consume context window, so the
+            // per-invocation progress hook folds them in; the same int is then published through
+            // tokensPublished (if any) so the gauge flips to the exact figure printed here.
+            final var effective =
+                    usageTracker.effectiveContext(messages, progress == null ? 0 : progress.extraToolTokens());
+            if (progress != null && progress.tokensPublished() != null) {
+                progress.tokensPublished().accept(effective);
+            }
             emit(AgentEvent.Notice.compactionStart(
-                    "Compaction in progress... (\u2248" + usageTracker.effectiveContext(messages, 0)
-                            + " estimated tokens)",
-                    sessionId));
+                    "Compaction in progress... (\u2248" + effective + " estimated tokens)", sessionId));
         }
         Outcome outcome;
         while (true) {

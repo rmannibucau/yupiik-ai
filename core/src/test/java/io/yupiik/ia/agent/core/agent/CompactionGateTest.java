@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.GateConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
+import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
@@ -143,9 +144,18 @@ class CompactionGateTest {
 
         @Override
         public CompactionResult compactForRecovery(
-                final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
+                final List<Message> messages,
+                final BooleanSupplier cancelled,
+                final ChatSettings settings,
+                final CompactionCoordinator.CompactionProgress progress) {
             recoveryCalls++;
             return new CompactionResult(messages, CompactionResult.Mode.NONE, "");
+        }
+
+        @Override
+        public CompactionResult compactForRecovery(
+                final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
+            return compactForRecovery(messages, cancelled, settings, null);
         }
 
         @Override
@@ -203,8 +213,11 @@ class CompactionGateTest {
         final var manager = new ScriptedContextManager(TRIGGER) {
             @Override
             public CompactionResult compactForRecovery(
-                    final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
-                super.compactForRecovery(messages, cancelled, settings); // bumps the call count
+                    final List<Message> messages,
+                    final BooleanSupplier cancelled,
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
+                recoveryCalls++; // bumps the call count
                 // reclaim ~2% of the CURRENT effective base, keeping it above the trigger
                 final var before = tracker.effective;
                 tracker.setEffective(before - Math.max(1, (int) (before * 0.02)));
@@ -246,7 +259,10 @@ class CompactionGateTest {
 
             @Override
             public CompactionResult compactForRecovery(
-                    final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
+                    final List<Message> messages,
+                    final BooleanSupplier cancelled,
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
                 recoveryCalls++;
                 return new CompactionResult(messages, CompactionResult.Mode.NONE, "");
             }
@@ -276,8 +292,11 @@ class CompactionGateTest {
         final var manager = new ScriptedContextManager(TRIGGER) {
             @Override
             public CompactionResult compactForRecovery(
-                    final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
-                super.compactForRecovery(messages, cancelled, settings);
+                    final List<Message> messages,
+                    final BooleanSupplier cancelled,
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
+                recoveryCalls++;
                 tracker.setEffective(TRIGGER - 1); // a single strong pass drops below the trigger
                 return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
             }
@@ -300,8 +319,11 @@ class CompactionGateTest {
         final var manager = new ScriptedContextManager(TRIGGER, 3, -1) {
             @Override
             public CompactionResult compactForRecovery(
-                    final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
-                super.compactForRecovery(messages, cancelled, settings);
+                    final List<Message> messages,
+                    final BooleanSupplier cancelled,
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
+                recoveryCalls++;
                 final var before = tracker.effective;
                 tracker.setEffective(Math.max(TRIGGER + 1, before - Math.max(1, (int) (before * 0.06))));
                 return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
@@ -326,8 +348,11 @@ class CompactionGateTest {
         final var manager = new ScriptedContextManager(TRIGGER, -1, 500) {
             @Override
             public CompactionResult compactForRecovery(
-                    final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
-                super.compactForRecovery(messages, cancelled, settings);
+                    final List<Message> messages,
+                    final BooleanSupplier cancelled,
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
+                recoveryCalls++;
                 // advance the virtual clock past the 500ms budget on the first pass
                 time.advanceMillis(501);
                 final var before = tracker.effective;
@@ -353,8 +378,11 @@ class CompactionGateTest {
         final var manager = new ScriptedContextManager(TRIGGER) {
             @Override
             public CompactionResult compactForRecovery(
-                    final List<Message> messages, final BooleanSupplier probe, final ChatSettings settings) {
-                super.compactForRecovery(messages, probe, settings);
+                    final List<Message> messages,
+                    final BooleanSupplier probe,
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
+                recoveryCalls++;
                 // the scripted recovery flips the cancellation so the gate must abort mid-loop
                 cancelled.set(true);
                 return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");

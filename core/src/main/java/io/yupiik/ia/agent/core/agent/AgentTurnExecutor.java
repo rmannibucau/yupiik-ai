@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
+import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.ContextView;
@@ -200,6 +201,19 @@ public class AgentTurnExecutor {
         host.turnState.toolSumMs += outcome.durationMs();
     }
 
+    /**
+     * Per-invocation compaction progress hook: folds this turn's wire tool-schema tokens into the
+     * effective-context measurement the progress notice prints, and publishes the exact same
+     * calibrated value as a fresh {@link io.yupiik.ia.agent.core.agent.AgentEvent.UsageUpdated} so
+     * the frontends' context gauge flips to the figure the notice shows (instead of a stale
+     * pre-compaction snapshot).
+     */
+    private CompactionCoordinator.CompactionProgress compactionProgress(final int toolsTokens) {
+        return new CompactionCoordinator.CompactionProgress(
+                toolsTokens,
+                effective -> host.usageReporter.pushUsageContext(effective, host.requestModel(host.resolvedModel())));
+    }
+
     private void applyToolDirective(
             final String sessionId,
             final List<Message> messages,
@@ -215,7 +229,8 @@ public class AgentTurnExecutor {
                         directive.keepLast(),
                         directive.urgent(),
                         () -> false,
-                        host.chatSettings);
+                        host.chatSettings,
+                        compactionProgress(toolsTokens));
         if (!result.changed()) {
             host.emit(host.notice(
                     AgentEvent.Notice.Level.INFO,
@@ -286,8 +301,15 @@ public class AgentTurnExecutor {
             if (effectiveCancelled.getAsBoolean()) {
                 return;
             }
-            final var compacted =
-                    host.contextManager.compact(messages, false, null, 0, effectiveCancelled, effectiveSettings);
+            final var compacted = host.contextManager.compact(
+                    messages,
+                    false,
+                    null,
+                    0,
+                    false,
+                    effectiveCancelled,
+                    effectiveSettings,
+                    compactionProgress(toolsTokens));
             if (compacted.changed()) {
                 messages.clear();
                 messages.addAll(compacted.messages());
@@ -865,7 +887,15 @@ public class AgentTurnExecutor {
                                 appliedModes.add(CompactionResult.Mode.CLEARED);
                             }
                         }
-                        compacted = host.contextManager.compact(messages, false, null, 0, cancelled, runSettings);
+                        compacted = host.contextManager.compact(
+                                messages,
+                                false,
+                                null,
+                                0,
+                                false,
+                                cancelled,
+                                runSettings,
+                                compactionProgress(toolsTokens));
                     } else {
                         // speculative adoption first: a validated candidate avoids the synchronous
                         // stall; anything it cannot install falls back to the normal path below
@@ -876,7 +906,15 @@ public class AgentTurnExecutor {
                                 useProfileModel ? runSettings : host.chatSettings);
                         compacted = adopted != null
                                 ? adopted
-                                : host.contextManager.compact(messages, false, null, 0, cancelled, runSettings);
+                                : host.contextManager.compact(
+                                        messages,
+                                        false,
+                                        null,
+                                        0,
+                                        false,
+                                        cancelled,
+                                        runSettings,
+                                        compactionProgress(toolsTokens));
                     }
                     if (compacted.changed()) {
                         messages.clear();
@@ -937,7 +975,8 @@ public class AgentTurnExecutor {
                                 + (int) host.usageTracker.contextPercent(host.contextManager.compactionTriggerTokens())
                                 + "%)"));
                         // 1) one tighter forced pass (halved tail budget) - LLM-backed
-                        final var recovery = host.contextManager.compactForRecovery(messages, cancelled, runSettings);
+                        final var recovery = host.contextManager.compactForRecovery(
+                                messages, cancelled, runSettings, compactionProgress(toolsTokens));
                         if (recovery.changed()) {
                             messages.clear();
                             messages.addAll(recovery.messages());
@@ -1157,7 +1196,8 @@ public class AgentTurnExecutor {
                         host.usageTracker.clearAnchor();
                     }
                     final var beforeOverflowContext = host.usageTracker.estimateContext(messages, toolsTokens);
-                    final var compacted = host.contextManager.compactForOverflow(messages, cancelled, runSettings);
+                    final var compacted = host.contextManager.compactForOverflow(
+                            messages, cancelled, runSettings, compactionProgress(toolsTokens));
                     if (compacted.changed() && !compacted.messages().isEmpty()) {
                         messages.clear();
                         messages.addAll(compacted.messages());

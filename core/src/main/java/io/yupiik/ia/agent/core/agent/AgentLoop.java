@@ -913,6 +913,9 @@ public class AgentLoop {
      * simply cannot call them - the strongest form of "plan must not build".
      */
     List<Tool> wireTools() {
+        if (toolRegistry == null) {
+            return List.of();
+        }
         final var toolCeiling = effectiveAllowedTools();
         final var tools = toolCeiling == null
                 ? toolRegistry.toWireTools()
@@ -1840,6 +1843,23 @@ public class AgentLoop {
     /** Reads the per-session cached account quota without causing a refresh. */
     public AgentEvent.UsageUpdated.Quota cachedQuotaSnapshot() {
         return usageReporter.cachedQuotaSnapshot();
+    }
+
+    /**
+     * Publishes a {@link AgentEvent.UsageUpdated} carrying the given effective context estimate (the
+     * same value a compaction-progress notice prints), so the frontends' context gauge flips to the
+     * calibrated compaction estimate including the wire tool tokens.
+     */
+    public void publishUsageContext(final int effective) {
+        usageReporter.pushUsageContext(effective, requestModel(resolvedModel()));
+    }
+
+    /**
+     * Estimates the token contribution of the wire tool schemas currently injected into every request
+     * of this session, mirroring what {@link AgentTurnExecutor} computes for a running turn.
+     */
+    public int estimateWireToolTokens() {
+        return toolTokens(wireTools());
     }
 
     /**

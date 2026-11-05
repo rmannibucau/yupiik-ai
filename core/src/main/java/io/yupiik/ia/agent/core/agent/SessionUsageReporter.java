@@ -81,6 +81,29 @@ public class SessionUsageReporter {
     }
 
     /**
+     * Publishes a {@link io.yupiik.ia.agent.core.agent.AgentEvent.UsageUpdated} carrying the PROVIDED
+     * context estimate (never recomputed from the message list), so the caller can align the
+     * frontends' context gauge with a value computed elsewhere - the compaction-progress notice uses
+     * this to flip the sidebar to the exact same calibrated estimate (including the wire tool tokens)
+     * that the notice prints, instead of leaving a stale pre-turn snapshot on screen.
+     */
+    public void pushUsageContext(final int estimatedContextTokens, final String model) {
+        if (emitter == null) {
+            return;
+        }
+        lastUsageContextTokens = estimatedContextTokens;
+        lastUsageContextPercent = usageTracker == null ? 0 : usageTracker.contextPercent(estimatedContextTokens);
+        emit(usageUpdated(
+                currentUsage(),
+                estimatedContextTokens,
+                lastUsageContextPercent,
+                usageTracker == null ? 0 : usageTracker.lastRealPromptTokens(),
+                usageTracker == null ? -1 : usageTracker.calibrationRatio(),
+                model,
+                currentQuota()));
+    }
+
+    /**
      * Emits a quota-only {@link io.yupiik.ia.agent.core.agent.AgentEvent.UsageUpdated} (the frontends'
      * single source for the sidebar gauge) with the session's current token metrics. Used at
      * provider/model switch so the TUI and web reflect the new provider's account usage immediately,

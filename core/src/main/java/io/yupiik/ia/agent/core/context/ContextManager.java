@@ -248,14 +248,52 @@ public class ContextManager {
             final boolean urgent,
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
+        return compact(messages, force, focus, keepLastOverride, urgent, cancelled, settings, null);
+    }
+
+    /**
+     * {@link #compact(List, boolean, String, int, boolean, BooleanSupplier, ChatSettings)} with a
+     * per-invocation {@link CompactionCoordinator.CompactionProgress} hook: the same calibrated
+     * effective-context estimate (including the wire tool tokens) is published through the hook and
+     * printed by the progress notice, keeping the frontends' context gauge aligned with the notice.
+     */
+    public CompactionResult compact(
+            final List<Message> messages,
+            final boolean force,
+            final String focus,
+            final int keepLastOverride,
+            final boolean urgent,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings,
+            final CompactionCoordinator.CompactionProgress progress) {
+        if (coordinator == null) {
+            return new CompactionResult(messages, CompactionResult.Mode.NONE, "");
+        }
         resetSpeculation();
-        return coordinator.compact(messages, force, focus, keepLastOverride, urgent, cancelled, settings);
+        return coordinator.compact(messages, force, focus, keepLastOverride, urgent, cancelled, settings, progress);
     }
 
     /** One tighter, bounded retry after automatic compaction leaves usage above its trigger. */
     public CompactionResult compactForRecovery(
             final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
         return compact(messages, true, null, 0, cancelled, settings);
+    }
+
+    /**
+     * {@link #compactForRecovery(List, BooleanSupplier, ChatSettings)} with the per-invocation
+     * {@link CompactionCoordinator.CompactionProgress} hook (see the 8-parameter
+     * {@link #compact(List, boolean, String, int, boolean, BooleanSupplier, ChatSettings, CompactionCoordinator.CompactionProgress)}).
+     */
+    public CompactionResult compactForRecovery(
+            final List<Message> messages,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings,
+            final CompactionCoordinator.CompactionProgress progress) {
+        // without a progress hook, keep the 3-param variant as the single overridable seam (test
+        // doubles, subclasses without a coordinator); with progress, thread it to the coordinator
+        return progress == null
+                ? compactForRecovery(messages, cancelled, settings)
+                : compact(messages, true, null, 0, false, cancelled, settings, progress);
     }
 
     /**
@@ -286,6 +324,23 @@ public class ContextManager {
             final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
         resetSpeculation();
         return coordinator.compact(messages, true, null, 0, cancelled, settings);
+    }
+
+    /**
+     * {@link #compactForOverflow(List, BooleanSupplier, ChatSettings)} with the per-invocation
+     * {@link CompactionCoordinator.CompactionProgress} hook (see the 8-parameter
+     * {@link #compact(List, boolean, String, int, boolean, BooleanSupplier, ChatSettings, CompactionCoordinator.CompactionProgress)}).
+     */
+    public CompactionResult compactForOverflow(
+            final List<Message> messages,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings,
+            final CompactionCoordinator.CompactionProgress progress) {
+        // without a progress hook, keep the 3-param variant as the single overridable seam (test
+        // doubles, subclasses without a coordinator); with progress, thread it to the coordinator
+        return progress == null
+                ? compactForOverflow(messages, cancelled, settings)
+                : compact(messages, true, null, 0, false, cancelled, settings, progress);
     }
 
     private volatile SpeculativeCompactionManager speculation;

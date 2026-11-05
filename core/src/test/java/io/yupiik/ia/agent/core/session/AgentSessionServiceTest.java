@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -578,7 +579,8 @@ class AgentSessionServiceTest {
                     final int keepLastOverride,
                     final boolean urgent,
                     final BooleanSupplier cancelled,
-                    final ChatSettings settings) {
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
                 captured.add(new Object[] {force, focus, keepLastOverride, urgent});
                 return new CompactionResult(messages, CompactionResult.Mode.SUMMARY, "");
             }

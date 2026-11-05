@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -384,7 +385,17 @@ public class AgentSessionService {
             return new CompactionApplied(false, "nothing to compact", null);
         }
         final var result = runtime.contextManager()
-                .compact(history, force, null, keepLast, urgent, () -> false, runtime.chatSettings());
+                .compact(
+                        history,
+                        force,
+                        null,
+                        keepLast,
+                        urgent,
+                        () -> false,
+                        runtime.chatSettings(),
+                        new CompactionCoordinator.CompactionProgress(
+                                runtime.loop().estimateWireToolTokens(),
+                                effective -> runtime.loop().publishUsageContext(effective)));
         if (!result.changed()) {
             return new CompactionApplied(false, "context already within budget", null);
         }

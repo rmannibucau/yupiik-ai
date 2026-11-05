@@ -1090,6 +1090,133 @@ class ContextManagerTest {
                         + progress.message());
     }
 
+    @Test
+    void compactionProgressPublishesTheSameCalibratedEstimateIncludingToolTokens() {
+        final var cfg = config(6, 128_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
+        // a shared order list between the recording emitter and the published usage consumer: the
+        // UsageUpdated must arrive BEFORE the progress notice (the gauge flips before it renders)
+        final var ordered = new ArrayList<AgentEvent>();
+        final var chat = chatReturning("digest: summarized");
+        final var tracker = new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC());
+        final var published = new ArrayList<Integer>();
+        final var contextManager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        tracker,
+                        providerManager(cfg),
+                        new Emitter() {
+                            @Override
+                            public <T> void emit(final T event) {
+                                if (event instanceof AgentEvent agentEvent) {
+                                    ordered.add(agentEvent);
+                                }
+                            }
+                        },
+                        "s1",
+                        new BackoffSleeper()));
+
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 8; i++) {
+            messages.add(Message.user("old step " + i + " " + "x".repeat(1_000)));
+            messages.add(Message.assistant("ack " + i, null));
+        }
+        messages.add(Message.user("current task"));
+
+        // anchor (real, estimateAtAnchor) between the raw full-list estimate and the tools-inclusive
+        // one: with ZERO extra tokens the estimate stays <= the anchor so effectiveContext falls back
+        // to the raw conservative bound (the old notice bug); with the wire tool tokens folded in the
+        // estimate crosses the anchor and the calibrated path applies - proving the tools flip the
+        // raw-fallback bug while keeping a clamped ratio (real = raw/4 clamps to 0.5).
+        final var raw = tracker.estimateContext(messages);
+        final var estimateAtAnchor = raw + 1_000;
+        final var real = Math.max(1, raw / 4);
+        tracker.anchor(real, estimateAtAnchor);
+        // old code (0 tools): effectiveContext(messages, 0) -> estimate raw <= anchor -> raw (fallback)
+        assertEquals(
+                raw,
+                tracker.effectiveContext(messages, 0),
+                "precondition: without tools the effective estimate must stay on the raw fallback");
+        // new code: effectiveContext(messages, tools) -> estimate raw+3000 > anchor -> calibrated
+        final var toolTokens = 3_000;
+        final var expected = (int) Math.round(real + 0.5 * (raw + toolTokens - estimateAtAnchor));
+        assertEquals(
+                expected,
+                tracker.effectiveContext(messages, toolTokens),
+                "precondition: with tools the effective estimate must be the calibrated one");
+        assertTrue(expected != raw, "the calibrated figure must differ from the raw fallback: " + expected);
+
+        final var result = contextManager.compact(
+                messages,
+                true,
+                null,
+                0,
+                false,
+                () -> false,
+                ChatSettings.EMPTY,
+                new CompactionCoordinator.CompactionProgress(toolTokens, effective -> {
+                    published.add(effective);
+                    // in production the tokensPublished hook routes through
+                    // SessionUsageReporter.pushUsageContext -> the same Emitter feeding
+                    // `ordered`: mirror that so the ordering assertion below is meaningful
+                    ordered.add(new AgentEvent.UsageUpdated(
+                            Usage.EMPTY,
+                            effective,
+                            tracker.contextPercent(effective),
+                            -1,
+                            -1,
+                            null,
+                            "s1",
+                            null,
+                            null,
+                            AgentEvent.UsageUpdated.Quota.NONE));
+                }));
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+
+        final var notices = ordered.stream()
+                .filter(AgentEvent.Notice.class::isInstance)
+                .map(AgentEvent.Notice.class::cast)
+                .toList();
+        final var progress = notices.get(0);
+        assertTrue(
+                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens\\)"),
+                "progress notice must carry a numeric estimate: " + progress.message());
+        assertTrue(
+                progress.message().contains("≈" + expected + " estimated tokens"),
+                "progress notice must report the calibrated effectiveContext including the tool tokens (" + expected
+                        + "), got: " + progress.message());
+
+        // the publisher received the exact same int the notice prints
+        assertEquals(1, published.size(), "the progress hook must publish exactly one estimate: " + published);
+        assertEquals(expected, published.get(0), "the published estimate must equal the notice's figure");
+        assertTrue(
+                progress.message().contains("≈" + published.get(0) + " estimated tokens"),
+                "notice and published estimate must be byte-identical");
+
+        // the published UsageUpdated precedes the progress notice in the shared event stream
+        final var usageIdx = indexOfFirst(ordered, AgentEvent.UsageUpdated.class);
+        final var noticeIdx = indexOfFirst(ordered, AgentEvent.Notice.class);
+        assertTrue(usageIdx >= 0, "a UsageUpdated must be emitted through the hook: " + ordered);
+        assertTrue(
+                usageIdx < noticeIdx,
+                "the UsageUpdated (" + usageIdx + ") must precede the progress notice (" + noticeIdx + "): " + ordered);
+        final var usage = (AgentEvent.UsageUpdated) ordered.get(usageIdx);
+        assertEquals(expected, usage.estimatedContextTokens(), "the UsageUpdated must carry the published estimate");
+        assertEquals("s1", usage.sessionId(), "the UsageUpdated must be routed to the session");
+    }
+
+    private static int indexOfFirst(final List<AgentEvent> events, final Class<?> type) {
+        for (var i = 0; i < events.size(); i++) {
+            if (type.isInstance(events.get(i))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private ContextManager manager(final CodingAgentConfiguration cfg, final ChatClient chat) {
         return new ContextManager(
                 cfg,

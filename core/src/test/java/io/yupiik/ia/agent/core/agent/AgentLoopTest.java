@@ -31,6 +31,7 @@ import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
@@ -4068,8 +4069,10 @@ class AgentLoopTest {
                     final boolean force,
                     final String focus,
                     final int keepLastOverride,
+                    final boolean urgent,
                     final BooleanSupplier cancelled,
-                    final ChatSettings settings) {
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
                 return new CompactionResult(
                         List.of(
                                 messages.get(0),
@@ -4133,7 +4136,10 @@ class AgentLoopTest {
 
             @Override
             public CompactionResult compactForRecovery(
-                    final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
+                    final List<Message> messages,
+                    final BooleanSupplier cancelled,
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
                 forcedCompactRuns.incrementAndGet();
                 return new CompactionResult(messages, CompactionResult.Mode.NONE, "no further reduction");
             }
@@ -4149,8 +4155,10 @@ class AgentLoopTest {
                     final boolean force,
                     final String focus,
                     final int keepLastOverride,
+                    final boolean urgent,
                     final BooleanSupplier cancelled,
-                    final ChatSettings settings) {
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
                 compactRuns.incrementAndGet();
                 final var reduced = new ArrayList<>(messages);
                 reduced.add(Message.user("<compacted-context>digest</compacted-context>"));
@@ -4280,7 +4288,8 @@ class AgentLoopTest {
                     final int keepLast,
                     final boolean urgent,
                     final BooleanSupplier cancelled,
-                    final ChatSettings settings) {
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
                 compactRuns.incrementAndGet();
                 return new CompactionResult(
                         List.of(
@@ -4362,8 +4371,10 @@ class AgentLoopTest {
                     final boolean force,
                     final String focus,
                     final int keepLast,
+                    final boolean urgent,
                     final BooleanSupplier cancelled,
-                    final ChatSettings settings) {
+                    final ChatSettings settings,
+                    final CompactionCoordinator.CompactionProgress progress) {
                 return new CompactionResult(
                         List.of(
                                 messages.get(0),
@@ -7070,6 +7081,43 @@ class AgentLoopTest {
         entries.put("yca.llm.maxIterations", "10");
         entries.put("yca.llm.continueOnTruncation", Boolean.toString(continueOnTruncation));
         entries.putAll(extra);
+        return TestConfigs.codingAgent(entries);
+    }
+
+    @Test
+    void publishUsageContextEmitsTheProvidedEstimateWithTheResolvedModel() {
+        // the /compact manual path calls runtime.loop().publishUsageContext(effective): it must carry
+        // the exact effective-context int (not a recomputed one) plus the resolved model, so the
+        // frontends' gauge flips to the identical figure the compaction-progress notice prints
+        final var loop = loop(
+                chatClient(new ArrayDeque<>(List.of(new ScriptedReply("ok", "stop", false))), new ArrayList<>()),
+                null,
+                config(1_000_000),
+                noContextManager(),
+                noSessionStore(),
+                null);
+        loop.run("hello", null, "s1", null, () -> false);
+        events.clear();
+
+        loop.publishUsageContext(12_345);
+
+        final var pushed = events.stream()
+                .filter(AgentEvent.UsageUpdated.class::isInstance)
+                .map(AgentEvent.UsageUpdated.class::cast)
+                .toList();
+        assertEquals(1, pushed.size(), "publishUsageContext must emit one UsageUpdated: " + events);
+        assertEquals(12_345, pushed.get(0).estimatedContextTokens(), "the provided estimate must be carried verbatim");
+        assertEquals("test-model", pushed.get(0).model(), "the resolved model must be attached");
+        assertEquals("s1", pushed.get(0).sessionId(), "the event must be routed to the session");
+    }
+
+    private static CodingAgentConfiguration config(final int contextWindow) {
+        return config(contextWindow, Map.of());
+    }
+
+    private static CodingAgentConfiguration config(final int contextWindow, final Map<String, String> extra) {
+        final var entries = new HashMap<>(extra);
+        entries.put("yca.contextWindow", Integer.toString(contextWindow));
         return TestConfigs.codingAgent(entries);
     }
 
