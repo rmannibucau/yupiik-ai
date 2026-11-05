@@ -189,30 +189,119 @@ function escapeCodeLikeStars(src: string): string {
 // "@blocked@", optionally with an inline priority suffix like "@12@ [high]"). They are injected
 // metadata that must never be user-visible; the server strips them from persisted messages, and
 // the TUI/CLI scrub accumulated transcript text (ConversationTranscript.markdown), so the web
-// render chokepoint applies the same strip on the accumulated block content. Mirrors
-// io.yupiik.ia.agent.core.context.ContextCompression.ECHOED_REF_LINE / ECHOED_REF_INLINE.
-const ECHOED_REF_LINE = /^[ \t]*@(?:[1-9]\d*|b[1-9]\d*|blocked)@(?:[ \t]+\[(?:low|medium|high)\])?[ \t]*\r?\n/gm;
-const ECHOED_REF_INLINE = /[ \t]*@(?:[1-9]\d*|b[1-9]\d*|blocked)@(?:[ \t]+\[(?:low|medium|high)\])?/g;
-
-// Multiline echoed seam at the end of a block: a lone fragment line ("@3149") followed only by
-// empty lines and a closing lone "@" line. The frontend has no live-ref whitelist to gate it on
-// (the Java render path withholds it only with that evidence), but a fragment-plus-closing-
-// delimiter pair shaped exactly like a split seam is display noise: strip it like the Java
-// complete-token rules strip the single-line form. Prose between the lines blocks the match.
+// render chokepoint applies the same strip on the accumulated block content.
+//
+// Content-preservation rule (mirrors io.yupiik.ia.agent.core.context.ContextCompression): a
+// seam-shaped token is removed ONLY when it stands ALONE on its line OUTSIDE a fenced code block.
+// A token inside prose, inside inline code, or anywhere inside a fenced block is intended content
+// and survives, so a model that writes the injected marker literally (or wraps it in backticks)
+// never has its delimiters orphaned into an empty inline-code span.
 const ECHOED_REF_MULTILINE_TAIL =
   /(^|\n)[ \t]*(@[1-9]\d*|@b[1-9]\d*|@blocked)([ \t]+\[(?:low|medium|high)\])?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*@[ \t]*\r?\n?$/;
 
 /**
+ * True when {@code line} is exactly a seam token on its own (mirrors
+ * ContextCompression.isStandaloneSeamLine): optional horizontal padding, then {@code @} + a
+ * bounded token ({@code N}, {@code bN}, {@code blocked}) + optional supported priority suffix
+ * ({@code [low|medium|high]}), then trailing horizontal padding - nothing else. A trailing
+ * {@code \r} is treated as padding so a CRLF line ending is matched; the whole line is dropped
+ * by the caller.
+ */
+function isStandaloneSeamLine(line: string): boolean {
+  let i = 0;
+  while (i < line.length && (line[i] === ' ' || line[i] === '\t')) i++;
+  if (i >= line.length || line[i] !== '@') return false;
+  i++;
+  const tokenStart = i;
+  while (i < line.length && ((line[i] >= 'a' && line[i] <= 'z') || (line[i] >= '0' && line[i] <= '9'))) i++;
+  const tokenEnd = i;
+  if (i >= line.length || line[i] !== '@') return false;
+  const token = line.slice(tokenStart, tokenEnd);
+  const blocked = token === 'blocked';
+  const b = token.startsWith('b');
+  const digits = b ? token.slice(1) : token;
+  if (!blocked) {
+    if (digits.length < 1 || digits.length > 10 || !/^\d+$/.test(digits)) return false;
+    if (b && digits[0] === '0') return false; // bN requires N=[1-9]\d*
+    if (!b && token.length >= 1 && token[0] === '0') return false; // plain N requires [1-9]\d*
+  }
+  i++;
+  let afterClosingAt = false;
+  while (i < line.length && (line[i] === ' ' || line[i] === '\t')) {
+    afterClosingAt = true;
+    i++;
+  }
+  if (i < line.length && line[i] === '[') {
+    if (!afterClosingAt) return false; // whitespace is required before the priority suffix
+    const start = i;
+    while (i < line.length && line[i] !== ']') i++;
+    if (i >= line.length) return false;
+    const prio = line.slice(start + 1, i);
+    if (prio !== 'low' && prio !== 'medium' && prio !== 'high') return false;
+    i++;
+    while (i < line.length && (line[i] === ' ' || line[i] === '\t')) i++;
+  }
+  if (i < line.length && line[i] === '\r') i++;
+  return i === line.length;
+}
+
+/*
+ * Fenced-code tracking for the strip: CommonMark minimum rules (a run of 3+ ` or ~ after <=3
+ * spaces opens; the closer is a run of the same char >= the opener length with only whitespace
+ * after it). Mirror of MarkdownFence.Classifier.
+ */
+function fenceState(line: string, state: { inFence: boolean; fenceChar: string; fenceLen: number }): void {
+  if (state.inFence) {
+    const runStart = line.search(/[^ \t]/);
+    const start = runStart < 0 ? line.length : runStart;
+    let i = start;
+    while (i < line.length && line[i] === state.fenceChar) i++;
+    if (i - start >= state.fenceLen) {
+      while (i < line.length && (line[i] === ' ' || line[i] === '\t' || line[i] === '\r')) i++;
+      if (i === line.length) state.inFence = false;
+    }
+    return;
+  }
+  const run = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+  if (run) {
+    state.fenceChar = run[1][0];
+    state.fenceLen = run[1].length;
+    state.inFence = true;
+  }
+}
+
+/**
  * Removes echoed compact {@code @N@} ref tags from model-generated text (assistant or thought
- * blocks). Whole echo lines first (the observed failure mode was a wall of consecutive tag lines),
- * then any inline tags that survived (e.g. a tag glued to prose on one line), then the multiline
- * split form at the end of the block. Only COMPLETE tags are stripped; a lone {@code @} is prose
- * and stays. A no-op on null/empty input.
+ * blocks). Whole standalone echo lines outside fenced code are removed, then the multiline split
+ * form at the end of the block. Complete tags embedded in prose or inside code blocks are
+ * intended content and survive. Keeps the input CRLF/LF style (each surviving line re-emits its
+ * own terminator). A no-op on null/empty input.
  */
 export function stripEchoedRefs(src: string | null | undefined): string {
   if (!src) return src ?? '';
-  return src
-    .replace(ECHOED_REF_LINE, (_m: string, lead: string) => (lead === '\n' ? '\n' : ''))
-    .replace(ECHOED_REF_INLINE, '')
-    .replace(ECHOED_REF_MULTILINE_TAIL, (_m: string, lead: string) => lead);
+  const out: string[] = [];
+  const state = { inFence: false, fenceChar: '', fenceLen: 0 };
+  let removed = false;
+  let lineStart = 0;
+  while (lineStart <= src.length) {
+    const newline = src.indexOf('\n', lineStart);
+    const lineEnd = newline < 0 ? src.length : newline;
+    const line = src.slice(lineStart, lineEnd);
+    const wasInFence = state.inFence;
+    fenceState(line, state);
+    // an opening delimiter or any content line INSIDE the fence (including a closing
+    // delimiter, whose classification just flipped to false) is preserved verbatim
+    const inFenceForThisLine = wasInFence || state.inFence;
+    if (!inFenceForThisLine && isStandaloneSeamLine(line)) {
+      removed = true;
+    } else {
+      out.push(line);
+      if (newline >= 0) out.push('\n');
+    }
+    if (newline < 0) break;
+    lineStart = newline + 1;
+  }
+  let result = out.join('');
+  result = result.replace(ECHOED_REF_MULTILINE_TAIL, (_m: string, lead: string) => lead);
+  return result;
 }

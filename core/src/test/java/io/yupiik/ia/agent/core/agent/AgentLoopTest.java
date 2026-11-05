@@ -2005,10 +2005,12 @@ class AgentLoopTest {
         assertNotNull(assistant, "an assistant entry must be persisted");
         final var persistedThinking =
                 assistant.others() == null ? null : assistant.others().get("thinking");
+        // a seam embedded in PROSE is intended content and survives the persistence scrub;
+        // only a complete seam ALONE on a line is removed
         assertEquals(
-                "let me check carefully",
+                "let me check @42@ [high] carefully",
                 persistedThinking,
-                "the persisted thinking must have the echoed seam stripped");
+                "the persisted thinking must keep the prose-glued seam");
     }
 
     /**

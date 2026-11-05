@@ -261,16 +261,21 @@ class ConversationTranscriptTest {
         // head still needs the render-time scrub (parity with the pre-split whole-string pass)
         t.appendTranscript("\n**Assistant**\n\nhello @9@ world\n");
         final var md = t.markdown("|", "");
-        assertTrue(md.contains("hello world"), "durable head echoes must be scrubbed on first build: " + md);
+        // a seam embedded in prose is INTENDED content and is preserved (the user policy);
+        // only standalone seam LINES are scrubbed from the durable head
+        assertTrue(md.contains("hello @9@ world"), "durable head prose seams must be preserved: " + md);
 
         // a streaming turn only mutates the pending tail: the durable head must be REUSED, so a
         // seam that shows up in the tail is scrubbed but the head is not re-derived each frame
         t.startUserTurn("go");
         t.onEvent(new AgentEvent.TextDelta("streaming @7@ answer", "s1"));
         final var streaming = t.markdown("|", "");
-        assertTrue(streaming.contains("streaming answer"), "streaming tail echoes must be scrubbed: " + streaming);
-        assertTrue(streaming.contains("hello world"), "durable head content must still render: " + streaming);
-        assertFalse(streaming.contains("@9@"), "head seam must not leak through the cache: " + streaming);
+        assertTrue(
+                streaming.contains("streaming @7@ answer"),
+                "streaming tail prose seams must be preserved: " + streaming);
+        assertTrue(
+                streaming.contains("hello @9@ world"),
+                "durable head content must still render (prose seam preserved): " + streaming);
     }
 
     @Test
@@ -1023,10 +1028,12 @@ class ConversationTranscriptTest {
         t.onEvent(new AgentEvent.TextDelta("4@ done", "s1"));
         t.onEvent(new AgentEvent.TurnDone("answer @12504@ done", "s1"));
         md = t.markdown("|", "welcome");
-        // the re-queued first half + the second half re-form the complete tag in the pending
-        // buffer, which the render scrub removes: nothing but the real content survives
-        assertFalse(md.contains("@1250"), "re-formed seam must be scrubbed: " + md);
-        assertFalse(md.contains("@12504@"), "complete seam must be scrubbed: " + md);
+        // the re-queued first half + the second half re-form the complete tag, but it is glued to
+        // prose ("answer ... done"), so under the content-preservation policy the intended content
+        // `` survives; the trailing partial fragment "@1250" itself never freezes as a
+        // half-seam (only the completed tag remains)
+        assertFalse(md.contains("@1250\n"), "half-seam line must not freeze: " + md);
+        assertTrue(md.contains("@12504@"), "prose-glued seam stays (intended content): " + md);
         assertTrue(md.contains("answer"), md);
         assertTrue(md.contains("done"), md);
         // the fragment was never persisted, so the final content is not duplicated
@@ -1106,28 +1113,27 @@ class ConversationTranscriptTest {
 
     @Test
     void echoedSeamTagIsStrippedFromLiveMarkdown() {
-        // a flash-class model may echo the injected "@N@" compact seam back into its answer:
-        // the persisted message is scrubbed by AgentLoop, so the live display must scrub too
-        // or the transcript would show the seam while the stored copy stays clean
+        // a flash-class model may echo the injected "@N@" compact seam as a STANDALONE line:
+        // the whole line is scrubbed from the live display
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
         t.onEvent(new AgentEvent.TextDelta("Let me run the proper typecheck.\n\n", "s1"));
-        t.onEvent(new AgentEvent.TextDelta("@535@", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("@535@\n\n", "s1"));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains("Let me run the proper typecheck."), md);
         assertFalse(md.contains("@535@"), "echoed seam must not render live: " + md);
-        assertFalse(md.contains("@b"), "block echoes must not render live: " + md);
     }
 
     @Test
     void echoedSeamTagSplitAcrossDeltasIsStrippedFromLiveMarkdown() {
         // the strip must run on the accumulated markdown, not per-delta, so a seam split
-        // by the streamer ("@5" + "35@") is still removed from what the user sees
+        // by the streamer ("@5" + "35@") is still removed when it forms a complete
+        // STANDALONE line
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("answer @5", "s1"));
-        t.onEvent(new AgentEvent.TextDelta("35@", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("answer\n@5", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("35@\n", "s1"));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains("answer"), md);
@@ -1137,10 +1143,10 @@ class ConversationTranscriptTest {
     @Test
     void echoedSeamTagIsStrippedFromFlushedTranscript() {
         // the seam may arrive before a tool call flushes the pending tail into the
-        // durable transcript: markdown() must scrub the accumulated buffer either way
+        // durable transcript: markdown() must scrub a STANDALONE seam line either way
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("let me check @12@", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("let me check\n@12@\n", "s1"));
         t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
 
         final var md = t.markdown("|", "welcome");
@@ -1151,18 +1157,20 @@ class ConversationTranscriptTest {
     @Test
     void echoedSeamTagIsStrippedFromLiveThinkingText() {
         // the live (not yet flushed) reasoning tail is rendered directly off thinkingText(),
-        // bypassing markdown(): a flash-class model echoing the injected "@N@" seam into its
-        // live reasoning must not show it on the thought panel while the stored copy stays clean
+        // bypassing markdown(): a flash-class model echoing the injected "@N@" seam as a
+        // STANDALONE line must not show it on the thought panel; a seam inside prose is
+        // intended content and survives
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.ThinkingDelta("reasoning about @12@", "s1"));
-        t.onEvent(new AgentEvent.ThinkingDelta(" then @b", "s1"));
-        t.onEvent(new AgentEvent.ThinkingDelta("21@ [high] step", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("reasoning about\n@12@\n", "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("then @b21@ [high] step", "s1"));
 
         assertTrue(t.thinkingText().contains("reasoning about"), t.thinkingText());
         assertTrue(t.thinkingText().contains("then"), t.thinkingText());
         assertTrue(t.thinkingText().contains("step"), t.thinkingText());
-        assertFalse(t.thinkingText().contains("@12@"), "live thinking seam must not render: " + t.thinkingText());
-        assertFalse(t.thinkingText().contains("@b21@"), "split block seam must not render: " + t.thinkingText());
+        assertFalse(
+                t.thinkingText().contains("@12@"),
+                "standalone live thinking seam must not render: " + t.thinkingText());
+        assertTrue(t.thinkingText().contains("@b21@"), "prose seam stays (intended content): " + t.thinkingText());
     }
 }

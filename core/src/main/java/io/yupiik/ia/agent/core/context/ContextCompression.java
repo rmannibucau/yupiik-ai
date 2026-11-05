@@ -54,18 +54,15 @@ public final class ContextCompression {
     private static final Pattern BLOCK_REF = Pattern.compile("@b([1-9]\\d*)@");
     private static final Pattern MESSAGE_REF = Pattern.compile("@?(?:m)?(\\d+)@?");
     private static final Pattern PROTECT_TAG = Pattern.compile("<protect>(.*?)</protect>", Pattern.DOTALL);
-    /** Echoed compact ref tags to remove from model output (strip-on-ingest defense). */
-    private static final Pattern ECHOED_REF_LINE = Pattern.compile(
-            "(?m)^[ \t]*+@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?[ \t]*\\r?\\n");
-
-    private static final Pattern ECHOED_REF_INLINE =
-            Pattern.compile("(?<![ \t])[ \t]*+@(?:[1-9]\\d*|b[1-9]\\d*|blocked)@(?:[ \t]+\\[(?:low|medium|high)\\])?");
     /**
      * Minimum digit-run length for the evidence-gated glued-seam strip: short runs ("step 12",
      * "issue #42") are far too common in real prose to gate on, while the observed leaks embed a
      * 3-5 digit ref id (125, 10632, 12504) and compaction refs are monotonically large in practice.
      */
     static final int MIN_GLUED_SEAM_DIGITS = 3;
+
+    /** The longest supported numeric ref token (Integer.MAX_VALUE has 10 digits). */
+    private static final int MAX_REF_DIGITS = 10;
 
     /**
      * Upper bound on the closed-turn pairs surfaced by the {@code compress} unknown-ref observer and the
@@ -1216,6 +1213,14 @@ public final class ContextCompression {
      * output the injected markers" instruction cannot leak them into the persisted transcript.
      * Mirrors the compact-format scrub of the reference DCP implementation.
      *
+     * <p>Content preservation rule (shared with {@link #withholdDanglingPrefix}): a seam-shaped
+     * token is removed only when it stands ALONE on its line OUTSIDE a fenced code block (the whole
+     * line, apart from horizontal padding and an optional supported priority suffix, is the token).
+     * A token inside prose, inside inline code, or anywhere inside a fenced block - including alone
+     * on its own content line - is intended content and survives, so a model that writes the
+     * injected marker literally, or wraps it in backticks, never has its delimiters orphaned.
+     * Unknown/malformed shapes (emails, {@code @user}, over-long or non-numeric tokens) survive too.
+     *
      * @param text text to clean, may be null.
      * @return the cleaned text, or null when the input was null.
      */
@@ -1223,22 +1228,118 @@ public final class ContextCompression {
         if (text == null) {
             return null;
         }
-        // cheap char gate: every transform below only ever touches text containing '@'
-        // (echo seams and glued-marker leaks all start with it), and when there is none
-        // - the overwhelmingly common case on the streaming render hot path - the input
-        // is returned verbatim (same instance) without allocating a single Matcher.
         if (text.indexOf('@') < 0) {
             return text;
         }
-        // whole echo lines first (the observed failure mode was a wall of consecutive tag lines),
-        // then any inline tags that survived (e.g. a tag glued to prose on one line), then the
-        // evidence-gated glued-marker strip: a flash-class model autocompleting a leaked '@' with
-        // the surrounding wire content produces "@EntCompactionTruncates10632" instead of
-        // "@10632@"; only the '@' is removed, the word (real content) survives.
-        final var afterLineInline = ECHOED_REF_INLINE
-                .matcher(ECHOED_REF_LINE.matcher(text).replaceAll(""))
-                .replaceAll("");
-        return stripGluedSeamWords(afterLineInline, maxAssignedRef());
+        // One linear, fence-aware pass: each line is classified by MarkdownFence (so code blocks
+        // are never touched) and, outside a fence, a standalone complete seam line is dropped whole
+        // and the evidence-gated glued-marker strip runs per line. The 'inline' tag form is
+        // intentionally NOT removed - see the content preservation rule. Line terminator style is
+        // preserved and the input instance is returned when nothing changed.
+        final var out = new StringBuilder(text.length());
+        var changed = false;
+        final var maxRef = maxAssignedRef();
+        final var fence = new MarkdownFence.Classifier();
+        var lineStart = 0;
+        while (lineStart <= text.length()) {
+            final var newline = text.indexOf('\n', lineStart);
+            final var lineEnd = newline < 0 ? text.length() : newline;
+            final var line = text.substring(lineStart, lineEnd);
+            final var inFence = fence.classify(text, lineStart, lineEnd);
+            if (!inFence && isStandaloneSeamLine(line)) {
+                changed = true; // the whole line (and its terminator) is dropped
+            } else {
+                final var scrubbed = inFence ? line : stripGluedSeamWords(line, maxRef);
+                if (scrubbed != line) {
+                    changed = true;
+                }
+                out.append(scrubbed);
+                if (newline >= 0) {
+                    out.append('\n');
+                }
+            }
+            if (newline < 0) {
+                break;
+            }
+            lineStart = newline + 1;
+        }
+        return changed ? out.toString() : text;
+    }
+
+    /**
+     * True when {@code line} is exactly a seam token on its own: optional horizontal padding, then
+     * {@code @} + a bounded token ({@code N}, {@code bN}, {@code blocked}) + optional supported
+     * priority suffix ({@code [low|medium|high]}), then trailing horizontal padding - nothing else.
+     * A trailing {@code \r} is treated as padding so a CRLF line ending is matched; the {@code \r}
+     * itself is never emitted because the line is dropped whole. Bounded validation avoids any
+     * regex; only recognized shapes are removed, so emails, {@code @user}, {@code answer@1},
+     * over-long digit runs and the lone {@code @} always survive.
+     */
+    private static boolean isStandaloneSeamLine(final String line) {
+        var i = 0;
+        while (i < line.length() && (line.charAt(i) == ' ' || line.charAt(i) == '\t')) {
+            i++;
+        }
+        if (i >= line.length() || line.charAt(i) != '@') {
+            return false;
+        }
+        i++;
+        final var tokenStart = i;
+        while (i < line.length() && (isAsciiLetter(line.charAt(i)) || isAsciiDigit(line.charAt(i)))) {
+            i++;
+        }
+        final var tokenEnd = i;
+        if (i >= line.length() || line.charAt(i) != '@') {
+            return false;
+        }
+        if (!isSeamToken(line, tokenStart, tokenEnd)) {
+            return false;
+        }
+        // complete seams require the [1-9]\d* ref shape (the historic ECHOED_REF_LINE): reject
+        // leading-zero numeric tokens (@01@, @b01@) here, while the bare-anchor shape keeps its
+        // looser all-digit acceptance
+        final var first = line.charAt(tokenStart);
+        if (first != 'b' && first == '0') {
+            return false;
+        }
+        if (first == 'b' && tokenEnd - tokenStart > 1 && line.charAt(tokenStart + 1) == '0') {
+            return false;
+        }
+        i++;
+        var afterClosingAt = false;
+        while (i < line.length() && (line.charAt(i) == ' ' || line.charAt(i) == '\t')) {
+            afterClosingAt = true;
+            i++;
+        }
+        if (i < line.length() && line.charAt(i) == '[') {
+            if (!afterClosingAt) {
+                return false; // the historical shape requires whitespace before the priority suffix
+            }
+            final var start = i;
+            while (i < line.length() && line.charAt(i) != ']') {
+                i++;
+            }
+            if (i >= line.length()) {
+                return false;
+            }
+            final var prio = line.substring(start + 1, i);
+            if (!("low".equals(prio) || "medium".equals(prio) || "high".equals(prio))) {
+                return false;
+            }
+            i++;
+            while (i < line.length() && (line.charAt(i) == ' ' || line.charAt(i) == '\t')) {
+                i++;
+            }
+        }
+        // trailing CR (from a CRLF line ending) is display padding, not content
+        if (i < line.length() && line.charAt(i) == '\r') {
+            i++;
+        }
+        return i == line.length();
+    }
+
+    private static boolean isAsciiDigit(final char c) {
+        return c >= '0' && c <= '9';
     }
 
     /**
@@ -1254,16 +1355,27 @@ public final class ContextCompression {
      * when nothing matches.
      */
     private static String stripGluedSeamWords(final String text, final int maxRef) {
-        if (text.indexOf('@') < 0) {
+        final var firstAt = text.indexOf('@');
+        if (firstAt < 0) {
             return text;
         }
         final var sb = new StringBuilder(text.length());
         var last = 0;
         var stripped = false;
         var i = 0;
+        var inInlineCode = false;
         while (i < text.length()) {
             final var c = text.charAt(i);
+            if (c == '`') {
+                inInlineCode = !inInlineCode; // 1- or 2-backtick spans (Consistency with the renderer)
+                i++;
+                continue;
+            }
             if (c != '@' || (i > 0 && isAsciiAlphanumeric(text.charAt(i - 1)))) {
+                i++;
+                continue;
+            }
+            if (inInlineCode) {
                 i++;
                 continue;
             }
@@ -1370,17 +1482,25 @@ public final class ContextCompression {
     /**
      * Drops every line that looks like a leaked seam-anchor fragment anywhere in the text - not just
      * at the tail, so a fragment frozen mid-block (followed by a tool card) is still hidden.
-     * Extremely cheap on purpose: one manual pass over the existing {@code \n} spans, no auxiliary
-     * matcher objects, no per-line regex runs.
+     * Fence-aware: a bare-anchor-shaped line inside a fenced code block is literal content and is
+     * preserved, matching the {@link #stripEchoedRefs} content-preservation rule. Extremely cheap on
+     * purpose: one manual pass over the existing {@code \n} spans, no auxiliary matcher objects, no
+     * per-line regex runs. A single trailing {@code \n} is preserved (the historical
+     * stripBareAnchorLines behavior, pinned by {@code withholdDanglingPrefixFastPathWithoutAtSign}).
      */
     private static String stripBareAnchorLines(final String text) {
+        final var fence = new MarkdownFence.Classifier();
         final var sb = new StringBuilder(text.length());
+        var removed = false;
         var lineStart = 0;
         while (lineStart <= text.length()) {
             final var newline = text.indexOf('\n', lineStart);
             final var lineEnd = newline < 0 ? text.length() : newline;
             final var line = text.substring(lineStart, lineEnd);
-            if (!isBareSeamAnchorLine(line)) {
+            final var inFence = fence.classify(text, lineStart, lineEnd);
+            if (!inFence && isBareSeamAnchorLine(line)) {
+                removed = true;
+            } else {
                 if (sb.length() > 0) {
                     sb.append('\n');
                 }
@@ -1391,7 +1511,9 @@ public final class ContextCompression {
             }
             lineStart = newline + 1;
         }
-        return sb.toString();
+        // preserve the input instance when nothing was removed (matches the identity fast path of
+        // the composed stripEchoedRefs and the historical behavior for '@'-free text)
+        return removed ? sb.toString() : text;
     }
 
     /** Cheap shape test for a leaked seam-anchor line: see {@link #withholdDanglingPrefix}. */
@@ -1415,27 +1537,34 @@ public final class ContextCompression {
         if (i != line.length()) {
             return false; // anything else on the line (prose, punctuation) means real content
         }
-        final var token = line.substring(tokenStart, tokenEnd);
-        if (token.isEmpty()) {
-            return false;
-        }
-        // value-based bound instead of the historical length carve-out: refs are ints, so a digit
-        // run longer than 10 (Integer.MAX_VALUE) can never be a real ref - the pinned 28-digit
-        // '@1234567890123456789012345678' shape survives *because it is not a ref*, exactly like a
-        // 28-char arbitrary token used to. 'blocked' (7) and 'b'+10 digits (11) still fit.
-        final var digits = token.charAt(0) == 'b' ? token.substring(1) : token;
-        if (token.equals("blocked")) {
-            return true;
-        }
-        if (digits.isEmpty() || digits.length() > 10 || !isAllDigits(digits)) {
-            return false;
-        }
-        return token.charAt(0) == 'b' || isAllDigits(token);
+        return isSeamToken(line, tokenStart, tokenEnd);
     }
 
-    private static boolean isAllDigits(final String token) {
-        for (var i = 0; i < token.length(); i++) {
-            if (!Character.isDigit(token.charAt(i))) {
+    /**
+     * Validates that the token {@code text[start, end)} is one of the supported seam shapes
+     * ({@code N}, {@code bN}, {@code blocked}) with a bounded numeric ref. Value-based bound: refs
+     * are ints, so a digit run longer than {@value #MAX_REF_DIGITS} (Integer.MAX_VALUE has 10
+     * digits) can never be a real ref - the pinned 28-digit shape survives *because it is not a
+     * ref*. {@code blocked} (7) and {@code b}+10 digits (11) still fit.
+     */
+    private static boolean isSeamToken(final String text, final int start, final int end) {
+        if (start >= end) {
+            return false;
+        }
+        if (end - start == "blocked".length() && text.regionMatches(start, "blocked", 0, "blocked".length())) {
+            return true;
+        }
+        final var b = text.charAt(start) == 'b';
+        final var digitsStart = b ? start + 1 : start;
+        final var digitsLen = end - digitsStart;
+        if (b && digitsLen < 1) {
+            return false;
+        }
+        if (digitsLen < 1 || digitsLen > MAX_REF_DIGITS) {
+            return false;
+        }
+        for (var i = digitsStart; i < end; i++) {
+            if (!isAsciiDigit(text.charAt(i))) {
                 return false;
             }
         }

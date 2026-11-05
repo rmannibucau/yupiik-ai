@@ -168,23 +168,33 @@ describe('normalizeMarkdown', () => {
 });
 
 describe('stripEchoedRefs', () => {
-  it('strips a whole echoed seam line with its trailing newline (the line pattern removes the tag line, surrounding blank lines survive)', () => {
+  it('strips a whole echoed seam line with its trailing newline (surrounding blank lines survive)', () => {
     expect(stripEchoedRefs('Let me run the proper typecheck.\n\n@535@\n')).toBe('Let me run the proper typecheck.\n\n');
   });
 
-  it('strips an inline tag glued to prose (the pattern consumes the space before the tag)', () => {
-    expect(stripEchoedRefs('the answer @12@ is done')).toBe('the answer is done');
+  it('preserves a seam glued to prose (inline tags are intended content)', () => {
+    expect(stripEchoedRefs('the answer @12@ is done')).toBe('the answer @12@ is done');
+    expect(stripEchoedRefs('x @blocked@ y')).toBe('x @blocked@ y');
   });
 
-  it('strips a seam split across streamed deltas once the block re-formed it', () => {
+  it('preserves a seam inside inline code (delimiters stay paired)', () => {
+    expect(stripEchoedRefs('use `@1@` like so')).toBe('use `@1@` like so');
+  });
+
+  it('preserves standalone seam lines inside a fenced code block', () => {
+    expect(stripEchoedRefs('```\n@7@\n```\n')).toBe('```\n@7@\n```\n');
+    expect(stripEchoedRefs('```java\n@b2@\n```\n')).toBe('```java\n@b2@\n```\n');
+    expect(stripEchoedRefs('~~~\n@blocked@\n~~~\n')).toBe('~~~\n@blocked@\n~~~\n');
+  });
+
+  it('strips a seam split across streamed deltas once the block re-formed it as a standalone line', () => {
     // the reducer appended the two deltas into one block content before the render chokepoint
-    expect(stripEchoedRefs('answer @5' + '35@')).toBe('answer');
+    expect(stripEchoedRefs('answer\n@5' + '35@\n')).toBe('answer\n');
   });
 
-  it('strips b-prefixed and blocked tags and the optional priority suffix', () => {
+  it('strips b-prefixed and blocked tags and the optional priority suffix as standalone lines', () => {
     expect(stripEchoedRefs('@b21@ [high]\nreal prose')).toBe('real prose');
-    // the leading space before the tag is consumed by the pattern, the trailing one survives
-    expect(stripEchoedRefs('x @blocked@ y')).toBe('x y');
+    expect(stripEchoedRefs('@blocked@\nreal prose')).toBe('real prose');
   });
 
   it('keeps a lone @ and non-tag text untouched', () => {

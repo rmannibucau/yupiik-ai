@@ -263,11 +263,17 @@ class ContextCompressionTest {
     @Test
     void stripEchoedRefsRemovesCompactSeamsFromModelOutput() {
         final var compression = new ContextCompression(null);
+        // a complete seam line ALONE on its line is stripped (with and without priority suffix)
         assertEquals("done\ncontinue", compression.stripEchoedRefs("done\n@90@\ncontinue"));
-        assertEquals("just a ref", compression.stripEchoedRefs("just a ref @7@"));
-        assertEquals("nested sum", compression.stripEchoedRefs("nested @b2@ sum"));
-        assertEquals("blocked turn", compression.stripEchoedRefs("blocked @blocked@ turn"));
-        assertEquals("prioritized", compression.stripEchoedRefs("prioritized @3@ [high]"));
+        assertEquals("", compression.stripEchoedRefs("@7@\n"));
+        assertEquals("x\ny", compression.stripEchoedRefs("x\n@b2@\ny"));
+        assertEquals("a\nb", compression.stripEchoedRefs("a\n@blocked@\nb"));
+        assertEquals("a\nb", compression.stripEchoedRefs("a\n@3@ [high]\nb"));
+        // a seam embedded in prose is INTENDED content and survives (the user policy)
+        assertEquals("just a ref @7@", compression.stripEchoedRefs("just a ref @7@"));
+        assertEquals("nested @b2@ sum", compression.stripEchoedRefs("nested @b2@ sum"));
+        assertEquals("blocked @blocked@ turn", compression.stripEchoedRefs("blocked @blocked@ turn"));
+        assertEquals("prioritized @3@ [high]", compression.stripEchoedRefs("prioritized @3@ [high]"));
         assertEquals("no refs here", compression.stripEchoedRefs("no refs here"));
         assertEquals("keeps at-word mention @user", compression.stripEchoedRefs("keeps at-word mention @user"));
         assertNull(compression.stripEchoedRefs(null));
@@ -328,6 +334,97 @@ class ContextCompressionTest {
         assertEquals("@blockedX", compression.stripEchoedRefs("@blockedX"));
         // an email-like address is not a seam
         assertEquals("mail@example.com", compression.stripEchoedRefs("mail@example.com"));
+    }
+
+    @Test
+    void stripEchoedRefsPreservesSeamShapesInsideInlineCodeAndProse() {
+        // the user-reported repro: the model emits `@1@` wrapped in backticks; the delimiters
+        // must stay paired (previously the inner token was stripped and the backticks orphaned
+        // into an empty inline-code span rendered as a literal pair)
+        final var compression = new ContextCompression(null);
+        assertEquals("use `@1@` like so", compression.stripEchoedRefs("use `@1@` like so"));
+        assertEquals("`@12@` and `@b3@`", compression.stripEchoedRefs("`@12@` and `@b3@`"));
+        // a seam in plain prose is intended content
+        assertEquals("@1@ is the marker", compression.stripEchoedRefs("@1@ is the marker"));
+        // a seam glued to prose (no line of its own) survives
+        assertEquals("suffix @90@", compression.stripEchoedRefs("suffix @90@"));
+    }
+
+    @Test
+    void stripEchoedRefsPreservesStandaloneSeamLinesInsideFencedCode() {
+        // a seam alone on its own content line INSIDE a fenced block is literal code, not an echo:
+        // the delimiters must never be orphaned and the code must stay byte-identical
+        final var compression = new ContextCompression(null);
+        final var fenced = "```\n@7@\n```\n";
+        assertEquals(fenced, compression.stripEchoedRefs(fenced));
+        final var fencedB = "```java\n@b2@\n```\n";
+        assertEquals(fencedB, compression.stripEchoedRefs(fencedB));
+        final var tilde = "~~~\n@blocked@\n~~~\n";
+        assertEquals(tilde, compression.stripEchoedRefs(tilde));
+        // a seam on a code line that also carries real code survives too
+        assertEquals("```\nint x = @3@;\n```\n", compression.stripEchoedRefs("```\nint x = @3@;\n```\n"));
+        // an OPEN fence (never closed) preserves everything after it to EOF
+        assertEquals("```\n@4@", compression.stripEchoedRefs("```\n@4@"));
+    }
+
+    @Test
+    void stripEchoedRefsStripsOnlyWholeStandaloneLinesAndPreservesLineEndings() {
+        final var compression = new ContextCompression(null);
+        // standalone line, both terminator styles
+        assertEquals("a\nc", compression.stripEchoedRefs("a\n@2@\nc"));
+        assertEquals("a\r\nc", compression.stripEchoedRefs("a\r\n@2@\r\nc"));
+        // a line that is only padding around the seam is still standalone
+        assertEquals("a\nc", compression.stripEchoedRefs("a\n  @2@  \nc"));
+        // a priority suffix is part of the standalone shape
+        assertEquals("a\nc", compression.stripEchoedRefs("a\n@2@ [high]\nc"));
+        // standalone seam at EOF without trailing newline
+        assertEquals("a\n", compression.stripEchoedRefs("a\n@2@"));
+        // the whole text is a standalone seam -> empty
+        assertEquals("", compression.stripEchoedRefs("@2@"));
+        assertEquals("", compression.stripEchoedRefs("@2@\n"));
+        // a seam on a line with other content is NOT standalone (survives)
+        assertEquals("a @2@ c", compression.stripEchoedRefs("a @2@ c"));
+        // tail occupied by a bare fragment (no closing @) is not a complete seam
+        assertEquals("a\n@2", compression.stripEchoedRefs("a\n@2"));
+    }
+
+    @Test
+    void stripEchoedRefsPathologyLongRunsAndAtHeavyInputAreBounded() {
+        final var compression = new ContextCompression(null);
+        // a 28-digit numeric token can never be a ref (not stripped)
+        assertEquals("@1234567890123456789012345678", compression.stripEchoedRefs("@1234567890123456789012345678"));
+        // a seam line with an over-long quoted suffix is not a recognized priority suffix (survives)
+        assertEquals("a\n@1@ [urgent]\nb", compression.stripEchoedRefs("a\n@1@ [urgent]\nb"));
+        // a huge run of '@' must process without pathological behavior and preserve the input
+        final var heavy = "@".repeat(10_000) + "\n";
+        assertEquals(heavy, compression.stripEchoedRefs(heavy));
+        // many complete standalone seams in a row are all removed
+        final var many = "@1@\n@2@\n@3@\n".repeat(500);
+        assertEquals("", compression.stripEchoedRefs(many));
+    }
+
+    @Test
+    void stripEchoedRefsRejectsLeadingZeroAndBareSuffixShapes() {
+        final var compression = new ContextCompression(null);
+        // complete seams must use the [1-9]\d* ref shape (historic ECHOED_REF_LINE)
+        assertEquals("@01@", compression.stripEchoedRefs("@01@"));
+        assertEquals("@b01@", compression.stripEchoedRefs("@b01@"));
+        // a bare fragment (no closing @) is not a complete seam
+        assertEquals("@1", compression.stripEchoedRefs("@1"));
+        // @blocked@ is the literal sentinel (letter token, not b+digits)
+        assertEquals("x\n", compression.stripEchoedRefs("x\n@blocked@\n"));
+    }
+
+    @Test
+    void withholdDanglingPrefixIsFenceAwareAndPreservesCodeBlocks() {
+        final var compression = new ContextCompression(config());
+        // a bare-anchor-shaped line INSIDE a fenced block is literal code and survives
+        assertEquals("```\n@1290\n```\n", compression.withholdDanglingPrefix("```\n@1290\n```\n"));
+        assertEquals("~~~\n@b7\n~~~\n", compression.withholdDanglingPrefix("~~~\n@b7\n~~~\n"));
+        // a bare anchor OUTSIDE a fence is still dropped
+        assertEquals("real code\n", compression.withholdDanglingPrefix("real code\n@1290\n"));
+        // an OPEN fence (never closed) preserves everything after it
+        assertEquals("```\n@1290", compression.withholdDanglingPrefix("```\n@1290"));
     }
 
     @Test
