@@ -828,6 +828,8 @@ public class CompactionCoordinator {
             }
             if (s.startsWith(COMPACTED_MARKER)
                     || s.startsWith("<pruned-context>")
+                    || s.startsWith("<subagent ")
+                    || (m.others() != null && Boolean.TRUE.equals(m.others().get("volatileTail")))
                     || s.startsWith("Your previous reply")) {
                 continue;
             }
@@ -871,16 +873,19 @@ public class CompactionCoordinator {
 
     /**
      * Centrally absorbs overflow: any message whose content exceeds {@code cap} is head+tail
-     * spliced. The system prompt (index 0) and the generated digest ({@code digestIndex}, when
-     * present and &gt; 0) are never touched, so the reusable context survives. Returns the same
+     * spliced. All leading system messages, the latest real user request and the generated digest
+     * ({@code digestIndex}, when present and &gt; 0) are never touched. Returns the same
      * list when nothing changed.
      */
     private List<Message> shrinkTail(final List<Message> list, final int cap, final int digestIndex) {
         var changed = false;
         final var out = new ArrayList<Message>();
+        final var lastUser = lastUserMessageIndex(list);
+        var leadingSystem = true;
         for (var i = 0; i < list.size(); i++) {
             final var m = list.get(i);
-            if (i == 0 || i == digestIndex) {
+            leadingSystem = leadingSystem && "system".equals(m.role());
+            if (leadingSystem || i == digestIndex || i == lastUser) {
                 out.add(m);
                 continue;
             }
@@ -1686,10 +1691,8 @@ public class CompactionCoordinator {
      */
     private boolean fallbackToMainModel(final ChatSettings settings) {
         final var overrides = compactionOverrides(settings);
-        // the framework materializes a default-filled per-provider block even when none is configured,
-        // so only an explicit TRUE opts in at the provider level; the global default governs otherwise
-        if (overrides != null && Boolean.TRUE.equals(overrides.fallbackToMainModel())) {
-            return true;
+        if (overrides != null && overrides.fallbackToMainModel() != null) {
+            return overrides.fallbackToMainModel();
         }
         return compactionConfigured() && configuration.compaction().fallbackToMainModel();
     }

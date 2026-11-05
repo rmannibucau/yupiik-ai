@@ -569,6 +569,7 @@ class AdaptiveCompactionTest {
                 if ("$main/main-model".equals(request.model())) {
                     return new ChatResult(Message.assistant("digest: fallback", null), Usage.EMPTY);
                 }
+
                 throw new IOException("500 transient");
             }
         };
@@ -582,5 +583,36 @@ class AdaptiveCompactionTest {
         assertTrue(
                 calls.stream().anyMatch("$main/main-model"::equals),
                 "the main model must be tried after the compact model fails: " + calls);
+    }
+
+    @Test
+    void providerFallbackOverrideDistinguishesAbsentTrueAndFalse() {
+        for (final var override : List.of("absent", "true", "false")) {
+            final var extra = new HashMap<String, String>();
+            extra.put("yca.compaction.fallbackToMainModel", "true");
+            if (!"absent".equals(override)) {
+                extra.put("yca.provider.providers.0.compaction.fallbackToMainModel", override);
+            }
+            final var cfg = twoProviderConfig(128_000, 16_000, extra);
+            final var calls = new ArrayList<String>();
+            final var chat = new ChatClient() {
+                @Override
+                public ChatResult chat(
+                        final ChatCompletionRequest request,
+                        final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                        final BooleanSupplier cancelled)
+                        throws IOException {
+                    calls.add(request.model());
+                    if ("$main/main-model".equals(request.model())) {
+                        return new ChatResult(Message.assistant("digest", null), Usage.EMPTY);
+                    }
+                    throw new IOException("500 transient");
+                }
+            };
+            final var manager = new ContextManager(
+                    cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()), coordinator(cfg, chat));
+            manager.compact(oldHeavyHistory(6, 300), true);
+            assertEquals(!"false".equals(override), calls.contains("$main/main-model"), override + ": " + calls);
+        }
     }
 }

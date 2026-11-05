@@ -343,7 +343,12 @@ class ContextManagerTest {
         for (var i = 0; i < 7; i++) {
             messages.add(Message.user("step " + i));
         }
+        final var additionalSystem = Message.system("additional instructions " + "z".repeat(2_000));
+        messages.add(1, additionalSystem);
+        final var latestUser = Message.user("current task " + "u".repeat(2_000));
+        messages.add(latestUser);
         messages.add(Message.tool("t8", "a tool output " + "y".repeat(20_000)));
+        messages.add(new Message("user", "session state", null, null, null, Map.of("volatileTail", true)));
         final var result = manager.compact(messages);
         assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
         final var summary = result.messages().stream()
@@ -363,6 +368,10 @@ class ContextManagerTest {
         final var first = result.messages().get(0);
         assertEquals("system", first.role());
         assertEquals("system", first.content());
+        assertTrue(result.messages().contains(additionalSystem), "all leading system instructions must remain intact");
+        assertTrue(
+                result.messages().contains(latestUser),
+                "the actual current request must remain intact despite a later state message");
     }
 
     @Test

@@ -49,6 +49,7 @@ public record ProviderCompactionConfiguration(
         int rateLimitRequestsPerMinute,
 
         @Property(
+                defaultValue = "null",
                 documentation =
                         "Whether a compaction summarizer that exhausts all its retries on a transient 5xx/network "
                                 + "failure falls back to the provider's main (conversation) model for one last "
