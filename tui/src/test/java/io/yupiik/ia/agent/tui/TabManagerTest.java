@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -92,13 +93,13 @@ class TabManagerTest {
         assertEquals(s3, manager.active());
         manager.remove(s3);
         assertEquals(-1, manager.activeTab());
-        assertEquals(null, manager.active());
+        assertNull(manager.active());
     }
 
     @Test
     void emptyManagerHasNoActive() {
         assertEquals(-1, manager.activeTab());
-        assertEquals(null, manager.active());
+        assertNull(manager.active());
         manager.activate(2);
         assertEquals(-1, manager.activeTab());
     }
@@ -108,7 +109,7 @@ class TabManagerTest {
         manager.add(s1);
         manager.remove(s1);
         assertEquals(-1, manager.activeTab());
-        assertEquals(null, manager.active());
+        assertNull(manager.active());
         assertTrue(manager.isEmpty());
     }
 

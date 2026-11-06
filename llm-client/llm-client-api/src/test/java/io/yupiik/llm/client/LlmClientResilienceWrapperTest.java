@@ -16,6 +16,7 @@
 package io.yupiik.llm.client;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -196,7 +197,7 @@ class LlmClientResilienceWrapperTest {
 
             @Override
             public CompletionStage<StreamAttempt> streamRaw(final LlmRequest request, final BooleanSupplier cancelled) {
-                return CompletableFuture.<StreamAttempt>failedFuture(new UnsupportedOperationException());
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
             }
 
             @Override
@@ -555,7 +556,7 @@ class LlmClientResilienceWrapperTest {
                         .join());
 
         assertEquals(1, dial.calls.get(), "a typed 400 must not be retried");
-        assertTrue(failure.getCause() instanceof LlmHttpFailureException, "got: " + failure.getCause());
+        assertInstanceOf(LlmHttpFailureException.class, failure.getCause(), "got: " + failure.getCause());
     }
 
     @Test
@@ -646,7 +647,7 @@ class LlmClientResilienceWrapperTest {
                 () -> wrapper.chat(dial, null, () -> false, null, true)
                         .toCompletableFuture()
                         .get(5, TimeUnit.SECONDS));
-        assertTrue(failure.getCause() instanceof LlmHttpFailureException, "got: " + failure.getCause());
+        assertInstanceOf(LlmHttpFailureException.class, failure.getCause(), "got: " + failure.getCause());
         assertEquals(1, dial.calls.get(), "skipRetries must surface the failure immediately, without wrapper retries");
     }
 
@@ -664,7 +665,7 @@ class LlmClientResilienceWrapperTest {
                 () -> wrapper.chat(dial, null, () -> false)
                         .toCompletableFuture()
                         .get(5, TimeUnit.SECONDS));
-        assertTrue(failure.getCause() instanceof LlmHttpFailureException, "got: " + failure.getCause());
+        assertInstanceOf(LlmHttpFailureException.class, failure.getCause(), "got: " + failure.getCause());
         assertEquals(
                 3,
                 dial.calls.get(),
@@ -817,7 +818,7 @@ class LlmClientResilienceWrapperTest {
                 return source.substring(start + 1, end);
             }
             if (c == '{') {
-                return parseBody(source.substring(start, source.length()));
+                return parseBody(source.substring(start));
             }
             // number: consume digits (and optional sign)
             int end = start;

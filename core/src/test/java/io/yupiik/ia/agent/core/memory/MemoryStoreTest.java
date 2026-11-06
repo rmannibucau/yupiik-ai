@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.memory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -233,7 +234,7 @@ class MemoryStoreTest {
                 .filter(l -> MemoryStore.metaOf(l).p() == 5)
                 .findFirst()
                 .orElse(null);
-        assertTrue(storedKeep != null, "a memory_write fact must be stored as a keep (p5) directive: " + file);
+        assertNotNull(storedKeep, "a memory_write fact must be stored as a keep (p5) directive: " + file);
         assertEquals("always use tabs", MemoryStore.textOf(storedKeep), "the fact text is preserved");
     }
 
@@ -252,7 +253,7 @@ class MemoryStoreTest {
                 .filter(l -> MemoryStore.textOf(l).equals("the discount rule"))
                 .findFirst()
                 .orElse(null);
-        assertTrue(line != null, "the fact must be stored: " + file);
+        assertNotNull(line, "the fact must be stored: " + file);
         assertEquals(2, MemoryStore.metaOf(line).p(), "keep=false stores an ordinary p2 fact");
         assertEquals("src/main/CartTotals.java", MemoryStore.metaOf(line).path(), "path anchor must be stored");
         assertEquals(List.of("rounding", "discount"), MemoryStore.metaOf(line).topic(), "topic must be stored");

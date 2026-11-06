@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.security;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
@@ -157,14 +158,14 @@ class MavenSecretServiceTest {
         assertTrue(secrets.contains("my-gpg-passphrase-value"), "gpg.passphrase keyword: " + secrets);
         assertTrue(secrets.contains("plain-deploy-secret"), "deploy.password keyword: " + secrets);
         // a harmless property not matching allowlist or keyword must be ignored
-        assertTrue(!secrets.contains("true"), "harmless property must not be a secret: " + secrets);
+        assertFalse(secrets.contains("true"), "harmless property must not be a secret: " + secrets);
 
         // server httpHeaders: only the credential part after the scheme is harvested
         assertTrue(secrets.contains("bearer-token-value"), "Bearer token after scheme: " + secrets);
         assertTrue(secrets.contains("plain-api-key-value"), "X-Api-Key without space keeps full value: " + secrets);
         assertTrue(secrets.contains("dXNlcjpwYXNz"), "Basic token after scheme: " + secrets);
         // the scheme prefix alone must not be harvested
-        assertTrue(!secrets.contains("Bearer"), "scheme prefix alone must not be a secret: " + secrets);
+        assertFalse(secrets.contains("Bearer"), "scheme prefix alone must not be a secret: " + secrets);
     }
 
     @Test

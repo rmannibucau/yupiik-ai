@@ -599,7 +599,7 @@ public class BtwAnswerer {
 
     /** The tools the main loop declares for the session: the full wire schema, never filtered to a btw-only set. */
     private List<Tool> wireBtwTools() {
-        return toolRegistry == null ? List.<Tool>of() : toolRegistry.toWireTools();
+        return toolRegistry == null ? List.of() : toolRegistry.toWireTools();
     }
 
     /** Renders the tool-attempt fallback: the leftover intro plus an explicit, honest note (Claude-Code style). */

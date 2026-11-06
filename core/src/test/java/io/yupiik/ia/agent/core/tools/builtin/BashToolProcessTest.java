@@ -71,7 +71,7 @@ class BashToolProcessTest {
         final var childPid = awaitPid(pidFile);
         assertNotNull(childPid, "the child must have been spawned before the timeout");
         awaitGone(childPid);
-        assertTrue(service.trackedCount() == 0, "no process may stay tracked after the timeout");
+        assertEquals(0, service.trackedCount(), "no process may stay tracked after the timeout");
     }
 
     @Test

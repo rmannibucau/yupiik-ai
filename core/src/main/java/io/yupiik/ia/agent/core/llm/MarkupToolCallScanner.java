@@ -508,7 +508,7 @@ public class MarkupToolCallScanner {
         while (p < header.length() && !Character.isWhitespace(header.charAt(p)) && header.charAt(p) != '>') {
             p++;
         }
-        for (; p < header.length(); ) {
+        while (p < header.length()) {
             // skip whitespace
             while (p < header.length() && Character.isWhitespace(header.charAt(p))) {
                 p++;
@@ -815,7 +815,7 @@ public class MarkupToolCallScanner {
 
     private static String unquote(final String raw) {
         if (raw == null || raw.length() < 2 || raw.charAt(0) != '"' || raw.charAt(raw.length() - 1) != '"') {
-            return raw == null ? null : raw;
+            return raw;
         }
         return raw.substring(1, raw.length() - 1);
     }

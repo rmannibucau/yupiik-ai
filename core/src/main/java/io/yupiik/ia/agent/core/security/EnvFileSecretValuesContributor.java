@@ -89,7 +89,7 @@ public class EnvFileSecretValuesContributor implements SecretValuesContributor {
         }
 
         String value(final String line) {
-            if (line == null || line.strip().isEmpty() || line.strip().startsWith("#")) {
+            if (line == null || line.isBlank() || line.strip().startsWith("#")) {
                 return null;
             }
             final var m = ASSIGN.matcher(line);

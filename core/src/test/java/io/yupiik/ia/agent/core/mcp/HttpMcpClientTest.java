@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.mcp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
@@ -171,7 +172,7 @@ class HttpMcpClientTest {
                 httpClient);
         final var error = assertThrows(McpHttpException.class, failing::initialize);
         assertEquals(500, error.statusCode());
-        assertEquals(true, error.getMessage().contains("500"));
+        assertTrue(error.getMessage().contains("500"));
     }
 
     @Test

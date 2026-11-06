@@ -94,18 +94,7 @@ public class SyntaxHighlighter {
         Pattern pattern();
     }
 
-    private static final class RegexHighlighter implements Highlighter {
-        private final Pattern pattern;
-
-        private RegexHighlighter(final Pattern pattern) {
-            this.pattern = pattern;
-        }
-
-        @Override
-        public Pattern pattern() {
-            return pattern;
-        }
-    }
+    private record RegexHighlighter(Pattern pattern) implements Highlighter {}
 
     public record Segment(Type type, String language, String text) {
         public enum Type {
@@ -606,15 +595,11 @@ public class SyntaxHighlighter {
         return immutable;
     }
 
-    private static final class ScanResult {
-        final List<Segment> committed; // segments up to the last closed fence
-        final String pendingTail; // text after the last closed fence (may turn into CODE later)
-
-        private ScanResult(final List<Segment> committed, final String pendingTail) {
-            this.committed = committed;
-            this.pendingTail = pendingTail;
-        }
-    }
+    /**
+     * @param committed   segments up to the last closed fence
+     * @param pendingTail text after the last closed fence (may turn into CODE later)
+     */
+    private record ScanResult(List<Segment> committed, String pendingTail) {}
 
     /**
      * Linear, backtracking-free fence scan: walks the region line by line once, committing

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.usage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
@@ -289,7 +290,7 @@ class QuotaSnapshotStoreTest {
             releaseFirstCall.countDown(); // let fetch #1 complete
             forcedThread.join(TimeUnit.SECONDS.toMillis(10));
             awaitFetchesAtLeast(1);
-            assertTrue(forced.get() != null, "forced /usage must complete after the coalesced fetch lands");
+            assertNotNull(forced.get(), "forced /usage must complete after the coalesced fetch lands");
             assertEquals(1, fetches.get(), "no extra backend call for a forced refresh that coalesced");
         }
     }
@@ -349,8 +350,10 @@ class QuotaSnapshotStoreTest {
     @Test
     void activePollingAndOneFinalRefresh(final JsonMapper mapper) {
         final var clock = new MutableClock();
-        try (final var worker = new ControlledExecutor(); final var scheduler = new CapturedScheduler()) {
-            final var store = new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
+        try (final var worker = new ControlledExecutor();
+                final var scheduler = new CapturedScheduler()) {
+            final var store =
+                    new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
             final var notifications = new AtomicInteger();
             store.listen("s1", notifications::incrementAndGet); // registration before attach is retained
             store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
@@ -412,8 +415,10 @@ class QuotaSnapshotStoreTest {
     @Test
     void timerHonorsBackoffAndDoesNotNotifyOnFailure(final JsonMapper mapper) {
         final var clock = new MutableClock();
-        try (final var worker = new ControlledExecutor(); final var scheduler = new CapturedScheduler()) {
-            final var store = new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
+        try (final var worker = new ControlledExecutor();
+                final var scheduler = new CapturedScheduler()) {
+            final var store =
+                    new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
             final var notifications = new AtomicInteger();
             store.listen("s1", notifications::incrementAndGet);
             store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
@@ -443,8 +448,10 @@ class QuotaSnapshotStoreTest {
     @Test
     void closeCancelsTimerAndRejectsOldFetchForRecreatedSession(final JsonMapper mapper) {
         final var clock = new MutableClock();
-        try (final var worker = new ControlledExecutor(); final var scheduler = new CapturedScheduler()) {
-            final var store = new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
+        try (final var worker = new ControlledExecutor();
+                final var scheduler = new CapturedScheduler()) {
+            final var store =
+                    new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
             store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
             store.activity("s1", true);
             final var oldTimer = scheduler.latest();
@@ -469,8 +476,10 @@ class QuotaSnapshotStoreTest {
     @Test
     void staleTimerIsCancelledByProviderChangeAndReadsCoalesce(final JsonMapper mapper) {
         final var clock = new MutableClock();
-        try (final var worker = new ControlledExecutor(); final var scheduler = new CapturedScheduler()) {
-            final var store = new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
+        try (final var worker = new ControlledExecutor();
+                final var scheduler = new CapturedScheduler()) {
+            final var store =
+                    new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
             store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
             worker.drain();
             store.activity("s1", true);
@@ -493,7 +502,8 @@ class QuotaSnapshotStoreTest {
 
     @Test
     void oldProviderGenerationDoesNotNotify(final JsonMapper mapper) {
-        try (final var worker = new ControlledExecutor(); final var scheduler = new CapturedScheduler()) {
+        try (final var worker = new ControlledExecutor();
+                final var scheduler = new CapturedScheduler()) {
             final var store = new QuotaSnapshotStore(
                     mapper, httpClient, auth, providerManager, new MutableClock(), worker, scheduler);
             final var notifications = new AtomicInteger();
@@ -512,8 +522,10 @@ class QuotaSnapshotStoreTest {
     @Test
     void forcedPublicationMovesPollingDeadline(final JsonMapper mapper) throws Exception {
         final var clock = new MutableClock();
-        try (final var worker = Executors.newSingleThreadExecutor(); final var scheduler = new CapturedScheduler()) {
-            final var store = new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
+        try (final var worker = Executors.newSingleThreadExecutor();
+                final var scheduler = new CapturedScheduler()) {
+            final var store =
+                    new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
             store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
             worker.submit(() -> {}).get(10, TimeUnit.SECONDS);
             store.activity("s1", true);

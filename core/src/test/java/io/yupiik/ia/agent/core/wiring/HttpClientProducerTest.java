@@ -117,7 +117,7 @@ class HttpClientProducerTest {
                     .POST(HttpRequest.BodyPublishers.ofString("{\"a\":1}"))
                     .build());
         }
-        final var trace = new String(logs.toByteArray(), StandardCharsets.UTF_8);
+        final var trace = logs.toString(StandardCharsets.UTF_8);
         Assertions.assertTrue(trace.contains("curl -i -X POST"), () -> "missing curl post in: " + trace);
         Assertions.assertTrue(trace.contains(url), () -> "missing url in: " + trace);
         Assertions.assertTrue(trace.contains("--data-raw '{\"a\":1}'"), () -> "missing payload in: " + trace);
@@ -134,7 +134,7 @@ class HttpClientProducerTest {
                     .POST(HttpRequest.BodyPublishers.ofString("{\"a\":1}"))
                     .build());
         }
-        Assertions.assertTrue(logs.size() == 0, () -> "no curl trace expected when debug disabled, got: " + logs);
+        Assertions.assertEquals(0, logs.size(), () -> "no curl trace expected when debug disabled, got: " + logs);
     }
 
     @Test

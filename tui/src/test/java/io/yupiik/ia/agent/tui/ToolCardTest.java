@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -127,7 +128,7 @@ class ToolCardTest {
                 }
             }
         }
-        assertTrue(cardArgs != null, "a finished tool card must be found");
+        assertNotNull(cardArgs, "a finished tool card must be found");
         assertEquals("cat <<'SQL' ALTER TABLE T LOCATION ('part_*.csv.gz'); SELECT COUNT(*) FROM T; SQL", cardArgs);
         assertFalse(cardArgs.contains("\\"), cardArgs);
     }

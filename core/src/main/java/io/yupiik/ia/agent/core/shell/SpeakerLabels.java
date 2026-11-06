@@ -120,7 +120,7 @@ public class SpeakerLabels {
     }
 
     private String render(final Template template, final Ctx ctx, final String fallback) {
-        final var rendered = template.render(context(ctx)).toString().strip();
+        final var rendered = template.render(context(ctx)).strip();
         return rendered.isBlank() ? fallback : rendered;
     }
 

@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
@@ -118,7 +119,7 @@ class WebSessionManagerCloseTest {
     @Test
     void cancelAllInterruptsTheTurnAndClearsTheQueueKeepingTheSessionAttached() {
         startTurnWithQueued("q1", "q2");
-        assertTrue(turnRunner.cancelled != null, "the running turn must expose a cancelled supplier");
+        assertNotNull(turnRunner.cancelled, "the running turn must expose a cancelled supplier");
         assertEquals(2, manager.queuedPromptCount("s1"));
         assertTrue(manager.isAttached("s1"));
 

@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui.prompt;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -80,8 +81,8 @@ class JLineProducerTest {
         // or the dumb fallback when no tty is attached (headless tests, piped stdout):
         // both are fine - what must never come back is the streams-based pty slave
         final var name = terminal.getClass().getName();
-        assertTrue(
-                !name.contains("PtyTerminal"),
+        assertFalse(
+                name.contains("PtyTerminal"),
                 "the hijacked runtime must not produce a streams-based pty terminal, got " + name);
         // a headless build has no tty and legitimately yields a dumb terminal (0x0):
         // only the class must be asserted here, the size comes from the real tty

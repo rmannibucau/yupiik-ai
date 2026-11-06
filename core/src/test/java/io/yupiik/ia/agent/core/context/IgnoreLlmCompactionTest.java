@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.context;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -162,8 +163,8 @@ class IgnoreLlmCompactionTest {
         final var manager = providerManager(cfg);
         final var coordinator = coordinator(cfg, explodingChat(new AtomicInteger()), new AtomicInteger());
         // the global default (llm) applies to the default provider
-        assertTrue(!manager.resolvedIgnoreLlm(new ChatSettings("default", "m", null, null)));
-        assertTrue(!coordinator.ignoreLlm(new ChatSettings("default", "m", null, null)));
+        assertFalse(manager.resolvedIgnoreLlm(new ChatSettings("default", "m", null, null)));
+        assertFalse(coordinator.ignoreLlm(new ChatSettings("default", "m", null, null)));
         // per-provider no_llm opts "other" in
         assertTrue(manager.resolvedIgnoreLlm(new ChatSettings("other", "m2", null, null)));
         assertTrue(coordinator.ignoreLlm(new ChatSettings("other", "m2", null, null)));
@@ -190,7 +191,7 @@ class IgnoreLlmCompactionTest {
                         "yca.provider.providers.1.compaction.mode", "llm"));
         final var manager = providerManager(cfg);
         // the enum makes the explicit opt-out expressible: this provider goes back to the LLM path
-        assertTrue(!manager.resolvedIgnoreLlm(new ChatSettings("other", "m2", null, null)));
+        assertFalse(manager.resolvedIgnoreLlm(new ChatSettings("other", "m2", null, null)));
     }
 
     @Test
@@ -224,6 +225,6 @@ class IgnoreLlmCompactionTest {
         final var contextManager = new ContextManager(
                 cfg, new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()), coordinator);
         final var messages = oldHeavyHistory();
-        assertTrue(!contextManager.compactNeeded(messages), "enabled=false wins: no compaction at all");
+        assertFalse(contextManager.compactNeeded(messages), "enabled=false wins: no compaction at all");
     }
 }

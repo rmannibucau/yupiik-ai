@@ -17,6 +17,7 @@ package io.yupiik.llm.client.openai;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -457,8 +458,8 @@ class OpenAIDialectTest {
         dialect.stream(request(true, Map.of("includeUsage", false)), () -> false)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        assertTrue(!reqBody.get().contains("stream_options"), "disabled by includeUsage=false: " + reqBody.get());
-        assertTrue(!reqBody.get().contains("includeUsage"), "control key must not leak: " + reqBody.get());
+        assertFalse(reqBody.get().contains("stream_options"), "disabled by includeUsage=false: " + reqBody.get());
+        assertFalse(reqBody.get().contains("includeUsage"), "control key must not leak: " + reqBody.get());
 
         dialect.stream(request(true, Map.of("stream_options", Map.of("include_usage", false))), () -> false)
                 .toCompletableFuture()
@@ -468,7 +469,7 @@ class OpenAIDialectTest {
                 "explicit stream_options must win: " + reqBody.get());
 
         dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
-        assertTrue(!reqBody.get().contains("stream_options"), "non-stream must not ask for usage: " + reqBody.get());
+        assertFalse(reqBody.get().contains("stream_options"), "non-stream must not ask for usage: " + reqBody.get());
     }
 
     @Test
@@ -500,8 +501,9 @@ class OpenAIDialectTest {
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var completion = dialect.chat(request(false)).toCompletableFuture();
         final var failure = failureOf(completion).orElseThrow();
-        assertTrue(
-                failure instanceof DialectNotSupportedException,
+        assertInstanceOf(
+                DialectNotSupportedException.class,
+                failure,
                 () -> "expected DialectNotSupportedException but got " + failure);
         assertTrue(
                 failure.getMessage().contains("not found"),
@@ -522,8 +524,9 @@ class OpenAIDialectTest {
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var completion = dialect.chat(request(false)).toCompletableFuture();
         final var failure = failureOf(completion).orElseThrow();
-        assertTrue(
-                failure instanceof DialectNotSupportedException,
+        assertInstanceOf(
+                DialectNotSupportedException.class,
+                failure,
                 () -> "expected DialectNotSupportedException but got " + failure);
         assertTrue(
                 failure.getMessage().contains("Model ' deepseek-v4-flash' not found"),

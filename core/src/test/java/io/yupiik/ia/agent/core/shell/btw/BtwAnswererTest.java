@@ -161,8 +161,7 @@ class BtwAnswererTest {
      * and the real bash tool whose plan-mode rules gate which commands may actually run.
      */
     private ToolRegistry registry() {
-        final var tools =
-                List.<EmbeddedTool>of(readFileTool(), writeFileTool(), new BashTool(NOOP, new ProcessService()));
+        final var tools = List.of(readFileTool(), writeFileTool(), new BashTool(NOOP, new ProcessService()));
         return new ToolRegistry(null) {
             @Override
             public List<EmbeddedTool> tools() {
@@ -440,7 +439,7 @@ class BtwAnswererTest {
                 .get(5, TimeUnit.SECONDS);
         final var body = bodies.getLast();
         assertTrue(body.contains("\"m50\""), body);
-        assertTrue(!body.contains("\"m49\""), body);
+        assertFalse(body.contains("\"m49\""), body);
         assertEquals(202, body.split("\"role\"", -1).length - 1, body);
     }
 
@@ -469,7 +468,7 @@ class BtwAnswererTest {
         noRecall.ask("second question", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        assertTrue(!bodies.getLast().contains("Earlier side questions"), bodies.getLast());
+        assertFalse(bodies.getLast().contains("Earlier side questions"), bodies.getLast());
     }
 
     @Test
@@ -569,7 +568,7 @@ class BtwAnswererTest {
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         final var body = bodies.getLast();
-        assertTrue(!body.contains("Q: TOOLCALL ONLY"), body);
+        assertFalse(body.contains("Q: TOOLCALL ONLY"), body);
         assertTrue(body.contains("Side question: TOOLCALL MARKUP"), body);
     }
 

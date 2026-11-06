@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.llm.Message;
@@ -62,7 +63,7 @@ class TurnNotificationReporterTest {
         assertTrue(lastContent.get(), "a non-blank content must record the turn ended with content");
         assertEquals(2, events.size());
         final var metrics = events.get(0);
-        assertTrue(metrics instanceof AgentEvent.TurnMetrics);
+        assertInstanceOf(AgentEvent.TurnMetrics.class, metrics);
         final var turnMetrics = (AgentEvent.TurnMetrics) metrics;
         assertEquals(3, turnMetrics.llmCalls());
         assertEquals(40, turnMetrics.thinkingDurationMs());

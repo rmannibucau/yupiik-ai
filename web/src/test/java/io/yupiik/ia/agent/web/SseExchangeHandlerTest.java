@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.httpserver.jre.JreHttpServer;
@@ -204,7 +205,7 @@ class SseExchangeHandlerTest {
                 .findFirst()
                 .orElseThrow();
         assertTrue(data.contains("\"total\":5"), "expected the total count in the snapshot, got: " + data);
-        assertTrue(!data.contains("m1"), "tail-first snapshot must not ship m1, got: " + data);
+        assertFalse(data.contains("m1"), "tail-first snapshot must not ship m1, got: " + data);
         assertTrue(data.contains("m4") && data.contains("m5"), "snapshot should carry the tail m4/m5, got: " + data);
     }
 

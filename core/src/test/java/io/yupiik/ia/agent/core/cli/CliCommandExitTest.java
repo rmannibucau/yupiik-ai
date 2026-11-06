@@ -16,8 +16,8 @@
 package io.yupiik.ia.agent.core.cli;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.cli.CliCommand.MenuChoice;
 import java.util.concurrent.CompletableFuture;
@@ -163,6 +163,6 @@ class CliCommandExitTest {
                 CompletionException.class,
                 () -> CliCommand.awaitTurnLoop(
                         future, new AtomicBoolean(), () -> false, () -> {}, () -> {}, 60_000_000_000L));
-        assertTrue(error.getCause() instanceof IllegalStateException);
+        assertInstanceOf(IllegalStateException.class, error.getCause());
     }
 }

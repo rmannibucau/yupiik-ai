@@ -55,7 +55,7 @@ public final class StructuralCodeGraphHelperMain {
         // launcher
     }
 
-    public static void main(final String[] args) {
+    static void main(final String[] args) {
         final int code = run(args);
         if (code != 0) {
             System.exit(code);

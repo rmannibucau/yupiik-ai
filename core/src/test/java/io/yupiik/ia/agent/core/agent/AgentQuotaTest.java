@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -53,7 +54,7 @@ class AgentQuotaTest {
         assertEquals(10.0, quota.windows().get(1).usedPercent());
         assertEquals(604800L, quota.windows().get(1).windowSeconds());
         assertEquals("10", quota.creditsBalance());
-        assertEquals(false, quota.creditsUnlimited());
+        assertFalse(quota.creditsUnlimited());
     }
 
     @Test

@@ -607,20 +607,20 @@ class ConversationTranscriptTest {
         // no quota -> not visible
         t.onEvent(new AgentEvent.UsageUpdated(
                 null, 42, 12.4, 40, 1.25, null, "s1", null, null, AgentEvent.UsageUpdated.Quota.NONE));
-        assertEquals(false, t.quotaVisible());
+        assertFalse(t.quotaVisible());
 
         // a real quota -> persisted fields
         final var quota =
                 new AgentEvent.UsageUpdated.Quota(true, true, "plus", 42.5, 18000, 1700000000L, "primary", "10", false);
         t.onEvent(new AgentEvent.UsageUpdated(null, 42, 12.4, 40, 1.25, null, "s1", null, null, quota));
-        assertEquals(true, t.quotaVisible());
+        assertTrue(t.quotaVisible());
         assertEquals("plus", t.quotaPlanType());
         assertEquals(42.5, t.quotaUsedPercent(), 0.0001);
         assertEquals(18000, t.quotaWindowSeconds());
         assertEquals(1700000000L, t.quotaResetAtEpochSeconds());
         assertEquals("primary", t.quotaWindowLabel());
         assertEquals("10", t.quotaCreditsBalance());
-        assertEquals(false, t.quotaCreditsUnlimited());
+        assertFalse(t.quotaCreditsUnlimited());
     }
 
     @Test

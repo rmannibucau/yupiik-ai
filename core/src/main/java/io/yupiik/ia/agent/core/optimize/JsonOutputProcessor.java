@@ -105,7 +105,7 @@ public class JsonOutputProcessor implements OutputProcessor {
                     if (count++ > 0) {
                         out.append('\n');
                     }
-                    out.append(String.valueOf(item));
+                    out.append(item);
                 }
             }
             return out.toString().isBlank() ? "[]" : compactLines(out.toString());

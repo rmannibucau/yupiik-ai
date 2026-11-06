@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.memory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -110,7 +111,7 @@ class MemoryCompactorTest {
         assertTrue(
                 result.contains("left untouched"), "the rewrite failure must surface as a no-output result: " + result);
         assertEquals(1, events.size(), "exactly one warning notice expected");
-        assertTrue(events.get(0) instanceof AgentEvent.Notice, "a Notice event expected");
+        assertInstanceOf(AgentEvent.Notice.class, events.get(0), "a Notice event expected");
         final var notice = (AgentEvent.Notice) events.get(0);
         assertEquals(AgentEvent.Notice.Level.WARN, notice.level());
         assertEquals(sessionId, notice.sessionId());

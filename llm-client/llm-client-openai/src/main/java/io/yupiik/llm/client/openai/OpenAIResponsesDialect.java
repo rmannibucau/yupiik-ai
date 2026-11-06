@@ -490,25 +490,26 @@ public class OpenAIResponsesDialect extends AbstractDialect {
 
         @Override
         public void onNext(final LlmStreamEvent event) {
-            if (event instanceof final LlmStreamEvent.TextDelta t) {
-                text.append(t.text());
-            } else if (event instanceof final LlmStreamEvent.ToolCallDelta call) {
-                final var mutable = calls.computeIfAbsent(call.index(), i -> new MutableToolCall());
-                if (call.name() != null) {
-                    mutable.name = call.name();
+            if (event instanceof LlmStreamEvent.TextDelta(String text1)) {
+                text.append(text1);
+            } else if (event
+                    instanceof LlmStreamEvent.ToolCallDelta(int index, String id, String name, String arguments)) {
+                final var mutable = calls.computeIfAbsent(index, i -> new MutableToolCall());
+                if (name != null) {
+                    mutable.name = name;
                 }
-                if (call.id() != null) {
-                    mutable.id = call.id();
+                if (id != null) {
+                    mutable.id = id;
                 }
-                if (call.arguments() != null) {
-                    mutable.arguments.append(call.arguments());
+                if (arguments != null) {
+                    mutable.arguments.append(arguments);
                 }
-            } else if (event instanceof final LlmStreamEvent.End end) {
-                if (end.usage() != null) {
-                    usage = end.usage();
+            } else if (event instanceof LlmStreamEvent.End(String reason, Usage usage1)) {
+                if (usage1 != null) {
+                    usage = usage1;
                 }
-                if (end.finishReason() != null) {
-                    finishReason = end.finishReason();
+                if (reason != null) {
+                    finishReason = reason;
                 }
             }
         }

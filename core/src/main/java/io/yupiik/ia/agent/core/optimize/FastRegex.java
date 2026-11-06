@@ -145,7 +145,6 @@ public final class FastRegex {
     }
 
     private static boolean containsAnyKeyword(final CharSequence input, final String[] keywords) {
-        outer:
         for (int i = 0; i < input.length(); i++) {
             final char c = input.charAt(i);
             // Fast reject: only scan starting at a word character.

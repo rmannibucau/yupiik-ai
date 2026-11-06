@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -41,11 +42,10 @@ class StructuredOutputSchemasTest {
         assertFalse(facts.containsKey("additionalProperties"), "array must not carry additionalProperties");
         final var item = asMap(facts.get("items"));
         assertNotNull(item, "array items expected");
-        assertTrue(
-                Boolean.FALSE.equals(item.get("additionalProperties")),
-                "item objects must keep additionalProperties: false");
+        assertEquals(
+                Boolean.FALSE, item.get("additionalProperties"), "item objects must keep additionalProperties: false");
         // root object keeps its own additionalProperties: false
-        assertTrue(Boolean.FALSE.equals(schema.get("additionalProperties")), "root must keep additionalProperties");
+        assertEquals(Boolean.FALSE, schema.get("additionalProperties"), "root must keep additionalProperties");
     }
 
     @Test
@@ -56,10 +56,9 @@ class StructuredOutputSchemasTest {
         assertFalse(steps.containsKey("additionalProperties"), "array must not carry additionalProperties");
         final var item = asMap(steps.get("items"));
         assertNotNull(item, "array items expected");
-        assertTrue(
-                Boolean.FALSE.equals(item.get("additionalProperties")),
-                "item objects must keep additionalProperties: false");
-        assertTrue(Boolean.FALSE.equals(schema.get("additionalProperties")), "root must keep additionalProperties");
+        assertEquals(
+                Boolean.FALSE, item.get("additionalProperties"), "item objects must keep additionalProperties: false");
+        assertEquals(Boolean.FALSE, schema.get("additionalProperties"), "root must keep additionalProperties");
     }
 
     private static Map<String, Object> array(final Map<String, Object> root, final String name) {
@@ -77,7 +76,7 @@ class StructuredOutputSchemasTest {
 
     @Test
     void sanitizerMovesUnsupportedConstraintsToDescriptionAndForcesAdditionalProperties() {
-        final var schema = Map.<String, Object>of(
+        final var schema = Map.of(
                 "type",
                 "object",
                 "properties",
@@ -90,7 +89,7 @@ class StructuredOutputSchemasTest {
                 List.of("age"));
         final var sanitized = io.yupiik.ia.agent.core.llm.ChatClient.sanitizeSchema(schema);
         // objects gain additionalProperties:false at every level
-        assertTrue(Boolean.FALSE.equals(sanitized.get("additionalProperties")), "root object must be closed");
+        assertEquals(Boolean.FALSE, sanitized.get("additionalProperties"), "root object must be closed");
         final var age = asMap(asMap(sanitized.get("properties")).get("age"));
         assertFalse(age.containsKey("minimum"), "unsupported constraint must be dropped from the wire schema");
         assertFalse(age.containsKey("maximum"), "unsupported constraint must be dropped from the wire schema");

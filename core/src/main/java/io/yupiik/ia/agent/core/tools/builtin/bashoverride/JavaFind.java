@@ -91,7 +91,7 @@ public class JavaFind implements JavaCommand {
             }
         }
         final var relative = !args.get(0).startsWith("/");
-        final var printBase = relative ? cwd.toAbsolutePath().normalize().toString() + "/" : "";
+        final var printBase = relative ? cwd.toAbsolutePath().normalize() + "/" : "";
         walk(root, name, type, 0, maxDepth, out, printBase);
         return true;
     }

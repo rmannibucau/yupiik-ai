@@ -16,6 +16,8 @@
 package io.yupiik.ia.agent.core.shell;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter.Parts;
@@ -68,7 +70,7 @@ class ThinkTagSplitterTest {
         }
         assertEquals("secret", thinking.toString());
         assertEquals("done", visible.toString());
-        assertTrue(!visible.toString().contains("<"), visible.toString());
+        assertFalse(visible.toString().contains("<"), visible.toString());
     }
 
     @Test
@@ -199,7 +201,7 @@ class ThinkTagSplitterTest {
         for (final var thread : runners) {
             thread.join();
         }
-        assertTrue(failures.get() == null, () -> "concurrent feed threw: " + failures.get());
+        assertNull(failures.get(), () -> "concurrent feed threw: " + failures.get());
         // flush is idempotent under the same lock and must not throw either
         parser.flush();
     }
@@ -271,7 +273,7 @@ class ThinkTagSplitterTest {
         start.countDown();
         a.join();
         b.join();
-        assertTrue(failures.get() == null, () -> "concurrent single-chunk feed threw: " + failures.get());
+        assertNull(failures.get(), () -> "concurrent single-chunk feed threw: " + failures.get());
     }
 
     private static void append(

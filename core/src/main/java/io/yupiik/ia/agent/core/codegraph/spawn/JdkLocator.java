@@ -657,7 +657,7 @@ public class JdkLocator {
         while (toolchain.find()) {
             final var block = toolchain.group(1);
             final var type = first(rawGroup(block, "type"));
-            if (type == null || !"jdk".equalsIgnoreCase(type)) {
+            if (!"jdk".equalsIgnoreCase(type)) {
                 continue;
             }
             final var version = first(rawGroup(block, "version"));

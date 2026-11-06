@@ -59,8 +59,8 @@ class ExecTemplateHelperTest {
         try {
             final var cmd = "printf x >> " + tf.getAbsolutePath() + " && wc -c < " + tf.getAbsolutePath();
             final var template = compile("{{exec \"exec_options=ttl=60\" \"sh\" \"-c\" \"" + cmd + "\"}}");
-            assertEquals("1", template.render(Map.of()).toString().strip());
-            assertEquals("1", template.render(Map.of()).toString().strip(), "the second render must hit the TTL cache");
+            assertEquals("1", template.render(Map.of()).strip());
+            assertEquals("1", template.render(Map.of()).strip(), "the second render must hit the TTL cache");
         } finally {
             tf.delete();
         }
@@ -73,9 +73,9 @@ class ExecTemplateHelperTest {
         try {
             final var cmd = "printf x >> " + tf.getAbsolutePath() + " && wc -c < " + tf.getAbsolutePath();
             final var template = compile("{{exec \"exec_options=ttl=1\" \"sh\" \"-c\" \"" + cmd + "\"}}");
-            assertEquals("1", template.render(Map.of()).toString().strip());
+            assertEquals("1", template.render(Map.of()).strip());
             Thread.sleep(1_200);
-            assertEquals("2", template.render(Map.of()).toString().strip(), "after expiry the command must re-run");
+            assertEquals("2", template.render(Map.of()).strip(), "after expiry the command must re-run");
         } finally {
             tf.delete();
         }
@@ -88,8 +88,8 @@ class ExecTemplateHelperTest {
         try {
             final var cmd = "printf x >> " + tf.getAbsolutePath() + " && wc -c < " + tf.getAbsolutePath();
             final var template = compile("{{exec \"sh\" \"-c\" \"" + cmd + "\"}}");
-            assertEquals("1", template.render(Map.of()).toString().strip());
-            assertEquals("2", template.render(Map.of()).toString().strip(), "no ttl means every render re-executes");
+            assertEquals("1", template.render(Map.of()).strip());
+            assertEquals("2", template.render(Map.of()).strip(), "no ttl means every render re-executes");
         } finally {
             tf.delete();
         }
@@ -108,7 +108,7 @@ class ExecTemplateHelperTest {
     }
 
     private static String render(final String source) {
-        return compile(source).render(Map.of()).toString();
+        return compile(source).render(Map.of());
     }
 
     private static Template compile(final String source) {

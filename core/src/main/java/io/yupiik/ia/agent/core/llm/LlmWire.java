@@ -242,7 +242,8 @@ public final class LlmWire {
                 Math.toIntExact(usage.cacheRead()),
                 Math.toIntExact(usage.cacheWrite()),
                 Math.toIntExact(usage.reasoning()),
-                usage.generationTime());
+                usage.generationTime(),
+                Math.toIntExact(usage.contextInput()));
     }
 
     /** {@link #pump(Flow.Publisher, Consumer, BooleanSupplier, String)} with no session attribution (global). */

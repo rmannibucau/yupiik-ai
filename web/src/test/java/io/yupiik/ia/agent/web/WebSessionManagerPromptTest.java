@@ -16,6 +16,8 @@
 package io.yupiik.ia.agent.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
@@ -113,7 +115,7 @@ class WebSessionManagerPromptTest {
         manager.submit("s1", "hello there", null);
 
         final var frame = broker.frames.poll();
-        assertTrue(frame != null, "a user frame must be broadcast for a fresh submit");
+        assertNotNull(frame, "a user frame must be broadcast for a fresh submit");
         assertTrue(frame.contains("\"type\":\"user\""), frame);
         assertTrue(frame.contains("\"message\":\"hello there\""), frame);
         // the prompt was handed to the turn runner (not queued)
@@ -129,11 +131,11 @@ class WebSessionManagerPromptTest {
         manager.submit("s1", "follow up meanwhile", null);
 
         final var frame = broker.frames.poll();
-        assertTrue(frame != null, "a user frame must be broadcast for a queued submit");
+        assertNotNull(frame, "a user frame must be broadcast for a queued submit");
         assertTrue(frame.contains("\"type\":\"user\""), frame);
         assertTrue(frame.contains("\"message\":\"follow up meanwhile\""), frame);
         // the turn runner was NOT invoked: the prompt is queued for the next checkpoint
-        assertEquals(null, turnRunner.lastPrompt);
+        assertNull(turnRunner.lastPrompt);
         assertEquals(1, manager.queuedPromptCount("s1"));
     }
 
@@ -146,7 +148,7 @@ class WebSessionManagerPromptTest {
         assertEquals(Boolean.TRUE, future.join());
         assertEquals(0, broker.frames.size(), "resume must not broadcast a user event");
         // resume reaches the turn runner with a null prompt (does not start a fresh user turn)
-        assertEquals(null, turnRunner.lastPrompt);
+        assertNull(turnRunner.lastPrompt);
     }
 
     @Test

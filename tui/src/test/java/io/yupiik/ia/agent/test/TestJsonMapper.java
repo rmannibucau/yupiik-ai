@@ -57,21 +57,13 @@ public class TestJsonMapper implements ParameterResolver {
      * so it is now booted once, lazily on first use; the static initializer is thread-safe and the
      * shutdown hook closes the mapper and the container exactly once on JVM exit.
      */
-    private static final class Holder {
+    private record Holder(Instance<JsonMapper> mapperInstance, RuntimeContainer container) {
         private static final Holder MAPPER = boot();
 
         private static final AtomicBoolean CLOSED = new AtomicBoolean();
 
         static {
             Runtime.getRuntime().addShutdownHook(new Thread(Holder::closeOnce, "yca-test-json-mapper-close"));
-        }
-
-        private final Instance<JsonMapper> mapperInstance;
-        private final RuntimeContainer container;
-
-        private Holder(final Instance<JsonMapper> mapperInstance, final RuntimeContainer container) {
-            this.mapperInstance = mapperInstance;
-            this.container = container;
         }
 
         private JsonMapper mapper() {

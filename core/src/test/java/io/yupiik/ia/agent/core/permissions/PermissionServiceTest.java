@@ -17,6 +17,8 @@ package io.yupiik.ia.agent.core.permissions;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.AgentMode;
@@ -143,7 +145,7 @@ class PermissionServiceTest {
     void clearPermissionModeRestoresConfiguredDefault() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setPermissionMode(PermissionMode.YOLO);
-        assertTrue(service.permissionMode() == PermissionMode.YOLO);
+        assertSame(service.permissionMode(), PermissionMode.YOLO);
         service.setPermissionMode(null);
         assertEquals(PermissionMode.ASK, service.permissionMode());
     }
@@ -284,7 +286,7 @@ class PermissionServiceTest {
         // approval gate so the user can approve it
         final var decision = service.check("bash", ToolCategory.BASH, Map.of("command", "cd /somewhere && doThing"));
         assertTrue(decision.allowed());
-        assertTrue(asked.get() != null, "the approval gate must be consulted in plan mode for state-changing tools");
+        assertNotNull(asked.get(), "the approval gate must be consulted in plan mode for state-changing tools");
     }
 
     @Test
@@ -298,7 +300,7 @@ class PermissionServiceTest {
         });
         final var decision = service.check("edit_file", ToolCategory.EDIT, Map.of("path", "a.txt"));
         assertTrue(decision.allowed());
-        assertTrue(asked.get() != null, "the approval gate must be consulted for edit tools in plan mode");
+        assertNotNull(asked.get(), "the approval gate must be consulted for edit tools in plan mode");
     }
 
     @Test

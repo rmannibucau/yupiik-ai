@@ -16,6 +16,7 @@
 package io.yupiik.llm.client.codex;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpExchange;
@@ -197,8 +198,8 @@ class CodexDialectTest {
 
             @Override
             public void onNext(LlmStreamEvent e) {
-                if (e instanceof LlmStreamEvent.TextDelta t) {
-                    sb.append(t.text());
+                if (e instanceof LlmStreamEvent.TextDelta(String text)) {
+                    sb.append(text);
                 }
             }
 
@@ -534,8 +535,8 @@ class CodexDialectTest {
 
             @Override
             public void onNext(LlmStreamEvent e) {
-                if (e instanceof LlmStreamEvent.TextDelta t) {
-                    sb.append(t.text());
+                if (e instanceof LlmStreamEvent.TextDelta(String text)) {
+                    sb.append(text);
                 }
             }
 
@@ -594,7 +595,7 @@ class CodexDialectTest {
 
         assertEquals(0, upgradeCalls.get(), "a non-delegated 4xx must not trigger the upgrader");
         final Throwable cause = stageError.get() instanceof CompletionException ce ? ce.getCause() : stageError.get();
-        Assertions.assertTrue(cause instanceof LlmHttpFailureException, "" + cause);
+        Assertions.assertInstanceOf(LlmHttpFailureException.class, cause, "" + cause);
         assertEquals(429, ((LlmHttpFailureException) cause).status());
         assertEquals(1, authCount.get(), "only the original request is sent, no silent retry");
     }
@@ -655,8 +656,8 @@ class CodexDialectTest {
         assertTrue(
                 firstBody.get().contains("\"include\":[\"reasoning.encrypted_content\"]"),
                 "the first request must carry the include directive: " + firstBody.get());
-        assertTrue(
-                !secondBody.get().contains("reasoning.encrypted_content"),
+        assertFalse(
+                secondBody.get().contains("reasoning.encrypted_content"),
                 "the retried request must drop the include directive: " + secondBody.get());
         Assertions.assertNull(stageError.get(), "no error after the auto-downgrade");
 
@@ -668,8 +669,8 @@ class CodexDialectTest {
                 .toCompletableFuture()
                 .join();
         assertEquals(3, calls.get(), "the memoized rejection must not trigger another include round-trip");
-        assertTrue(
-                !secondBody.get().contains("reasoning.encrypted_content"),
+        assertFalse(
+                secondBody.get().contains("reasoning.encrypted_content"),
                 "the second request must also drop the include directive: " + secondBody.get());
         Assertions.assertNull(secondStageError.get(), "no error on the second request");
     }

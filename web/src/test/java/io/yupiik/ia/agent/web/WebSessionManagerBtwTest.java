@@ -16,6 +16,8 @@
 package io.yupiik.ia.agent.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -136,7 +138,7 @@ class WebSessionManagerBtwTest {
         final var state = manager.btwState("s1");
         assertEquals("what is xyz?", state.question());
         assertEquals("**the answer**", state.answer());
-        assertEquals(false, state.running());
+        assertFalse(state.running());
     }
 
     @Test
@@ -197,7 +199,7 @@ class WebSessionManagerBtwTest {
     void clearBtwCancelsTheInflightAnswerAndClearsTheSlot() {
         manager.attach("s1");
         manager.slash("s1", "/btw question").join();
-        assertTrue(answerer.cancelledSupplier("question") != null);
+        assertNotNull(answerer.cancelledSupplier("question"));
         answerer.complete("question", "an answer");
         broker.awaitFrame();
 
@@ -244,7 +246,7 @@ class WebSessionManagerBtwTest {
         final var events = manager.snapshotFor("s1");
         final var btwEvent =
                 events.stream().filter(e -> "btw".equals(e.type())).findFirst().orElse(null);
-        assertTrue(btwEvent != null, "snapshot must carry the btw event");
+        assertNotNull(btwEvent, "snapshot must carry the btw event");
         assertEquals("reseed me", btwEvent.message());
         assertEquals("persisted answer", btwEvent.data().get("answer"));
     }

@@ -166,7 +166,7 @@ class MavenServerPasswordTemplateHelperTest {
         final Template template = new HandlebarsCompiler()
                 .compile(new HandlebarsCompiler.CompilationContext(
                         new HandlebarsCompiler.Settings().helpers(Map.of(helper.name(), fn)), source));
-        return template.render(Map.of()).toString();
+        return template.render(Map.of());
     }
 
     /** A minimal fake Maven tree (a {@code .m2} clone) with settings.xml and settings-security4.xml. */

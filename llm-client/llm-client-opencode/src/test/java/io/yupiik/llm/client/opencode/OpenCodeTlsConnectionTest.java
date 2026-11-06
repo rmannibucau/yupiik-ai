@@ -237,7 +237,6 @@ class OpenCodeTlsConnectionTest {
                 } catch (final IOException e) {
                     if (!rejection) {
                         // Some tests deliberately cancel or corrupt the stream after handshake.
-                        return;
                     }
                 }
             });

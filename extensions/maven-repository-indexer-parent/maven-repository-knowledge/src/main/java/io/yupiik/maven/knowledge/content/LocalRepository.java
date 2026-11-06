@@ -27,17 +27,7 @@ import java.util.List;
  * Navigates a local Maven repository layout directly (no resolver). Answers "is this GAV present and where",
  * and lists the artifact's own files.
  */
-public final class LocalRepository {
-
-    private final Path root;
-
-    public LocalRepository(final Path root) {
-        this.root = root;
-    }
-
-    public Path root() {
-        return root;
-    }
+public record LocalRepository(Path root) {
 
     /**
      * Resolve a GAV to its {@code <a>/<v>} directory and the artifact files in it. Returns a

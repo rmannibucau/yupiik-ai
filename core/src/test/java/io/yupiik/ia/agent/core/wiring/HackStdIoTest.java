@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.wiring;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -129,7 +130,7 @@ class HackStdIoTest {
             hack.install();
             final var capturedOut = System.out;
             final var capturedErr = System.err;
-            assertTrue(capturedOut instanceof HackStdIo.HijackedPrintStream, "System.out must be the wrapper");
+            assertInstanceOf(HackStdIo.HijackedPrintStream.class, capturedOut, "System.out must be the wrapper");
             assertSame(
                     ((HackStdIo.HijackedPrintStream) capturedOut).pristine(),
                     hack.out(),
@@ -173,14 +174,15 @@ class HackStdIoTest {
         final var wrapper = System.out;
         first.install();
         assertSame(wrapper, System.out, "installing twice must keep a single wrapper");
-        assertTrue(wrapper instanceof HackStdIo.HijackedPrintStream, "System.out must still be the first wrapper");
+        assertInstanceOf(HackStdIo.HijackedPrintStream.class, wrapper, "System.out must still be the first wrapper");
         second.install();
         assertSame(wrapper, System.out, "a control must never take over streams another runtime already hijacked");
         try {
             first.uninstall();
             second.install();
-            assertTrue(
-                    System.out instanceof HackStdIo.HijackedPrintStream,
+            assertInstanceOf(
+                    HackStdIo.HijackedPrintStream.class,
+                    System.out,
                     "the second control must be able to install once the first released the streams");
         } finally {
             second.uninstall();
@@ -200,8 +202,9 @@ class HackStdIoTest {
         final var control = new StdIoControl();
         try {
             control.install(registration(Map.of()));
-            assertTrue(
-                    System.out instanceof HackStdIo.HijackedPrintStream,
+            assertInstanceOf(
+                    HackStdIo.HijackedPrintStream.class,
+                    System.out,
                     "an unset yca.logging.auto must default to a takeover");
             final var wrapper = System.out;
             assertTrue(control.hackStdIo().installed(), "the produced control must be the installed one");
@@ -230,7 +233,7 @@ class HackStdIoTest {
         final var capturedErr = System.err;
         final var control = new StdIoControl();
         control.install(registration(Map.of()));
-        assertTrue(System.out instanceof HackStdIo.HijackedPrintStream, "the takeover must be active");
+        assertInstanceOf(HackStdIo.HijackedPrintStream.class, System.out, "the takeover must be active");
         control.uninstall(new Stop());
         assertSame(capturedOut, System.out, "the Stop listener must restore System.out");
         assertSame(capturedErr, System.err, "the Stop listener must restore System.err");

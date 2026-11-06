@@ -430,12 +430,7 @@ public class RunCommand implements Runnable {
     /**
      * Optional per-event detail log enabling LLM-latency and context-curve drill-down.
      */
-    private static final class Detail implements AutoCloseable {
-        private final BufferedWriter writer;
-
-        private Detail(final BufferedWriter writer) {
-            this.writer = writer;
-        }
+    private record Detail(BufferedWriter writer) implements AutoCloseable {
 
         static Detail of(final String path) {
             if (path == null || path.isBlank()) {

@@ -62,7 +62,7 @@ public class SystemPromptBuilder {
     private final ProviderManager providerManager;
     private final TodoPromptResolver todoPromptResolver;
     private final MavenRepositoryKnowledgeService mavenRepositoryKnowledge;
-    private volatile SecretRedactor secretRedactor;
+    private final SecretRedactor secretRedactor;
     /** The session's per-tab selection (provider/model); when set the prompt caps follow it. */
     protected volatile ChatSettings settings;
 

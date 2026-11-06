@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.wiring;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.sun.net.httpserver.HttpsConfigurator;
@@ -116,7 +117,7 @@ class OpenCodeTlsTest {
         server.createContext("/", exchange -> {
             received.incrementAndGet();
             peers.add(exchange.getRemoteAddress());
-            assertEquals(null, exchange.getRequestHeaders().getFirst("x-yca-internal-opencode-transport"));
+            assertNull(exchange.getRequestHeaders().getFirst("x-yca-internal-opencode-transport"));
             if (close) {
                 exchange.getResponseHeaders().set("Connection", "close");
             }

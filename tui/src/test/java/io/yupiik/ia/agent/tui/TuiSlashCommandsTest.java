@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.tui;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
@@ -129,8 +130,8 @@ class TuiSlashCommandsTest {
             if (command.spec().usage() == null || command.spec().usage().isBlank()) {
                 continue;
             }
-            assertTrue(
-                    command.completion() != ArgCompletion.NONE, command.spec().name() + " must have a completion");
+            assertNotSame(
+                    command.completion(), ArgCompletion.NONE, command.spec().name() + " must have a completion");
         }
     }
 }

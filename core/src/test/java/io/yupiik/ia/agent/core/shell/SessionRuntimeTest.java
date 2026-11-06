@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.shell;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -96,18 +97,18 @@ class SessionRuntimeTest {
         final var first = factory.create("k1", "s1");
         final var second = factory.create("k2", "s2");
 
-        assertTrue(first.permissions() != second.permissions());
+        assertNotSame(first.permissions(), second.permissions());
         first.permissions().setMode(AgentMode.BUILD);
         assertEquals(AgentMode.BUILD, first.permissions().mode());
-        assertFalse(second.permissions().mode() == AgentMode.BUILD, "mode of one tab must not leak to the other");
+        assertNotSame(second.permissions().mode(), AgentMode.BUILD, "mode of one tab must not leak to the other");
 
         first.todos().replace(List.of(new TodoItem("only in tab one", "pending")));
         assertEquals(1, first.todos().all().size());
         assertTrue(second.todos().all().isEmpty(), "todos of one tab must not leak to the other");
 
-        assertTrue(first.usage() != second.usage());
-        assertTrue(first.feedback() != second.feedback());
-        assertTrue(first.loop() != second.loop());
+        assertNotSame(first.usage(), second.usage());
+        assertNotSame(first.feedback(), second.feedback());
+        assertNotSame(first.loop(), second.loop());
     }
 
     @Test

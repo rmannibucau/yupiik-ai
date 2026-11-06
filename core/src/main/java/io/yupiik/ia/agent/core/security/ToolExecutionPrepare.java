@@ -24,27 +24,4 @@ import java.util.Map;
  * still work; the provider never saw the real value because the outbound filter redacted it. Only
  * registry-tracked fakes are restored; any other placeholder a model invented is left untouched.
  */
-public class ToolExecutionPrepare {
-
-    private final String tool;
-    private final Map<String, Object> args;
-    private final String sessionId;
-
-    public ToolExecutionPrepare(final String tool, final Map<String, Object> args, final String sessionId) {
-        this.tool = tool;
-        this.args = args;
-        this.sessionId = sessionId;
-    }
-
-    public String tool() {
-        return tool;
-    }
-
-    public Map<String, Object> args() {
-        return args;
-    }
-
-    public String sessionId() {
-        return sessionId;
-    }
-}
+public record ToolExecutionPrepare(String tool, Map<String, Object> args, String sessionId) {}

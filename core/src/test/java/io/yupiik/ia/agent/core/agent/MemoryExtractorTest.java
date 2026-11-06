@@ -398,8 +398,8 @@ class MemoryExtractorTest {
                 String.valueOf(requests.get(1).messages().get(1).content());
         assertTrue(
                 secondExcerpt.contains("second message"), "the delta must contain the new message: " + secondExcerpt);
-        assertTrue(
-                !secondExcerpt.contains("first message"),
+        assertFalse(
+                secondExcerpt.contains("first message"),
                 "the delta must not re-feed extracted messages: " + secondExcerpt);
     }
 
@@ -654,7 +654,7 @@ class MemoryExtractorTest {
         assertTrue(store.readProject().contains("short preference"), "the forced pass must save the fact");
         // a second forced pass on the same messages must be a no-op (watermark)
         final var ran2 = extractor.forceExtractNow(messages, ChatSettings.EMPTY);
-        assertTrue(!ran2, "the forced pass must be a no-op when nothing new was added");
+        assertFalse(ran2, "the forced pass must be a no-op when nothing new was added");
     }
 
     @Test
@@ -991,13 +991,13 @@ class MemoryExtractorTest {
         assertTrue(
                 excerpt.contains("the function reads a config file"),
                 "the plain assistant answer must be kept: " + excerpt);
-        assertTrue(!excerpt.contains("system prompt"), "the system prompt must be filtered: " + excerpt);
-        assertTrue(!excerpt.contains("huge JSON"), "tool results must be filtered: " + excerpt);
+        assertFalse(excerpt.contains("system prompt"), "the system prompt must be filtered: " + excerpt);
+        assertFalse(excerpt.contains("huge JSON"), "tool results must be filtered: " + excerpt);
         assertTrue(
                 !excerpt.contains("tc-2") && !excerpt.contains("/tmp/x"),
                 "assistant tool-call frames must be filtered: " + excerpt);
-        assertTrue(!excerpt.contains("compacted-context"), "compaction digests must be filtered: " + excerpt);
-        assertTrue(!excerpt.contains("volatile tail"), "the volatile tail must be filtered: " + excerpt);
+        assertFalse(excerpt.contains("compacted-context"), "compaction digests must be filtered: " + excerpt);
+        assertFalse(excerpt.contains("volatile tail"), "the volatile tail must be filtered: " + excerpt);
     }
 
     @Test

@@ -88,7 +88,7 @@ public class SessionRuntimeFactory {
     private final BashRulesRegistry bashRulesRegistry;
     private final MemoryProductionPolicy memoryProductionPolicy;
     private final QuotaSnapshotStore quotaStore;
-    private volatile SecretRedactor secretRedactor;
+    private final SecretRedactor secretRedactor;
     private final NotificationService notificationService;
 
     public SessionRuntimeFactory(

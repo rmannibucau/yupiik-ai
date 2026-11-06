@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -38,7 +39,7 @@ class LlmWireTest {
         final var other = LlmWire.toLlmRequest(request.withSessionId("other"), enabledKeys);
         org.junit.jupiter.api.Assertions.assertEquals(first.extensions(), repeated.extensions());
         org.junit.jupiter.api.Assertions.assertNotEquals(first.extensions(), other.extensions());
-        assertFalse(first.extensions().get("prompt_cache_key").equals("first"));
+        assertNotEquals("first", first.extensions().get("prompt_cache_key"));
         org.junit.jupiter.api.Assertions.assertEquals(
                 "prompt_cache_key", first.extensions().keySet().iterator().next());
         // no session id, or a key list without prompt_cache_key, leaves the extensions untouched

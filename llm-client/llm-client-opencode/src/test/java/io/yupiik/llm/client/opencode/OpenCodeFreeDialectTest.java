@@ -55,9 +55,9 @@ import org.junit.jupiter.api.io.TempDir;
 @ExtendWith(TestJsonMapper.class)
 class OpenCodeFreeDialectTest {
     private static final String TOOL_RESPONSE = """
-        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\\\"path\\\":"}}]}}]}
+        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\\"path\\":"}}]}}]}
 
-        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\\"note.txt\\\"}"}}]},"finish_reason":"tool_calls"}]}
+        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"note.txt\\"}"}}]},"finish_reason":"tool_calls"}]}
 
         data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}
 

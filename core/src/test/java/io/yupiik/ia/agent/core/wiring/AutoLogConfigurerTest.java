@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.wiring;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -52,8 +53,8 @@ class AutoLogConfigurerTest {
             configurer.onStart(new Start());
             final var inline = configurer.installedInlineHandler();
             assertNotNull(inline, "the inline handler must be registered after the Start event");
-            assertTrue(inline instanceof StandardHandler, "it must be the yupiik standard handler");
-            assertTrue(inline.getFormatter() instanceof InlineFormatter, "it must use the inline formatter");
+            assertInstanceOf(StandardHandler.class, inline, "it must be the yupiik standard handler");
+            assertInstanceOf(InlineFormatter.class, inline.getFormatter(), "it must use the inline formatter");
             assertEquals(Level.INFO, inline.getLevel(), "captured records must start at INFO");
             assertEquals(Level.INFO, Logger.getLogger("").getLevel(), "the root logger level must be INFO");
             assertTrue(
@@ -125,8 +126,9 @@ class AutoLogConfigurerTest {
             final var first = configurer.installedInlineHandler();
             assertNotNull(first);
             other.onStart(new Start()); // second bean instance, second Start event
-            assertTrue(
-                    countStandardHandlers(Logger.getLogger("").getHandlers()) == 1,
+            assertEquals(
+                    1,
+                    countStandardHandlers(Logger.getLogger("").getHandlers()),
                     "a second onStart must not stack a second inline handler");
             assertNotNull(other.installedInlineHandler(), "the second instance still owns the surviving handler");
         } finally {

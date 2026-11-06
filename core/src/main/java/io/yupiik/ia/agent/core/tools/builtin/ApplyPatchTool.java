@@ -421,7 +421,7 @@ public class ApplyPatchTool implements EmbeddedTool {
     private static int resolveStartAnchored(final List<String> lines, final Hunk hunk, final int drift) {
         final var old = oldLines(hunk);
         if (old.isEmpty()) { // pure addition: bind at the declared position (or end)
-            return hunk.oldStart == null ? Math.min(lines.size(), 0 + drift) : Math.max(0, hunk.oldStart - 1 + drift);
+            return hunk.oldStart == null ? Math.min(lines.size(), drift) : Math.max(0, hunk.oldStart - 1 + drift);
         }
         if (hunk.oldStart == null) {
             var found = -1;
@@ -578,9 +578,7 @@ public class ApplyPatchTool implements EmbeddedTool {
             end--;
         }
         final var lines = new ArrayList<String>(end);
-        for (var i = 0; i < end; i++) {
-            lines.add(parts[i]);
-        }
+        lines.addAll(Arrays.asList(parts).subList(0, end));
         return new TextLines(lines, bom);
     }
 
@@ -588,16 +586,7 @@ public class ApplyPatchTool implements EmbeddedTool {
         void apply(final List<String> applied, final List<String> created, final List<String> deleted);
     }
 
-    private static final class WriteOp implements PendingOp {
-        private final Path path;
-        private final PendingContent content;
-        private final boolean create;
-
-        private WriteOp(final Path path, final PendingContent content, final boolean create) {
-            this.path = path;
-            this.content = content;
-            this.create = create;
-        }
+    private record WriteOp(Path path, PendingContent content, boolean create) implements PendingOp {
 
         @Override
         public void apply(final List<String> applied, final List<String> created, final List<String> deleted) {
@@ -617,12 +606,7 @@ public class ApplyPatchTool implements EmbeddedTool {
         }
     }
 
-    private static final class DeleteOp implements PendingOp {
-        private final Path path;
-
-        private DeleteOp(final Path path) {
-            this.path = path;
-        }
+    private record DeleteOp(Path path) implements PendingOp {
 
         @Override
         public void apply(final List<String> applied, final List<String> created, final List<String> deleted) {
@@ -636,16 +620,7 @@ public class ApplyPatchTool implements EmbeddedTool {
         }
     }
 
-    private static final class MoveOp implements PendingOp {
-        private final Path source;
-        private final Path target;
-        private final PendingContent content;
-
-        private MoveOp(final Path source, final Path target, final PendingContent content) {
-            this.source = source;
-            this.target = target;
-            this.content = content;
-        }
+    private record MoveOp(Path source, Path target, PendingContent content) implements PendingOp {
 
         @Override
         public void apply(final List<String> applied, final List<String> created, final List<String> deleted) {

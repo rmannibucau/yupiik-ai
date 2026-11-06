@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.yupiik.fusion.framework.api.configuration.ConfigurationSource;
 import io.yupiik.fusion.framework.api.configuration.impl.MapConfigSource;
@@ -185,7 +186,7 @@ class YcaConfigurationProducerTest {
         final var combined = new CombinedConfigurationSource(first, second);
         assertEquals("1", combined.get("a"), "first wins on present key");
         assertEquals("2", combined.get("b"), "second provides absent keys");
-        assertEquals(null, combined.get("z"), "absent key resolves to null");
+        assertNull(combined.get("z"), "absent key resolves to null");
     }
 
     @Test

@@ -281,8 +281,8 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
                 case "properties" -> {
                     final var properties = new LinkedHashMap<String, Object>();
                     map(value)
-                            .forEach((name, property) -> properties.put(
-                                    name.toString(), rewrite(mapper, schemas, docs, defs, map(property))));
+                            .forEach((name, property) ->
+                                    properties.put(name, rewrite(mapper, schemas, docs, defs, map(property))));
                     result.put("properties", properties);
                 }
                 case "items" -> result.put("items", rewrite(mapper, schemas, docs, defs, map(value)));

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -175,7 +176,7 @@ class TodoContinuationTest {
         assertEquals(1, state.unfinishedTodoContinues);
         assertEquals(1, messages.size(), "a continuation user message must be appended");
         assertEquals("user", messages.get(0).role());
-        assertTrue(messages.get(0).content() instanceof String);
+        assertInstanceOf(String.class, messages.get(0).content());
         assertTrue(((String) messages.get(0).content()).contains("continue"));
         assertEquals(1, notices.size());
         assertEquals(AgentEvent.Notice.Level.INFO, notices.get(0).level());

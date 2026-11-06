@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.web;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -147,8 +148,9 @@ class StaticAssetsExchangeHandlerTest {
                 HttpResponse.BodyHandlers.ofByteArray());
         assertEquals(200, resp.statusCode());
         assertEquals("font/woff2", resp.headers().firstValue("content-type").orElse(""));
-        assertTrue(
-                Arrays.equals(expected, resp.body()),
+        assertArrayEquals(
+                expected,
+                resp.body(),
                 "binary asset must be served byte-faithfully, got: " + Arrays.toString(resp.body()));
     }
 

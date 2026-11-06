@@ -72,7 +72,7 @@ class SecretNamesTest {
     @Test
     void nullConfigIsAnInertMatcher() {
         // no config at all -> nothing is classified, never a NPE
-        final var names = new SecretNames((io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration) null);
+        final var names = new SecretNames(null);
         assertFalse(names.isKnownSafeName("PWD"));
         assertFalse(names.isSecretName("DB_PASSWORD"));
         assertFalse(names.isSecretName("HOME"));

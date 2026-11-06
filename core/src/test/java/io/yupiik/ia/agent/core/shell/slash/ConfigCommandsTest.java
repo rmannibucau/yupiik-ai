@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.shell.slash;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -208,8 +209,8 @@ class ConfigCommandsTest {
         final var session = sessionWithLoop();
         session.runtime().updateChatSettings(session.chatSettings().withVariant("fast"));
         final var outcome = runVariant("default", session);
-        assertEquals(null, session.chatSettings().variant(), "default clears the forced variant");
-        assertEquals(null, session.chatSettings().sampling());
+        assertNull(session.chatSettings().variant(), "default clears the forced variant");
+        assertNull(session.chatSettings().sampling());
         assertTrue(((ShellOutcome.Status) outcome).message().contains("[variant default]"));
     }
 

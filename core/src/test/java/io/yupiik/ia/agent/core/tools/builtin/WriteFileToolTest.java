@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.tools.builtin;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.tools.ToolContext;
@@ -86,7 +87,7 @@ class WriteFileToolTest {
         // ../.. outside the session root must be rejected, not silently written to another tree
         final var result = new WriteFileTool()
                 .execute(Map.of("path", "../../escape.txt", "content", "nope"), ToolContext.empty(projectDir));
-        assertTrue(!result.success(), result.output());
+        assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("escapes"), result.output());
     }
 
@@ -96,7 +97,7 @@ class WriteFileToolTest {
                 .execute(
                         Map.of("path", "../../escape.txt", "oldString", "x", "newString", "y"),
                         ToolContext.empty(projectDir));
-        assertTrue(!result.success(), result.output());
+        assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("escapes"), result.output());
     }
 
@@ -115,14 +116,14 @@ class WriteFileToolTest {
     void missingPathReturnsFriendlyErrorInsteadOfNpe() {
         // a null/missing "path" must surface a clear "path is required", never Path.of(null) -> NPE
         final var write = new WriteFileTool().execute(Map.of("content", "x"));
-        assertTrue(!write.success(), write.output());
+        assertFalse(write.success(), write.output());
         assertEquals("path is required", write.output());
     }
 
     @Test
     void missingPathForEditReturnsFriendlyErrorInsteadOfNpe() {
         final var edit = new EditFileTool().execute(Map.of("oldString", "x", "newString", "y"));
-        assertTrue(!edit.success(), edit.output());
+        assertFalse(edit.success(), edit.output());
         assertEquals("path is required", edit.output());
     }
 }

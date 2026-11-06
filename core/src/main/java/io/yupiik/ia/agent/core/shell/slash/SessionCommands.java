@@ -336,7 +336,8 @@ public class SessionCommands implements SlashCommandSet {
                 .append(payload.toolChoice())
                 .append('\n');
         if (usage != null) {
-            final var estimated = usage.effectiveContext(payload.messages(), payload.toolsTokens());
+            final var measurement = usage.lastContextMeasurement();
+            final var estimated = measurement.tokens();
             sb.append("\n**Context footprint** ~")
                     .append(estimated)
                     .append(" tokens (")
@@ -346,16 +347,21 @@ public class SessionCommands implements SlashCommandSet {
                     .append(" usable, window ")
                     .append(usage.windowOrigin())
                     .append(")\n");
+            sb.append("**Measurement source** ")
+                    .append(measurement.source())
+                    .append("; pending additions ~")
+                    .append(measurement.pendingTokens())
+                    .append(" tokens\n");
             final var lastReal = usage.lastRealPromptTokens();
             if (lastReal > 0) {
-                sb.append("**Last real (provider-billed)** ")
+                sb.append("**Last real (provider-reported input)** ")
                         .append(lastReal)
                         .append(" prompt tokens of the last anchored request (calibration ratio ")
                         .append(String.format(Locale.ROOT, "%.2f", usage.calibrationRatio()))
                         .append(")\n");
             } else {
                 sb.append(
-                        "**Last real (provider-billed)** none yet - the context estimate is heuristic only (no anchor)\n");
+                        "**Last real (provider-reported input)** no matching request anchor; using the indicated estimate source\n");
             }
         }
 

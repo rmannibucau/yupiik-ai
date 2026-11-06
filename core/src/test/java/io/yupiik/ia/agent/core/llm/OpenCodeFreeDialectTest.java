@@ -50,9 +50,9 @@ class OpenCodeFreeDialectTest {
             auth.add(exchange.getRequestHeaders().getFirst("authorization"));
             sessions.add(exchange.getRequestHeaders().getFirst("x-opencode-session"));
             final var response = bodies.size() == 1 ? """
-                data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\\\"path\\\":"}}]}}]}
+                data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\\"path\\":"}}]}}]}
 
-                data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\\"README.md\\\"}"}}]},"finish_reason":"tool_calls"}]}
+                data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"README.md\\"}"}}]},"finish_reason":"tool_calls"}]}
 
                 data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}
 

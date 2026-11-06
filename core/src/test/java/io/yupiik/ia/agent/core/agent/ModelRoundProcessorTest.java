@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -161,8 +162,8 @@ class ModelRoundProcessorTest {
                         observer));
 
         assertEquals(3, clientCalls.get(), "a generic 400 keeps the normal retry budget");
-        assertTrue(
-                !observer.calls.contains("toolCallPairingRejected"),
+        assertFalse(
+                observer.calls.contains("toolCallPairingRejected"),
                 "a non-pairing 400 must NOT fire the pairing callback: " + observer.calls);
         assertEquals(2, observer.calls.stream().filter("retrying"::equals).count(), "two retries for three calls");
         assertEquals(2, observer.calls.stream().filter("paused"::equals).count(), "two backoffs for the two retries");

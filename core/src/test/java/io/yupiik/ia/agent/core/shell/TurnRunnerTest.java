@@ -27,6 +27,8 @@ import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.llm.CodexLoginService;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
+import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
@@ -236,12 +238,7 @@ class TurnRunnerTest {
         return new RecordingAgentSessionService();
     }
 
-    private static final class FixedIo implements ShellIO {
-        private final boolean confirm;
-
-        private FixedIo(final boolean confirm) {
-            this.confirm = confirm;
-        }
+    private record FixedIo(boolean confirm) implements ShellIO {
 
         @Override
         public CompletionStage<Boolean> confirm(final String question) {
@@ -259,12 +256,12 @@ class TurnRunnerTest {
         }
 
         @Override
-        public io.yupiik.ia.agent.core.permissions.ApprovalGate approvalGate() {
+        public ApprovalGate approvalGate() {
             return null;
         }
 
         @Override
-        public io.yupiik.ia.agent.core.question.FeedbackGate feedbackGate() {
+        public FeedbackGate feedbackGate() {
             return null;
         }
     }

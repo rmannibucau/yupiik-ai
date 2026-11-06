@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.shell;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -138,7 +139,7 @@ class AnsiShellIOTest {
                 CompletionException.class,
                 () -> io.readLine("prompt").toCompletableFuture().join());
 
-        assertTrue(error.getCause() instanceof PromptInterruptException);
+        assertInstanceOf(PromptInterruptException.class, error.getCause());
         assertEquals(0, interrupts.get(), "the interrupt handling belongs to the caller for external reads");
     }
 

@@ -105,7 +105,7 @@ public class DocTreeWriter {
         final var content = render(relSource, model);
         try {
             final StringBuilder body = readBody(cardFile);
-            if (body != null && content.equals(body.toString())) {
+            if (body != null && content.contentEquals(body)) {
                 return cardFile;
             }
             writeBody(cardFile, content);
@@ -127,7 +127,7 @@ public class DocTreeWriter {
         final var content = renderConcept(node);
         try {
             final StringBuilder body = readBody(cardFile);
-            if (body != null && content.equals(body.toString())) {
+            if (body != null && content.contentEquals(body)) {
                 return cardFile;
             }
             writeBody(cardFile, content);

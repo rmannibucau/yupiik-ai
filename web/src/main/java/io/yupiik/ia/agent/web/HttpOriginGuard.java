@@ -52,7 +52,7 @@ final class HttpOriginGuard {
      */
     static Response rejectIfForeign(final Request request, final String boundHost) {
         final var host = request.header("host");
-        if (host == null || !isValidHost(host, boundHost)) {
+        if (!isValidHost(host, boundHost)) {
             return Response.of().status(403).body(FORBIDDEN_BODY).build();
         }
         final var origin = request.header("origin");

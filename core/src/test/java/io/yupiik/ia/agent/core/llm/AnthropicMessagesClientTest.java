@@ -465,6 +465,6 @@ class AnthropicMessagesClientTest {
         final var body = reqBody.get();
         assertTrue(body.contains("\"output_config\""), "anthropic structured field expected:\n" + body);
         assertTrue(body.contains("\"json_schema\""), body);
-        assertTrue(!body.contains("\"response_format\""), "the openai field must not leak into anthropic:\n" + body);
+        assertFalse(body.contains("\"response_format\""), "the openai field must not leak into anthropic:\n" + body);
     }
 }

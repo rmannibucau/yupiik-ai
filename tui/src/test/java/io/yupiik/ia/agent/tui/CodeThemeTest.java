@@ -16,7 +16,7 @@
 package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -42,7 +42,7 @@ class CodeThemeTest {
 
     @Test
     void themesDiffer() {
-        assertFalse(CodeTheme.ONE_DARK.equals(CodeTheme.ONE_LIGHT));
+        assertNotEquals(CodeTheme.ONE_DARK, CodeTheme.ONE_LIGHT);
     }
 
     @Test

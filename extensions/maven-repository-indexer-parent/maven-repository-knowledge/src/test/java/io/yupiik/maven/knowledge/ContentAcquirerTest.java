@@ -16,6 +16,8 @@
 package io.yupiik.maven.knowledge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.codegraph.index.CodeGraphIndex;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
@@ -96,11 +98,11 @@ class ContentAcquirerTest {
             final var acquired = acquirer.acquire(Gav.of("g", "doc", "1"));
             assertEquals(ContentKind.DOC, acquired.kind());
             final var text = acquired.content();
-            assertEquals(false, text.contains("<nav"), "nav must be dropped");
-            assertEquals(false, text.contains("<script"), "script must be dropped");
-            assertEquals(false, text.contains("<main"), "raw html must not reach the LLM");
-            assertEquals(false, text.contains("nav link"), "nav content must be dropped");
-            assertEquals(true, text.contains("Widget"), "main content must be kept");
+            assertFalse(text.contains("<nav"), "nav must be dropped");
+            assertFalse(text.contains("<script"), "script must be dropped");
+            assertFalse(text.contains("<main"), "raw html must not reach the LLM");
+            assertFalse(text.contains("nav link"), "nav content must be dropped");
+            assertTrue(text.contains("Widget"), "main content must be kept");
         }
     }
 
@@ -149,7 +151,7 @@ class ContentAcquirerTest {
             final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
             final var acquired = acquirer.acquire(Gav.of("g", "e", "1"));
             assertEquals(ContentKind.CLASSES, acquired.kind());
-            assertEquals(true, acquired.content().contains("Artifact API:"), "bytecode surface must be listed");
+            assertTrue(acquired.content().contains("Artifact API:"), "bytecode surface must be listed");
         }
     }
 
@@ -160,7 +162,7 @@ class ContentAcquirerTest {
             final var config = KnowledgeConfig.defaults(tmp);
             final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
             final var bytes = acquirer.codeGraph(Gav.of("g", "cgraph", "1"));
-            assertEquals(false, bytes.length == 0, "codegraph must be produced for a jar with classes");
+            assertFalse(bytes.length == 0, "codegraph must be produced for a jar with classes");
             // the fake jar embeds an invalid class entry, so BytecodeAnalyzer tolerates it and yields no symbols;
             // what matters is that the payload is a valid, loadable shared index (round-trips without error)
             final var index = CodeGraphIndex.load(bytes);
@@ -185,7 +187,7 @@ class ContentAcquirerTest {
             final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
             final var acquired = acquirer.acquire(Gav.of("g", "plugin-a", "1"));
             assertEquals(ContentKind.PLUGIN, acquired.kind(), "plugin.xml descriptor must win over sources");
-            assertEquals(true, acquired.content().contains("<plugin>"), "content should be the plugin descriptor");
+            assertTrue(acquired.content().contains("<plugin>"), "content should be the plugin descriptor");
         }
     }
 
@@ -266,11 +268,11 @@ class ContentAcquirerTest {
             final var acquired = acquirer.acquire(Gav.of("g", "doc", "1"));
             assertEquals(ContentKind.JAVADOC, acquired.kind());
             final var content = acquired.content();
-            assertEquals(true, content.contains("Class Foo"), "class name must be present");
-            assertEquals(true, content.contains("public void run(String arg)"), "member signature must be extracted");
-            assertEquals(false, content.contains("INDEX"), "index-all.html must be pruned (chrome only)");
-            assertEquals(false, content.contains("HELP"), "help-doc.html must be pruned (chrome only)");
-            assertEquals(false, content.contains("OVERVIEW"), "summary/overview pages must be pruned");
+            assertTrue(content.contains("Class Foo"), "class name must be present");
+            assertTrue(content.contains("public void run(String arg)"), "member signature must be extracted");
+            assertFalse(content.contains("INDEX"), "index-all.html must be pruned (chrome only)");
+            assertFalse(content.contains("HELP"), "help-doc.html must be pruned (chrome only)");
+            assertFalse(content.contains("OVERVIEW"), "summary/overview pages must be pruned");
         }
     }
 
@@ -293,11 +295,11 @@ class ContentAcquirerTest {
             final var acquired = acquirer.acquire(Gav.of("g", "p", "1"));
             assertEquals(ContentKind.SOURCES, acquired.kind());
             final var content = acquired.content();
-            assertEquals(true, content.contains("class A"), "regular source must be kept");
-            assertEquals(false, content.contains("module-info"), "module-info must be pruned");
-            assertEquals(false, content.contains("package-info"), "package-info must be pruned");
-            assertEquals(false, content.contains("class B"), "generated source must be pruned");
-            assertEquals(false, content.contains("class C"), "srcgen source must be pruned");
+            assertTrue(content.contains("class A"), "regular source must be kept");
+            assertFalse(content.contains("module-info"), "module-info must be pruned");
+            assertFalse(content.contains("package-info"), "package-info must be pruned");
+            assertFalse(content.contains("class B"), "generated source must be pruned");
+            assertFalse(content.contains("class C"), "srcgen source must be pruned");
         }
     }
 
@@ -339,8 +341,7 @@ class ContentAcquirerTest {
             final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
             final var acquired = acquirer.acquire(Gav.of("g", "b", "1"));
             assertEquals(ContentKind.SOURCES, acquired.kind());
-            assertEquals(
-                    true,
+            assertTrue(
                     acquired.content().length() <= 13_000,
                     "per-artifact content must be capped by the content budget (got "
                             + acquired.content().length() + ")");

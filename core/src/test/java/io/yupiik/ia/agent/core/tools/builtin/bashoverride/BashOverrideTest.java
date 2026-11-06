@@ -36,7 +36,7 @@ class BashOverrideTest {
             Executors.newVirtualThreadPerTaskExecutor();
 
     private static BashOverride override(final int cap) {
-        final var commands = List.<JavaCommand>of(
+        final var commands = List.of(
                 new JavaCat(),
                 new JavaLs(),
                 new JavaHead(),

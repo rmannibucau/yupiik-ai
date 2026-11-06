@@ -389,7 +389,7 @@ class TuiCommandHeadlessTest {
                 if (!"missing".equals(persisted)) {
                     Files.writeString(homeDir.resolve("theme"), persisted);
                 }
-                final var detected = (String) testCase.get("detected");
+                final var detected = testCase.get("detected");
                 ThemeDetector.DETECTOR =
                         () -> detected == null || detected.isBlank() ? Optional.empty() : Optional.of(detected);
                 final var config = new LinkedHashMap<String, String>();

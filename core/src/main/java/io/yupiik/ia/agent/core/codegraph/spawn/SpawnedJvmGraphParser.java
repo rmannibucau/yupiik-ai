@@ -73,16 +73,16 @@ public class SpawnedJvmGraphParser implements GraphParser {
     private static final String FINGERPRINT_ATTRIBUTE = "X-Yca-Parser-Checksum";
     private static final String PARSER_JAR_NAME = "parser.jar";
 
-    private JdkLocator jdkLocator;
-    private Path scratchDir;
-    private Function<String, InputStream> classResource;
-    private long spawnTimeoutSeconds;
+    private final JdkLocator jdkLocator;
+    private final Path scratchDir;
+    private final Function<String, InputStream> classResource;
+    private final long spawnTimeoutSeconds;
     private final String mainClass;
-    private List<String> classPieces;
+    private final List<String> classPieces;
     private List<String> javacOptions;
 
     private final ReentrantLock availabilityLock = new ReentrantLock();
-    private boolean hasCompilerInProcess;
+    private final boolean hasCompilerInProcess;
     private boolean availabilityResolved;
     private boolean availableValue;
     private boolean warnedNoJdk;

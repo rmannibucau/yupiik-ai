@@ -15,7 +15,8 @@
  */
 package io.yupiik.maven.knowledge.content;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -39,14 +40,14 @@ class ContentAcquirerCommentStripTest {
                 }
                 """;
         final var stripped = ContentAcquirer.stripComments(src);
-        assertEquals(false, stripped.contains("Copyright"), "license header must be dropped");
-        assertEquals(false, stripped.contains("Apache License"), "license terms must be dropped");
-        assertEquals(true, stripped.contains("package a.b;"), "package declaration must be kept");
-        assertEquals(true, stripped.contains("public String get"), "method signature must be kept");
-        assertEquals(false, stripped.contains("<a href"), "javadoc prose must be dropped");
-        assertEquals(false, stripped.contains("@param"), "javadoc tags must be dropped");
-        assertEquals(false, stripped.contains("line comment"), "line comments must be dropped");
-        assertEquals(true, stripped.contains("literal // not a comment"), "string literal must be kept intact");
-        assertEquals(true, stripped.contains("/* still literal */"), "block-comment-looking text in a string is kept");
+        assertFalse(stripped.contains("Copyright"), "license header must be dropped");
+        assertFalse(stripped.contains("Apache License"), "license terms must be dropped");
+        assertTrue(stripped.contains("package a.b;"), "package declaration must be kept");
+        assertTrue(stripped.contains("public String get"), "method signature must be kept");
+        assertFalse(stripped.contains("<a href"), "javadoc prose must be dropped");
+        assertFalse(stripped.contains("@param"), "javadoc tags must be dropped");
+        assertFalse(stripped.contains("line comment"), "line comments must be dropped");
+        assertTrue(stripped.contains("literal // not a comment"), "string literal must be kept intact");
+        assertTrue(stripped.contains("/* still literal */"), "block-comment-looking text in a string is kept");
     }
 }

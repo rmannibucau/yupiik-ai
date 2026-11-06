@@ -15,8 +15,8 @@
  */
 package io.yupiik.ia.agent.web;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -92,7 +92,7 @@ class HttpOriginGuardTest {
 
     @Test
     void missingOrNullOriginIsAcceptable() {
-        assertEquals(null, HttpOriginGuard.rejectIfForeign(mockRequest("127.0.0.1:6060", null), null));
+        assertNull(HttpOriginGuard.rejectIfForeign(mockRequest("127.0.0.1:6060", null), null));
         // a request with a foreign Origin AND a loopback Host must be rejected
         final var rejected = HttpOriginGuard.rejectIfForeign(mockRequest("127.0.0.1:6060", "http://evil.com"), null);
         assertTrue(rejected != null && rejected.status() == 403);

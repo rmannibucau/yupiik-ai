@@ -527,7 +527,7 @@ class ProviderManagerTest {
                 CompactionLlmMode.LLM,
                 manager.resolvedCompactionMode(new ChatSettings("p0", "m", null, null)),
                 "an explicit per-provider llm opts the provider out of the global no_llm");
-        assertTrue(!manager.resolvedIgnoreLlm(new ChatSettings("p0", "m", null, null)));
+        assertFalse(manager.resolvedIgnoreLlm(new ChatSettings("p0", "m", null, null)));
     }
 
     @Test
@@ -541,6 +541,6 @@ class ProviderManagerTest {
                 CompactionLlmMode.LLM,
                 manager.resolvedCompactionMode(new ChatSettings("p0", "m", null, null)),
                 "no global and no per-provider mode means the built-in llm");
-        assertTrue(!manager.resolvedIgnoreLlm(new ChatSettings("p0", "m", null, null)));
+        assertFalse(manager.resolvedIgnoreLlm(new ChatSettings("p0", "m", null, null)));
     }
 }

@@ -197,7 +197,7 @@ public class CodeResolveTool implements EmbeddedTool {
         final var artifact = arg(args, "artifact");
         final var edgeTypes = relationsToEdgeTypes(relation);
         final var depth = optInt(args, "depth", 0);
-        final var max = (int) Math.clamp(optInt(args, "max", 80), 1, 500);
+        final var max = Math.clamp(optInt(args, "max", 80), 1, 500);
 
         final var sb = new StringBuilder();
         int graphHits = 0;

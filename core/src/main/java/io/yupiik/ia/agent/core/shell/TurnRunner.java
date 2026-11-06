@@ -149,7 +149,6 @@ public class TurnRunner {
                 runTurnOrLogin(request, loop, history, cancelled, env);
             } catch (final Throwable t) {
                 done.completeExceptionally(t);
-                return;
             } finally {
                 // an interrupt also stops the sub-agents this session spawned: their probe is
                 // latched here, while the flag still reads true - a child polling after the next

@@ -61,8 +61,8 @@ class PaletteTest {
         for (final var value : Arrays.asList(null, "", "  ", "auto", "  AuTo  ")) {
             final var colors = new String[12];
             Arrays.fill(colors, value);
-            assertEquals(dark, Palette.from("dark", config(colors), false), String.valueOf(value));
-            assertEquals(light, Palette.from("LIGHT", config(colors), false), String.valueOf(value));
+            assertEquals(dark, Palette.from("dark", config(colors), false), value);
+            assertEquals(light, Palette.from("LIGHT", config(colors), false), value);
         }
         assertEquals(dark, Palette.from("unknown", config(new String[12]), false));
     }
@@ -113,7 +113,7 @@ class PaletteTest {
     }
 
     public static class NoColorProbe {
-        public static void main(final String[] args) {
+        static void main(final String[] args) {
             final var palette = Palette.from("light", config(new String[12]));
             System.out.println(Palette.noColorRequested() + ":" + palette.mono() + ":"
                     + palette.color(palette.accent()).equals(dev.tamboui.style.Color.RESET) + ":"

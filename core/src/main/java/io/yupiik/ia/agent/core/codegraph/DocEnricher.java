@@ -293,10 +293,10 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
             LOGGER.warning("Concept JSON parse failed: " + e.getMessage());
             return result;
         }
-        if (!(parsed instanceof ConceptDtos dtos)) {
+        if (!(parsed instanceof ConceptDtos(List<ConceptDto> concepts))) {
             return result;
         }
-        for (final var c : dtos.concepts()) {
+        for (final var c : concepts) {
             final var slug = c.slug();
             if (slug == null || slug.isBlank()) {
                 continue;
@@ -448,7 +448,7 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
             final var request = new ChatCompletionRequest(
                             resolveModel(),
                             List.of(Message.user(prompt)),
-                            (Double) null,
+                            null,
                             null,
                             false,
                             null,

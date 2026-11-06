@@ -16,7 +16,9 @@
 package io.yupiik.ia.agent.core.codegraph;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
@@ -190,7 +192,7 @@ class StructuralCodeGraphTest {
         try {
             final Future<GraphStore> result = query.submit(graph::graph);
             Thread.sleep(100);
-            assertTrue(!result.isDone(), "graph query must wait for readiness");
+            assertFalse(result.isDone(), "graph query must wait for readiness");
             release.countDown();
             assertTrue(result.get(15, TimeUnit.SECONDS).symbols().stream()
                     .anyMatch(s -> s.fqn().equals("demo.Foo")));
@@ -227,13 +229,13 @@ class StructuralCodeGraphTest {
         graph.ensureReady();
         final var defaultIdx = graph.queryIndex();
         assertTrue(defaultIdx != null && defaultIdx.resolve("demo.Foo") != null);
-        assertTrue(defaultIdx.resolve("other.Baz") == null, "default root must not know the second project");
+        assertNull(defaultIdx.resolve("other.Baz"), "default root must not know the second project");
 
         // a per-session root resolves its own symbols lazily, independently of the default graph
         final var secondIdx = graph.queryIndex(second);
-        assertTrue(secondIdx != null, "expected a lazily built per-root index");
-        assertTrue(secondIdx.resolve("other.Baz") != null, "second root should resolve its own symbol");
-        assertTrue(secondIdx.resolve("demo.Foo") == null, "second root must not contain the default project's symbol");
+        assertNotNull(secondIdx, "expected a lazily built per-root index");
+        assertNotNull(secondIdx.resolve("other.Baz"), "second root should resolve its own symbol");
+        assertNull(secondIdx.resolve("demo.Foo"), "second root must not contain the default project's symbol");
 
         // path resolution must be root-aware
         final var root = graph.projectDir(second);
@@ -264,7 +266,7 @@ class StructuralCodeGraphTest {
         final var idx1 = graph.queryIndex(work);
         assertNotNull(idx1, "expected a lazily built per-root index");
         assertNotNull(idx1.resolve("work.Foo"), "first query should resolve the freshly built symbol");
-        assertTrue(idx1.resolve("work.Baz") == null, "Baz not yet present");
+        assertNull(idx1.resolve("work.Baz"), "Baz not yet present");
 
         // a later edit under the root must be visible on the NEXT query (refresh-on-access),
         // not served from an ever-stale snapshot. Force a distinct mtime to be filesystem-agnostic.
@@ -295,7 +297,7 @@ class StructuralCodeGraphTest {
 
         final var idx1 = graph.queryIndex(work);
         assertNotNull(idx1.resolve("work.Bar"));
-        assertTrue(idx1.resolve("work.NewBar") == null);
+        assertNull(idx1.resolve("work.NewBar"));
 
         // adding an indexed file offline changes the file count -> next query re-indexes
         Files.writeString(work.resolve("NewBar.java"), "package work;\npublic class NewBar { public void run() {} }\n");
@@ -305,7 +307,7 @@ class StructuralCodeGraphTest {
         // deleting an indexed file offline changes the count -> next query drops it
         Files.delete(work.resolve("Bar.java"));
         final var idx3 = graph.queryIndex(work);
-        assertTrue(idx3.resolve("work.Bar") == null, "a deleted file must be dropped on the next query");
+        assertNull(idx3.resolve("work.Bar"), "a deleted file must be dropped on the next query");
         assertNotNull(idx3.resolve("work.NewBar"), "the surviving file must still be indexed");
     }
 
@@ -324,7 +326,7 @@ class StructuralCodeGraphTest {
 
         final var idx1 = graph.queryIndex(work);
         assertNotNull(idx1.resolve("work.A"));
-        assertTrue(idx1.resolve("work.B") == null);
+        assertNull(idx1.resolve("work.B"));
 
         // resync(root) must re-index the per-session root regardless of the mtime freshness gate
         Files.writeString(work.resolve("B.java"), "package work;\npublic class B { public void run() {} }\n");
@@ -349,7 +351,7 @@ class StructuralCodeGraphTest {
         assertEquals(2, cache.size(), "cache must stay within its bound");
         assertNotNull(cache.get(Path.of("/r/a")));
         assertNotNull(cache.get(Path.of("/r/c")));
-        assertTrue(cache.get(Path.of("/r/b")) == null, "the least-recently used entry must be evicted");
+        assertNull(cache.get(Path.of("/r/b")), "the least-recently used entry must be evicted");
     }
 
     @Test
@@ -442,7 +444,7 @@ class StructuralCodeGraphTest {
         // deleting a source file removes its doc and its symbols
         Files.delete(project.resolve("Foo.java"));
         graph.refreshFile(project.resolve("Foo.java"));
-        assertTrue(!Files.exists(docsFoo), "expected doc removed when source file deleted");
+        assertFalse(Files.exists(docsFoo), "expected doc removed when source file deleted");
         final var afterDelete = graph.graph();
         assertTrue(
                 afterDelete.symbols().stream().noneMatch(s -> s.fqn().startsWith("demo.Foo")),
@@ -685,7 +687,7 @@ class StructuralCodeGraphTest {
         assertTrue(card.startsWith("# Foo.java"), "expected source-path header, got:\n" + card);
         assertTrue(card.contains("- Foo · type"), "expected a type bullet with line span");
         assertTrue(card.contains("- run · method"), "expected a method bullet");
-        assertTrue(!card.contains("## Symbols"), "wiring cards must not carry a ## Symbols section");
+        assertFalse(card.contains("## Symbols"), "wiring cards must not carry a ## Symbols section");
 
         // idempotent: re-writing the unchanged structure must not churn the card
         final var writer = new DocTreeWriter(config, docRoot);
@@ -816,7 +818,7 @@ class StructuralCodeGraphTest {
             assertTrue(card.startsWith("# Foo.java"), "expected source-path header");
             assertTrue(card.contains("One file summary text."), "expected the file one-liner inline");
             assertTrue(card.contains("does addition"), "expected per-symbol one-liner inline");
-            assertTrue(!card.contains("## Summary"), "wiring cards must not carry a ## Summary section");
+            assertFalse(card.contains("## Summary"), "wiring cards must not carry a ## Summary section");
 
             // the wiring graph re-emits with summary, crux and a ready state once enriched
             enricher.awaitIdle().get(5, TimeUnit.SECONDS);
@@ -874,18 +876,18 @@ class StructuralCodeGraphTest {
         assertTrue(
                 after.symbols().stream().noneMatch(s -> s.fqn().startsWith("demo.sub")),
                 "deleted file symbols must be dropped by patch");
-        assertTrue(
-                !after.fingerprints().containsKey("other/Bar.java"),
+        assertFalse(
+                after.fingerprints().containsKey("other/Bar.java"),
                 "deleted file fingerprint must be dropped by patch");
-        assertTrue(
-                !Files.exists(project.resolve(".yca/generated/graph/other/Bar.md")),
+        assertFalse(
+                Files.exists(project.resolve(".yca/generated/graph/other/Bar.md")),
                 "deleted file doc must be removed by patch");
         final var meta = Files.readString(project.resolve(".yca/generated/graph/index.meta"));
         assertEquals(
                 "#count=" + after.fingerprints().size(),
                 meta.substring(0, meta.indexOf('\n')),
                 "sidecar must record the indexed file count");
-        assertTrue(!meta.contains("other/Bar.java"), "sidecar must forget the deleted file, got:\n" + meta);
+        assertFalse(meta.contains("other/Bar.java"), "sidecar must forget the deleted file, got:\n" + meta);
 
         // a fresh session must reload the reconciled index: no ghost symbols survive
         final var reloaded = newGraph(config, mapper);

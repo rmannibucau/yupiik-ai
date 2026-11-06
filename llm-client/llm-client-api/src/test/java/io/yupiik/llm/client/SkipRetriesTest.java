@@ -16,6 +16,7 @@
 package io.yupiik.llm.client;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -140,7 +141,7 @@ class SkipRetriesTest {
                     .join();
             fail("a transient 429 in cooperative mode must not be swallowed");
         } catch (final CompletionException expected) {
-            assertTrue(expected.getCause() instanceof LlmHttpFailureException, "got: " + expected.getCause());
+            assertInstanceOf(LlmHttpFailureException.class, expected.getCause(), "got: " + expected.getCause());
         }
         assertEquals(1, dial.calls.get(), "cooperative mode must not retry a 429");
     }

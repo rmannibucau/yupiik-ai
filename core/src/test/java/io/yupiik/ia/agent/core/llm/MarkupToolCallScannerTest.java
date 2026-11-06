@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -155,8 +156,8 @@ class MarkupToolCallScannerTest {
         final var out = scanner.strip(raw);
         assertTrue(out.contains("Before."));
         assertTrue(out.contains("After."));
-        assertTrue(!out.contains("TOOL_CALLS"));
-        assertTrue(!out.contains("tool_calls"));
+        assertFalse(out.contains("TOOL_CALLS"));
+        assertFalse(out.contains("tool_calls"));
     }
 
     @Test

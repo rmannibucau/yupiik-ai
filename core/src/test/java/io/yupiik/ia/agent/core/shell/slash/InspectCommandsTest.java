@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.shell.slash;
 
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -48,9 +49,8 @@ class InspectCommandsTest {
         final var env = new ShellEnv(null, null, new ShellSession().sessionId("s1"), new ConversationTranscript());
         final var outcome = command(env, "/executing-tools");
         final var content = content(outcome);
-        assertTrue(
-                outcome instanceof ShellOutcome.Transcript,
-                "empty list must be a transcript, not a status: " + outcome);
+        assertInstanceOf(
+                ShellOutcome.Transcript.class, outcome, "empty list must be a transcript, not a status: " + outcome);
         assertTrue(content.startsWith("**Executing tools**"), "must keep the executing-tools marker: " + content);
         assertTrue(content.contains("(no tool executing)"), "must say no tool is executing: " + content);
     }

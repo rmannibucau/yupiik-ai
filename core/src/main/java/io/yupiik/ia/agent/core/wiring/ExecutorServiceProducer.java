@@ -60,13 +60,10 @@ public class ExecutorServiceProducer {
         return new TimingExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }
 
-    /** Delegating {@link ExecutorService} that times its graceful {@link #close()}. */
-    private static final class TimingExecutor implements ExecutorService {
-        private final ExecutorService delegate;
-
-        private TimingExecutor(final ExecutorService delegate) {
-            this.delegate = delegate;
-        }
+    /**
+     * Delegating {@link ExecutorService} that times its graceful {@link #close()}.
+     */
+    private record TimingExecutor(ExecutorService delegate) implements ExecutorService {
 
         @Override
         public void close() {

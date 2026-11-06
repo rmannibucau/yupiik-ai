@@ -157,7 +157,7 @@ public class MemoryExtractor {
     private final String sessionId;
     private final MemoryCompactor memoryCompactor;
     private final MemoryProductionPolicy productionPolicy;
-    private volatile SecretRedactor secretRedactor;
+    private final SecretRedactor secretRedactor;
     /** Serializes extraction and protects the successful input snapshot (in-memory watermark). */
     private final ReentrantLock extractionLock = new ReentrantLock();
 
@@ -556,11 +556,7 @@ public class MemoryExtractor {
     private static String render(final List<Message> messages) {
         final var sb = new StringBuilder();
         for (final var m : messages) {
-            sb.append('[')
-                    .append(m.role())
-                    .append("] ")
-                    .append(String.valueOf(m.content()))
-                    .append('\n');
+            sb.append('[').append(m.role()).append("] ").append(m.content()).append('\n');
         }
         return sb.toString();
     }
@@ -597,7 +593,7 @@ public class MemoryExtractor {
                                 "Importance weight 1..5 (5 = explicit keep directive, default 2)."),
                 "path", Map.of("type", "string", "description", "Relative code path/package the fact is anchored to."),
                 "topic", Map.of("type", "string", "description", "Space-separated topic keywords for retrieval."));
-        final var item = Map.<String, Object>of(
+        final var item = Map.of(
                 "type",
                 "object",
                 "properties",
@@ -608,8 +604,8 @@ public class MemoryExtractor {
                 false);
         // no additionalProperties on the array wrapper: it is invalid JSON Schema there (the keyword
         // only applies to objects) and Anthropic structured outputs reject the schema with a 400
-        final var facts = Map.<String, Object>of("type", "array", "items", item);
-        return Map.<String, Object>of(
+        final var facts = Map.of("type", "array", "items", item);
+        return Map.of(
                 "type",
                 "object",
                 "properties",

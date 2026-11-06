@@ -611,7 +611,7 @@ public class WebJsonRpc {
                         spec.name(),
                         spec.command(),
                         spec.usage(),
-                        String.valueOf(spec.group().name().toLowerCase(Locale.ROOT)),
+                        spec.group().name().toLowerCase(Locale.ROOT),
                         spec.description()))
                 .toList();
     }

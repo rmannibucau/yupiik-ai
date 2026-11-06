@@ -58,10 +58,8 @@ public abstract class ShapePreservingSecretMatcher implements SecretMatcher {
     @Override
     public String replace(final String value) {
         final int start = Math.min(bodyStart(value), value.length());
-        final var out = new StringBuilder(start);
-        out.append(value, 0, start);
-        out.append(regenerate(value.substring(start)));
-        return out.toString();
+        String out = value.substring(0, start) + regenerate(value.substring(start));
+        return out;
     }
 
     /**

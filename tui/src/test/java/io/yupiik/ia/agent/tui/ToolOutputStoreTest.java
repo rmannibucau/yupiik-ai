@@ -30,7 +30,7 @@ class ToolOutputStoreTest {
         store.record(3, new ToolOutputStore.Entry("mvn", "test", "output-3", false, 12));
         assertEquals("output-3", store.get(3).output());
         assertEquals("mvn", store.get(3).name());
-        assertTrue(store.get(3).elapsedMs() == 12);
+        assertEquals(12, store.get(3).elapsedMs());
         assertEquals(3, store.latestOrdinal());
     }
 

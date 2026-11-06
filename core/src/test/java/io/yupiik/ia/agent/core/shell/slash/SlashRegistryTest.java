@@ -19,10 +19,12 @@ import static java.util.concurrent.CompletableFuture.completedStage;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
+import io.yupiik.ia.agent.core.shell.ShellFrontend;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
@@ -100,12 +102,7 @@ class SlashRegistryTest {
         assertTrue(calls.contains("status:alpha:hi"), calls.toString());
     }
 
-    private static final class RecordingFrontend implements io.yupiik.ia.agent.core.shell.ShellFrontend {
-        private final List<String> calls;
-
-        private RecordingFrontend(final List<String> calls) {
-            this.calls = calls;
-        }
+    private record RecordingFrontend(List<String> calls) implements ShellFrontend {
 
         @Override
         public void status(final String message) {
@@ -113,7 +110,7 @@ class SlashRegistryTest {
         }
 
         @Override
-        public void notice(final io.yupiik.ia.agent.core.agent.AgentEvent.Notice.Level level, final String message) {
+        public void notice(final AgentEvent.Notice.Level level, final String message) {
             calls.add("notice:" + message);
         }
 

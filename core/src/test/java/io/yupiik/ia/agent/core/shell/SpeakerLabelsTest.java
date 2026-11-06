@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.shell;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -270,7 +271,7 @@ class SpeakerLabelsTest {
     void messageIdentityHelpersRoundTrip() {
         final var m = Message.withIdentity(Message.user("x"), "p", "m", "agent1");
         final var identity = Message.identityOf(m);
-        assertTrue(identity != null, "identity must be present");
+        assertNotNull(identity, "identity must be present");
         assertEquals("p", identity.provider());
         assertEquals("m", identity.model());
         assertEquals("agent1", identity.agent());

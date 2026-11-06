@@ -98,7 +98,7 @@ public class MemoryWriteTool implements EmbeddedTool {
         final var global = "global".equalsIgnoreCase(arg(args, "scope") == null ? "project" : arg(args, "scope"));
         // default to an explicit keep directive (p5); keep=false or an explicit p override downgrades it.
         // (optBool does not honor its default when the key is absent, so default the absence here)
-        final var keep = args.containsKey("keep") ? ToolArgs.optBool(args, "keep", true) : true;
+        final var keep = !args.containsKey("keep") || ToolArgs.optBool(args, "keep", true);
         final long explicitP = ToolArgs.optInt(args, "p", 0);
         final int p = explicitP >= 1 && explicitP <= 5 ? (int) explicitP : (keep ? 5 : 2);
         final var topic = splitTopic(arg(args, "topic"));

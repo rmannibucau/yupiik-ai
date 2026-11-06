@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -98,7 +99,7 @@ class PromptHistoryTest {
         h.olderPush("draft");
         assertTrue(h.navigating());
         h.add("c");
-        assertTrue(!h.navigating(), "add resets navigation");
+        assertFalse(h.navigating(), "add resets navigation");
     }
 
     @Test

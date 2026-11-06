@@ -272,9 +272,6 @@ public class CallbackRunner {
         }
         try {
             final var response = mapper.fromString(HookResponse.class, stripped);
-            if (response == null) {
-                return null;
-            }
             return response;
         } catch (final RuntimeException e) {
             throw new IllegalStateException("hook " + eventId + " printed invalid JSON: " + e.getMessage(), e);

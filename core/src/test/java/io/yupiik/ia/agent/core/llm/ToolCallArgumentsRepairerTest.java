@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
@@ -140,7 +141,7 @@ class ToolCallArgumentsRepairerTest {
 
     @Test
     void nullAndBlankAreUntouched() {
-        assertEquals(null, repairer.repair(null, true, "qwen3.8-27b"));
+        assertNull(repairer.repair(null, true, "qwen3.8-27b"));
         assertEquals("", repairer.repair("", true, "qwen3.8-27b"));
     }
 

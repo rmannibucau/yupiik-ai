@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.shell.slash;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentLoop;
@@ -111,7 +112,7 @@ class MaintainCommandsTest {
     @Test
     void completionOffersForceUrgentAndKeep() {
         final var completion = compactCommand().completion();
-        assertTrue(completion != ArgCompletion.NONE, "/compact has options so it must register a completion");
+        assertNotSame(completion, ArgCompletion.NONE, "/compact has options so it must register a completion");
         final var items = completion.complete("", "", null).items();
         assertTrue(items.contains("force"), "completion must offer force: " + items);
         assertTrue(items.contains("urgent"), "completion must offer urgent: " + items);

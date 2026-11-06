@@ -45,7 +45,7 @@ public class CallbackFixtureMain {
         // no-op
     }
 
-    public static void main(final String[] args) throws Exception {
+    static void main(final String[] args) throws Exception {
         final var input = readAll();
         final var echoTarget = System.getProperty("fixture.echo");
         if (echoTarget != null && !echoTarget.isBlank()) {

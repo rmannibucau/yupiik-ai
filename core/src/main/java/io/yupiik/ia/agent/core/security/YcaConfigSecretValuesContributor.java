@@ -195,16 +195,7 @@ public class YcaConfigSecretValuesContributor implements SecretValuesContributor
     }
 
     /** Walks one JSON file, harvesting apiKey leaves and secret-header values. */
-    private static final class Visitor {
-        private final Collection<String> out;
-        private final Set<String> headerNames;
-        private final JsonMapper mapper;
-
-        private Visitor(final Collection<String> out, final Set<String> headerNames, final JsonMapper mapper) {
-            this.out = out;
-            this.headerNames = headerNames;
-            this.mapper = mapper;
-        }
+    private record Visitor(Collection<String> out, Set<String> headerNames, JsonMapper mapper) {
 
         private void visit(final Path path) {
             if (path == null || !Files.isRegularFile(path)) {

@@ -153,7 +153,7 @@ class BatchSizerTest {
         final var large = BatchSizer.windows(gavs(129), config(0, 2, null));
         assertEquals(2, large.size());
         assertEquals(128, large.get(0).size());
-        assertTrue(large.get(0).size() == 128, "windows must be bounded to WINDOW_MULTIPLIER * batchSize");
+        assertEquals(128, large.get(0).size(), "windows must be bounded to WINDOW_MULTIPLIER * batchSize");
         // every GAV present exactly once across windows (no dupes, no loss)
         final var seen = new ArrayList<Gav>();
         for (final var w : large) {

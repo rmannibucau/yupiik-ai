@@ -377,13 +377,12 @@ class SubagentIntegrationTest {
         };
     }
 
-    private static class ScriptedReply {
-        private final String content;
-        private final String finishReason;
-        private final RuntimeException error;
-        private final IOException ioError;
-        private final List<ToolCall> toolCalls;
-
+    private record ScriptedReply(
+            String content,
+            String finishReason,
+            RuntimeException error,
+            IOException ioError,
+            List<ToolCall> toolCalls) {
         ScriptedReply(final String content, final String finishReason) {
             this(content, finishReason, null, null, null);
         }
@@ -396,19 +395,6 @@ class SubagentIntegrationTest {
             this(null, null, null, ioError, null);
         }
 
-        private ScriptedReply(
-                final String content,
-                final String finishReason,
-                final RuntimeException error,
-                final IOException ioError,
-                final List<ToolCall> toolCalls) {
-            this.content = content;
-            this.finishReason = finishReason;
-            this.error = error;
-            this.ioError = ioError;
-            this.toolCalls = toolCalls;
-        }
-
         static ScriptedReply toolCall(final String toolName, final String args) {
             return new ScriptedReply(
                     null,
@@ -416,26 +402,6 @@ class SubagentIntegrationTest {
                     null,
                     null,
                     List.of(new ToolCall("tc-" + toolName, "function", new ToolCall.FunctionCall(toolName, args), 0)));
-        }
-
-        String content() {
-            return content;
-        }
-
-        String finishReason() {
-            return finishReason;
-        }
-
-        RuntimeException error() {
-            return error;
-        }
-
-        IOException ioError() {
-            return ioError;
-        }
-
-        List<ToolCall> toolCalls() {
-            return toolCalls;
         }
 
         Message toMessage() {

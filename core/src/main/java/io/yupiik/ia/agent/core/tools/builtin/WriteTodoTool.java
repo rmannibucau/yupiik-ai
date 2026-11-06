@@ -117,7 +117,7 @@ public class WriteTodoTool implements EmbeddedTool {
             return ToolResult.error(
                     "todos must be a non empty array of {content, status} (got " + typeName(args.get("todos")) + ")");
         }
-        final var todos = store.from(raw);
+        final var todos = TodoStore.from(raw);
         if (todos.isEmpty()) {
             return ToolResult.error("todos must be a non empty array of {content, status}");
         }

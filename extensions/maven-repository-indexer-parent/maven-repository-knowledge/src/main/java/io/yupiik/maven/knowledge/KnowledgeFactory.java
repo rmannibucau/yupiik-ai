@@ -37,31 +37,21 @@ import java.util.List;
  * </ol>
  * Everything is deterministic and framework-free; the LLM is only ever an optional, validated enrichment.
  */
-public final class KnowledgeFactory {
-
-    private final KnowledgeWriter writer;
-
-    public KnowledgeFactory(final KnowledgeWriter writer) {
-        this.writer = writer;
-    }
-
-    public KnowledgeWriter writer() {
-        return writer;
-    }
+public record KnowledgeFactory(KnowledgeWriter writer) {
 
     /**
      * Write the whole knowledge set for an artifact.
      *
-     * @param gav             the artifact.
-     * @param parts           the acquired content parts (sources chunked, javadoc per-class, ...); may be empty when
-     *                        the surface is entirely bytecode or a plugin/extension (then only the {@code api}
-     *                        sibling plus the folded {@code moduleConfig} section are produced).
-     * @param apiMarkdown     the bytecode-derived public-API markdown (or blank when no main jar); written to the
-     *                        {@code api} sibling.
-     * @param moduleConfig    plugin/extension configuration markdown folded into the index (blank for ordinary
-     *                        artifacts).
-     * @param entryPoints     deterministic entry-point classes (list of FQNs).
-     * @param skills          optional validated skills (short name + full gold-format text); written and indexed.
+     * @param gav          the artifact.
+     * @param parts        the acquired content parts (sources chunked, javadoc per-class, ...); may be empty when
+     *                     the surface is entirely bytecode or a plugin/extension (then only the {@code api}
+     *                     sibling plus the folded {@code moduleConfig} section are produced).
+     * @param apiMarkdown  the bytecode-derived public-API markdown (or blank when no main jar); written to the
+     *                     {@code api} sibling.
+     * @param moduleConfig plugin/extension configuration markdown folded into the index (blank for ordinary
+     *                     artifacts).
+     * @param entryPoints  deterministic entry-point classes (list of FQNs).
+     * @param skills       optional validated skills (short name + full gold-format text); written and indexed.
      * @return the index file path.
      */
     public Path writeArtifact(

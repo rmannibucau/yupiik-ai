@@ -51,21 +51,13 @@ public class TestWebJsonMapper implements ParameterResolver {
         return Holder.MAPPER.mapper();
     }
 
-    private static final class Holder {
+    private record Holder(Instance<JsonMapper> mapperInstance, RuntimeContainer container) {
         private static final Holder MAPPER = boot();
 
         private static final AtomicBoolean CLOSED = new AtomicBoolean();
 
         static {
             Runtime.getRuntime().addShutdownHook(new Thread(Holder::closeOnce, "yca-web-test-json-mapper-close"));
-        }
-
-        private final Instance<JsonMapper> mapperInstance;
-        private final RuntimeContainer container;
-
-        private Holder(final Instance<JsonMapper> mapperInstance, final RuntimeContainer container) {
-            this.mapperInstance = mapperInstance;
-            this.container = container;
         }
 
         private JsonMapper mapper() {
