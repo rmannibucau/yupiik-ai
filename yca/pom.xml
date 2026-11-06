@@ -159,6 +159,30 @@
                   -->
                 <customOption>-march=compatibility</customOption>
               </customOptions>
+              <!--
+                GraalVM auto-registers SunJCE's KeyPairGenerator services but not the KEM service:
+                OpenCode's hybrid TLS (X25519MLKEM768, group 4588) calls
+                KEM.getInstance("ML-KEM").newDecapsulator(...). Without explicit reflection
+                registration of the ML-KEM KEM implementation the service cannot be instantiated in
+                the native image and decapsulation fails with
+                "InvalidKeyException: No installed provider found"
+                (caused by ClassNotFoundException: com.sun.crypto.provider.ML_KEM_Impls$K).
+
+                SunJCE registers the "ML-KEM" alias (which OpenCode uses) on the base
+                ML_KEM_Impls$K class, so registering that single type with all constructors and
+                methods (implDecapsulate/implEncapsulate/implSecretSize/...) is sufficient;
+                enableAllSecurityServices does NOT cover the KEM service. The per-strength
+                concrete subclasses ($K2/$K3/$K5) are only needed for direct KEM.getInstance
+                of the algorithm-specific names, which this code path never does.
+                -->
+              <reflections>
+                <ClassReflectionModel>
+                  <type>com.sun.crypto.provider.ML_KEM_Impls$K</type>
+                  <allDeclaredConstructors>true</allDeclaredConstructors>
+                  <allDeclaredMethods>true</allDeclaredMethods>
+                  <allPublicMethods>true</allPublicMethods>
+                </ClassReflectionModel>
+              </reflections>
               <resources>
                 <resource>
                   <pattern>dev/tamboui/tui/bindings/*\.properties</pattern>
