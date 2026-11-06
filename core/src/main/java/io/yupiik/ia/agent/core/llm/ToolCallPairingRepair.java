@@ -16,7 +16,6 @@
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-import io.yupiik.ia.agent.core.agent.ModelRoundProcessor;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.llm.client.LlmHttpFailureException;
@@ -190,36 +189,56 @@ public class ToolCallPairingRepair {
     }
 
     /**
-     * Tells whether an LLM failure is the Azure/litellm strict-validator rejection of an assistant
-     * {@code tool_calls} block that has no matching {@code tool}-role result ("An assistant message
-     * with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'...").
-     * The signature check is owned by {@link ModelRoundProcessor#isToolCallPairingRejected} (single
-     * source of truth); this adds the authoritative status-code narrowing and the message-only
-     * fallback for failures that do not carry a body.
+     * Tells whether an LLM failure is the strict-validator rejection of an assistant tool-call block that
+     * has no matching {@code tool}-role result. This covers two wire signatures, both meaning "a function
+     * call was made but no tool output was provided":
+     * <ul>
+     *     <li>Azure / litellm: "An assistant message with 'tool_calls' must be followed by tool messages
+     *     responding to each 'tool_call_id'...", and</li>
+     *     <li>OpenAI Responses backends: "No tool output found for function call &lt;id&gt;".</li>
+     * </ul>
+     * The signature check lives here as the single source of truth, shared by the agent-loop history
+     * repair, the /btw side-answerer, and {@link ModelRoundProcessor} (which short-circuits the generic
+     * retry budget for such a deterministic failure). For {@link LlmHttpFailureException} the status code
+     * is authoritative (a non-400 with the same body is NOT a pairing rejection). For failures that only
+     * carry a message, the existing {@code "LLM request failed (400)"} prefix is the authority.
      *
-     * @param failure the thrown low-level request failure (the 400 propagates to the caller as an
-     *     {@link java.io.IOException}, possibly a {@link LlmHttpFailureException} carrying the provider body).
+     * @param failure the thrown low-level request failure (a 400 propagates to the caller as an
+     *     {@link java.io.IOException}, possibly a {@link LlmHttpFailureException}).
      * @return whether the failure is a tool-call pairing rejection that the repair can fix.
      */
     public static boolean isPairingRejection(final Throwable failure) {
-        // prefer the typed failure: the status code is authoritative and never depends on
-        // message formatting ("LLM request failed (400)" is a bare prefix heuristic)
         if (failure instanceof LlmHttpFailureException httpFailure) {
-            return httpFailure.status() == 400 && ModelRoundProcessor.isToolCallPairingRejected(httpFailure);
+            return httpFailure.status() == 400 && matchesText(httpFailure.body());
         }
         final var message = failure == null ? null : failure.getMessage();
         if (message == null || !message.startsWith("LLM request failed (400)")) {
             return false;
         }
-        if (failure instanceof LlmHttpFailureException httpFailure
-                && ModelRoundProcessor.isToolCallPairingRejected(httpFailure)) {
+        return matchesText(message);
+    }
+
+    /**
+     * Shared text matcher for the two pairing-rejection wire signatures. Only the body/message text is
+     * inspected (lowercased once, {@link Locale#ROOT}); no regex, JSON parsing or call-id extraction.
+     * The {@code tool_calls} branch mirrors the Azure/litellm wording, the second branch the OpenAI
+     * Responses endpoint.
+     *
+     * @param text the provider body or exception message, possibly {@code null}.
+     * @return whether the text is a tool-call pairing rejection signature.
+     */
+    private static boolean matchesText(final String text) {
+        if (text == null) {
+            return false;
+        }
+        final var lower = text.toLowerCase(Locale.ROOT);
+        if (lower.contains("no tool output found for function call")) {
             return true;
         }
-        final var lowerTxt = message.toLowerCase(Locale.ROOT);
-        return lowerTxt.contains("tool_calls")
-                && (lowerTxt.contains("must be followed")
-                        || lowerTxt.contains("no response message")
-                        || lowerTxt.contains("did not have")
-                        || lowerTxt.contains("without tool messages"));
+        return lower.contains("tool_calls")
+                && (lower.contains("must be followed")
+                        || lower.contains("no response message")
+                        || lower.contains("did not have")
+                        || lower.contains("without tool messages"));
     }
 }

@@ -131,6 +131,47 @@ class ModelRoundProcessorTest {
     }
 
     @Test
+    void responsesMissingToolOutput400ShortCircuitsOnFirstAttempt() throws Exception {
+        // OpenAI Responses backends reject an unanswered function call with a distinct signature:
+        // "No tool output found for function call <id>". Like the Azure/litellm wording, it is a
+        // deterministic broken-history rejection, so it must short-circuit the generic retry budget and
+        // fire the pairing-rejected callback so the caller repairs the history before retrying once.
+        final var clientCalls = new AtomicInteger();
+        final var chatClient = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest r,
+                    final java.util.function.Consumer<PauseEvent> pauseListener,
+                    final java.util.function.Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                clientCalls.incrementAndGet();
+                throw new LlmHttpFailureException(
+                        400, "{\"error\":{\"message\":\"No tool output found for function call call_1.\"}}", null);
+            }
+        };
+        final var processor = new ModelRoundProcessor(chatClient, config(2), new PrecisionDurationMarkerProvider());
+        final var observer = new RecordingObserver();
+
+        assertThrows(
+                LlmHttpFailureException.class,
+                () -> processor.stream(
+                        new ChatCompletionRequest("m", List.of(), null, null, null, null, "auto", null, null, null),
+                        new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY},
+                        () -> false,
+                        pause -> {},
+                        delta -> {},
+                        observer));
+
+        assertEquals(1, clientCalls.get(), "the broken history must not be re-sent (no retry storm)");
+        assertTrue(observer.calls.contains("toolCallPairingRejected"), "observer must be told about the pairing 400");
+        assertTrue(
+                !observer.calls.contains("retrying") && !observer.calls.contains("paused"),
+                "no generic retry/backoff may run for a deterministic pairing 400: " + observer.calls);
+        assertEquals(0, observer.pausedMs, "no backoff sleep may run");
+    }
+
+    @Test
     void nonPairing400StillRetriesPerBudget() {
         final var clientCalls = new AtomicInteger();
         final var chatClient = new ChatClient() {

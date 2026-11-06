@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
+import io.yupiik.llm.client.LlmHttpFailureException;
+import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
@@ -109,6 +111,34 @@ class ToolCallPairingRepairTest {
         assertEquals(1, store.size("s1"));
         // and the healed in-memory list still carries both markers (contiguity for the wire)
         assertEquals(2, messages.stream().filter(m -> "tool".equals(m.role())).count());
+    }
+
+    @Test
+    void isPairingRejectionRecognizesResponsesMissingToolOutput() {
+        // the exact OpenAI Responses signature ("No tool output found for function call ...") must be
+        // classified as a pairing rejection so the agent loop and /btw recover it like the Azure wording.
+        final var typed = new LlmHttpFailureException(
+                400, "{\"error\":{\"message\":\"No tool output found for function call call_1.\"}}", null);
+        assertTrue(
+                ToolCallPairingRepair.isPairingRejection(typed),
+                "a typed 400 carrying the Responses error must be a pairing rejection");
+        // message-only fallback (no body): only the "LLM request failed (400)" prefix variant matches
+        final var messageOnly =
+                new IOException("LLM request failed (400): No tool output found for function call call_1.");
+        assertTrue(
+                ToolCallPairingRepair.isPairingRejection(messageOnly),
+                "the message-only fallback must also recognize the Responses error");
+        // a non-400 typed failure with the same wording is NOT a pairing rejection (status is authoritative)
+        assertFalse(
+                ToolCallPairingRepair.isPairingRejection(
+                        new LlmHttpFailureException(429, "No tool output found for function call call_1.", null)),
+                "a 429 with the Responses wording is not a pairing rejection");
+        // unrelated 400s stay untouched
+        assertFalse(
+                ToolCallPairingRepair.isPairingRejection(
+                        new LlmHttpFailureException(400, "{\"error\":{\"message\":\"invalid api key\"}}", null)),
+                "an unrelated 400 is not a pairing rejection");
+        assertFalse(ToolCallPairingRepair.isPairingRejection(null), "null is never a pairing rejection");
     }
 
     private static ToolCall call(final String id, final String name) {

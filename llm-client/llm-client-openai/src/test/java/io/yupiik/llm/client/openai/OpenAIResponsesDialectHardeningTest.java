@@ -16,6 +16,7 @@
 package io.yupiik.llm.client.openai;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
@@ -155,6 +156,68 @@ class OpenAIResponsesDialectHardeningTest {
         assertTrue(
                 streamB.stream().noneMatch(e -> hasCallId(e, "call-A")),
                 "stream B must not observe stream A's call, got: " + streamB);
+    }
+
+    @Test
+    void streamedFunctionCallPrefersCallIdAndDoesNotDoubleAppend(final JsonMapper mapper) throws Exception {
+        // A streamed Responses function_call carries both item.id (fc_s) and call_id (call_s). The neutral
+        // tool-call id delivered on the deltas must be the call_id, never downgraded to the item_id, and
+        // the assembled arguments on .done / output_item.done must not be appended a second time after the
+        // incremental delta already delivered them.
+        final var added = "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\","
+                + "\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_s\",\"call_id\":\"call_s\","
+                + "\"name\":\"read\",\"arguments\":\"\"}}\n\n";
+        final var delta = "event: response.function_call_arguments.delta\ndata: "
+                + "{\"item_id\":\"fc_s\",\"output_index\":0,\"delta\":\"{\\\"path\\\":\\\"a\\\"}\"}\n\n";
+        final var done = "event: response.function_call_arguments.done\ndata: "
+                + "{\"item_id\":\"fc_s\",\"output_index\":0,\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}\n\n";
+        final var itemDone = "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\","
+                + "\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_s\",\"call_id\":\"call_s\","
+                + "\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}}\n\n";
+        final var completed = "event: response.completed\ndata: {\"response\":{\"id\":\"r1\","
+                + "\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n";
+
+        server.createContext("/v1/responses", exchange -> {
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            final var out = exchange.getResponseBody();
+            out.write((added + delta + done + itemDone + completed).getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            exchange.close();
+        });
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var events = new CopyOnWriteArrayList<LlmStreamEvent>();
+        dialect.stream(request("mA"), () -> false)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS)
+                .subscribe(collector(events, new CountDownLatch(0)));
+        waitCompletion(events);
+
+        // every delta must carry the call_id, never the item id
+        final var deltas = events.stream()
+                .filter(e -> e instanceof LlmStreamEvent.ToolCallDelta)
+                .map(e -> (LlmStreamEvent.ToolCallDelta) e)
+                .toList();
+        assertFalse(deltas.isEmpty(), "tool-call deltas must be produced");
+        assertTrue(
+                deltas.stream().allMatch(d -> "call_s".equals(d.id())),
+                "all deltas must use the call_id, got: " + deltas);
+        // the incremental delta is the only source of the argument text: the assembled arguments carried by
+        // .done and output_item.done must be suppressed (no double-append), so exactly ONE delta carries content
+        final var argBearing = events.stream()
+                .filter(e -> e instanceof LlmStreamEvent.ToolCallDelta d
+                        && d.arguments() != null
+                        && !d.arguments().isEmpty())
+                .count();
+        assertEquals(1, argBearing, "the arguments must be delivered by exactly one delta: " + events);
+        // the id streamed must never be the item id fc_s
+        assertTrue(
+                events.stream().noneMatch(e -> hasCallId(e, "fc_s")),
+                "the item id must never leak as the tool-call id");
     }
 
     private static LlmRequest request(final String model) {

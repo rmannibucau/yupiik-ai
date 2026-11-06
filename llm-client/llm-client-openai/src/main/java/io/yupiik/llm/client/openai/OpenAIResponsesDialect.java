@@ -38,14 +38,13 @@ import java.net.http.HttpRequest;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -60,12 +59,14 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     private static final Logger LOGGER = Logger.getLogger(OpenAIResponsesDialect.class.getName());
 
     private volatile Consumer<String> onRawLine;
-    // Records the ids of tool calls whose arguments were already streamed incrementally via
-    // response.function_call_arguments.delta, so the assembled arguments carried by the completion
-    // events are only emitted as a fallback (when no delta was seen) and never double-appended.
-    // Per-stream: each stream()/assemble() call creates its own set captured by a per-call mapper,
-    // so two concurrent streams on the shared dialect can never observe each other's deltas
-    // (the old instance-level mutable set was a cross-stream data race).
+    // Per-stream mapping of Responses output_index -> coalescing bookkeeping for one tool call: the best
+    // known neutral tool-call id (the Responses `call_id` when present, the item `id`/`item_id` fallback
+    // otherwise) and whether nonempty arguments were already delivered (so the completion events only emit
+    // assembled arguments as a fallback and never double-append). Keyed by output index because each stream
+    // may contain several parallel function calls and the argument-delta events carry only the item_id,
+    // which must not overwrite the canonical call_id. The map is created fresh per stream()/assemble() call
+    // and captured by a per-call mapper, so two concurrent streams on the shared dialect can never observe
+    // each other's bookkeeping (the old instance-level mutable set was a cross-stream data race).
 
     // Set once a backend rejects the encrypted-reasoning include (reasoning.include) and a retry without it
     // succeeded: from then on the dialect stops sending the directive for this provider, so each later request
@@ -300,12 +301,8 @@ public class OpenAIResponsesDialect extends AbstractDialect {
             final var payload = mapper.toBytes(toWire(request, true, include));
             return openStream(payload, cancelled).thenCompose(attempt -> {
                 if (attempt.ok()) {
-                    return CompletableFuture.completedFuture(Streams.toEvents(
-                            attempt.live(),
-                            cancelled,
-                            mapEventCapture(ConcurrentHashMap.newKeySet()),
-                            () -> null,
-                            onRawLine));
+                    return CompletableFuture.completedFuture(
+                            Streams.toEvents(attempt.live(), cancelled, mapEventCapture(), () -> null, onRawLine));
                 }
                 if (include && request.reasoningEffort() != null && isReasoningIncludeRejected(attempt)) {
                     // a gateway/edge rejected the encrypted-reasoning include: transparently
@@ -315,11 +312,7 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                                 if (retry.ok()) {
                                     encryptedReasoningRejected.set(true);
                                     return CompletableFuture.completedFuture(Streams.toEvents(
-                                            retry.live(),
-                                            cancelled,
-                                            mapEventCapture(ConcurrentHashMap.newKeySet()),
-                                            () -> null,
-                                            onRawLine));
+                                            retry.live(), cancelled, mapEventCapture(), () -> null, onRawLine));
                                 }
                                 return streamError(attempt);
                             });
@@ -375,22 +368,22 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     private CompletionStage<LlmResponse> assembleEvents(
             final Flow.Publisher<List<ByteBuffer>> live, final BooleanSupplier cancelled) {
         final var future = new CompletableFuture<LlmResponse>();
-        Streams.toEvents(live, cancelled, mapEventCapture(ConcurrentHashMap.newKeySet()), () -> null, onRawLine)
+        Streams.toEvents(live, cancelled, mapEventCapture(), () -> null, onRawLine)
                 .subscribe(new LlmResponseAssembler(future));
         return future;
     }
 
     /**
-     * Binds a per-stream {@code streamedArgIds} set to {@link #mapEvent(SseParser.Event, Set)}:
-     * the returned mapper routes every event of THIS stream (and only this stream) through the
-     * captured set, so concurrently-streaming calls on the shared dialect can never double-emit
-     * assembled tool-call arguments from each other's delta bookkeeping.
+     * Binds a fresh per-stream tool-call coalescing map to {@link #mapEvent(SseParser.Event, Map)}:
+     * the map is created ONCE and captured by the returned mapper, so every event of THIS stream (and only
+     * this stream) shares the same bookkeeping while concurrently-streaming calls on the shared dialect can
+     * never observe each other's state.
      *
-     * @param streamedArgIds the per-stream delta-observed call-id set.
-     * @return a mapper function bound to that set.
+     * @return a mapper function bound to a fresh per-stream state map.
      */
-    private Function<SseParser.Event, List<LlmStreamEvent>> mapEventCapture(final Set<String> streamedArgIds) {
-        return event -> mapEvent(event, streamedArgIds);
+    private Function<SseParser.Event, List<LlmStreamEvent>> mapEventCapture() {
+        final var streamArgState = new LinkedHashMap<Integer, MutableToolCallState>();
+        return event -> mapEvent(event, streamArgState);
     }
 
     /**
@@ -634,12 +627,21 @@ public class OpenAIResponsesDialect extends AbstractDialect {
      * OpenAI-compatible backends (OpenAI, sglang, Azure, litellm, ...) reject an assistant message whose
      * {@code tool_calls} are not answered
      * by matching tool responses ("An assistant message with 'tool_calls' must be followed by tool messages
-     * responding to each 'tool_call_id'"), a hard 400. Anthropic carries a wire backstop for its own pairing
-     * rule; this is the symmetric OpenAI one for the Responses wire. Older completed turns are trusted as-is
-     * (the agent loop always pairs them): only the live tail is verified, so per-request cost stays O(live
-     * tail), not O(history). Any assistant tool call whose id was never answered contiguously, and any orphan
-     * tool response, is stripped from the wire and FINE-logged - the request then validates instead of
-     * failing wholesale.
+     * responding to each 'tool_call_id'", or Responses "No tool output found for function call ..."),
+     * a hard 400. Anthropic carries a wire backstop for its own pairing rule; this is the symmetric OpenAI
+     * one for the Responses wire. The WHOLE serialized history is verified (not just the live tail): a
+     * persisted, compressed, transformed or externally supplied history can carry an older unanswered call,
+     * and the backend validates the entire request, so one stale dangling call anywhere must be stripped.
+     * Any assistant tool call whose id was never answered contiguously is stripped from the wire and
+     * FINE-logged - the request then validates instead of failing wholesale. Standalone {@code tool}
+     * results are intentionally kept verbatim (an orphan result in history is not rejected; only an
+     * unanswered assistant call is).
+     *
+     * <p>Verification is block-local and allocation-light: for each assistant {@code tool_calls} block the
+     * pending ids are tracked in a small reusable set and matched against the immediately-following
+     * contiguous run of {@code tool} results only. The output list and replacement call lists are created
+     * lazily, only once a change is found, so a fully valid history costs one linear pass with no extra
+     * allocations.</p>
      *
      * <p>This is a backstop: the primary repair lives in the agent loop (it inserts an honest lost-result
      * marker). This only fires when a broken pairing still reaches the wire (a third-party caller, a
@@ -653,8 +655,7 @@ public class OpenAIResponsesDialect extends AbstractDialect {
             return messages;
         }
         // most requests carry no assistant tool calls at all: skip the O(history) scan and rebuild entirely,
-        // so the common pure-text path stays zero-cost (the previous unconditional verificationStart pass ran
-        // a full-list scan on every request even when there was nothing to sanitize).
+        // so the common pure-text path stays zero-cost.
         var hasToolRound = false;
         for (final var probe : messages) {
             if (probe != null
@@ -668,37 +669,78 @@ public class OpenAIResponsesDialect extends AbstractDialect {
         if (!hasToolRound) {
             return messages;
         }
-        final var verificationStart = verificationStart(messages);
-        final var unmatched = LlmMessage.unmatchedToolCallIds(
-                messages.subList(Math.min(verificationStart, messages.size()), messages.size()));
         final var dropped = new ArrayList<String>();
-        var changed = false;
-        final var out = new ArrayList<LlmMessage>(messages.size());
+        var out = (List<LlmMessage>) null;
         for (var i = 0; i < messages.size(); i++) {
             final var message = messages.get(i);
-            if (i < verificationStart) {
-                out.add(message); // trusted: agent-loop paired, emit as-is
-                continue;
-            }
             if (message == null) {
-                out.add(message);
+                if (out != null) {
+                    out.add(null);
+                }
                 continue;
             }
             if ("assistant".equals(message.role())
                     && message.toolCalls() != null
                     && !message.toolCalls().isEmpty()) {
+                // collect this block's nonnull ids, then match against the contiguous following tool results
+                final var pending = new HashSet<String>();
+                var overCap = false;
+                for (final var call : message.toolCalls()) {
+                    if (call != null && call.id() != null) {
+                        if (pending.size() < MAX_PENDING_TOOL_IDS) {
+                            pending.add(call.id());
+                        } else {
+                            overCap = true;
+                        }
+                    }
+                }
+                var j = i + 1;
+                while (j < messages.size() && "tool".equals(messages.get(j).role())) {
+                    final var result = messages.get(j).toolCallId();
+                    if (result != null) {
+                        pending.remove(result);
+                    }
+                    j++;
+                }
+                if (overCap) {
+                    // an oversized block cannot be trusted to be fully paired: leave it untouched and keep
+                    // its contiguous results, so the backend can still reject rather than silently corrupt
+                    if (out != null) {
+                        for (var k = i; k < j; k++) {
+                            out.add(messages.get(k));
+                        }
+                    }
+                    i = j - 1;
+                    continue;
+                }
+                if (pending.isEmpty()) {
+                    // all calls answered contiguously; copy the block unchanged
+                    if (out != null) {
+                        for (var k = i; k < j; k++) {
+                            out.add(messages.get(k));
+                        }
+                    }
+                    i = j - 1;
+                    continue;
+                }
+                // some calls are unanswered: strip them; the contiguous results are still preserved below
                 final var kept = new ArrayList<LlmToolCall>(message.toolCalls().size());
                 for (final var call : message.toolCalls()) {
-                    if (call != null && call.id() != null && unmatched.contains(call.id())) {
-                        dropped.add(call.id());
-                    } else {
-                        kept.add(call);
+                    if (call == null || call.id() == null || pending.contains(call.id())) {
+                        if (call != null && call.id() != null && dropped.size() < MAX_DROPPED_SAMPLE_IDS) {
+                            dropped.add(call.id());
+                        }
+                        continue;
                     }
+                    kept.add(call);
+                }
+                if (out == null) {
+                    out = new ArrayList<>(messages.size());
+                    out.addAll(messages.subList(0, i));
                 }
                 if (kept.isEmpty()) {
                     // no surviving call: keep a text-only assistant message (drop the empty toolCalls) so
                     // the plain text answer, if any, is still served
-                    changed = true;
                     out.add(new LlmMessage(
                             message.role(),
                             message.content(),
@@ -706,8 +748,7 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                             null,
                             message.toolCallId(),
                             message.extensions()));
-                } else if (kept.size() != message.toolCalls().size()) {
-                    changed = true;
+                } else {
                     out.add(new LlmMessage(
                             message.role(),
                             message.content(),
@@ -715,50 +756,33 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                             kept,
                             message.toolCallId(),
                             message.extensions()));
-                } else {
-                    out.add(message);
                 }
-            } else if ("tool".equals(message.role()) && message.toolCallId() != null) {
-                // a `tool` result (even an "orphan", with no matching assistant tool_call in this history) is
-                // kept verbatim: strict backends only reject an assistant tool_calls with no response, never a
-                // standalone tool result, and the Responses API permits standalone function_call_output items
-                // (a client-side completion of a call the client already handled/cleared).
-                out.add(message);
-            } else {
-                out.add(message);
-            }
-        }
-        if (!dropped.isEmpty()) {
-            LOGGER.fine(() -> "sanitized " + dropped.size() + " assistant tool call(s) with no contiguously-answered "
-                    + "tool response (OpenAI-compatible backends such as OpenAI, sglang, Azure and litellm reject "
-                    + "an assistant 'tool_calls' with no matching tool response) before sending: " + dropped
-                    + ". The agent loop should repair these inline; this is the wire backstop.");
-        }
-        return changed ? out : messages;
-    }
-
-    /** First index of the region whose tool-call pairing is verified before sending. Mirrors AnthropicDialect. */
-    private static int verificationStart(final List<LlmMessage> messages) {
-        int lastUserPrompt = -1;
-        int lastToolCallsAssistant = -1;
-        for (var i = 0; i < messages.size(); i++) {
-            final var message = messages.get(i);
-            if (message == null) {
+                // copy the streamed (contiguous) tool results that answer the surviving calls verbatim
+                for (var k = i + 1; k < j; k++) {
+                    out.add(messages.get(k));
+                }
+                i = j - 1;
                 continue;
             }
-            if ("user".equals(message.role())) {
-                lastUserPrompt = i;
-            } else if ("assistant".equals(message.role())
-                    && message.toolCalls() != null
-                    && !message.toolCalls().isEmpty()) {
-                lastToolCallsAssistant = i;
+            if (out != null) {
+                out.add(message);
             }
         }
-        if (lastToolCallsAssistant < 0) {
-            return lastUserPrompt + 1;
+        if (dropped.isEmpty()) {
+            return messages; // nothing changed (out is null when unchanged)
         }
-        return Math.max(0, Math.min(lastToolCallsAssistant, lastUserPrompt + 1));
+        LOGGER.fine(() -> "sanitized " + dropped.size() + " assistant tool call(s) with no contiguously-answered "
+                + "tool response (OpenAI-compatible backends such as OpenAI, sglang, Azure and litellm reject "
+                + "an assistant 'tool_calls' with no matching tool response) before sending: " + dropped
+                + ". The agent loop should repair these inline; this is the wire backstop.");
+        return out;
     }
+
+    /** Upper bound on pending tool ids tracked per assistant block during wire sanitization. */
+    private static final int MAX_PENDING_TOOL_IDS = 256;
+
+    /** Upper bound on distinct dropped call ids recorded for the FINE diagnostic log. */
+    private static final int MAX_DROPPED_SAMPLE_IDS = 8;
 
     private LlmResponse toLlmResponse(final Map<String, Object> root) {
         final var messageText = new StringBuilder();
@@ -781,8 +805,10 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                         }
                     } else if ("function_call".equals(type)) {
                         // keep every call: parallel tool calls must land in one assistant message
+                        final var itemId = str(map.get("id"));
+                        final var callId = nonBlank(map.get("call_id")) ? str(map.get("call_id")) : itemId;
                         calls.add(new LlmToolCall(
-                                str(map.get("id")),
+                                callId,
                                 "function",
                                 new LlmToolCall.FunctionCall(str(map.get("name")), str(map.get("arguments"))),
                                 index.getAndIncrement()));
@@ -802,7 +828,8 @@ public class OpenAIResponsesDialect extends AbstractDialect {
         return new LlmResponse(str(root.get("id")), str(root.get("model")), null, List.of(choice), usage, null);
     }
 
-    private List<LlmStreamEvent> mapEvent(final SseParser.Event event, final Set<String> streamedArgIds) {
+    private List<LlmStreamEvent> mapEvent(
+            final SseParser.Event event, final Map<Integer, MutableToolCallState> streamArgState) {
         try {
             final var type = event.event() == null ? "" : event.event();
             if (event.data() == null) {
@@ -827,26 +854,34 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                 }
                 case "response.function_call_arguments.delta" -> {
                     final var text = str(root.get("delta"));
-                    final var callId = str(root.get("item_id"));
                     // use the item's real output_index (not a constant) so the coalescing subscriber
                     // can match this fragment to the output_item that carries the name; index 0 would
                     // collide across tool calls in a multi-call turn and drop the leading arguments
                     // (eg. the 'command' of a bash call), leaving command empty.
                     final var outputIndex = root.get("output_index") instanceof Number n ? n.intValue() : 0;
-                    if (callId != null) {
-                        streamedArgIds.add(callId);
+                    final var state = streamArgState.computeIfAbsent(outputIndex, i -> new MutableToolCallState());
+                    // the delta event carries only item_id (a provisional id, never the canonical call_id):
+                    // record it as a fallback but never overwrite an authoritative id already known.
+                    state.offerItemId(str(root.get("item_id")));
+                    final var id = state.bestId();
+                    // a delta delivery signals the arguments streamed incrementally, so the assembled
+                    // arguments on a later .done / output_item.done must be suppressed, never double-appended.
+                    if (id != null) {
+                        state.markArgumentsDelivered();
                     }
-                    result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, callId, null, text == null ? "" : text));
+                    result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, id, null, text == null ? "" : text));
                 }
                 case "response.function_call_arguments.done" -> {
-                    final var callId = str(root.get("item_id"));
+                    final var outputIndex = root.get("output_index") instanceof Number n ? n.intValue() : 0;
+                    final var state = streamArgState.computeIfAbsent(outputIndex, i -> new MutableToolCallState());
+                    state.offerItemId(str(root.get("item_id")));
                     final var assembled = str(root.get("arguments"));
-                    if (callId != null
-                            && assembled != null
+                    if (assembled != null
                             && !assembled.isEmpty()
-                            && !streamedArgIds.contains(callId)) {
-                        final var outputIndex = root.get("output_index") instanceof Number n ? n.intValue() : 0;
-                        result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, callId, null, assembled));
+                            && !state.argumentsDelivered()
+                            && state.bestId() != null) {
+                        state.markArgumentsDelivered();
+                        result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, state.bestId(), null, assembled));
                     }
                 }
                 case "response.output_item.added", "response.output_item.done" -> {
@@ -856,17 +891,25 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                             // output_item.added carries the name; output_item.done carries the fully
                             // assembled arguments.
                             final var outputIndex = root.get("output_index") instanceof Number n ? n.intValue() : 0;
-                            final var id = str(item.get("id"));
+                            final var state =
+                                    streamArgState.computeIfAbsent(outputIndex, i -> new MutableToolCallState());
+                            // the item carries the authoritative call_id (when present) which upgrades any
+                            // provisional item_id seen on argument-delta events; fall back to item.id for
+                            // gateways that only emit id.
+                            state.offerAuthoritativeCallId(str(item.get("call_id")));
+                            state.offerItemId(str(item.get("id")));
+                            final var id = state.bestId();
                             result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, id, str(item.get("name")), null));
                             final var assembled = str(item.get("arguments"));
                             if ("response.output_item.done".equals(type)
                                     && assembled != null
                                     && !assembled.isEmpty()
                                     && id != null
-                                    && !streamedArgIds.contains(id)) {
+                                    && !state.argumentsDelivered()) {
                                 // no incremental delta was seen for this call: emit the assembled
                                 // arguments so the coalesced tool call is complete (prevents an empty
                                 // 'command is required' failure when a provider skips the delta events).
+                                state.markArgumentsDelivered();
                                 result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, id, null, assembled));
                             }
                         } else if ("response.output_item.done".equals(type) && "reasoning".equals(itemType)) {
@@ -882,7 +925,10 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                         }
                     }
                 }
-                case "response.completed" -> result.add(new LlmStreamEvent.End("stop", terminalUsage(root)));
+                case "response.completed" -> {
+                    streamArgState.clear();
+                    result.add(new LlmStreamEvent.End("stop", terminalUsage(root)));
+                }
                 case "response.incomplete" -> {
                     // Only a genuine output-token exhaustion is a truncation. A response.incomplete
                     // with any other reason (content_filter, max_messages, steered, ...) is NOT the
@@ -892,16 +938,19 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                     // "length"; keep the upstream reason verbatim otherwise so isTruncation() leaves it
                     // alone and the turn can end/route normally.
                     final var incompleteReason = incompleteReason(root);
+                    streamArgState.clear();
                     result.add(new LlmStreamEvent.End(
                             "max_output_tokens".equals(incompleteReason) ? "length" : incompleteReason,
                             terminalUsage(root)));
                 }
-                case "response.failed", "response.error", "error" ->
+                case "response.failed", "response.error", "error" -> {
                     // An HTTP-layer/backend failure is not output-token exhaustion: map it to "error"
                     // (a never-truncating reason) so it is not retried through the truncation path.
                     // The empty-completion retry is bounded separately (emptyCompletionRetriesMax) and
                     // surfaces the real failure to the user instead of pretending it was truncation.
+                    streamArgState.clear();
                     result.add(new LlmStreamEvent.End("error", null));
+                }
                 default -> {
                     // ignore unknown event types
                 }
@@ -910,6 +959,44 @@ public class OpenAIResponsesDialect extends AbstractDialect {
         } catch (final RuntimeException e) {
             warnMapEventFailure("responses", event.data() == null ? null : event.data(), e);
             return List.of();
+        }
+    }
+
+    /**
+     * Per-output-index coalescing state for a streaming Responses tool call, keyed by output index in
+     * {@link #mapEvent(SseParser.Event, Map)}. Tracks the best known neutral tool-call id (an
+     * authoritative {@code call_id} from a function_call item wins over the provisional {@code item_id}
+     * carried by argument-delta events) and whether nonempty argument content has already been delivered,
+     * so the completion events only emit assembled arguments as a fallback and never double-append.
+     */
+    private static final class MutableToolCallState {
+        private String bestId;
+        private boolean argumentsDelivered;
+
+        /** Registers an authoritative {@code call_id}; upgrades any provisional id, never downgrades. */
+        void offerAuthoritativeCallId(final CharSequence callId) {
+            if (callId != null && !callId.isEmpty()) {
+                bestId = callId.toString();
+            }
+        }
+
+        /** Registers a provisional {@code item_id} only when no authoritative id is known yet. */
+        void offerItemId(final CharSequence itemId) {
+            if (bestId == null && itemId != null && !itemId.isEmpty()) {
+                bestId = itemId.toString();
+            }
+        }
+
+        String bestId() {
+            return bestId;
+        }
+
+        boolean argumentsDelivered() {
+            return argumentsDelivered;
+        }
+
+        void markArgumentsDelivered() {
+            argumentsDelivered = true;
         }
     }
 
@@ -1062,5 +1149,11 @@ public class OpenAIResponsesDialect extends AbstractDialect {
             return n.longValue();
         }
         return 0L;
+    }
+
+    /** Whether a value stringifies to a nonblank string. */
+    private static boolean nonBlank(final Object value) {
+        final var s = value == null ? null : value.toString();
+        return s != null && !s.isBlank();
     }
 }

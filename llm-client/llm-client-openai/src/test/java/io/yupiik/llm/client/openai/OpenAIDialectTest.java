@@ -828,6 +828,180 @@ class OpenAIDialectTest {
     }
 
     @Test
+    void responsesDialectStripsOlderDanglingCallOverLaterValidTurns(final JsonMapper mapper) throws Exception {
+        // Regression for the full-history backstop: an unanswered function_call FOLLOWED by several later
+        // completed tool rounds was previously trusted (only the live tail was verified), so the stale call
+        // shipped to the backend and 400'd. The whole serialized history must be validated: the old dangling
+        // call_old is stripped while the later valid call/result pairing survives.
+        server.createContext("/v1/responses", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "{\"id\":\"r1\",\"model\":\"m\",\"output\":[],\"usage\":{}}");
+        });
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var request = new LlmRequest(
+                "m",
+                List.of(
+                        LlmMessage.user("start"),
+                        LlmMessage.assistant("", List.of(LlmToolCall.of("call_old", "grep", "{}"))),
+                        // an interposed user message breaks call_old's contiguity; later turns are valid
+                        LlmMessage.user("next turn"),
+                        LlmMessage.assistant("", List.of(LlmToolCall.of("call_ok", "read", "{}"))),
+                        LlmMessage.tool("call_ok", "result")),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                false,
+                Map.of());
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertFalse(
+                body.contains("\"call_id\":\"call_old\""),
+                "the OLD dangling function_call must be stripped from the full history:\n" + body);
+        assertTrue(
+                body.contains("\"call_id\":\"call_ok\""),
+                "the later valid call/result pairing must be preserved:\n" + body);
+        assertTrue(
+                body.contains("\"type\":\"function_call_output\""),
+                "the later valid tool result must still be emitted:\n" + body);
+    }
+
+    @Test
+    void responsesDialectLoadsNonNullCallIdWhenPresent(final JsonMapper mapper) throws Exception {
+        // Responses function_call items carry BOTH item.id (fc_...) and call_id (call_...); the neutral
+        // tool-call id must be the call_id (the value used to pair function_call_output), not the item id.
+        server.createContext(
+                "/v1/responses",
+                exchange -> respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"r1\",\"model\":\"m\",\"output\":["
+                                + "{\"type\":\"function_call\",\"id\":\"fc_x\",\"call_id\":\"call_x\","
+                                + "\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}],"
+                                + "\"usage\":{}}"));
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final LlmResponse response =
+                dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var calls = response.first().message().toolCalls();
+        assertEquals(1, calls.size());
+        assertEquals("call_x", calls.get(0).id(), "the neutral id must be the call_id, not the item id");
+        assertEquals("read", calls.get(0).function().name());
+    }
+
+    @Test
+    void responsesDialectRoundTripPairsCallIdOnReplay(final JsonMapper mapper) throws Exception {
+        // Full tool round trip against a mock backend: the /responses call returns a function_call whose
+        // call_id differs from its item id, and the NEXT request must replay the call and its result both
+        // using the call_id so the backend sees a valid function_call/function_call_output pairing.
+        final var first = new AtomicReference<Boolean>(null); // null=first, then true once first served
+        server.createContext("/v1/responses", exchange -> {
+            final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            if (first.compareAndSet(null, Boolean.TRUE)) {
+                reqBody.set(body);
+                respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"r1\",\"model\":\"m\",\"output\":["
+                                + "{\"type\":\"function_call\",\"id\":\"fc_z\",\"call_id\":\"call_z\","
+                                + "\"name\":\"grep\",\"arguments\":\"{\\\"pattern\\\":\\\"x\\\"}\"}],"
+                                + "\"usage\":{}}");
+            } else {
+                // second (replay) request: carry the just-returned call and its result
+                reqBody.set(body);
+                respond(exchange, 200, "{\"id\":\"r2\",\"model\":\"m\",\"output\":[],\"usage\":{}}");
+            }
+        });
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final LlmResponse response =
+                dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var calls = response.first().message().toolCalls();
+        assertEquals("call_z", calls.get(0).id(), "the returned call must use the call_id");
+
+        // replay the call + its result in a follow-up request
+        final var replayRequest = new LlmRequest(
+                "m",
+                List.of(
+                        LlmMessage.user("do it again"),
+                        LlmMessage.assistant("", calls),
+                        LlmMessage.tool("call_z", "answer")),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                false,
+                Map.of());
+        dialect.chat(replayRequest).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertTrue(
+                body.contains("\"call_id\":\"call_z\""),
+                "the replayed function_call must reference call_z, not the item id:\n" + body);
+    }
+
+    @Test
+    void responsesDialectStripsOldDanglingCallAcrossLargeHistory(final JsonMapper mapper) throws Exception {
+        // Deterministic large-history correctness: thousands of valid tool rounds plus one OLD dangling call
+        // at the head. The full-history block-local sanitizer must strip the stale call (which the former
+        // live-tail-only backstop trusted) while preserving every later valid round - a single linear pass
+        // with bounded per-block state, not an O(history) set build per request.
+        server.createContext("/v1/responses", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "{\"id\":\"r1\",\"model\":\"m\",\"output\":[],\"usage\":{}}");
+        });
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+
+        final var messages = new java.util.ArrayList<LlmMessage>(4010);
+        messages.add(LlmMessage.user("start"));
+        messages.add(LlmMessage.assistant("", List.of(LlmToolCall.of("old_dangling", "grep", "{}"))));
+        messages.add(LlmMessage.user("broken interposed"));
+        for (var i = 0; i < 2000; i++) {
+            messages.add(LlmMessage.assistant("", List.of(LlmToolCall.of("t" + i, "read", "{}"))));
+            messages.add(LlmMessage.tool("t" + i, "r" + i));
+        }
+        final var request =
+                new LlmRequest("m", messages, null, null, 64, null, null, null, null, null, false, false, Map.of());
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertFalse(
+                body.contains("\"call_id\":\"old_dangling\""),
+                "the OLD dangling call at the head of a large history must be stripped:\n"
+                        + (body.length() > 300 ? body.substring(0, 300) : body));
+        assertTrue(
+                body.contains("\"call_id\":\"t1999\""),
+                "the last valid round must survive the full-history sanitizer:\n"
+                        + (body.length() > 500 ? body.substring(body.length() - 300) : body));
+        assertTrue(
+                body.contains("\"call_id\":\"t0\""),
+                "the first valid round must survive the full-history sanitizer:\n"
+                        + (body.length() > 500 ? body.substring(0, 500) : body));
+    }
+
+    @Test
     void fineLogsWhenSanitizerDropsDanglingToolCall(final JsonMapper mapper) throws Exception {
         // dropped tool blocks must be observable, not silent - FINE-log each dropped id (mirror AnthropicDialect).
         server.createContext("/v1/chat/completions", exchange -> {

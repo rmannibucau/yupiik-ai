@@ -20,12 +20,12 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
+import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.llm.client.LlmHttpFailureException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import java.io.IOException;
-import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -84,7 +84,7 @@ public final class ModelRoundProcessor {
                 // retrying it here is pure waste (same doomed retry, with a backoff sleep, up to the whole
                 // budget). Instead flag the caller (AgentLoop owns the history and repairs it) and rethrow
                 // immediately so the repair runs on the first attempt instead of after a retry storm.
-                if (e instanceof LlmHttpFailureException failure && isToolCallPairingRejected(failure)) {
+                if (e instanceof LlmHttpFailureException failure && ToolCallPairingRepair.isPairingRejection(failure)) {
                     observer.toolCallPairingRejected();
                     throw e;
                 }
@@ -151,22 +151,19 @@ public final class ModelRoundProcessor {
     }
 
     /**
-     * Tells whether an LLM HTTP failure is the Azure/litellm strict-validator rejection of an assistant
-     * {@code tool_calls} block that has no matching {@code tool}-role result ("An assistant message with
-     * 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'..."). This is the
-     * single source of truth for that signature, shared with the caller (AgentLoop) which owns the history
-     * repair. The offending history is unchanged between attempts, so a matching failure must surface on the
-     * first attempt so the caller repairs before it can be retried.
+     * Tells whether an LLM HTTP failure is the strict-validator rejection of an assistant
+     * {@code tool_calls} block that has no matching {@code tool}-role result, on either wire signature
+     * (Azure/litellm "An assistant message with 'tool_calls' must be followed by tool messages responding
+     * to each 'tool_call_id'...", or OpenAI Responses "No tool output found for function call ..."). The
+     * signature check is owned by {@link ToolCallPairingRepair#isPairingRejection} (single source of
+     * truth); this is a delegating convenience for existing callers of the status-code-typed failure. The
+     * offending history is unchanged between attempts, so a matching failure must surface on the first
+     * attempt so the caller repairs before it can be retried.
      *
      * @param e the http failure reported by the provider.
      * @return whether the failure body is a tool-call pairing rejection that the interrupted-tool repair can fix.
      */
     public static boolean isToolCallPairingRejected(final LlmHttpFailureException e) {
-        final var body = e.body() == null ? "" : e.body().toLowerCase(Locale.ROOT);
-        return body.contains("tool_calls")
-                && (body.contains("must be followed")
-                        || body.contains("no response message")
-                        || body.contains("did not have")
-                        || body.contains("without tool messages"));
+        return ToolCallPairingRepair.isPairingRejection(e);
     }
 }
