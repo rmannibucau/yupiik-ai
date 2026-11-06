@@ -151,12 +151,25 @@ class UsageTrackerTest {
         entries.put("yca.provider.providers.0.models.0.contextWindow", "1000000");
         final var cfgOverride = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
         final var pm = new ProviderManager(cfgOverride, mapper);
-        final var tracker = new UsageTracker(pm, client, null, Clock.systemUTC());
+        final var cache = new ContextWindowCache(cfgOverride, mapper, Clock.systemUTC());
+        // seed a detected entry so the assertion below proves the override was not persisted over,
+        // instead of merely observing that an empty cache stayed empty
+        cache.put(
+                "default",
+                "test-model",
+                new ModelsResponse.TokenCount(64_000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "seed"),
+                null,
+                System.currentTimeMillis());
+        final var tracker = new UsageTracker(pm, client, cache, Clock.systemUTC());
         assertEquals(1_000_000, tracker.contextWindowTokenCount().value());
-        // an overflow-triggered shrink must not persist (the override is explicit, not auto)
+        // an overflow-triggered shrink must not persist (the override is absolute, not a fallback)
         tracker.rememberShrinkOnOverflow();
-        // a fresh tracker resolves the same 1M again, never a halved/cached 500k
-        final var fresh = new UsageTracker(pm, client, null, Clock.systemUTC());
+        assertEquals(
+                64_000,
+                cache.getInt("default", "test-model"),
+                "the per-model override must not be persisted as a halved window");
+        // a fresh tracker resolves the same 1M again, never the cached seed
+        final var fresh = new UsageTracker(pm, client, cache, Clock.systemUTC());
         assertEquals(
                 1_000_000,
                 fresh.contextWindowTokenCount().value(),
@@ -233,6 +246,76 @@ class UsageTrackerTest {
                         System.currentTimeMillis());
         modelsStatus = 500;
         assertEquals(64000, tracker().contextWindowTokenCount().value());
+    }
+
+    @Test
+    void overflowAdjustedCacheIsNotAuthoritativeOverFreshDetection() {
+        modelsStatus = 500;
+        final var cache = new ContextWindowCache(configuration, mapper, Clock.systemUTC());
+        final var failing = new UsageTracker(providerManager, client, cache, Clock.systemUTC());
+        assertEquals(
+                ModelsResponse.AUTO_DETECTED_BASELINE,
+                failing.contextWindowTokenCount().value());
+        assertEquals(16_000, failing.rememberShrinkOnOverflow());
+        assertEquals(
+                ModelsResponse.SourceType.OVERFLOW_ADJUSTED,
+                cache.get("default", "test-model").orElseThrow().sourceType());
+
+        modelsStatus = 200;
+        modelsBody = "{\"data\":[{\"id\":\"test-model\",\"context_length\":1000000,\"max_output_length\":393216}]}";
+        final var recovered = new UsageTracker(providerManager, client, cache, Clock.systemUTC());
+        assertEquals(1_000_000, recovered.contextWindowTokenCount().value());
+        assertEquals("explicit", recovered.windowOrigin());
+        assertEquals(1_000_000, cache.getInt("default", "test-model"));
+    }
+
+    @Test
+    void overflowAdjustedCacheIsReportedAsAutoWhenDetectionFails() {
+        modelsStatus = 500;
+        final var cache = new ContextWindowCache(configuration, mapper, Clock.systemUTC());
+        final var failing = new UsageTracker(providerManager, client, cache, Clock.systemUTC());
+        failing.contextWindowTokenCount();
+        failing.rememberShrinkOnOverflow();
+
+        final var recovered = new UsageTracker(providerManager, client, cache, Clock.systemUTC());
+        assertEquals(16_000, recovered.contextWindowTokenCount().value());
+        assertEquals("auto", recovered.windowOrigin());
+        assertEquals(12_000, recovered.usableWindow(), "the provisional fallback is still a conservative 12k");
+    }
+
+    @Test
+    void lastResolutionOriginReflectsTheLatestResolution() {
+        modelsBody = "{\"data\":[{\"id\":\"test-model\",\"context_length\":1000000}]}";
+        final var tracker = tracker();
+        assertEquals(1_000_000, tracker.contextWindowTokenCount().value());
+        assertEquals(1_000_000, tracker.contextWindowTokenCount().value());
+        assertEquals(1_000_000, tracker.contextWindowTokenCount().value());
+        assertEquals("explicit", tracker.windowOrigin());
+
+        tracker.attach(new ChatSettings("default", "unknown-model", null, null));
+        assertEquals(
+                ModelsResponse.AUTO_DETECTED_BASELINE,
+                tracker.contextWindowTokenCount().value());
+        assertEquals(
+                "auto",
+                tracker.windowOrigin(),
+                "the latest fallback must not be hidden by earlier explicit resolutions");
+    }
+
+    @Test
+    void overflowAdjustedCacheIsNotAuthoritativeForBackgroundModels() {
+        final var cache = new ContextWindowCache(configuration, mapper, Clock.systemUTC());
+        cache.put(
+                "default",
+                "test-model",
+                new ModelsResponse.TokenCount(
+                        16_000, false, ModelsResponse.SourceType.OVERFLOW_ADJUSTED, "auto-baseline-halved"),
+                null,
+                System.currentTimeMillis());
+        modelsBody = "{\"data\":[{\"id\":\"test-model\",\"context_length\":1000000}]}";
+
+        final var tracker = new UsageTracker(providerManager, client, cache, Clock.systemUTC());
+        assertEquals(980_000, tracker.usableWindowForModel("$default/test-model"));
     }
 
     @Test
@@ -522,13 +605,13 @@ class UsageTrackerTest {
                     tracker.contextWindowTokenCount().value());
             assertEquals("auto", tracker.windowOrigin());
             // auth recovers (user ran /codex login) and the short anti-spam window elapses: the next
-            // resolution must retry and succeed, never stay pinned to the baseline for a day
+            // resolution must retry and succeed, never stay pinned to the baseline
             recovered.set(true);
             now.addAndGet(61_000);
             assertEquals(
                     272_000,
                     tracker.contextWindowTokenCount().value(),
-                    "an auth failure must not arm the 24h backoff: detection retries after login");
+                    "an auth failure must not arm the long backoff: detection retries after login");
             assertEquals("explicit", tracker.windowOrigin());
         } finally {
             client.close();
@@ -536,8 +619,30 @@ class UsageTrackerTest {
     }
 
     @Test
-    void permanentFailureStillBacksOffForADay() throws Exception {
+    void detectionFailureBacksOffBriefly() throws Exception {
         final var calls = new AtomicInteger();
+        final var now = new AtomicLong(System.currentTimeMillis());
+        final Clock clock = new Clock() {
+            @Override
+            public long millis() {
+                return now.get();
+            }
+
+            @Override
+            public Instant instant() {
+                return Instant.ofEpochMilli(now.get());
+            }
+
+            @Override
+            public ZoneId getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(final ZoneId zone) {
+                return this;
+            }
+        };
         final var client = new ChatClient(configuration(-1), mapper, providerManager, Clock.systemUTC(), httpClient) {
             @Override
             public ModelsResponse models(final ChatSettings s) {
@@ -547,20 +652,19 @@ class UsageTrackerTest {
         };
         try {
             final var tracker = new UsageTracker(
-                    providerManager,
-                    client,
-                    new ContextWindowCache(configuration, mapper, Clock.systemUTC()),
-                    Clock.systemUTC());
+                    providerManager, client, new ContextWindowCache(configuration, mapper, Clock.systemUTC()), clock);
             assertEquals(
                     ModelsResponse.AUTO_DETECTED_BASELINE,
                     tracker.contextWindowTokenCount().value());
             assertEquals(
                     ModelsResponse.AUTO_DETECTED_BASELINE,
                     tracker.contextWindowTokenCount().value());
+            assertEquals(1, calls.get(), "a detection failure must not re-attempt on every resolution");
+            now.addAndGet(6L * 60L * 1000L);
             assertEquals(
-                    1,
-                    calls.get(),
-                    "a permanent detection failure must not re-attempt on every resolution (24h backoff)");
+                    ModelsResponse.AUTO_DETECTED_BASELINE,
+                    tracker.contextWindowTokenCount().value());
+            assertEquals(2, calls.get(), "a transient detection failure must retry after the short backoff");
         } finally {
             client.close();
         }

@@ -87,11 +87,14 @@ public class ContextWindowCache {
     /**
      * The cached window even when older than the TTL: a day-stale figure is a far better fallback
      * than the conservative auto baseline when a fresh detection fails (provider unreachable, auth
-     * pending). Only valid entries are returned - never expired-then-halved overflow adjustments
-     * beyond their usefulness, which is left to the caller to judge.
+     * pending). Overflow-adjusted entries are excluded: they are provisional guesses derived from a
+     * fallback window, not a detected value, so they must never become an authoritative stale fallback.
      */
     public Optional<ModelsResponse.TokenCount> getStale(final String providerId, final String model) {
-        return getEntry(providerId, model, true).map(Entry::window);
+        return getEntry(providerId, model, true)
+                .filter(entry -> entry.window() != null
+                        && entry.window().sourceType() != ModelsResponse.SourceType.OVERFLOW_ADJUSTED)
+                .map(Entry::window);
     }
 
     private Optional<Entry> getEntry(final String providerId, final String model) {

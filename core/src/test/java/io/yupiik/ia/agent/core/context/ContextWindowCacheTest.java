@@ -106,6 +106,35 @@ class ContextWindowCacheTest {
     }
 
     @Test
+    void staleOverflowAdjustmentIsNotReturnedAsADetectedFallback(final JsonMapper mapper) {
+        final var cache = cache(mapper);
+        final var expired = now() - 25L * 60L * 60L * 1000L;
+        cache.put(
+                "freeinference",
+                "deepseek-v4-flash",
+                new ModelsResponse.TokenCount(
+                        16_000, false, ModelsResponse.SourceType.OVERFLOW_ADJUSTED, "auto-baseline-halved"),
+                null,
+                expired);
+        assertEquals(
+                Optional.empty(),
+                cache.getStale("freeinference", "deepseek-v4-flash"),
+                "a stale overflow adjustment must not become an authoritative fallback");
+
+        cache.put(
+                "freeinference",
+                "glm-5.3",
+                new ModelsResponse.TokenCount(
+                        272_000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "/context_window"),
+                null,
+                expired);
+        assertEquals(
+                Optional.of(272_000),
+                cache.getStale("freeinference", "glm-5.3").map(ModelsResponse.TokenCount::value),
+                "a stale detected window is still better than the conservative baseline");
+    }
+
+    @Test
     void distinctProvidersAndModelsArePreserved(final JsonMapper mapper) throws Exception {
         final var cache = cache(mapper);
         cache.put(

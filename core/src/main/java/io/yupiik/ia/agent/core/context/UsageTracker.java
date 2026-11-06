@@ -53,20 +53,20 @@ public class UsageTracker {
     private final AtomicLong optimizedCharsBefore = new AtomicLong();
     private final AtomicLong optimizedCharsAfter = new AtomicLong();
     protected final Clock clock;
-    private final AtomicLong contextWindowResolutions = new AtomicLong();
-    private final AtomicLong autoContextWindowResolutions = new AtomicLong();
+    /** Whether the most recent context-window resolution used a fallback rather than a configured/detected value. */
+    private volatile boolean lastResolutionAuto;
     /**
-     * Retention window for a failed auto-detection of the context window, matching
-     * {@link ContextWindowCache}'s one-day dedup dimension so a flaky/unreachable {@code /v1/models}
-     * does not re-fail (and re-warn) on every resolution but at most once per day.
+     * Anti-spam window for a failed auto-detection of the context window: a flaky/unreachable
+     * {@code /v1/models} must not re-fail (and re-warn) on every resolution, but a transient outage
+     * must still recover within minutes instead of pinning the conservative baseline.
      */
-    private static final long DETECTION_FAILURE_TTL_MILLIS = 24L * 60L * 60L * 1000L;
+    private static final long DETECTION_FAILURE_TTL_MILLIS = 5L * 60L * 1000L;
     /**
      * Anti-spam window for auth-related detection failures ({@code CodexNotAuthenticatedException}):
-     * unlike permanent failures these are recoverable within the session (the user can run
-     * {@code /codex login}), so retrying after a short backoff is correct; arming the 24h permanent
-     * backoff here pinned the conservative auto baseline for a whole day and inflated the displayed
-     * context usage (historical 1341% bug).
+     * unlike other failures these are recoverable within the session (the user can run
+     * {@code /codex login}), so retrying after a short backoff is correct; arming the long failure
+     * backoff here pinned the conservative auto baseline and inflated the displayed context usage
+     * (historical 1341% bug).
      */
     private static final long AUTH_DETECTION_RETRY_TTL_MILLIS = 60_000L;
     /** Last time auto-detection of the context window failed for a (provider id, model) key. */
@@ -336,23 +336,25 @@ public class UsageTracker {
         }
         final var providerId = current.id() == null || current.id().isBlank() ? "default" : current.id();
         final var cached = contextWindowCache.get(providerId, model);
-        if (cached.isPresent()) {
+        if (cached.isPresent() && !isOverflowAdjusted(cached.get())) {
             return rememberExplicit(cached.get());
         }
-        if (failedAutoDetectionRecently(providerId, model)) {
-            return rememberAuto(new ModelsResponse.TokenCount(
-                    ModelsResponse.AUTO_DETECTED_BASELINE,
-                    false,
-                    ModelsResponse.SourceType.AUTO_BASELINE,
-                    "auto-baseline"));
+        if (!failedAutoDetectionRecently(providerId, model)) {
+            final var detected = detectTokenCount(providerId, model);
+            if (detected.isPresent()) {
+                return rememberExplicit(detected.get());
+            }
         }
-        return detectTokenCount(providerId, model)
-                .map(this::rememberExplicit)
-                .orElseGet(() -> rememberAuto(new ModelsResponse.TokenCount(
-                        ModelsResponse.AUTO_DETECTED_BASELINE,
-                        false,
-                        ModelsResponse.SourceType.AUTO_BASELINE,
-                        "auto-baseline")));
+        if (cached.isPresent()) {
+            // a provisional value learned from an overflow is better than the generic baseline, but it
+            // must be reported as auto so the next successful detection can replace it
+            return rememberAuto(cached.get());
+        }
+        return rememberAuto(new ModelsResponse.TokenCount(
+                ModelsResponse.AUTO_DETECTED_BASELINE,
+                false,
+                ModelsResponse.SourceType.AUTO_BASELINE,
+                "auto-baseline"));
     }
 
     /**
@@ -463,13 +465,16 @@ public class UsageTracker {
         }
         final var providerId = providerId(provider);
         final var cached = contextWindowCache.get(providerId, model);
-        if (cached.isPresent()) {
+        if (cached.isPresent() && !isOverflowAdjusted(cached.get())) {
             return cached.get();
         }
-        if (failedAutoDetectionRecently(providerId, model)) {
-            return null;
+        if (!failedAutoDetectionRecently(providerId, model)) {
+            final var detected = detectTokenCount(providerId, model);
+            if (detected.isPresent()) {
+                return detected.get();
+            }
         }
-        return detectTokenCount(providerId, model).orElse(null);
+        return cached.orElse(null);
     }
 
     /**
@@ -534,33 +539,29 @@ public class UsageTracker {
 
     /**
      * Whether the last {@link #contextWindowTokenCount()} resolution (if any) fell back to the auto-detected
-     * baseline rather than an explicit/explicitly detected value. Useful to avoid spamming a
-     * 'context window auto-detected' notice on every turn.
+     * baseline or a provisional overflow-adjusted value rather than an explicit/explicitly detected value.
+     * Useful to avoid spamming a 'context window auto-detected' notice on every turn.
      */
     public boolean lastResolutionWasAuto() {
-        return autoContextWindowResolutions.get() > 0
-                && autoContextWindowResolutions.get() >= contextWindowResolutions.get();
+        return lastResolutionAuto;
     }
 
     /**
      * Where the last {@link #contextWindowTokenCount()} resolution came from: {@code "explicit"} for a
      * provider-configured or vendor-detected/cached value, {@code "auto"} for the
-     * {@link ModelsResponse#AUTO_DETECTED_BASELINE} fallback. Ordered after
-     * {@link #lastResolutionWasAuto()} so a pending detection first call still reports the
-     * resolution it would pick.
+     * {@link ModelsResponse#AUTO_DETECTED_BASELINE} fallback or a provisional overflow-adjusted value.
      */
     public String windowOrigin() {
         return lastResolutionWasAuto() ? "auto" : "explicit";
     }
 
     private ModelsResponse.TokenCount rememberExplicit(final ModelsResponse.TokenCount window) {
-        contextWindowResolutions.incrementAndGet();
+        lastResolutionAuto = false;
         return window;
     }
 
     private ModelsResponse.TokenCount rememberAuto(final ModelsResponse.TokenCount window) {
-        contextWindowResolutions.incrementAndGet();
-        autoContextWindowResolutions.incrementAndGet();
+        lastResolutionAuto = true;
         return window;
     }
 
@@ -574,12 +575,10 @@ public class UsageTracker {
 
     /**
      * Learns from a {@code ContextWindowExceededException}: the assumed window was too high, so
-     * halve it and return the corrected value so the overflow-compaction retry runs against a
-     * window the provider can actually satisfy. When the current resolution came from the auto
-     * baseline (no explicit provider/config/vendor figure), the corrected value is also persisted so
-     * later turns benefit; for explicitly configured/detected windows the felt value is only used
-     * for this overflow retry, avoiding a long-lived half-window for a provider that transiently
-     * overflowed. No-op when the cache/client is unavailable.
+     * halve it and return the corrected value. When the current window is not absolute (a fallback
+     * or relative estimate rather than a configured/vendor-declared absolute limit), the corrected
+     * value is also persisted so later turns benefit; absolute windows are left untouched so the
+     * provider/config figure remains authoritative. No-op when the cache/client is unavailable.
      *
      * @return the new (halved) window, or the current window if it could not be adjusted.
      */
@@ -587,15 +586,15 @@ public class UsageTracker {
         if (chatClient == null || contextWindowCache == null) {
             return contextWindowTokenCount().value();
         }
-        final var current = providerManager == null ? null : providerManager.current();
+        final var current = currentProvider();
         if (current == null) {
             return contextWindowTokenCount().value();
         }
-        final var model = current.model();
+        final var model = currentModel(current);
         if (model == null || model.isBlank()) {
             return contextWindowTokenCount().value();
         }
-        final var providerId = current.id() == null || current.id().isBlank() ? "default" : current.id();
+        final var providerId = providerId(current);
         final var currentWindow = contextWindowTokenCount();
         final var halvedValue = Math.max(4_096, currentWindow.value() / 2);
         final var halved = new ModelsResponse.TokenCount(
@@ -616,12 +615,17 @@ public class UsageTracker {
         return halvedValue;
     }
 
+    /** An overflow adjustment is a provisional guess, never an authoritative detected/configured value. */
+    private static boolean isOverflowAdjusted(final ModelsResponse.TokenCount window) {
+        return window != null && window.sourceType() == ModelsResponse.SourceType.OVERFLOW_ADJUSTED;
+    }
+
     private Optional<ModelsResponse.TokenCount> detectTokenCount(final String providerId, final String model) {
         try {
             // session-aware: resolve against the session's provider (per-tab selection), not the
             // process-current one - a null settings made the /models call target the wrong provider
-            // (whose catalog does not contain the session model), arming a bogus 24h backoff keyed
-            // to this (providerId, model) and pinning the conservative auto baseline
+            // (whose catalog does not contain the session model), arming a bogus detection backoff
+            // keyed to this (providerId, model) and pinning the conservative auto baseline
             final var response = chatClient.models(settings);
             if (response == null || response.data() == null) {
                 return Optional.empty();
@@ -640,7 +644,7 @@ public class UsageTracker {
         } catch (final CodexNotAuthenticatedException e) {
             // recoverable within the session (login can happen after the first resolution attempt):
             // only apply a short anti-spam backoff so the detection retries once the user signs in,
-            // unlike a permanent failure which must not re-fail on every resolution for a day
+            // unlike a transient failure which must not re-fail on every resolution
             authDetectionFailedAt.put(new Key(providerId, model), clock.millis());
             LOGGER.log(
                     Level.INFO,
@@ -656,7 +660,7 @@ public class UsageTracker {
                     () -> "Context window auto-detection failed for " + providerId + "/" + model
                             + " (" + e.getClass().getSimpleName() + ")"
                             + "; falling back to conservative default " + ModelsResponse.AUTO_DETECTED_BASELINE
-                            + " (no retry within 24h)");
+                            + " (no retry for 5 minutes)");
             return staleWindow(providerId, model);
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
