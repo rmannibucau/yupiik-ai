@@ -79,6 +79,39 @@ main-model fallback) skips the pass and keeps the raw context so the next
 automatic compaction retries from a clean state, unless the compaction was
 requested with the `urgent` option below.
 
+The summarizer is the biggest continuous background cost yca pays, so several
+defaults keep it cheap:
+
+* **Incremental input.** A repeated compaction re-sums only the *delta*: the
+  previous digest body is fed once as prior state and only the messages that
+  arrive after the last recognized whole-message `<compacted-context>` digest
+  are re-sent as new events. The original transcript is not resent, digest
+  texts are never stacked, and ordinary tool/assistant/prose messages are never
+  dropped (only a complete, whole-message digest is treated as covered state).
+* **Finite output budget.** Each summarizer call carries a default
+  `max_tokens` of `8192` (independent of the character-based `digestChars`
+  caps); set `yca.model.compact.max_tokens` (or a per-provider compact tuning)
+  to override. A reasoning model with a shared output budget counts its
+  reasoning against this budget.
+* **One transient retry.** The compaction retry default is
+  `yca.compaction.retriesMaxAttempts=2` - one initial attempt plus one
+  transient retry per chunk. Context-sizing failures are recovered by the
+  chunk-halving restart, not by this budget.
+* **Low reasoning on Codex.** When the summarizer targets a Codex backend and
+  no explicit `yca.model.compact.reasoningEffort` (or raw extra) is set, the
+  effort defaults to `low`. Non-Codex APIs are left to their own effort
+  defaults (an unsupported field is never forced on the wire).
+* **Cache-stable prompt.** The full static instruction plus the output template
+  live in the fixed system prompt, so every summarizer call shares the same
+  byte-identical prefix while the user message carries only the varying prior
+  state + new events + focus + chunk metadata. This favors provider-side prompt
+  caching, though yca makes no guarantee a given provider actually caches it.
+
+The multi-chunk rolling digest is a *replacement*, never an accumulation: each
+chunk's successful merge output replaces the running state, and only the
+latest merge survives in the single output digest (the previous context is
+folded inside it, never re-prepended textually).
+
 === LLM-free compaction mode
 
 When a provider must never pay a summarizer call, set the global
@@ -169,6 +202,13 @@ takes precedence over the buffer trigger (`0` = buffer mode).
 only local strategies (prune, splice, dedup/supersede/purge) and never
 calls a model, `auto` resolves to `llm`. Per-provider override:
 `providers.<id>.compaction.mode` (`auto` inherits the global).
+
+|`yca.compaction.retriesMaxAttempts`
+|`2`
+|Transient retries of the compaction summarizer (one initial attempt plus one
+retry per chunk); `yca.llm.retriesMaxAttempts` keeps applying to conversation
+calls. Per-provider override: `providers.<id>.compaction.retriesMaxAttempts`.
+Context-sizing failures are recovered by chunk halving, not this budget.
 |===
 
 === Window sizing examples

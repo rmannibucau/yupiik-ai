@@ -615,4 +615,72 @@ class AdaptiveCompactionTest {
             assertEquals(!"false".equals(override), calls.contains("$main/main-model"), override + ": " + calls);
         }
     }
+
+    /** The default {@code yca.compaction.retriesMaxAttempts} is 2 (1 initial + 1 transient retry per chunk). */
+    @Test
+    void defaultCompactionRetriesIsTwoAttempts() {
+        // no explicit compaction retries: the compaction default (2) applies, NOT the larger
+        // conversation default yca.llm.retriesMaxAttempts (set to 4 here to prove compaction is scoped)
+        final var cfg = config(
+                128_000,
+                Map.of(
+                        "yca.compaction.summarizer.chunkChars", "2000",
+                        "yca.llm.retriesMaxAttempts", "4"));
+        final var attempts = new AtomicInteger();
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                attempts.incrementAndGet();
+                throw new IOException("500 transient");
+            }
+        };
+        final var manager = new ContextManager(
+                cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()), coordinator(cfg, chat));
+        final var result = manager.compact(oldHeavyHistory(4, 300), true);
+        assertEquals(CompactionResult.Mode.NONE, result.mode(), "transient failure must skip, not truncate");
+        assertEquals(
+                2,
+                attempts.get(),
+                "one initial attempt + one transient retry = the default compaction budget (2), scoped from yca.llm");
+    }
+
+    /** Across multiple chunks the rolling digest is REPLACED, never accumulated: only the latest merge survives. */
+    @Test
+    void multiChunkRollingStateReplacesNotAppends() {
+        final var calls = new AtomicInteger();
+        final var cfg = config(
+                128_000,
+                Map.of(
+                        "yca.compaction.summarizer.chunkChars", "400",
+                        "yca.compaction.summarizer.minChunkChars", "200"));
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
+                final var n = calls.incrementAndGet();
+                return new ChatResult(Message.assistant("merge-chunk-" + n, null), Usage.EMPTY);
+            }
+        };
+        final var manager = new ContextManager(
+                cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()), coordinator(cfg, chat));
+        final var result = manager.compact(oldHeavyHistory(30, 200), true);
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+        assertTrue(calls.get() >= 2, "a multi-chunk history must make several summarizer calls: " + calls.get());
+        final var digest = result.messages().stream()
+                .filter(m -> m.content() instanceof String s && s.contains("<compacted-context>"))
+                .map(m -> String.valueOf(m.content()))
+                .findFirst()
+                .orElseThrow();
+        // replace semantics: only the LAST merge result is the digest, earlier per-chunk lines are gone
+        assertTrue(digest.contains("merge-chunk-" + calls.get()), "the digest must reflect the LATEST merge");
+        assertFalse(
+                digest.contains("merge-chunk-1"),
+                "replace semantics must drop earlier per-chunk lines, not accumulate them");
+    }
 }

@@ -66,12 +66,15 @@ public record CompactionConfiguration(
         boolean fallbackToMainModel,
 
         @Property(
-                defaultValue = "3",
+                defaultValue = "2",
                 documentation =
                         "Retry budget of the compaction summarizer (the coordinator-owned retry loop). Scoped: this "
                                 + "value feeds the compaction retries only; conversation requests keep yca.llm.retriesMaxAttempts. "
                                 + "Because the coordinator is the single retry authority (the resilience wrapper skips its "
                                 + "own retry loop for summarizer calls), this is the only retry budget compaction pays. "
+                                + "The default of 2 means one initial attempt plus one transient retry per chunk (a larger "
+                                + "value is a per-operation multiple but still costs one call per attempt); context-sizing "
+                                + "failures are recovered by the chunk-halving restart, not by this budget. "
                                 + "A per-provider compaction.retriesMaxAttempts overrides it; must be >= 1.")
         int retriesMaxAttempts,
 

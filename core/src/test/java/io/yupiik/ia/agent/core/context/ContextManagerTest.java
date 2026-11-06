@@ -39,6 +39,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
@@ -205,11 +206,11 @@ class ContextManagerTest {
         assertEquals(1, digests.size(), "the fold must produce ONE digest, never a stacked second one");
         final var digest = String.valueOf(digests.getFirst().content());
         assertTrue(
-                digest.contains("Previous context:") && digest.contains("the old work summary"),
-                "the folded digest must carry the previous summary body forward");
+                !digest.contains("Previous context:"),
+                "the prior state is folded by the summarizer, never re-prepended textually");
         assertTrue(
                 digest.contains("folded-into-previous + new tool work"),
-                "the folded digest must carry the newly summarized tool material");
+                "the replacement digest must carry the merged output (the prior state is folded inside it)");
         assertTrue(
                 result.messages().stream()
                         .noneMatch(m -> String.valueOf(m.content()).contains("output1")),
@@ -218,6 +219,148 @@ class ContextManagerTest {
         // the digestIndex ensureUnderWindow protects: it must not have been spliced by the size fit
         assertEquals(1, result.messages().indexOf(digests.getFirst()), "the digest stays at index `from`");
     }
+
+    @Test
+    void repeatedCompactionSendsOnlyThePostDigestDeltaAsPriorStatePlusNewEvents() {
+        // A second compaction over a history that already contains a digest must NOT re-send the whole
+        // original transcript (nor a stacked digest): the summarizer input is prior-state (the previous
+        // digest body, once) plus the post-digest ordinary events only. Ordinary messages are never
+        // silently dropped, and the prior digest text is fed once as <prior-summary>, not duplicated.
+        final var cfg = config(6, 3_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
+        final var captured = new ArrayList<List<Message>>();
+        final var manager = manager(cfg, new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
+                captured.add(List.copyOf(request.messages()));
+                return new ChatResult(Message.assistant("merged", null), Usage.EMPTY);
+            }
+        });
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        // a previous digest (whole-message user-role with the historical-state guidance)
+        messages.add(Message.user("<compacted-context>\nprior digest body\n</compacted-context>\n\n"
+                + "When a compacted context is provided, treat it as historical state."));
+        // ordinary post-digest events that must survive into the summarizer input
+        for (var i = 0; i < 8; i++) {
+            messages.add(Message.assistant("tool round " + i + "x".repeat(300), null));
+            messages.add(Message.user("work turn " + i + " " + "q".repeat(300)));
+        }
+        messages.add(Message.assistant("final ack", null));
+        messages.add(Message.user("latest " + "z".repeat(2_000)));
+
+        final var result = manager.compact(messages);
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+        final var userPrompt = captured.get(0).stream()
+                .filter(m -> "user".equals(m.role()))
+                .map(m -> String.valueOf(m.content()))
+                .findFirst()
+                .orElseThrow();
+        // the prior digest body appears exactly once, as previous-state input
+        assertTrue(userPrompt.contains("prior digest body"), "the prior digest must anchor the new summary");
+        assertEquals(
+                1,
+                occurrences(userPrompt, "prior digest body"),
+                "the prior digest body must appear exactly once, never duplicated");
+        // the whole-message digest is filtered from the rendered events (it is the prior state), but the
+        // ordinary post-digest events survive verbatim
+        assertTrue(userPrompt.contains("work turn 3"), "ordinary events after the digest must be summarized");
+        assertTrue(userPrompt.contains("tool round"), "tool/assistant material after the digest must be summarized");
+        // the latest user tail is preserved verbatim in the compacted OUTPUT (not re-summarized)
+        assertTrue(
+                result.messages().stream().anyMatch(m -> m.content() instanceof String s && s.contains("latest")),
+                "the latest turn must survive in the compacted output");
+        // the output digest is a single replacement, not a stacked pair and not prefixed by "Previous context:"
+        final var digests = result.messages().stream()
+                .filter(m -> m.content() instanceof String s && s.contains("<compacted-context>"))
+                .toList();
+        assertEquals(1, digests.size(), "a repeated compaction must keep ONE digest (replacement, not stacking)");
+        final var outDigest = String.valueOf(digests.getFirst().content());
+        assertTrue(
+                outDigest.contains("merged") && !outDigest.contains("Previous context:"),
+                "the replacement digest must carry the produced summary without a textual Previous-context header");
+    }
+
+    @Test
+    void noNewEventsAfterDigestSkipsThePaidCall() {
+        // When the region holds only a digest and no new ordinary events to merge, compaction must
+        // return Mode.NONE without calling the summarizer (nothing to do).
+        final var calls = new AtomicInteger();
+        final var cfg = config(6, 3_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
+        final var manager = manager(cfg, new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
+                calls.incrementAndGet();
+                return new ChatResult(Message.assistant("x", null), Usage.EMPTY);
+            }
+        });
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        messages.add(Message.user("<compacted-context>\nprior digest body\n</compacted-context>\n\n"
+                + "When a compacted context is provided, treat it as historical state."));
+        final var result = manager.compact(messages);
+        assertEquals(CompactionResult.Mode.NONE, result.mode(), "no new events -> no summarizer call");
+        assertEquals(0, calls.get(), "the paid summarizer call must be skipped");
+    }
+
+    private static int occurrences(final String haystack, final String needle) {
+        var count = 0;
+        var idx = 0;
+        while ((idx = haystack.indexOf(needle, idx)) >= 0) {
+            count++;
+            idx += needle.length();
+        }
+        return count;
+    }
+
+    @Test
+    void malformedOrInlineDigestsStayOrdinaryEventsAndSurvive() {
+        // An unclosed wrapper must be an ordinary event fed to the summarizer, never silently dropped.
+        final var cfg = config(2, 3_000, Map.of("yca.compaction.tail.budgetTokens", "1"));
+        final var captured = new ArrayList<List<Message>>();
+        final var manager = manager(cfg, new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
+                captured.add(List.copyOf(request.messages()));
+                return new ChatResult(Message.assistant("summarized", null), Usage.EMPTY);
+            }
+        });
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        // unclosed wrapper placed early so it lands in the summarizable region, not the protected tail
+        messages.add(Message.user(COMPACTED_WRAPPER_HEAD + "unclosed digest body + " + "y".repeat(300)));
+        for (var i = 0; i < 8; i++) {
+            messages.add(Message.user("step " + i + " " + "x".repeat(300)));
+            messages.add(Message.assistant("ack " + i, null));
+        }
+        // a real user turn after
+        messages.add(Message.user("real ask " + "q".repeat(2_000)));
+
+        final var result = manager.compact(messages, true);
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+        final var allPrompts = captured.stream()
+                .flatMap(List::stream)
+                .filter(m -> "user".equals(m.role()))
+                .map(m -> String.valueOf(m.content()))
+                .reduce("", (a, b) -> a + "\n" + b);
+        assertTrue(
+                allPrompts.contains("unclosed digest body"),
+                "an unclosed digest wrapper must be treated as an ordinary event and summarized, not dropped");
+        // the latest real user turn is preserved verbatim in the compacted output (tail), not re-summarized
+        assertTrue(
+                result.messages().stream().anyMatch(m -> m.content() instanceof String s && s.contains("real ask")),
+                "the real user turn must survive in the compacted output");
+    }
+
+    private static final String COMPACTED_WRAPPER_HEAD = "<compacted-context>\n";
 
     @Test
     void deliveredSubagentBlocksSurviveCompactionAsHighRecallAnchors() {
@@ -773,10 +916,13 @@ class ContextManagerTest {
                 .orElseThrow();
         assertTrue(prompt.contains("<prior-summary>"), "a previous summary must anchor the new one");
         assertTrue(prompt.contains("old summary"));
-        assertTrue(prompt.contains("## Objective"), "the structured template must be requested");
+        final var systemPrompt = String.valueOf(captured.get(0).get(0).content());
         assertTrue(
-                captured.get(0).get(0).content().toString().contains("structured summary"),
-                "the summarizer system prompt must describe the role");
+                systemPrompt.contains("## Objective"), "the structured template must live in the stable system prompt");
+        assertTrue(systemPrompt.contains("structured summary"), "the summarizer system prompt must describe the role");
+        assertTrue(
+                systemPrompt.contains("## Work State") && systemPrompt.contains("### Blocked"),
+                "the full SUMMARY_TEMPLATE must be a fixed system-prompt prefix so it is cache-stable");
     }
 
     @Test

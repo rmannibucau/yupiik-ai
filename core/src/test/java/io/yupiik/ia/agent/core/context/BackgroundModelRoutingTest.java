@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.context;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -284,6 +285,147 @@ class BackgroundModelRoutingTest {
         assertTrue(
                 chat.requestedModels().stream().anyMatch(m -> "deepseek-v4-flash".equals(m)),
                 "the session model must be requested: " + chat.requestedModels());
+    }
+
+    @Test
+    void summarizerRequestCarriesTheDefaultOutputBudgetAndNoEffortOnNonCodexTargets() {
+        final var cfg = twoProviderConfig(null);
+        final var captured = new ArrayList<ChatCompletionRequest>();
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
+                captured.add(request);
+                return new ChatResult(Message.assistant("summary", null), Usage.EMPTY);
+            }
+        };
+        final var coordinator = new CompactionCoordinator(
+                cfg,
+                chat,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                providerManager(cfg),
+                null,
+                "s1",
+                new BackoffSleeper());
+        final var result = coordinator.compact(
+                longHistory(), true, null, 0, () -> false, new ChatSettings("main", "main-model", null, null));
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode(), result.error());
+        assertFalse(captured.isEmpty());
+        for (final var request : captured) {
+            assertEquals(
+                    Integer.valueOf(8192),
+                    request.maxTokens(),
+                    "an unset compact tuning maxTokens must default to the finite summarizer budget");
+            assertNull(request.reasoningEffort(), "a non-Codex target must not have an effort forced on it");
+        }
+    }
+
+    @Test
+    void explicitCompactTuningMaxTokensAndEffortOverrideTheDefaults() {
+        final var cfg = jsonConfig("$main/main-model", null, null);
+        // add an explicit compact tuning: maxTokens and reasoningEffort must be preserved
+        final var entries = new HashMap<String, String>();
+        entries.put("yca.storageHome", "x");
+        entries.put("yca.workingDir", ".");
+        entries.put("yca.model.compact.name", "$main/main-model");
+        entries.put("yca.model.compact.max_tokens", "4096");
+        entries.put("yca.model.compact.reasoningEffort", "high");
+        entries.put("yca.provider.providers.0.id", "main");
+        entries.put("yca.provider.providers.0.baseUrl", "https://main.example/v1/chat/completions");
+        entries.put("yca.provider.providers.0.apiKey", "");
+        entries.put("yca.provider.providers.0.model", "main-model");
+        entries.put("yca.provider.providers.0.api", "auto");
+        entries.put("yca.provider.providers.0.contextWindow", "128000");
+        entries.put("yca.provider.providers.0.timeoutSeconds", "120");
+        entries.put("yca.provider.providers.1.id", "cheap");
+        entries.put("yca.provider.providers.1.baseUrl", "https://cheap.example/v1/chat/completions");
+        entries.put("yca.provider.providers.1.apiKey", "");
+        entries.put("yca.provider.providers.1.model", "deepseek-v4-flash");
+        entries.put("yca.provider.providers.1.api", "auto");
+        entries.put("yca.provider.providers.1.contextWindow", "128000");
+        entries.put("yca.provider.providers.1.timeoutSeconds", "120");
+        entries.put("yca.compaction.tail.budgetTokens", "1");
+        entries.put("yca.pruning.keepRecent", "1");
+        final var explicitCfg = TestConfigs.codingAgent(entries);
+        final var captured = new ArrayList<ChatCompletionRequest>();
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
+                captured.add(request);
+                return new ChatResult(Message.assistant("summary", null), Usage.EMPTY);
+            }
+        };
+        final var coordinator = new CompactionCoordinator(
+                explicitCfg,
+                chat,
+                new UsageTracker(providerManager(explicitCfg), chat, null, Clock.systemUTC()),
+                providerManager(explicitCfg),
+                null,
+                "s1",
+                new BackoffSleeper());
+        final var result = coordinator.compact(
+                longHistory(), true, null, 0, () -> false, new ChatSettings("main", "main-model", null, null));
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode(), result.error());
+        assertFalse(captured.isEmpty());
+        // an explicit positive tuning maxTokens always wins over the 8192 default
+        assertEquals(Integer.valueOf(4096), captured.getFirst().maxTokens());
+        // an explicit tuning reasoningEffort is preserved (kept by put-if-absent)
+        assertEquals("high", captured.getFirst().reasoningEffort());
+    }
+
+    @Test
+    void codexTargetDefaultsToLowReasoning() {
+        final var entries = new HashMap<String, String>();
+        entries.put("yca.storageHome", "x");
+        entries.put("yca.workingDir", ".");
+        entries.put("yca.model.compact.name", "$codex/codex-model");
+        entries.put("yca.provider.providers.length", "1");
+        entries.put("yca.provider.providers.0.id", "codex");
+        entries.put("yca.provider.providers.0.baseUrl", "https://chatgpt.com/backend-api/codex");
+        entries.put("yca.provider.providers.0.apiKey", "");
+        entries.put("yca.provider.providers.0.model", "codex-model");
+        entries.put("yca.provider.providers.0.api", "codex");
+        entries.put("yca.provider.providers.0.contextWindow", "128000");
+        entries.put("yca.provider.providers.0.timeoutSeconds", "120");
+        entries.put("yca.compaction.tail.budgetTokens", "1");
+        entries.put("yca.pruning.keepRecent", "1");
+        final var cfg = TestConfigs.codingAgent(entries);
+        final var captured = new ArrayList<ChatCompletionRequest>();
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
+                captured.add(request);
+                return new ChatResult(Message.assistant("summary", null), Usage.EMPTY);
+            }
+        };
+        final var coordinator = new CompactionCoordinator(
+                cfg,
+                chat,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                providerManager(cfg),
+                null,
+                "s1",
+                new BackoffSleeper());
+        final var result = coordinator.compact(
+                longHistory(), true, null, 0, () -> false, new ChatSettings("codex", "codex-model", null, null));
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode(), result.error());
+        assertFalse(captured.isEmpty());
+        assertEquals(
+                "low",
+                captured.getFirst().reasoningEffort(),
+                "an unconfigured Codex-backed summarizer must default to low reasoning");
+        assertEquals(
+                Integer.valueOf(8192),
+                captured.getFirst().maxTokens(),
+                "the default output budget applies to the Codex path too");
     }
 
     private static List<Message> longHistory() {

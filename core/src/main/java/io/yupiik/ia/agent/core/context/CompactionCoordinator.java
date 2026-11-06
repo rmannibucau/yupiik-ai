@@ -31,8 +31,10 @@ import io.yupiik.ia.agent.core.context.SpeculativeCompaction.Candidate;
 import io.yupiik.ia.agent.core.events.CompactionStartingEvent;
 import io.yupiik.ia.agent.core.events.EventContext;
 import io.yupiik.ia.agent.core.events.HookResult;
+import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatRoutes;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
@@ -112,6 +114,37 @@ public class CompactionCoordinator {
             ### Blocked
             ## Next Move
             ## Relevant Files""";
+
+    /**
+     * The default {@code max_tokens} for a summarizer call when the compact model's tuning leaves it
+     * unset (0/-1/null sentinel). A finite, small cap keeps the wire completion cheap on a cheap
+     * summarizer model while still comfortably covering the digest output. It is independent of the
+     * character-based digest caps ({@code digestChars} bounds retained text, not generated tokens); an
+     * explicit {@code yca.model.compact.maxTokens} still wins. Note the shared reasoning/output budget
+     * on reasoning models means this bounds the total completion (reasoning + digest), and a truncated
+     * completion is accepted as-is (the digest is folded and clamped locally regardless).
+     */
+    static final int DEFAULT_SUMMARIZER_MAX_TOKENS = 8192;
+
+    /**
+     * A bounded input view of the summarizable region {@code [from, boundary)}: the previous digest
+     * state (every recognized whole-message {@code <compacted-context>} body, newest last) and the
+     * remaining ordinary event messages {@code [from, boundary)} with those digest messages filtered
+     * out. This makes repeated compactions incremental ("previous state + new events") instead of
+     * re-sending the entire original transcript or stacking digest texts.
+     *
+     * <p>Only a complete whole-message user-role digest (content starting with {@code <compacted-context>}
+     * ending with a matching {@code </compacted-context>} whose only trailing text is whitespace or the
+     * {@link #DIGEST_GUIDANCE}) is treated as digest state. Anything else - tool/assistant messages,
+     * prose, quoted lines, malformed or unclosed wrappers, an inline (not whole-message) digest - stays
+     * an ordinary event so real history is never silently dropped on an unproven coverage assumption.
+     * The prior state is also only ever <em>one</em> combined block, so a previously published digest is
+     * not duplicated downstream.
+     */
+    private record SummaryInput(String priorState, List<Message> events) {}
+
+    /** The close marker used to recognize a whole digest message (see {@link #isDigestMessage(Message)}). */
+    private static final String DIGEST_CLOSE = "</compacted-context>";
 
     private final CodingAgentConfiguration configuration;
     private final ChatClient chatClient;
@@ -341,14 +374,18 @@ public class CompactionCoordinator {
         final var started = System.nanoTime();
         var chunkCap = source.chunkCap();
         var calls = 0;
+        // Reuse the same bounded incremental input as the foreground path: the captured prefix snapshot
+        // is kept full (prefix/cutoff/compatibility validation still compare the exact source), but the
+        // summarizer only sees the post-digest event delta prefixed by the combined prior state - so a
+        // speculative candidate and a foreground summary are generated from identical input semantics.
+        final var input = summaryInput(source.prefix().subList(source.leadingSystemCount(), source.cutoff()));
         while (!cancelled.getAsBoolean()) {
-            final var chunks =
-                    chunkCompact(source.prefix().subList(source.leadingSystemCount(), source.cutoff()), chunkCap);
+            final var chunks = chunkCompact(input.events(), chunkCap);
             final var outcome = summarizeReducing(
                     "speculative compaction",
                     configSystemPrompt(),
                     chunks,
-                    source.priorSummary(),
+                    input.priorState(),
                     null,
                     cancelled,
                     source.settings(),
@@ -420,21 +457,14 @@ public class CompactionCoordinator {
             final List<Message> messages, final int from, final int boundary, final String summary) {
         final var out = new ArrayList<Message>();
         out.addAll(messages.subList(0, from));
-        // digest-fold: when the summarizable region's only user content is a previous
-        // <compacted-context> digest (a digest-only dead-end: the digest then a long tool-churn
-        // turn), fold the new summary into the previous one and REPLACE the old digest with ONE
-        // digest instead of stacking a second one. The tool-round material is summarized and the
-        // region dropped, so repeated /compact force actually reduces the tool-churn middle.
-        // With the region dropped the new digest sits exactly at `from`, so the digestIndex
-        // protection of ensureUnderWindow stays aligned with the real digest position.
-        final var digestIndex = digestMessageIndex(messages, from, boundary);
-        final var previous = previousSummary(messages);
-        final var body = new StringBuilder();
-        if (digestIndex >= 0 && previous != null && !previous.isBlank()) {
-            body.append("Previous context:\n").append(previous).append("\n\n");
-        }
-        body.append(summary);
-        out.add(Message.user(COMPACTED_MARKER + "\n" + body + "\n</compacted-context>\n\n" + DIGEST_GUIDANCE));
+        // Replace the summarizable region with ONE new digest carrying exactly the merged replacement
+        // state. The prior digest state is not re-prepended here: it was fed to the summarizer as the
+        // <prior-summary> input and folded by it, so a separate "Previous context:" concatenation would
+        // only duplicate text that already lives in the generated summary. The summarizable region is
+        // dropped (folded away), so in the digest-only dead-end case repeated /compact force actually
+        // reclaims the tool-churn middle, and the new digest sits exactly at `from`, keeping the
+        // digestIndex protection of ensureUnderWindow aligned with the real digest position.
+        out.add(Message.user(COMPACTED_MARKER + "\n" + summary + "\n" + DIGEST_CLOSE + "\n\n" + DIGEST_GUIDANCE));
         out.addAll(subagentBlocks(messages.subList(from, boundary)));
         out.addAll(messages.subList(boundary, messages.size()));
         final var lastUser = lastUserMessageIndex(messages);
@@ -442,6 +472,64 @@ public class CompactionCoordinator {
             out.add(Message.user(str(messages.get(lastUser).content())));
         }
         return out;
+    }
+
+    /**
+     * Combines the recognized whole-message {@code <compacted-context>} digest bodies of a region into a
+     * single prior-state block (newest last) and returns the remaining ordinary events, with those digest
+     * messages removed. Repeated compactions then only re-summarize the delta instead of re-sending the
+     * entire transcript or stacking digest texts.
+     */
+    private static SummaryInput summaryInput(final List<Message> region) {
+        final var prior = new StringBuilder();
+        final var events = new ArrayList<Message>();
+        for (final var m : region) {
+            if (isDigestMessage(m)) {
+                final var body = digestBody(str(m.content()));
+                if (body != null && !body.isBlank()) {
+                    if (!prior.isEmpty()) {
+                        prior.append('\n');
+                    }
+                    prior.append(body);
+                }
+            } else {
+                events.add(m);
+            }
+        }
+        return new SummaryInput(prior.isEmpty() ? null : prior.toString(), events);
+    }
+
+    /**
+     * Whether a message is a <em>complete whole-message</em> digest: a user-role message whose content
+     * starts with {@code <compacted-context>} and whose only trailing text after a matching
+     * {@code </compacted-context>} is whitespace or the {@link #DIGEST_GUIDANCE}. Anything else - a
+     * tool/assistant/prose message, a quoted or inline digest, a malformed or unclosed wrapper - is an
+     * ordinary event so real history is never silently dropped on an unproven coverage assumption.
+     */
+    private static boolean isDigestMessage(final Message m) {
+        if (!"user".equals(m.role()) || !(m.content() instanceof String s)) {
+            return false;
+        }
+        if (!s.startsWith(COMPACTED_MARKER)) {
+            return false;
+        }
+        final var close = s.indexOf(DIGEST_CLOSE);
+        if (close < 0) {
+            return false; // unclosed wrapper: preserve as an ordinary event
+        }
+        final var after = s.substring(close + DIGEST_CLOSE.length()).strip();
+        return after.isEmpty() || after.equals(DIGEST_GUIDANCE.strip());
+    }
+
+    /** The body of a {@code <compacted-context>} message (between the markers), or null when malformed. */
+    private static String digestBody(final String content) {
+        final var start = content.indexOf(COMPACTED_MARKER);
+        final var bodyStart = content.indexOf('\n', start);
+        final var end = content.indexOf(DIGEST_CLOSE, start);
+        if (bodyStart < 0 || end < 0 || end <= bodyStart) {
+            return null;
+        }
+        return content.substring(bodyStart + 1, end).strip();
     }
 
     /**
@@ -556,11 +644,18 @@ public class CompactionCoordinator {
         if (ignoreLlm(settings)) {
             return localCompact(messages, force, urgent, settings);
         }
-        final var prior = previousSummary(messages);
+        final var summaryInput = summaryInput(messages.subList(from, boundary));
         final var compactCfg = configuration.compaction();
         var chunkCap = effectiveChunkCap(compactModelReference(settings));
         var halvings = 0;
         var lastSizeError = (String) null;
+        // Nothing new to summarize: a repeated compaction over an already-fully-digested region (only a
+        // recognized digest, no ordinary events after it) would call the summarizer to reproduce what is
+        // already folded. Skip the paid call and keep raw messages; the within-budget/trigger logic stays
+        // untouched so a genuinely oversized tail still reaches local truncation below.
+        if (summaryInput.events().isEmpty()) {
+            return new CompactionResult(messages, Mode.NONE, "");
+        }
         // user-visible lifecycle feedback: an INFO notice right before the first summarizer call, so
         // the UI can pin a "compacting..." indicator while the (potentially slow) LLM pass runs
         if (usageTracker != null) {
@@ -581,9 +676,17 @@ public class CompactionCoordinator {
         }
         Outcome outcome;
         while (true) {
-            final var chunks = chunkCompact(messages.subList(from, boundary), chunkCap);
+            final var chunks = chunkCompact(summaryInput.events(), chunkCap);
             outcome = summarizeReducing(
-                    "compaction", configSystemPrompt(), chunks, prior, focus, chunkCap, cancelled, settings, false);
+                    "compaction",
+                    configSystemPrompt(),
+                    chunks,
+                    summaryInput.priorState(),
+                    focus,
+                    chunkCap,
+                    cancelled,
+                    settings,
+                    false);
             if (!outcome.sizeError()) {
                 break;
             }
@@ -1055,7 +1158,8 @@ public class CompactionCoordinator {
     private ChatCompletionRequest summaryRequest(
             final String model, final String systemPrompt, final String prompt, final ChatSettings settings) {
         final var routed = settings == null ? ChatSettings.EMPTY : settings;
-        return new ChatCompletionRequest(
+        final var tuning = providerManager == null ? null : providerManager.resolvedBackgroundTuning(routed, "compact");
+        var request = new ChatCompletionRequest(
                         model,
                         List.of(Message.system(systemPrompt), Message.user(prompt)),
                         null,
@@ -1067,9 +1171,90 @@ public class CompactionCoordinator {
                         null,
                         null)
                 .withSessionId(sessionId)
-                .withSettings(routed)
-                .withTuning(
-                        providerManager == null ? null : providerManager.resolvedBackgroundTuning(routed, "compact"));
+                .withSettings(routed);
+        // Apply the resolved compact tuning first (put-if-absent) so any explicit operator value wins,
+        // then default only the fields the tuning left unset.
+        request = request.withTuning(tuning);
+        if (request.maxTokens() == null) {
+            // A finite default output budget when nothing configured one. Independent of the
+            // character-based digest caps (digestChars bounds retained text, not generated tokens).
+            request = new ChatCompletionRequest(
+                    request.model(),
+                    request.messages(),
+                    request.temperature(),
+                    request.topP(),
+                    request.stream(),
+                    request.tools(),
+                    request.toolChoice(),
+                    DEFAULT_SUMMARIZER_MAX_TOKENS,
+                    request.reasoningEffort(),
+                    request.others(),
+                    request.sessionId(),
+                    request.settings());
+        }
+        if ((request.reasoningEffort() == null || request.reasoningEffort().isBlank())
+                && request.others() != null
+                && request.others().containsKey("reasoning_effort")) {
+            // a raw extra payload already carries an effort; leave it untouched
+        } else if (request.reasoningEffort() == null
+                || request.reasoningEffort().isBlank()) {
+            // Default the reasoning effort to "low" ONLY for a Codex-backed summarizer target; any
+            // explicit tuning/variant/config effort already won above. Non-Codex APIs are normalized
+            // back to null (a blank effort carries no meaning on the wire) and keep their own defaults -
+            // an unsupported effort field must never be forced on the wire.
+            if (isCodexTarget(model, routed)) {
+                request = new ChatCompletionRequest(
+                        request.model(),
+                        request.messages(),
+                        request.temperature(),
+                        request.topP(),
+                        request.stream(),
+                        request.tools(),
+                        request.toolChoice(),
+                        request.maxTokens(),
+                        "low",
+                        request.others(),
+                        request.sessionId(),
+                        request.settings());
+            } else if (request.reasoningEffort() != null) {
+                request = new ChatCompletionRequest(
+                        request.model(),
+                        request.messages(),
+                        request.temperature(),
+                        request.topP(),
+                        request.stream(),
+                        request.tools(),
+                        request.toolChoice(),
+                        request.maxTokens(),
+                        null,
+                        request.others(),
+                        request.sessionId(),
+                        request.settings());
+            }
+        }
+        return request;
+    }
+
+    /**
+     * Whether the summarizer target routes through the Codex dialect. Resolves the compact model
+     * reference (explicit or the session's routing) to its provider and reports whether that provider's
+     * API/route is {@link ApiFlavor#CODEX}. Falls back to false (never force an effort) when the target
+     * cannot be resolved to a provider - so only a concretely Codex-backed summarizer gets the default.
+     */
+    private boolean isCodexTarget(final String model, final ChatSettings routed) {
+        if (providerManager == null) {
+            return false;
+        }
+        final var resolved = providerManager.resolve(model);
+        final var provider = resolved.provider();
+        if (provider == null) {
+            return false;
+        }
+        final var configured = provider.api();
+        if (configured != null && configured != ApiFlavor.AUTO) {
+            return configured == ApiFlavor.CODEX;
+        }
+        return ChatRoutes.detectFlavor(provider.baseUrl()) == ApiFlavor.CODEX;
     }
 
     private Outcome summarizeReducing(
@@ -1203,7 +1388,10 @@ public class CompactionCoordinator {
                                     ? ""
                                     : str(res.message().content());
                             if (fallbackPart != null && !fallbackPart.isBlank()) {
-                                appendBounded(summary, fallbackPart, digestCap);
+                                // replace, never append: each chunk's successful result is the authoritative
+                                // merged replacement state (the summarizer already had the running state in
+                                // its input), so the digest reflects the LATEST merge, not an accumulation
+                                replaceBounded(summary, fallbackPart, digestCap);
                                 if (!quiet && c + 1 < chunks.size()) {
                                     emit(new AgentEvent.Status(
                                             label + " (chunk " + (c + 2) + "/" + chunks.size() + ")...",
@@ -1235,7 +1423,10 @@ public class CompactionCoordinator {
                 }
                 return new Outcome("", error, calls, false, true);
             }
-            appendBounded(summary, part, digestCap);
+            // replace, never append: each chunk's successful result is the authoritative merged
+            // replacement state (the running summary was already in the chunk's input), so the digest
+            // reflects the LATEST merge instead of accumulating stale lines across chunks
+            replaceBounded(summary, part, digestCap);
             if (!quiet && c + 1 < chunks.size()) {
                 emit(new AgentEvent.Status(
                         label + " (chunk " + (c + 2) + "/" + chunks.size() + ")...", sessionId, null, null));
@@ -1245,32 +1436,14 @@ public class CompactionCoordinator {
     }
 
     /**
-     * Appends a digest part to the running summary, never letting the running summary exceed
-     * the effective digest cap; oldest content is dropped first so the digest stays a
-     * compact rolling record rather than growing without bound (which would itself blow the
-     * compact model's input window on the merge calls for long conversations).
+     * Replaces the running digest with a single part, clamped to {@code maxChars}. The rolling state is
+     * the latest summarizer output (each chunk's merge already had the running state in its input, so a
+     * multi-layer accumulation only re-appends stale lines); a too-long part is truncated head-first.
      */
-    private static void appendBounded(final StringBuilder summary, final String part, final int maxChars) {
-        if (part == null || part.length() >= maxChars) {
-            summary.setLength(0);
-            if (part != null) {
-                summary.append(part, 0, Math.min(part.length(), maxChars));
-            }
-            return;
-        }
-        if (summary.length() + part.length() <= maxChars) {
-            summary.append(part).append('\n');
-            return;
-        }
-        // Drop from the front until the new part fits, then append.
-        final var needed = part.length() + 1;
-        final var keep = maxChars - needed;
-        if (keep <= 0) {
-            summary.setLength(0);
-            summary.append(part).append('\n');
-        } else {
-            summary.delete(0, summary.length() - keep);
-            summary.append(part).append('\n');
+    private static void replaceBounded(final StringBuilder summary, final String part, final int maxChars) {
+        summary.setLength(0);
+        if (part != null && !part.isBlank()) {
+            summary.append(part, 0, Math.min(part.length(), maxChars));
         }
     }
 
@@ -1312,15 +1485,22 @@ public class CompactionCoordinator {
         if (focus != null && !focus.isBlank()) {
             sb.append("\n\nExtra focus requested for this summary: ").append(focus.strip());
         }
-        sb.append("\n\n").append(SUMMARY_TEMPLATE);
         return sb.toString();
     }
 
+    /**
+     * The stable summarizer system prompt. It carries the full static instruction AND the
+     * {@link #SUMMARY_TEMPLATE}, so every summarizer call shares the same byte-identical prefix (a
+     * provider-side prompt-cache-friendly invariant) while the user message carries only the varying
+     * prior state + new events + focus + chunk metadata. Deliberately stable across calls: no runtime
+     * values are injected here.
+     */
     private static String configSystemPrompt() {
         return "You are a context summarization agent. Summarize the conversation for another coding agent so it"
                 + " can continue the work seamlessly. Do not continue the conversation and never reply to it:"
                 + " only output the structured summary. Preserve exact file paths, symbols, commands, error strings"
-                + " and URLs. Do not mention the summary process or that context was compacted.";
+                + " and URLs. Do not mention the summary process or that context was compacted.\n\n"
+                + SUMMARY_TEMPLATE;
     }
 
     /**
