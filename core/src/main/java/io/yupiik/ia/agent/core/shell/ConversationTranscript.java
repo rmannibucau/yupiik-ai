@@ -198,18 +198,6 @@ public class ConversationTranscript {
     private long scrubbedHeadVersion = -1;
 
     private String scrubbedHeadCache;
-    /** Cached {@link MarkdownSnapshot} of the last {@link #markdownWithHead} call (see there). */
-    private MarkdownSnapshot markdownHeadCache;
-
-    /**
-     * The lazily-assembled snapshot the TUI renderer keys its stable-region cache on:
-     * the stable scrubbed durable head (the exact cached {@code String} instance, so a
-     * streaming turn that only appends to the pending tail can detect "head unchanged"
-     * by reference equality - no hashing of multi-megabyte strings) and the full
-     * assembled markdown (pending tail + running-tool blocks included, exactly what
-     * {@link #markdown} renders), plus the offset where the streaming tail starts.
-     */
-    public record MarkdownSnapshot(String head, String md, int tailStart) {}
 
     /** Marks the transcript-markdown inputs as changed so {@code markdown()} rebuilds its cache. */
     private synchronized void touch() {
@@ -938,51 +926,6 @@ public class ConversationTranscript {
         if (markdownCache != null && markdownVersion == contentVersion && Objects.equals(markdownSpinner, spinner)) {
             return markdownCache;
         }
-        final var built = buildMarkdown(spinner);
-        final var result = built.md().isBlank() ? fallback : built.md();
-        markdownVersion = contentVersion;
-        markdownSpinner = spinner;
-        markdownCache = result;
-        return result;
-    }
-
-    /**
-     * Same assembly as {@link #markdown(String, String)} but exposes the stable durable
-     * {@code head} (the exact instance of the scrubbed transcript, so a streaming turn that
-     * appends only to the pending tail reuses the very same {@code String} object frame after
-     * frame - identity comparison, no hashing) and the {@code tailStart} offset where the
-     * streaming content (pending tail, running-tool blocks) begins in the assembled md. The
-     * TUI renderer keys its per-region render-unit cache on these: a frame whose head string
-     * is identical proves that everything before the tail rendered the same as the previous
-     * frame, so only the growing last region must be re-rendered instead of the whole
-     * multi-megabyte transcript every TextDelta tick.
-     */
-    public synchronized MarkdownSnapshot markdownWithHead(final String spinner, final String fallback) {
-        if (markdownHeadCache != null
-                && markdownVersion == contentVersion
-                && Objects.equals(markdownSpinner, spinner)) {
-            return markdownHeadCache;
-        }
-        final var built = buildMarkdown(spinner);
-        final var snapshot = new MarkdownSnapshot(
-                scrubbedHeadCache, built.md().isBlank() ? fallback : built.md(), built.tailStart());
-        markdownVersion = contentVersion;
-        markdownSpinner = spinner;
-        markdownCache = snapshot.md();
-        markdownHeadCache = snapshot;
-        return snapshot;
-    }
-
-    /** Assembled markdown plus where the streaming tail starts in it, see {@link #buildMarkdown}. */
-    private record MarkdownBuild(String md, int tailStart) {}
-
-    /**
-     * Assembles the markdown for {@link #markdown} / {@link #markdownWithHead}: the scrubbed
-     * durable head, then the pending tail and one running-tool block per pending tool. Also
-     * computes {@code tailStart}, the index in the stripped md where the first streaming
-     * character lands between the durable head and the appended tail.
-     */
-    private MarkdownBuild buildMarkdown(final String spinner) {
         // The durable transcript was already scrubbed on each write (flushPending, TurnDone,
         // flushThinking, ToolFinished, Notice... see touchTranscript() sites), so the scrub is
         // idempotent for it. The result is cached against transcriptVersion, which only bumps on
@@ -995,9 +938,8 @@ public class ConversationTranscript {
             scrubbedHeadVersion = transcriptVersion;
         }
         final var sb = new StringBuilder(scrubbedHeadCache);
-        final var headLen = sb.length();
         if (busy && !pending.isEmpty()) {
-            // pending only carries visible text: inline  thinking content is already
+            // pending only carries visible text: inline <think> content is already
             // classified into the thinking buffer by the stream splitter. It renders
             // last because that is where it happened: everything the turn produced
             // before this chunk was already flushed into the transcript in place.
@@ -1036,16 +978,17 @@ public class ConversationTranscript {
             block.append(TOOL_END).append('\n');
             sb.append(compression.withholdDanglingPrefix(block.toString()));
         }
-        final var assembled = sb.toString();
-        final var md = assembled.strip();
-        // the streaming tail always starts after the durable head; strip() only ever trims
-        // leading whitespace, which belongs to the head, so the tail offset is headLen minus
-        // however many leading whitespace characters were stripped
-        var lead = 0;
-        while (lead < assembled.length() && Character.isWhitespace(assembled.charAt(lead))) {
-            lead++;
-        }
-        return new MarkdownBuild(md, Math.max(0, headLen - lead));
+        final var md = sb.toString().strip();
+        // the persisted transcript is scrubbed by AgentLoop (stripEchoedRefs) but the live
+        // stream renders TextDelta chunks verbatim, so a flash-class model echoing the injected
+        // "@N@" seam would show it on screen while the stored message stays clean. This display
+        // surface applies the same deterministic scrub so what is rendered matches what persists,
+        // plus the dangling-fragment withhold so a partially-arrived seam never renders.
+        final var result = md.isBlank() ? fallback : md;
+        markdownVersion = contentVersion;
+        markdownSpinner = spinner;
+        markdownCache = result;
+        return result;
     }
 
     public record Region(String text, boolean thought, boolean tool, boolean log) {}

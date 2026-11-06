@@ -36,6 +36,25 @@ import org.junit.jupiter.api.Test;
 class ContextCompressionTest {
 
     @Test
+    void seamScrubRespectsFenceValidityAndMultilineCodeRuns() {
+        final var compression = new ContextCompression(null);
+        for (final var code : List.of(
+                "``literal\n@1@\n@b2\nend``",
+                "text ```literal\n@1@\nend```",
+                "```\n    ```\n@1@\n```",
+                "~~~\n\t~~~\n@1@\n~~~")) {
+            assertEquals(code, compression.stripEchoedRefs(code));
+            assertEquals(code, compression.withholdDanglingPrefix(code));
+        }
+        assertEquals("\t~~~\n", compression.stripEchoedRefs("\t~~~\n@1@\n"));
+        assertEquals("\\`literal\n", compression.stripEchoedRefs("\\`literal\n@1@\n"));
+        // Backticks in a backtick fence's info string invalidate the fence. The equal runs
+        // here form a closed inline span instead, leaving the following seam outside code.
+        assertEquals("```bad```\n", compression.stripEchoedRefs("```bad```\n@1@\n"));
+        assertEquals("``a ` b``\n", compression.stripEchoedRefs("``a ` b``\n@1@\n"));
+    }
+
+    @Test
     void closedTurnIncludesToolRoundsAcrossInternalStateMessages() {
         final var compression = new ContextCompression(config());
         final var call = new ToolCall("c1", "function", new ToolCall.FunctionCall("read", "{}"), 0);

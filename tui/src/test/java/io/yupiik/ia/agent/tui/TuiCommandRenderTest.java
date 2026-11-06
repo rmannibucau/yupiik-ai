@@ -556,11 +556,189 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void regionCachePreservesOversizedContentAndOriginalWidths() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var unit =
+                TuiCommand.class.getDeclaredMethod("regionUnit", String.class, String.class, int.class, UiState.class);
+        unit.setAccessible(true);
+        for (final var kind : List.of("thought", "log")) {
+            final var source = "one two three four five six seven eight nine ten";
+            final var direct = TuiCommand.class.getDeclaredMethod(kind + "Lines", String.class, int.class);
+            direct.setAccessible(true);
+            final var expected = (List<?>) direct.invoke(command, source, 25);
+            final var part = unit.invoke(command, kind, source, 25, state);
+            final var rows = part.getClass().getDeclaredMethod("rows");
+            rows.setAccessible(true);
+            assertEquals(expected.size(), ((List<?>) rows.invoke(part)).size(), kind + " wrapping changed");
+        }
+        final var oversized = "x".repeat(512 * 1024 + 1);
+        final var part = unit.invoke(command, "thought", oversized, 80, state);
+        final var rows = part.getClass().getDeclaredMethod("rows");
+        rows.setAccessible(true);
+        assertFalse(((List<?>) rows.invoke(part)).isEmpty(), "oversized content must render uncached");
+    }
+
+    @Test
+    void regionCacheReusesStableChunksAndDropsStreamingRevisions() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        state.showThinking = true;
+        final var render = TuiCommand.class.getDeclaredMethod(
+                "contentChunks",
+                List.class,
+                String.class,
+                int.class,
+                UiState.class,
+                List.class,
+                List.class,
+                List.class,
+                List.class);
+        render.setAccessible(true);
+        final var cacheField = TuiCommand.class.getDeclaredField("regionUnitCache");
+        cacheField.setAccessible(true);
+        final var stable = io.yupiik.ia.agent.core.shell.ConversationTranscript.THOUGHT_BEGIN + "stable thought"
+                + io.yupiik.ia.agent.core.shell.ConversationTranscript.THOUGHT_END;
+        Object previous = null;
+        for (var i = 0; i < 20; i++) {
+            final var chunks = new ArrayList<>();
+            final var rows = new ArrayList<>();
+            render.invoke(
+                    command,
+                    chunks,
+                    stable + "\nanswer " + i,
+                    60,
+                    state,
+                    new ArrayList<>(),
+                    new ArrayList<>(),
+                    new ArrayList<>(),
+                    rows);
+            assertTrue(rows.toString().contains("stable thought"));
+            if (previous != null) {
+                org.junit.jupiter.api.Assertions.assertSame(previous, chunks.getFirst());
+            }
+            previous = chunks.getFirst();
+            assertTrue(((Map<?, ?>) cacheField.get(command)).size() <= 2, "old streaming revisions retained");
+        }
+        final var code = "```java\nint answer = 42;\n```";
+        render.invoke(
+                command,
+                new ArrayList<>(),
+                code,
+                60,
+                state,
+                new ArrayList<>(),
+                new ArrayList<>(),
+                new ArrayList<>(),
+                new ArrayList<>());
+        final var target = state.lastCodeBlock;
+        assertTrue(target.contains("int answer = 42;"));
+        state.lastCodeBlock = "wrong tab";
+        render.invoke(
+                command,
+                new ArrayList<>(),
+                code,
+                60,
+                state,
+                new ArrayList<>(),
+                new ArrayList<>(),
+                new ArrayList<>(),
+                new ArrayList<>());
+        assertEquals(target, state.lastCodeBlock, "full frame cache must restore the code copy target");
+        render.invoke(
+                command,
+                new ArrayList<>(),
+                "reset",
+                60,
+                state,
+                new ArrayList<>(),
+                new ArrayList<>(),
+                new ArrayList<>(),
+                new ArrayList<>());
+        org.junit.jupiter.api.Assertions.assertNull(state.lastCodeBlock);
+        assertEquals(1, ((Map<?, ?>) cacheField.get(command)).size(), "reset must release old regions");
+    }
+
+    @Test
+    void cachedRegionsMatchColdRowsAndSelectionKinds() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var cold = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var coldState = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        state.showThinking = true;
+        coldState.showThinking = true;
+        final var render = TuiCommand.class.getDeclaredMethod(
+                "contentChunks",
+                List.class,
+                String.class,
+                int.class,
+                UiState.class,
+                List.class,
+                List.class,
+                List.class,
+                List.class);
+        render.setAccessible(true);
+        final var key = TuiCommand.class.getDeclaredField("lastContentKey");
+        key.setAccessible(true);
+        final var cache = TuiCommand.class.getDeclaredField("regionUnitCache");
+        cache.setAccessible(true);
+        final var thought = io.yupiik.ia.agent.core.shell.ConversationTranscript.THOUGHT_BEGIN
+                + "thought with **bold** and `code`\n\n```java\nint n = 1;\n```"
+                + io.yupiik.ia.agent.core.shell.ConversationTranscript.THOUGHT_END;
+        for (final var tail : List.of(
+                "paragraph",
+                "paragraph\n\nnext",
+                "| a | b |\n|---|---|\n| c | d |",
+                "```text\n@123@\n```",
+                "[link]: https://example.com")) {
+            final var rows = new ArrayList<>();
+            final var coldRows = new ArrayList<>();
+            final var chunks = new ArrayList<>();
+            final var coldChunks = new ArrayList<>();
+            ((Map<?, ?>) cache.get(cold)).clear();
+            key.set(cold, null);
+            render.invoke(
+                    command,
+                    chunks,
+                    thought + tail,
+                    42,
+                    state,
+                    new ArrayList<>(),
+                    new ArrayList<>(),
+                    new ArrayList<>(),
+                    rows);
+            render.invoke(
+                    cold,
+                    coldChunks,
+                    thought + tail,
+                    42,
+                    coldState,
+                    new ArrayList<>(),
+                    new ArrayList<>(),
+                    new ArrayList<>(),
+                    coldRows);
+            assertEquals(coldRows, rows, tail);
+            assertEquals(coldChunks.size(), chunks.size(), tail);
+            for (var i = 0; i < chunks.size(); i++) {
+                for (final var field : List.of("height", "rowKinds", "box")) {
+                    final var accessor = chunks.get(i).getClass().getDeclaredMethod(field);
+                    accessor.setAccessible(true);
+                    final var actual = accessor.invoke(chunks.get(i));
+                    final var expected = accessor.invoke(coldChunks.get(i));
+                    if (actual instanceof Object[] array) {
+                        org.junit.jupiter.api.Assertions.assertArrayEquals((Object[]) expected, array);
+                    } else {
+                        assertEquals(expected, actual, tail + ": " + field);
+                    }
+                }
+            }
+            assertEquals(coldState.lastCodeBlock, state.lastCodeBlock);
+        }
+    }
+
+    @Test
     void streamingParagraphBreakAcrossFlushBoundaryIsPreserved() throws Exception {
-        // the durable head ends with a flushed chunk; the streaming tail continues the answer.
-        // The head/tail split re-renders only the tail, but the paragraph break between the
-        // flushed paragraph and the streamed one (a blank source line) must survive: the two
-        // prose halves render as one merged region, exactly like a cold render of the whole md.
+        // Text flushed around a tool boundary must remain visible as the answer resumes.
         final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
             @Override
@@ -3689,6 +3867,31 @@ class TuiCommandRenderTest {
         assertTrue(rowIndex("| name | age |") < rowIndex("|------|-----|"));
         assertTrue(rowIndex("|------|-----|") < rowIndex("| bob  | 42  |"));
 
+        quit();
+    }
+
+    @Test
+    void codeSelectionPreservesLiteralSeam() throws Exception {
+        final var registry = testRegistry();
+        final var command = command(registry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-code-seam-copy-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        registry.onEvent(new AgentEvent.TextDelta("```text\n@123@\n```", sid(registry)));
+        registry.onEvent(new AgentEvent.TurnDone("```text\n@123@\n```", sid(registry)));
+        awaitText("@123@");
+        final var row = rowOf("@123@");
+        final var from = columnOfLineContaining("@123@");
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
+        tuiRef.get().dispatch(MouseEvent.drag(MouseButton.LEFT, from + 4, row));
+        tuiRef.get().dispatch(MouseEvent.release(MouseButton.LEFT, from + 4, row));
+        final var deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+        while (!backend.raw().contains(SelectionState.osc52Payload("@123@")) && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertTrue(backend.raw().contains(SelectionState.osc52Payload("@123@")), backend.raw());
         quit();
     }
 

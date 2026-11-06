@@ -115,12 +115,22 @@ class StreamTextBufferTest {
     }
 
     @Test
-    void mirrorHalfOfASplitSeamIsHiddenCompletely() {
-        // "@1250" was already re-queued by the transcript flush; the mirror "4@" alone has no
-        // word of its own and must not render its digits - it drains as an empty line
+    void literalNumericAtSuffixIsNotASeam() {
         final var buffer = new StreamTextBuffer(line -> line);
-        assertEquals("\n", buffer.append("4@\n"));
+        assertEquals("4@\n", buffer.append("4@\n"));
         assertEquals("", buffer.flush());
+    }
+
+    @Test
+    void preservesCodeAcrossChunksAndResetClearsCodeState() {
+        final var buffer = new StreamTextBuffer(line -> line);
+        assertEquals("```text\n", buffer.append("```text\n@"));
+        assertEquals("@12@\n@b2\n4@\n```\n\n", buffer.append("12@\n@b2\n4@\n```\n@3@\n"));
+        assertEquals("``code\n", buffer.append("``code\n"));
+        assertEquals("@4@\nend``\n\n", buffer.append("@4@\nend``\n@5@\n"));
+        buffer.append("~~~\n");
+        buffer.reset();
+        assertEquals("\n", buffer.append("@6@\n"));
     }
 
     @Test

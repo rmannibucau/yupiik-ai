@@ -48,6 +48,24 @@ import org.junit.jupiter.api.parallel.Resources;
 @ResourceLock(Resources.SYSTEM_ERR)
 @ExtendWith(TestJsonMapper.class)
 class AnsiShellFrontendTest {
+    @Test
+    void splitThinkingSeamsAreHiddenButMultilineCodeAndProseSurvive() {
+        final var frontend = frontend(true, false);
+        frontend.beginTurn();
+        frontend.onEvent(new AgentEvent.ThinkingDelta("@bl", "s1"));
+        assertFalse(err.toString().contains("@bl"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("ocked@\n``literal\n@1", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("@\nend``\nuse @2@ literally\n", "s1"));
+        frontend.onEvent(new AgentEvent.TextDelta("~~~\n@3", "s1"));
+        frontend.onEvent(new AgentEvent.TextDelta("@\n~~~\n@4@\n", "s1"));
+        frontend.endTurn();
+        assertFalse(err.toString().contains("@blocked@"));
+        assertTrue(err.toString().contains("@1@"));
+        assertTrue(err.toString().contains("use @2@ literally"));
+        assertTrue(out.toString().contains("@3@"));
+        assertFalse(out.toString().contains("@4@"));
+    }
+
     private PrintStream originalOut;
     private PrintStream originalErr;
     private final ByteArrayOutputStream out = new ByteArrayOutputStream();

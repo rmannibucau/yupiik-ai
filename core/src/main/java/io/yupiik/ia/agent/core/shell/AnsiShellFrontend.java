@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.cli.Symbols;
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import io.yupiik.ia.agent.core.context.ContextCompression;
+import io.yupiik.ia.agent.core.context.MarkdownFence;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.util.OpenBrowser;
 import java.util.ArrayDeque;
@@ -49,6 +50,11 @@ public class AnsiShellFrontend implements ShellFrontend {
     private final CliVerbosity verbosity;
     private final boolean tty;
     private final StreamTextBuffer textBuffer;
+    private final StringBuilder thinkingText = new StringBuilder();
+    private int thinkingEmitted;
+    private MarkdownFence.Classifier thinkingCode = new MarkdownFence.Classifier();
+    private String thinkingPrefix = "";
+    private String answerPrefix = "";
     private final TurnStats stats = new TurnStats();
     private volatile ContextCompression compression = new ContextCompression(null);
 
@@ -159,7 +165,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         this.showThinking = showThinking;
         this.showToolOutput = showToolOutput;
         this.promptOutput = promptOutput == null ? PromptOutput.raw() : promptOutput;
-        this.textBuffer = new StreamTextBuffer(colorizer::colorizeLine);
+        this.textBuffer = new StreamTextBuffer(line -> answerPrefix + colorizer.colorizeLine(line));
     }
 
     public TurnStats stats() {
@@ -416,6 +422,7 @@ public class AnsiShellFrontend implements ShellFrontend {
      */
     @Override
     public void endTurn() {
+        closeThinkingRound();
         // a thinking round may have left an open newline-less stderr line: the
         // trailing metrics/usage/prompt must not glue onto it
         ensureStderrNewline();
@@ -462,7 +469,12 @@ public class AnsiShellFrontend implements ShellFrontend {
                 AgentEvent.TextDelta(String delta, String sessionId, String subagentId, String subagentName)) {
             stopSpinner();
             closeThinkingRound();
-            print(textBuffer.append(prefix + delta));
+            if (!answerPrefix.equals(prefix)) {
+                print(textBuffer.flush());
+                textBuffer.reset();
+                answerPrefix = prefix;
+            }
+            print(textBuffer.append(delta));
         } else if (event instanceof AgentEvent.TextReset(String sessionId, String subagentId, String subagentName)) {
             textBuffer.reset();
             closeThinkingRound();
@@ -476,13 +488,15 @@ public class AnsiShellFrontend implements ShellFrontend {
                     ensureStderrNewline();
                 }
                 if (!thinkingRoundOpen || !Objects.equals(thinkingRoundOwner, subagentId)) {
+                    closeThinkingRound();
                     thinkingRoundOpen = true;
                     thinkingRoundOwner = subagentId;
+                    thinkingPrefix = prefix;
                     printlnErr(MarkdownColorizer.thinking(prefix + "thinking..."));
                 }
                 stopSpinner();
-                printErr(MarkdownColorizer.thinking(compression.withholdDanglingPrefix(prefix + delta)));
-                stderrNeedsNewline = !delta.endsWith("\n");
+                thinkingText.append(delta);
+                renderThinking(false);
                 stderrLineOwner = subagentId;
             } else {
                 beginSpinner(BusyLabels.thinking());
@@ -862,8 +876,45 @@ public class AnsiShellFrontend implements ShellFrontend {
 
     /** Closes the current reasoning round: the next delta opens a fresh 'thinking...' header. */
     private void closeThinkingRound() {
+        if (thinkingRoundOpen) {
+            renderThinking(true);
+            ensureStderrNewline();
+        }
+        thinkingText.setLength(0);
+        thinkingEmitted = 0;
+        thinkingCode = new MarkdownFence.Classifier();
         thinkingRoundOpen = false;
         thinkingRoundOwner = null;
+    }
+
+    private void renderThinking(final boolean flush) {
+        var newline = thinkingText.indexOf("\n");
+        while (newline >= 0) {
+            final var line = thinkingText.substring(0, newline);
+            final var protectedLine = thinkingCode.classify(line, 0, line.length());
+            emitThinking(protectedLine ? line : compression.withholdDanglingPrefix(line));
+            printErr(MarkdownColorizer.thinking("\n"));
+            stderrNeedsNewline = false;
+            thinkingText.delete(0, newline + 1);
+            thinkingEmitted = 0;
+            newline = thinkingText.indexOf("\n");
+        }
+        final var raw = thinkingText.toString();
+        // Outside code, defer an ambiguous @ suffix until its logical line is complete.
+        // Retain only the current line, never a growing copy of the whole reasoning round.
+        final var at = raw.indexOf('@');
+        final var source = !flush && at >= 0 ? "" : raw;
+        emitThinking(thinkingCode.inCode() ? source : compression.withholdDanglingPrefix(source));
+    }
+
+    private void emitThinking(final String view) {
+        if (view.length() > thinkingEmitted) {
+            final var addition = view.substring(thinkingEmitted);
+            printErr(MarkdownColorizer.thinking((thinkingEmitted == 0 ? thinkingPrefix : "") + addition));
+            stderrNeedsNewline = !addition.endsWith("\n");
+            stderrLineOwner = thinkingRoundOwner;
+            thinkingEmitted = view.length();
+        }
     }
 
     /** Renders a blank line on stdout through the prompt sink. */

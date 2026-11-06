@@ -168,6 +168,32 @@ describe('normalizeMarkdown', () => {
 });
 
 describe('stripEchoedRefs', () => {
+  it('protects split tails inside fenced and multiline inline code', () => {
+    for (const src of [
+      '```text\n@1\n@',
+      '~~~\n@b2\n\n@\n',
+      '``literal\n@1@\n@2\n@\nend``',
+      'text ```literal\n@1\n@\nend```',
+      '```\n    ```\n@1\n@',
+      '~~~\n\t~~~\n@1\n@',
+    ]) {
+      expect(stripEchoedRefs(src)).toBe(src);
+    }
+  });
+
+  it('rejects invalid fences and preserves mismatched code runs', () => {
+    expect(stripEchoedRefs('```bad```\n@1@\n')).toBe('```bad```\n');
+    expect(stripEchoedRefs('\t~~~\n@1@\n')).toBe('\t~~~\n');
+    expect(stripEchoedRefs('``a ` b``\n@1@\n')).toBe('``a ` b``\n');
+    expect(stripEchoedRefs('\\`literal\n@1@\n')).toBe('\\`literal\n');
+  });
+
+  it('keeps overlong split tokens and handles at-heavy input without rewriting prose', () => {
+    const long = '@' + '1'.repeat(100000) + '\n@';
+    expect(stripEchoedRefs(long)).toBe(long);
+    const prose = 'mail@example.com '.repeat(10000);
+    expect(stripEchoedRefs(prose)).toBe(prose);
+  });
   it('strips a whole echoed seam line with its trailing newline (surrounding blank lines survive)', () => {
     expect(stripEchoedRefs('Let me run the proper typecheck.\n\n@535@\n')).toBe('Let me run the proper typecheck.\n\n');
   });

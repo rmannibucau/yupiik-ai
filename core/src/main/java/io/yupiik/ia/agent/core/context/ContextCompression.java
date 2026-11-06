@@ -1363,19 +1363,31 @@ public final class ContextCompression {
         var last = 0;
         var stripped = false;
         var i = 0;
-        var inInlineCode = false;
+        var inlineRun = 0;
         while (i < text.length()) {
             final var c = text.charAt(i);
+            if (c == '\\' && inlineRun == 0 && i + 1 < text.length()) {
+                i += 2;
+                continue;
+            }
             if (c == '`') {
-                inInlineCode = !inInlineCode; // 1- or 2-backtick spans (Consistency with the renderer)
-                i++;
+                final var start = i;
+                while (i < text.length() && text.charAt(i) == '`') {
+                    i++;
+                }
+                final var run = i - start;
+                if (inlineRun == 0) {
+                    inlineRun = run;
+                } else if (inlineRun == run) {
+                    inlineRun = 0;
+                }
                 continue;
             }
             if (c != '@' || (i > 0 && isAsciiAlphanumeric(text.charAt(i - 1)))) {
                 i++;
                 continue;
             }
-            if (inInlineCode) {
+            if (inlineRun > 0) {
                 i++;
                 continue;
             }

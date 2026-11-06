@@ -197,7 +197,7 @@ function escapeCodeLikeStars(src: string): string {
 // and survives, so a model that writes the injected marker literally (or wraps it in backticks)
 // never has its delimiters orphaned into an empty inline-code span.
 const ECHOED_REF_MULTILINE_TAIL =
-  /(^|\n)[ \t]*(@[1-9]\d*|@b[1-9]\d*|@blocked)([ \t]+\[(?:low|medium|high)\])?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*@[ \t]*\r?\n?$/;
+  /(^|\n)[ \t]*(@[1-9]\d{0,9}|@b[1-9]\d{0,9}|@blocked)([ \t]+\[(?:low|medium|high)\])?[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*@[ \t]*\r?\n?$/;
 
 /**
  * True when {@code line} is exactly a seam token on its own (mirrors
@@ -252,18 +252,18 @@ function isStandaloneSeamLine(line: string): boolean {
  */
 function fenceState(line: string, state: { inFence: boolean; fenceChar: string; fenceLen: number }): void {
   if (state.inFence) {
-    const runStart = line.search(/[^ \t]/);
+    const runStart = line.search(/[^ ]/);
     const start = runStart < 0 ? line.length : runStart;
     let i = start;
     while (i < line.length && line[i] === state.fenceChar) i++;
-    if (i - start >= state.fenceLen) {
+    if (start <= 3 && i - start >= state.fenceLen) {
       while (i < line.length && (line[i] === ' ' || line[i] === '\t' || line[i] === '\r')) i++;
       if (i === line.length) state.inFence = false;
     }
     return;
   }
   const run = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-  if (run) {
+  if (run && (run[1][0] !== '`' || !line.slice(run[0].length).includes('`'))) {
     state.fenceChar = run[1][0];
     state.fenceLen = run[1].length;
     state.inFence = true;
@@ -281,27 +281,53 @@ export function stripEchoedRefs(src: string | null | undefined): string {
   if (!src) return src ?? '';
   const out: string[] = [];
   const state = { inFence: false, fenceChar: '', fenceLen: 0 };
-  let removed = false;
+  let inlineRun = 0;
+  const protectedLines = new Set<number>();
+  let outputOffset = 0;
   let lineStart = 0;
   while (lineStart <= src.length) {
     const newline = src.indexOf('\n', lineStart);
     const lineEnd = newline < 0 ? src.length : newline;
     const line = src.slice(lineStart, lineEnd);
     const wasInFence = state.inFence;
-    fenceState(line, state);
+    const wasInInline = inlineRun > 0;
+    if (state.inFence || inlineRun === 0) fenceState(line, state);
     // an opening delimiter or any content line INSIDE the fence (including a closing
     // delimiter, whose classification just flipped to false) is preserved verbatim
-    const inFenceForThisLine = wasInFence || state.inFence;
+    const inFenceForThisLine = wasInFence || state.inFence || wasInInline;
+    if (!wasInFence && !state.inFence) {
+      for (let i = 0; i < line.length;) {
+        if (line[i] === '\\' && inlineRun === 0) {
+          i += 2;
+        } else if (line[i] === '`') {
+          const start = i;
+          while (i < line.length && line[i] === '`') i++;
+          const run = i - start;
+          if (inlineRun === 0) inlineRun = run;
+          else if (inlineRun === run) inlineRun = 0;
+        } else {
+          i++;
+        }
+      }
+    }
     if (!inFenceForThisLine && isStandaloneSeamLine(line)) {
-      removed = true;
+      // Drop only this standalone metadata line and its terminator.
     } else {
+      if (inFenceForThisLine) protectedLines.add(outputOffset);
       out.push(line);
       if (newline >= 0) out.push('\n');
+      outputOffset += line.length + (newline >= 0 ? 1 : 0);
     }
     if (newline < 0) break;
     lineStart = newline + 1;
   }
   let result = out.join('');
-  result = result.replace(ECHOED_REF_MULTILINE_TAIL, (_m: string, lead: string) => lead);
+  result = result.replace(ECHOED_REF_MULTILINE_TAIL, (match: string, lead: string, _token: string, _priority: string, offset: number) => {
+    const start = offset + lead.length;
+    for (const lineStart of protectedLines) {
+      if (lineStart >= start && lineStart < offset + match.length) return match;
+    }
+    return lead;
+  });
   return result;
 }

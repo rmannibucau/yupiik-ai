@@ -44,27 +44,35 @@ public final class MarkdownFence {
     }
 
     /**
-     * Stateful fence classifier: {@link #classify} is called once per source line,
-     * in order, and returns whether that line is inside a fenced code block at the
-     * moment it is processed (fence delimiter lines themselves included).
+     * Stateful code classifier: {@link #classify} is called once per source line,
+     * in order, and returns whether that line is protected by a fenced block or
+     * a code span carried over from a previous line (delimiter lines included).
      */
     public static final class Classifier {
         private boolean inFence;
         private char fenceChar;
         private int fenceLen;
+        private int inlineRun;
+
+        /** Whether the next line begins inside a fence or a continued code span. */
+        public boolean inCode() {
+            return inFence || inlineRun > 0;
+        }
 
         /**
          * Classifies one source line ({@code [lineStart, lineEnd)} of {@code text}) and returns
-         * whether the line is part of a fenced code block (an opening/closing delimiter or content
-         * between them). Call exactly once per line, in source order, including the final
+         * whether the line is part of a fenced block or begins inside a multiline code span.
+         * Call exactly once per line, in source order, including the final
          * unterminated line.
          */
         public boolean classify(final String text, final int lineStart, final int lineEnd) {
+            final var wasInFence = inFence;
+            final var wasInInline = inlineRun > 0;
             if (inFence) {
                 if (isClosingFence(text, lineStart, lineEnd, fenceChar, fenceLen)) {
                     inFence = false;
                 }
-            } else {
+            } else if (inlineRun == 0) {
                 final var open = openingFenceLength(text, lineStart, lineEnd);
                 if (open > 0) {
                     fenceChar = text.charAt(firstNonSpace(text, lineStart, lineEnd));
@@ -72,20 +80,39 @@ public final class MarkdownFence {
                     inFence = true;
                 }
             }
-            return inFence;
+            if (!wasInFence && !inFence) {
+                for (var i = lineStart; i < lineEnd; i++) {
+                    final var c = text.charAt(i);
+                    if (c == '\\' && inlineRun == 0 && i + 1 < lineEnd) {
+                        i++;
+                    } else if (c == '`') {
+                        final var start = i;
+                        while (i + 1 < lineEnd && text.charAt(i + 1) == '`') {
+                            i++;
+                        }
+                        final var run = i - start + 1;
+                        if (inlineRun == 0) {
+                            inlineRun = run;
+                        } else if (inlineRun == run) {
+                            inlineRun = 0;
+                        }
+                    }
+                }
+            }
+            return wasInFence || inFence || wasInInline;
         }
     }
 
-    /** The index of the first non space/tab character within {@code [start, end)} (may equal end). */
+    /** The index of the first non-space character within {@code [start, end)} (may equal end). */
     private static int firstNonSpace(final String text, final int start, final int end) {
         var i = start;
-        while (i < end && (text.charAt(i) == ' ' || text.charAt(i) == '\t')) {
+        while (i < end && text.charAt(i) == ' ') {
             i++;
         }
         return i;
     }
 
-    /** The number of leading space/tab characters within {@code [start, end)}. */
+    /** The number of leading spaces within {@code [start, end)}. */
     private static int leadingSpaces(final String text, final int start, final int end) {
         return firstNonSpace(text, start, end) - start;
     }
@@ -114,14 +141,22 @@ public final class MarkdownFence {
         while (i < end && text.charAt(i) == c) {
             i++;
         }
-        return i - runStart >= 3 ? i - runStart : 0;
+        final var length = i - runStart;
+        if (c == '`') {
+            for (var j = i; j < end; j++) {
+                if (text.charAt(j) == '`') {
+                    return 0;
+                }
+            }
+        }
+        return length >= 3 ? length : 0;
     }
 
     /** True when the line at {@code [start, end)} closes the open fence {@code fenceChar}/{@code fenceLen}. */
     private static boolean isClosingFence(
             final String text, final int start, final int end, final char fenceChar, final int fenceLen) {
         final var runStart = firstNonSpace(text, start, end);
-        if (runStart >= end) {
+        if (runStart >= end || runStart - start > 3) {
             return false;
         }
         var i = runStart;
