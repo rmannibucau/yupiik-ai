@@ -32,4 +32,11 @@ public record ProviderCapabilities(
                 documentation =
                         "OpenAI-flavored capability knobs (shared by the responses and codex flavors): session affinity keys and "
                                 + "the per-request x-client-request-id marker.")
-        OpenAICapabilities openai) {}
+        OpenAICapabilities openai,
+
+        @Property(documentation = "Experimental OpenCode free inference transport settings.")
+        OpenCodeCapabilities opencode) {
+    public ProviderCapabilities(final CodexCapabilities codex, final OpenAICapabilities openai) {
+        this(codex, openai, null);
+    }
+}

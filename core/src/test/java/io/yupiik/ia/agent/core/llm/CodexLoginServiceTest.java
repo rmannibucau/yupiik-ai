@@ -219,12 +219,13 @@ class CodexLoginServiceTest {
             Thread.sleep(20);
         }
         assertNotNull(callbackPort.get(), "the authorize URL must expose the loopback port");
-        final var http = HttpClient.newHttpClient();
         final var callback = java.net.http.HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + callbackPort.get()
                         + "/auth/callback?state=" + callbackState.get() + "&code=thecode"))
                 .GET()
                 .build();
-        http.send(callback, java.net.http.HttpResponse.BodyHandlers.discarding());
+        try (final var http = HttpClient.newHttpClient()) {
+            http.send(callback, java.net.http.HttpResponse.BodyHandlers.discarding());
+        }
 
         final CodexTokenStore store = result.get(5, TimeUnit.SECONDS);
         assertNotNull(store);

@@ -117,9 +117,19 @@ public class HttpClientProducer {
             listeners.add(new CurlLoggerListener(
                     new CurlLoggerListener.Configuration(Logger.getLogger("yca.http")).setLogPayload(true)));
         }
-        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
-                .setDelegate(builder.build())
-                .setRequestListeners(listeners));
+        final var transport = new OpenCodeHttpClient(
+                builder.build(), hasCertificates(cfg.certificates()) ? certificateKeyStore(cfg.certificates()) : null);
+        return new ExtendedHttpClient(
+                new ExtendedHttpClientConfiguration().setDelegate(transport).setRequestListeners(listeners)) {
+            @Override
+            public void close() {
+                try {
+                    super.close();
+                } finally {
+                    transport.close();
+                }
+            }
+        };
     }
 
     private static HttpClient.Version version(final String value) {
@@ -207,6 +217,18 @@ public class HttpClientProducer {
     /** Builds an SSL context trusting the JVM global trust store (optional) plus the configured PEMs. */
     private static SSLContext certificateSslContext(final HttpClientCertificateConfiguration certificates) {
         try {
+            final var tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init(certificateKeyStore(certificates));
+            final var ctx = SSLContext.getInstance("TLS");
+            ctx.init(null, tmf.getTrustManagers(), new SecureRandom());
+            return ctx;
+        } catch (final Exception e) {
+            throw new IllegalStateException("Cannot build custom-certificates SSL context", e);
+        }
+    }
+
+    private static KeyStore certificateKeyStore(final HttpClientCertificateConfiguration certificates) {
+        try {
             final var keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
             keyStore.load(null, null);
             if (certificates.importGlobalCertificate()) {
@@ -225,11 +247,7 @@ public class HttpClientProducer {
                     keyStore.setCertificateEntry("custom-" + i, certificate);
                 }
             }
-            final var tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-            tmf.init(keyStore);
-            final var ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, tmf.getTrustManagers(), new SecureRandom());
-            return ctx;
+            return keyStore;
         } catch (final Exception e) {
             throw new IllegalStateException("Cannot build custom-certificates SSL context", e);
         }

@@ -21,9 +21,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
@@ -49,6 +51,7 @@ import org.junit.jupiter.api.io.TempDir;
 class AnthropicMessagesClientTest {
     private HttpServer server;
     private ChatClient client;
+    private ExtendedHttpClient http;
     private JsonMapper mapper;
 
     @TempDir
@@ -62,6 +65,7 @@ class AnthropicMessagesClientTest {
     void start(final JsonMapper mapper) throws IOException {
         this.mapper = mapper;
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        http = new HttpClientProducer().httpClient(configuration());
     }
 
     @AfterEach
@@ -72,6 +76,9 @@ class AnthropicMessagesClientTest {
         if (server != null) {
             server.stop(0);
         }
+        if (http != null) {
+            http.close();
+        }
     }
 
     private String base() {
@@ -80,7 +87,8 @@ class AnthropicMessagesClientTest {
 
     private ChatClient client() {
         final var configuration = configuration();
-        return new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC());
+        return new ChatClient(
+                configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC(), http);
     }
 
     private CodingAgentConfiguration configuration() {
@@ -148,7 +156,8 @@ class AnthropicMessagesClientTest {
                 Map.entry("yca.llm.retriesBaseDelayMs", "1"),
                 Map.entry("yca.llm.rateLimitRequestsPerMinute", "0"),
                 Map.entry("yca.llm.maxConcurrent", "1")));
-        client = new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC());
+        client = new ChatClient(
+                configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC(), http);
         client.chat(new ChatCompletionRequest(
                 "claude-3-5-haiku-latest",
                 List.of(new Message("user", "hi", null, null, null, null)),
@@ -280,7 +289,8 @@ class AnthropicMessagesClientTest {
                 Map.entry("yca.llm.retriesBaseDelayMs", "1"),
                 Map.entry("yca.llm.rateLimitRequestsPerMinute", "0"),
                 Map.entry("yca.llm.maxConcurrent", "1")));
-        client = new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC());
+        client = new ChatClient(
+                configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC(), http);
         assertEquals(ApiFlavor.ANTHROPIC, client.flavor());
         final var result = client.chat(new ChatCompletionRequest(
                 "claude-sonnet-5-5",

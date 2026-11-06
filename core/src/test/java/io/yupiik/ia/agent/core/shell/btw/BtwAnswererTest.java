@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
@@ -37,6 +38,7 @@ import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.tools.builtin.BashTool;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.maven.knowledge.process.ProcessService;
@@ -89,6 +91,8 @@ class BtwAnswererTest {
     private ToolRegistry toolRegistry;
     private JsonMapper mapper;
     private final List<ChatClient> clients = new ArrayList<>();
+    private final List<ExtendedHttpClient> httpClients = new ArrayList<>();
+    private final List<BtwAnswerer> answerers = new ArrayList<>();
     private final CopyOnWriteArrayList<String> bodies = new CopyOnWriteArrayList<>();
 
     @BeforeEach
@@ -111,7 +115,9 @@ class BtwAnswererTest {
 
     @AfterEach
     void stop() {
+        answerers.forEach(BtwAnswerer::release);
         clients.forEach(ChatClient::close);
+        httpClients.forEach(ExtendedHttpClient::close);
         if (server != null) {
             server.stop(0);
         }
@@ -126,10 +132,12 @@ class BtwAnswererTest {
     private BtwAnswerer answerer(final Map<String, String> extra) {
         final var configuration = TestConfigs.codingAgent(config(extra));
         final var providerManager = new ProviderManager(configuration, mapper);
-        final var client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC());
+        final var httpClient = new HttpClientProducer().httpClient(configuration);
+        httpClients.add(httpClient);
+        final var client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC(), httpClient);
         clients.add(client);
         btwExecutor = Executors.newVirtualThreadPerTaskExecutor();
-        return new BtwAnswerer(
+        final var created = new BtwAnswerer(
                 client,
                 sessionStore,
                 configuration,
@@ -142,7 +150,10 @@ class BtwAnswererTest {
                 Clock.systemUTC(),
                 NOOP,
                 null,
-                new ToolCallPairingRepair(sessionStore, Clock.systemUTC()));
+                new ToolCallPairingRepair(sessionStore, Clock.systemUTC()),
+                httpClient);
+        answerers.add(created);
+        return created;
     }
 
     /**

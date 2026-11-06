@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -27,6 +28,7 @@ import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
@@ -86,6 +88,8 @@ class StructuralCodeGraphTest {
         schedulers.clear();
         chatClients.forEach(ChatClient::close);
         chatClients.clear();
+        httpClients.forEach(ExtendedHttpClient::close);
+        httpClients.clear();
     }
 
     private StructuralCodeGraph newGraph(final CodingAgentConfiguration config, final JsonMapper mapper) {
@@ -131,8 +135,13 @@ class StructuralCodeGraphTest {
         return store;
     }
 
+    private final List<ExtendedHttpClient> httpClients = new ArrayList<>();
+
     private ChatClient chatClient(final CodingAgentConfiguration config, final JsonMapper mapper) {
-        final var client = new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC());
+        final var httpClient = new HttpClientProducer().httpClient(config);
+        httpClients.add(httpClient);
+        final var client =
+                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC(), httpClient);
         chatClients.add(client);
         return client;
     }

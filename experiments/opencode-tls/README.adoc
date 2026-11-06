@@ -1,0 +1,72 @@
+= Custom TLS 1.3 diagnostic
+
+This is an isolated experiment, not a supported transport and not part of YCA's Maven build or runtime.
+It is intended to test whether a fresh TLS handshake with the observed Bun wire profile changes the previously observed provider response.
+It must not be used for general browsing or production credentials without independent security review.
+
+== Implementation
+
+`Tls13Probe.java` uses a plain TCP socket and JDK 25 cryptographic primitives, not `SSLSocket` or `SSLEngine`.
+The runtime has no third-party dependency and does not launch subprocesses.
+It implements TLS 1.3 record encryption, the HKDF key schedule, X25519 and X25519MLKEM768, certificate-chain and SAN hostname validation, CertificateVerify verification, and both Finished messages.
+AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305 are implemented.
+The ClientHello cipher and extension ordering follows the locally observed Bun 1.4.4 profile, with fresh random values and ephemeral keys on every connection.
+The hybrid group concatenates the ML-KEM-768 share/secret before the X25519 share/secret.
+
+Certificate paths are checked by the platform trust manager using the default trust store unless an explicit diagnostic PKCS12 store is provided.
+Server-authentication usage and the peer's DNS/IP SAN are also checked before any HTTP bytes are sent.
+A bare TCP close is not accepted as an authenticated TLS close.
+This does not implement certificate pinning or require online revocation checks.
+
+The prototype deliberately rejects HelloRetryRequest, client authentication, key updates, unsupported extensions and TLS versions, and oversized or malformed messages.
+Session tickets are ignored after authentication, never retained or used.
+There is no early data, resumption, pooling, proxy support, IPv6 hostname support, or retry logic.
+The ClientHello retains observed legacy TLS 1.2 offers for profile comparison, but any actual TLS 1.2 selection fails closed.
+It is therefore intentionally not a complete or conformant general-purpose TLS implementation.
+
+HTTP response handling only detects message completion; it saves raw response bytes without decompression, chunk decoding or SSE interpretation.
+It rejects duplicate response headers and informational responses rather than providing a full HTTP client implementation.
+Do not advertise compression unless the caller can handle raw encoded response bytes.
+
+== Local verification
+
+[source,shell]
+----
+python3 experiments/opencode-tls/test_probe.py -v
+----
+
+The harness requires JDK 25+, Python 3 with TLS 1.3 support, and the `openssl` executable for local fixture preparation only.
+It compiles into a temporary directory, uses loopback servers, and makes no provider calls.
+Tests check HTTP exchange, certificate and hostname rejection, downgrade rejection, tampering and truncation.
+
+== Manual invocation
+
+[source,shell]
+----
+javac --release 25 -d /tmp/yca-tls-classes experiments/opencode-tls/Tls13Probe.java
+java -cp /tmp/yca-tls-classes Tls13Probe host.example 443 /private/request.bin /private/response.bin
+----
+
+The request file must contain a complete HTTP/1.1 request with correct framing.
+An optional fifth argument selects a diagnostic PKCS12 trust store with password `changeit`.
+Keep request/response files in a private directory; they can contain credentials and prompts.
+No captured requests or credentials belong in this repository.
+
+== References
+
+* https://www.rfc-editor.org/rfc/rfc8446[RFC 8446: TLS 1.3]
+* https://datatracker.ietf.org/doc/html/draft-kwiatkowski-tls-ecdhe-mlkem[Hybrid ECDHE-MLKEM groups]
+
+== Observed result
+
+On 2026-11-06, one bounded Java 25 request using the previously successful captured OpenCode application request with its output budget reduced to 64 returned HTTP 200.
+The connection negotiated AES-128-GCM and X25519MLKEM768 with peer verification enabled and no JVM security-policy relaxation.
+The SSE response included a text delta, finish reason `stop`, and `[DONE]`, without an error event.
+An earlier connection failed in the prototype's trust-manager invocation before any HTTP application data was sent; its TLS 1.3 authentication-type argument was corrected before this successful control.
+This is not a successful YCA-native prompt or tool-round-trip test and is not a production integration.
+
+The final local harness run executed 15 tests: 14 passed and one Python/OpenSSL hybrid test skipped.
+A separate Java 27 loopback server verified the hybrid exchange successfully; Java 27 is needed for that stock-JSSE server fixture, not for the Java 25 custom client.
+Individual tests verified all three cipher suites, fragmented responses, and security rejection cases.
+
+Matching the observed ClientHello shape is not proof that a service uses TLS fingerprinting, nor a guarantee of future service access.

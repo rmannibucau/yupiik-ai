@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.model.LlmStreamEvent;
@@ -72,28 +73,30 @@ class ChatClientMidStreamTest {
 
             final var port = server.getLocalPort();
             final var cfg = configuration(port);
-            final var client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
-            final var deltas = new CopyOnWriteArrayList<LlmStreamEvent>();
-            final Consumer<LlmStreamEvent> onDelta = delta -> {
-                if (delta instanceof TextDelta) {
-                    firstChunkDelivered.countDown();
+            try (final var http = new HttpClientProducer().httpClient(cfg);
+                    final var client =
+                            new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http)) {
+                final var deltas = new CopyOnWriteArrayList<LlmStreamEvent>();
+                final Consumer<LlmStreamEvent> onDelta = delta -> {
+                    if (delta instanceof TextDelta) {
+                        firstChunkDelivered.countDown();
+                    }
+                    deltas.add(delta);
+                };
+                try {
+                    final var failure =
+                            assertThrows(IOException.class, () -> client.stream(request(), onDelta, () -> false));
+                    assertInstanceOf(MidStreamFailureException.class, failure);
+                    assertTrue(
+                            ((MidStreamFailureException) failure).partialText().contains("hello"),
+                            "the partial text seen before the cut must be preserved");
+                } finally {
+                    assertTrue(serverDone.await(5, TimeUnit.SECONDS), "server thread must finish");
                 }
-                deltas.add(delta);
-            };
-            try {
-                final var failure =
-                        assertThrows(IOException.class, () -> client.stream(request(), onDelta, () -> false));
-                assertInstanceOf(MidStreamFailureException.class, failure);
                 assertTrue(
-                        ((MidStreamFailureException) failure).partialText().contains("hello"),
-                        "the partial text seen before the cut must be preserved");
-            } finally {
-                client.close();
-                assertTrue(serverDone.await(5, TimeUnit.SECONDS), "server thread must finish");
+                        deltas.stream().anyMatch(TextDelta.class::isInstance),
+                        "deltas delivered before the cut must still reach the consumer");
             }
-            assertTrue(
-                    deltas.stream().anyMatch(TextDelta.class::isInstance),
-                    "deltas delivered before the cut must still reach the consumer");
         }
     }
 

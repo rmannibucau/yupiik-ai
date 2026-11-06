@@ -18,5 +18,6 @@
     <subproject>llm-client-openai</subproject>
     <subproject>llm-client-anthropic</subproject>
     <subproject>llm-client-codex</subproject>
+    <subproject>llm-client-opencode</subproject>
   </subprojects>
 </project>

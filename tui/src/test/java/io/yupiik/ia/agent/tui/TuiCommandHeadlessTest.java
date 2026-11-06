@@ -701,6 +701,7 @@ class TuiCommandHeadlessTest {
                             null,
                             null,
                             null,
+                            null,
                             null),
                     tabManager,
                     new SubagentRegistry(d.configuration(), d.providerManager()),

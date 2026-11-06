@@ -24,7 +24,8 @@ public enum ApiFlavor {
     COMPLETIONS,
     RESPONSES,
     ANTHROPIC,
-    CODEX;
+    CODEX,
+    OPENCODE_FREE;
 
     /** The {@code io.yupiik.llm.client.spi.Dialect#name()} routing identifier; null for {@link #AUTO}. */
     public String dialectName() {
@@ -33,6 +34,7 @@ public enum ApiFlavor {
             case RESPONSES -> "openai-responses";
             case ANTHROPIC -> "anthropic-messages";
             case CODEX -> "codex";
+            case OPENCODE_FREE -> "opencode-free";
             case AUTO -> null;
         };
     }

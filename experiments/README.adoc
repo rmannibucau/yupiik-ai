@@ -1,0 +1,4 @@
+= Isolated diagnostics
+
+These experiments are not included in the Maven build or the production runtime.
+See each experiment's README for requirements and limitations.

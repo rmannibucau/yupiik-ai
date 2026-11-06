@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.shell.btw;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
@@ -120,6 +121,7 @@ public class BtwAnswerer {
                     + "claim to have executed anything you did not.";
 
     private final ChatClient chatClient;
+    private final ExtendedHttpClient httpClient;
     private final SessionStore sessionStore;
     private final CodingAgentConfiguration configuration;
     private final ExecutorService executor;
@@ -149,8 +151,10 @@ public class BtwAnswerer {
             final Clock clock,
             final Emitter emitter,
             final EventContextBuilder eventContextBuilder,
-            final ToolCallPairingRepair pairingRepair) {
+            final ToolCallPairingRepair pairingRepair,
+            final ExtendedHttpClient httpClient) {
         this.chatClient = chatClient;
+        this.httpClient = httpClient;
         this.sessionStore = sessionStore;
         this.configuration = configuration;
         this.executor = executor;
@@ -542,7 +546,7 @@ public class BtwAnswerer {
         }
         synchronized (this) {
             if (dedicatedClient == null) {
-                final var created = new ChatClient(configuration, mapper, providerManager, clock);
+                final var created = new ChatClient(configuration, mapper, providerManager, clock, httpClient);
                 final var settings = ChatSettings.EMPTY.withModel(model);
                 dedicatedClient = created;
                 dedicatedSettings = settings;

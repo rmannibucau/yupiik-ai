@@ -30,6 +30,7 @@ import dev.tamboui.tui.event.MouseButton;
 import dev.tamboui.tui.event.MouseEvent;
 import dev.tamboui.tui.event.PasteEvent;
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
@@ -67,12 +68,12 @@ import io.yupiik.ia.agent.core.shell.slash.ConfigCommands;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
-import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
@@ -147,6 +148,8 @@ class TuiCommandRenderTest {
     private CodingAgentConfiguration tuiConfig;
 
     private final List<String> sessionAppends = new ArrayList<>();
+    private final List<ExtendedHttpClient> httpClients = new ArrayList<>();
+    private final List<ChatClient> chatClients = new ArrayList<>();
 
     @BeforeEach
     void start(final JsonMapper mapper) throws IOException {
@@ -165,6 +168,8 @@ class TuiCommandRenderTest {
         if (uiThread != null) {
             uiThread.join(TIMEOUT_MS);
         }
+        chatClients.forEach(ChatClient::close);
+        httpClients.forEach(ExtendedHttpClient::close);
         llm.close();
         if (llm2 != null) {
             llm2.close();
@@ -2745,15 +2750,13 @@ class TuiCommandRenderTest {
                 null, "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0,
                 0.22, 0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, true, "unicode",
                 "auto", "auto", List.of(), null, null, true, 3, 10, "", 0.8, "#ff5555", null);
-        final var chatClient = new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), clock);
+        final var httpClient = new HttpClientProducer().httpClient(configuration);
+        httpClients.add(httpClient);
+        final var chatClient =
+                new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), clock, httpClient);
+        chatClients.add(chatClient);
         final var mcpManager = new McpManager(
-                configuration,
-                mapper,
-                List.of(),
-                new io.yupiik.fusion.httpclient.core.ExtendedHttpClient(
-                        new io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration()
-                                .setDelegate(HttpClient.newBuilder().build())),
-                new io.yupiik.maven.knowledge.process.ProcessService());
+                configuration, mapper, List.of(), httpClient, new io.yupiik.maven.knowledge.process.ProcessService());
         final var factory = new TuiRunnerFactory() {
             @Override
             public TuiRunner create(final TuiCommand.TuiConf tuiConf, final boolean hideCursor) throws Exception {
@@ -2862,7 +2865,8 @@ class TuiCommandRenderTest {
                         null,
                         null,
                         null,
-                        null),
+                        null,
+                        httpClient),
                 tabManager,
                 subagentRegistry,
                 new ScrollService(tuiConfiguration),

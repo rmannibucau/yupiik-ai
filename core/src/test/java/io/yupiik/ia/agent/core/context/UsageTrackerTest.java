@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -26,6 +27,7 @@ import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
@@ -59,6 +61,7 @@ class UsageTrackerTest {
 
     private HttpServer server;
     private ChatClient client;
+    private ExtendedHttpClient httpClient;
     private ProviderManager providerManager;
     private CodingAgentConfiguration configuration;
     private JsonMapper mapper;
@@ -74,13 +77,17 @@ class UsageTrackerTest {
         this.mapper = mapper;
         configuration = configuration(-1);
         providerManager = new ProviderManager(configuration, mapper);
-        client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC());
+        httpClient = new HttpClientProducer().httpClient(configuration);
+        client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC(), httpClient);
     }
 
     @AfterEach
     void stop() {
         if (client != null) {
             client.close();
+        }
+        if (httpClient != null) {
+            httpClient.close();
         }
         if (server != null) {
             server.stop(0);
@@ -421,7 +428,7 @@ class UsageTrackerTest {
         entries.put("yca.provider.providers.0.timeoutSeconds", "5");
         final var cfg = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
         final var pm = new ProviderManager(cfg, mapper);
-        final var c = new ChatClient(cfg, mapper, pm, Clock.systemUTC());
+        final var c = new ChatClient(cfg, mapper, pm, Clock.systemUTC(), httpClient);
         try {
             final var tracker =
                     new UsageTracker(pm, c, new ContextWindowCache(cfg, mapper, Clock.systemUTC()), Clock.systemUTC());
@@ -496,7 +503,7 @@ class UsageTrackerTest {
                 return this;
             }
         };
-        final var client = new ChatClient(configuration(-1), mapper, providerManager, Clock.systemUTC()) {
+        final var client = new ChatClient(configuration(-1), mapper, providerManager, Clock.systemUTC(), httpClient) {
             @Override
             public ModelsResponse models(final ChatSettings s) {
                 if (!recovered.get()) {
@@ -531,7 +538,7 @@ class UsageTrackerTest {
     @Test
     void permanentFailureStillBacksOffForADay() throws Exception {
         final var calls = new AtomicInteger();
-        final var client = new ChatClient(configuration(-1), mapper, providerManager, Clock.systemUTC()) {
+        final var client = new ChatClient(configuration(-1), mapper, providerManager, Clock.systemUTC(), httpClient) {
             @Override
             public ModelsResponse models(final ChatSettings s) {
                 calls.incrementAndGet();
@@ -570,7 +577,7 @@ class UsageTrackerTest {
                 new ModelsResponse.TokenCount(
                         272000, true, ModelsResponse.SourceType.DETECTED_ABSOLUTE, "/context_window"),
                 System.currentTimeMillis() - 25L * 60L * 60L * 1000L);
-        final var client = new ChatClient(cfg, mapper, providerManager, Clock.systemUTC()) {
+        final var client = new ChatClient(cfg, mapper, providerManager, Clock.systemUTC(), httpClient) {
             @Override
             public ModelsResponse models(final ChatSettings s) {
                 throw new IllegalStateException("provider unreachable");
@@ -592,7 +599,7 @@ class UsageTrackerTest {
         final var seen = new AtomicReference<ChatSettings>();
         final var cfg = configuration(-1);
         final var marker = new ChatSettings("default", "test-model", null, null);
-        final var client = new ChatClient(cfg, mapper, providerManager, Clock.systemUTC()) {
+        final var client = new ChatClient(cfg, mapper, providerManager, Clock.systemUTC(), httpClient) {
             @Override
             public ModelsResponse models(final ChatSettings s) {
                 seen.set(s);

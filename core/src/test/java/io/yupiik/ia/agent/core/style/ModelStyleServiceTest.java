@@ -20,14 +20,18 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -43,6 +47,8 @@ class ModelStyleServiceTest {
 
     private JsonMapper mapper;
     private ChatClient chatClient;
+    private final List<ExtendedHttpClient> httpClients = new ArrayList<>();
+    private final List<ChatClient> chatClients = new ArrayList<>();
     private ModelStyleService service;
     private ProviderManager providerManager;
 
@@ -53,9 +59,16 @@ class ModelStyleServiceTest {
 
     @AfterEach
     void tearDown() {
-        if (chatClient != null) {
-            chatClient.close();
-        }
+        chatClients.forEach(ChatClient::close);
+        httpClients.forEach(ExtendedHttpClient::close);
+    }
+
+    private ChatClient client(final CodingAgentConfiguration configuration, final ProviderManager providers) {
+        final var httpClient = new HttpClientProducer().httpClient(configuration);
+        httpClients.add(httpClient);
+        final var client = new ChatClient(configuration, mapper, providers, Clock.systemUTC(), httpClient);
+        chatClients.add(client);
+        return client;
     }
 
     private void init() {
@@ -76,7 +89,7 @@ class ModelStyleServiceTest {
                 Map.entry("yca.provider.providers.1.models.length", "1"),
                 Map.entry("yca.provider.providers.1.models.0.model", "gpt-5")));
         providerManager = new ProviderManager(cfg, mapper);
-        chatClient = new ChatClient(cfg, mapper, providerManager, Clock.systemUTC());
+        chatClient = client(cfg, providerManager);
         service = new ModelStyleService(cfg, chatClient);
     }
 
@@ -168,7 +181,7 @@ class ModelStyleServiceTest {
                 Map.entry("yca.provider.providers.1.models.length", "1"),
                 Map.entry("yca.provider.providers.1.models.0.model", "model-a")));
         providerManager = new ProviderManager(cfg, mapper);
-        chatClient = new ChatClient(cfg, mapper, providerManager, Clock.systemUTC());
+        chatClient = client(cfg, providerManager);
         service = new ModelStyleService(cfg, chatClient);
     }
 
@@ -215,7 +228,7 @@ class ModelStyleServiceTest {
                 Map.entry("yca.provider.providers.0.models.1.model", "model-b"),
                 Map.entry("yca.provider.providers.0.models.2.model", "model-c")));
         final var firstManager = new ProviderManager(first, mapper);
-        final var firstClient = new ChatClient(first, mapper, firstManager, Clock.systemUTC());
+        final var firstClient = client(first, firstManager);
         final var firstService = new ModelStyleService(first, firstClient);
         final var ax = firstService
                 .resolve(firstManager.providers().get(0), "model-c", true)
@@ -231,15 +244,13 @@ class ModelStyleServiceTest {
                 Map.entry("yca.provider.providers.0.models.1.model", "model-b"),
                 Map.entry("yca.provider.providers.0.models.2.model", "model-a")));
         final var reorderedManager = new ProviderManager(reordered, mapper);
-        final var reorderedClient = new ChatClient(reordered, mapper, reorderedManager, Clock.systemUTC());
+        final var reorderedClient = client(reordered, reorderedManager);
         final var reorderedService = new ModelStyleService(reordered, reorderedClient);
         final var cx = reorderedService
                 .resolve(reorderedManager.providers().get(0), "model-c", true)
                 .hex();
 
         assertEquals(ax, cx, "reordering the models list must not change a model's color");
-        firstClient.close();
-        reorderedClient.close();
     }
 
     private static int channel(final String hex, final int offset) {

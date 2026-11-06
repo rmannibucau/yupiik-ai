@@ -18,21 +18,32 @@ package io.yupiik.ia.agent.core.llm;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class ChatClientCompressionBoundaryTest {
+    private final List<ExtendedHttpClient> httpClients = new ArrayList<>();
+
+    @AfterEach
+    void stop() {
+        httpClients.forEach(ExtendedHttpClient::close);
+    }
+
     @TempDir
     Path storageHome;
 
@@ -121,7 +132,9 @@ class ChatClientCompressionBoundaryTest {
         values.put("yca.provider.providers.0.model", "deepseek-v4-flash");
         values.putAll(overrides);
         final var config = TestConfigs.codingAgent(values);
-        return new ChatClient(config, mapper, new ProviderManager(config, mapper), Clock.systemUTC());
+        final var http = new HttpClientProducer().httpClient(config);
+        httpClients.add(http);
+        return new ChatClient(config, mapper, new ProviderManager(config, mapper), Clock.systemUTC(), http);
     }
 
     private ChatCompletionRequest request(final String model, final ChatSettings settings) {

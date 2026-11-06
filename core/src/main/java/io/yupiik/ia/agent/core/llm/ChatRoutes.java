@@ -40,6 +40,10 @@ public final class ChatRoutes {
             return null;
         }
         final var url = stripSlash(baseUrl);
+        if (url.equals("https://opencode.ai/inference/openai/v1")
+                || url.equals("https://opencode.ai/inference/openai/v1/chat/completions")) {
+            return ApiFlavor.OPENCODE_FREE;
+        }
         if (url.endsWith("/messages")) {
             return ApiFlavor.ANTHROPIC;
         }

@@ -106,7 +106,7 @@ public class OpenAICompletionsDialect extends AbstractDialect {
     @Override
     public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
         try {
-            final var payload = mapper.toBytes(toWire(request, false));
+            final var payload = encodeRequest(request, false);
             return post(payload).thenCompose(response -> {
                 try {
                     return CompletableFuture.completedFuture(
@@ -124,7 +124,7 @@ public class OpenAICompletionsDialect extends AbstractDialect {
     public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
             final LlmRequest request, final BooleanSupplier cancelled) {
         try {
-            final var payload = mapper.toBytes(toWire(request, true));
+            final var payload = encodeRequest(request, true);
             return openStream(payload, cancelled)
                     .thenCompose(attempt -> attempt.ok()
                             ? CompletableFuture.completedFuture(

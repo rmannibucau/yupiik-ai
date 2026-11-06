@@ -48,7 +48,7 @@ public record ProviderConfiguration(
         @Property(
                 defaultValue = "io.yupiik.ia.agent.core.llm.ApiFlavor.AUTO",
                 documentation =
-                        "API flavor: auto (detect from the base URL route suffix, falling back to completions then responses for OpenAI), completions, responses or anthropic.")
+                        "API flavor: auto (detect from the base URL route suffix), completions, responses, anthropic, codex or experimental opencode-free.")
         ApiFlavor api,
 
         @Property(
@@ -179,6 +179,11 @@ public record ProviderConfiguration(
     }
 
     public String resolveApiKey() {
+        if (api == ApiFlavor.OPENCODE_FREE
+                || (api == null || api == ApiFlavor.AUTO)
+                        && io.yupiik.ia.agent.core.llm.ChatRoutes.detectFlavor(baseUrl) == ApiFlavor.OPENCODE_FREE) {
+            return "public";
+        }
         if (apiKey != null && !apiKey.isBlank()) {
             return apiKey;
         }

@@ -21,8 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.model.LlmStreamEvent;
@@ -52,6 +54,7 @@ class ChatClientInBandToolCallsTest {
 
     private HttpServer server;
     private ChatClient client;
+    private ExtendedHttpClient http;
     private JsonMapper mapper;
 
     @TempDir
@@ -74,8 +77,9 @@ class ChatClientInBandToolCallsTest {
                 exchange -> respond(
                         exchange, 200, "{\"data\":[{\"id\":\"test-model\",\"owned_by\":\"x\"}]}", "application/json"));
         server.start();
+        http = new HttpClientProducer().httpClient(configuration());
         client = new ChatClient(
-                configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC());
+                configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC(), http);
     }
 
     @AfterEach
@@ -85,6 +89,9 @@ class ChatClientInBandToolCallsTest {
         }
         if (server != null) {
             server.stop(0);
+        }
+        if (http != null) {
+            http.close();
         }
     }
 

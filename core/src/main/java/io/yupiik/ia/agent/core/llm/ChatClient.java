@@ -21,8 +21,6 @@ import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
 import io.yupiik.fusion.framework.handlebars.spi.Template;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
-import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
-import io.yupiik.fusion.httpclient.core.listener.impl.CurlLoggerListener;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.BoundaryOnlyRefMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -31,6 +29,7 @@ import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.ReasoningFormatMode;
 import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
+import io.yupiik.ia.agent.core.wiring.OpenCodeHttpClient;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.llm.client.DialectLlmClient;
@@ -46,10 +45,10 @@ import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.openai.OpenAICompletionsDialect;
 import io.yupiik.llm.client.openai.OpenAIResponsesDialect;
+import io.yupiik.llm.client.opencode.OpenCodeFreeDialect;
 import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
 import java.io.IOException;
-import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.time.Clock;
 import java.time.Duration;
@@ -98,7 +97,6 @@ public class ChatClient implements AutoCloseable {
     private final InBandToolCallExtractor inBandToolCallExtractor;
     private final ContextWindowCache contextWindowCache;
     private final ExtendedHttpClient httpClient;
-    private final boolean ownsHttpClient;
     /** Shared application scheduler parking the resilient retry waits; {@code null} falls back to the JDK delayed executor. */
     private final ScheduledExecutorService scheduler;
     /** Provides the {@code {{exec}}} handlebars helper for dynamic provider headers; {@code null} in tests/programmatic use. */
@@ -129,6 +127,7 @@ public class ChatClient implements AutoCloseable {
     private static final long MODEL_CATALOG_FAILURE_BACKOFF_MILLIS = 60_000L;
     private final Map<String, Long> modelCatalogRetryAfter = new ConcurrentHashMap<>();
 
+    /** Uses the caller-owned HTTP client, which must be closed by its owner. */
     public ChatClient(
             final CodingAgentConfiguration configuration,
             final JsonMapper mapper,
@@ -141,19 +140,25 @@ public class ChatClient implements AutoCloseable {
             final ExecTemplateHelper execTemplateHelper,
             final CodexAuthTemplateHelper codexAuthTemplateHelper,
             final List<CustomDynamicHeaderTemplateHelper> customDynamicHeaderTemplateHelpers) {
-        this(
-                configuration,
-                mapper,
-                providerManager,
-                clock,
-                httpClient,
-                toolCallArgumentsRepairer,
-                inBandToolCallExtractor,
-                false,
-                scheduler,
-                execTemplateHelper,
-                codexAuthTemplateHelper,
-                customDynamicHeaderTemplateHelpers);
+        this.configuration = configuration;
+        this.mapper = mapper;
+        this.providerManager = providerManager;
+        this.clock = clock;
+        this.toolCallArgumentsRepairer = toolCallArgumentsRepairer;
+        this.inBandToolCallExtractor = inBandToolCallExtractor == null
+                ? new InBandToolCallExtractor(new MarkupToolCallScanner())
+                : inBandToolCallExtractor;
+        this.contextWindowCache = new ContextWindowCache(configuration, mapper, clock);
+        this.httpClient = httpClient;
+        this.scheduler = scheduler;
+        this.execTemplateHelper = execTemplateHelper;
+        this.codexAuthTemplateHelper = codexAuthTemplateHelper;
+        this.customDynamicHeaderTemplateHelpers = customDynamicHeaderTemplateHelpers == null
+                ? List.of()
+                : List.copyOf(customDynamicHeaderTemplateHelpers);
+        // context overflow is handled by the agent loop (context compaction), retries after are
+        // honored by the library resilience layer; per-provider clients get their own resilience
+        // wrapper so the concurrency budget is scoped to one provider base URL
     }
 
     public ChatClient(
@@ -171,109 +176,20 @@ public class ChatClient implements AutoCloseable {
                 httpClient,
                 toolCallArgumentsRepairer,
                 null,
-                false,
                 null,
                 null,
                 null,
                 List.of());
     }
 
-    /**
-     * Convenience constructor creating and owning a default {@link ExtendedHttpClient} delegating to a plain
-     * {@link HttpClient#newHttpClient()}. Reserved for tests and programmatic usage; the managed application
-     * path injects the shared client through the constructor above.
-     */
+    /** Convenience constructor using a caller-owned HTTP client. */
     public ChatClient(
             final CodingAgentConfiguration configuration,
             final JsonMapper mapper,
             final ProviderManager providerManager,
             final Clock clock,
             final ExtendedHttpClient httpClient) {
-        this(
-                configuration,
-                mapper,
-                providerManager,
-                clock,
-                httpClient,
-                new ToolCallArgumentsRepairer(mapper),
-                null,
-                false,
-                null,
-                null,
-                null,
-                List.of());
-    }
-
-    /**
-     * Convenience constructor creating and owning a default {@link ExtendedHttpClient} delegating to a plain
-     * {@link HttpClient#newHttpClient()}. Reserved for tests and programmatic usage; the managed application
-     * path injects the shared client through the constructor above.
-     */
-    public ChatClient(
-            final CodingAgentConfiguration configuration,
-            final JsonMapper mapper,
-            final ProviderManager providerManager,
-            final Clock clock) {
-        this(
-                configuration,
-                mapper,
-                providerManager,
-                clock,
-                defaultClient(configuration),
-                new ToolCallArgumentsRepairer(mapper),
-                null,
-                true,
-                null,
-                null,
-                null,
-                List.of());
-    }
-
-    private ChatClient(
-            final CodingAgentConfiguration configuration,
-            final JsonMapper mapper,
-            final ProviderManager providerManager,
-            final Clock clock,
-            final ExtendedHttpClient httpClient,
-            final ToolCallArgumentsRepairer toolCallArgumentsRepairer,
-            final InBandToolCallExtractor inBandToolCallExtractor,
-            final boolean ownsHttpClient,
-            final ScheduledExecutorService scheduler,
-            final ExecTemplateHelper execTemplateHelper,
-            final CodexAuthTemplateHelper codexAuthTemplateHelper,
-            final List<CustomDynamicHeaderTemplateHelper> customDynamicHeaderTemplateHelpers) {
-        this.configuration = configuration;
-        this.mapper = mapper;
-        this.providerManager = providerManager;
-        this.clock = clock;
-        this.toolCallArgumentsRepairer = toolCallArgumentsRepairer;
-        this.inBandToolCallExtractor = inBandToolCallExtractor == null
-                ? new InBandToolCallExtractor(new MarkupToolCallScanner())
-                : inBandToolCallExtractor;
-        this.contextWindowCache = new ContextWindowCache(configuration, mapper, clock);
-        this.httpClient = httpClient;
-        this.ownsHttpClient = ownsHttpClient;
-        this.scheduler = scheduler;
-        this.execTemplateHelper = execTemplateHelper;
-        this.codexAuthTemplateHelper = codexAuthTemplateHelper;
-        this.customDynamicHeaderTemplateHelpers = customDynamicHeaderTemplateHelpers == null
-                ? List.of()
-                : List.copyOf(customDynamicHeaderTemplateHelpers);
-        // context overflow is handled by the agent loop (context compaction), retries after are
-        // honored by the library resilience layer; per-provider clients get their own resilience
-        // wrapper so the concurrency budget is scoped to one provider base URL
-    }
-
-    private static ExtendedHttpClient defaultClient(final CodingAgentConfiguration configuration) {
-        final var clientConfig = new ExtendedHttpClientConfiguration()
-                .setDelegate(HttpClient.newBuilder()
-                        .version(HttpClient.Version.HTTP_1_1)
-                        .build());
-        if (configuration.httpClient().debug()) {
-            clientConfig.setRequestListeners(List.of(new CurlLoggerListener(
-                    new CurlLoggerListener.Configuration(Logger.getLogger("yca.http")).setLogPayload(true))));
-        }
-        return new ExtendedHttpClient(clientConfig);
+        this(configuration, mapper, providerManager, clock, httpClient, new ToolCallArgumentsRepairer(mapper));
     }
 
     private LlmClientResilienceWrapper resilience(final ProviderConfiguration provider, final int providerBounds) {
@@ -321,7 +237,6 @@ public class ChatClient implements AutoCloseable {
         this.inBandToolCallExtractor = new InBandToolCallExtractor(new MarkupToolCallScanner());
         this.contextWindowCache = null;
         this.httpClient = null;
-        this.ownsHttpClient = false;
         this.scheduler = null;
         this.execTemplateHelper = null;
         this.codexAuthTemplateHelper = null;
@@ -403,12 +318,29 @@ public class ChatClient implements AutoCloseable {
             throw new IllegalStateException("resolved flavor and provider must be concrete");
         }
         return dialectClients.computeIfAbsent(new ClientKey(flavor, provider), key -> {
+            final var headers = headersCustomizer(provider);
+            final Consumer<HttpRequest.Builder> transport;
+            if (flavor == ApiFlavor.OPENCODE_FREE && httpClient.delegate() instanceof OpenCodeHttpClient selector) {
+                final var caps = provider.capabilities();
+                transport = selector.profile(
+                        caps == null || caps.opencode() == null
+                                ? null
+                                : caps.opencode().cipherSuites());
+            } else {
+                if (flavor == ApiFlavor.OPENCODE_FREE) {
+                    throw new IllegalStateException("OpenCode requires the shared OpenCode-selecting HTTP transport");
+                }
+                transport = ignored -> {};
+            }
             final var spec = new ProviderSpec(
                     ChatRoutes.chatEndpoint(provider.baseUrl(), flavor),
-                    provider.resolveApiKey(),
+                    flavor == ApiFlavor.OPENCODE_FREE ? "public" : provider.resolveApiKey(),
                     Duration.ofSeconds(provider.timeoutSeconds()),
                     providerManager.providerOptions(provider),
-                    headersCustomizer(provider));
+                    builder -> {
+                        headers.accept(builder);
+                        transport.accept(builder);
+                    });
             final var bounds = provider.maxConcurrent() >= 0
                     ? provider.maxConcurrent()
                     : configuration.llm().maxConcurrent();
@@ -481,6 +413,7 @@ public class ChatClient implements AutoCloseable {
     private Dialect dialect(final ApiFlavor flavor, final ProviderSpec spec, final ProviderConfiguration provider) {
         final var debugLogger = configuration.httpClient().debug() ? Logger.getLogger("yca.http") : null;
         return switch (flavor) {
+            case OPENCODE_FREE -> new OpenCodeFreeDialect(mapper, httpClient, spec);
             case COMPLETIONS -> {
                 final var d = new OpenAICompletionsDialect(mapper, httpClient, spec);
                 if (debugLogger != null) {
@@ -575,6 +508,7 @@ public class ChatClient implements AutoCloseable {
             return keys;
         }
         return switch (flavor) {
+            case OPENCODE_FREE -> List.of("prompt_cache_key");
             case CODEX -> List.of("session-id", "prompt_cache_key");
             case RESPONSES -> List.of("x-session-id", "prompt_cache_key");
             default -> List.of();
@@ -2720,18 +2654,11 @@ public class ChatClient implements AutoCloseable {
     @Destroy
     public void close() {
         if (LOGGER.isLoggable(Level.FINE)) {
-            LOGGER.fine("[yca-shutdown] ChatClient.close: closing dialect clients and HTTP client");
+            LOGGER.fine("[yca-shutdown] ChatClient.close: closing dialect clients");
         }
         final var start = System.nanoTime();
         if (dialectClients != null) {
             dialectClients.values().forEach(DialectLlmClient::close);
-        }
-        if (ownsHttpClient && httpClient != null) {
-            try {
-                httpClient.close();
-            } catch (final RuntimeException e) {
-                // ignore close failures on shutdown
-            }
         }
         if (LOGGER.isLoggable(Level.FINE)) {
             LOGGER.fine(() ->

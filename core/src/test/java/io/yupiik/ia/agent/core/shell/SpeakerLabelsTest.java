@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.cli.CliPromptTemplate;
 import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
@@ -32,16 +33,19 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.session.SessionEntry;
+import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.time.Clock;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -49,6 +53,14 @@ import org.junit.jupiter.api.extension.ExtendWith;
 @ExtendWith(TestJsonMapper.class)
 class SpeakerLabelsTest {
     private JsonMapper mapper;
+    private final List<ExtendedHttpClient> httpClients = new ArrayList<>();
+    private final List<ChatClient> chatClients = new ArrayList<>();
+
+    @AfterEach
+    void closeClients() {
+        chatClients.forEach(ChatClient::close);
+        httpClients.forEach(ExtendedHttpClient::close);
+    }
 
     @BeforeEach
     void bindMapper(final JsonMapper mapper) {
@@ -84,7 +96,12 @@ class SpeakerLabelsTest {
     }
 
     private ChatClient chatClient(final CodingAgentConfiguration configuration) {
-        return new ChatClient(configuration, mapper, providerManager(configuration), Clock.systemUTC());
+        final var httpClient = new HttpClientProducer().httpClient(configuration);
+        httpClients.add(httpClient);
+        final var client =
+                new ChatClient(configuration, mapper, providerManager(configuration), Clock.systemUTC(), httpClient);
+        chatClients.add(client);
+        return client;
     }
 
     private SpeakerLabels labels(final CodingAgentConfiguration configuration) {

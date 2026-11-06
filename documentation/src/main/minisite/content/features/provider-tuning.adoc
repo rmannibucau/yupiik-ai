@@ -12,6 +12,8 @@ measured parity benchmark (context and wall-clock) against opencode.
 
 == What yca sends by default
 
+See also link:opencode-free.html[experimental OpenCode free inference] for its dedicated transport and security limitations.
+
 For every chat completion request yca resolves a per-model *budget*, a
 *reasoning effort* and a *variant*. The resolution chain is (first match wins):
 
