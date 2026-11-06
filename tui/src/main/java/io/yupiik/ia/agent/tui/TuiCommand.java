@@ -404,11 +404,10 @@ public class TuiCommand implements Runnable {
 
             @Override
             public List<String> subagents() {
-                return subagentRegistry == null
+                final var state = active();
+                return subagentRegistry == null || state == null
                         ? List.of()
-                        : subagentRegistry.listAll(null).stream()
-                                .map(SubagentRegistry.SubagentState::id)
-                                .toList();
+                        : subagentRegistry.completionCandidates(state.sessionId);
             }
 
             @Override
@@ -3167,7 +3166,7 @@ public class TuiCommand implements Runnable {
     private void ensureVariantsLoaded(final String model) {
         final var activeState = active();
         final var providerId = providerIdOf(activeState);
-        if (chatClient == null || model == null || !completionCache.beginVariantsLoad(providerId, model)) {
+        if (chatClient == null || !completionCache.beginVariantsLoad(providerId, model)) {
             return;
         }
         executor.execute(() -> {
@@ -3366,6 +3365,17 @@ public class TuiCommand implements Runnable {
                 next = "~" + formatTokens(est) + " / " + formatTokens(max) + " tok";
             } else {
                 next = "~" + formatTokens(est) + " tok";
+            }
+            final var measurement = state.model.contextMeasurement();
+            if (measurement != null) {
+                next += " (" + measurement.source();
+                if (measurement.lastInputTokens() > 0) {
+                    next += "; last input " + formatTokens(measurement.lastInputTokens());
+                }
+                if (measurement.pendingTokens() > 0) {
+                    next += "; pending ~" + formatTokens(measurement.pendingTokens());
+                }
+                next += ")";
             }
         }
         if (Objects.equals(state.hoverContextSize, next)) {
@@ -6773,18 +6783,20 @@ public class TuiCommand implements Runnable {
                 splits.get(1));
     }
 
-    /** Opens the subagents overlay from "/subagents": no arg = the list, an id = one subagent detail. */
+    /** Opens the subagents overlay: no arg = the list, an id or unique name = detail. */
     private ShellOutcome openSubagents(final String arg) {
         final var state = active();
         if (state == null) {
             return ShellOutcome.none();
         }
-        final var id = arg == null ? "" : arg.strip();
-        if (!id.isEmpty()) {
-            final var present = subagentRegistry.get(id).isPresent();
-            if (!present) {
-                return ShellOutcome.status("unknown subagent: " + id);
+        final var reference = arg == null ? "" : arg.strip();
+        var id = "";
+        if (!reference.isEmpty()) {
+            final var matches = subagentRegistry.resolve(state.sessionId, reference);
+            if (matches.size() != 1) {
+                return ShellOutcome.status(subagentRegistry.selectionError(reference, matches));
             }
+            id = matches.getFirst().id();
         }
         state.subagentsOverlay = id;
         state.subagentsScroll = 0;
@@ -6914,7 +6926,9 @@ public class TuiCommand implements Runnable {
                 rows.add(Line.from(Span.styled("no subagents for this session", muted)));
             }
             for (final var sub : list) {
-                final var label = sub.name() != null ? sub.name() : sub.id();
+                final var label = sub.name() == null || sub.name().isBlank()
+                        ? sub.id()
+                        : sub.name() + "  (" + sub.id() + ")";
                 final var status = sub.isDone() ? (sub.isCancelled() ? "cancelled" : "completed") : "running";
                 final var effective = subagentRegistry
                         .identityOf(sub.id())
@@ -6938,7 +6952,7 @@ public class TuiCommand implements Runnable {
                         Span.styled("  " + TuiInputSupport.firstLine(summarize(sub)), muted)));
             }
             rows.add(Line.empty());
-            rows.add(Line.from(Span.styled("  /subagents <id> to open one subagent transcript", muted)));
+            rows.add(Line.from(Span.styled("  /subagents <id|name> to open one subagent transcript", muted)));
         }
         final var splits = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(1))
@@ -8976,7 +8990,7 @@ public class TuiCommand implements Runnable {
             if (v.isEmpty()) {
                 return;
             }
-            selected = Math.clamp(selected + pageDelta * pageSize, 0, v.size() - 1);
+            selected = Math.clamp(selected + (long) pageDelta * pageSize, 0, v.size() - 1);
         }
 
         /** @return the 0-based page that holds the current selection (0 when no paging). */

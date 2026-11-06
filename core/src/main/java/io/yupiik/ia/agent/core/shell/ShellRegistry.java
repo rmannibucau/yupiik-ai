@@ -40,9 +40,15 @@ public class ShellRegistry {
     private final Emitter emitter;
     private final Map<String, ShellEnv> shellsBySession = new ConcurrentHashMap<>();
     private volatile SubagentRegistry subagentRegistry;
+    private volatile boolean isolateSubagents;
 
     public ShellRegistry(final Emitter emitter) {
+        this(emitter, null);
+    }
+
+    public ShellRegistry(final Emitter emitter, final SubagentRegistry subagentRegistry) {
         this.emitter = emitter;
+        this.subagentRegistry = subagentRegistry;
     }
 
     /**
@@ -53,6 +59,7 @@ public class ShellRegistry {
      */
     public void bindSubagents(final SubagentRegistry subagentRegistry) {
         this.subagentRegistry = subagentRegistry;
+        this.isolateSubagents = true;
     }
 
     /**
@@ -97,18 +104,18 @@ public class ShellRegistry {
 
     /** Forwards an agent event to the shell owning its session, no-op when unknown or untagged. */
     public void onEvent(@OnEvent final AgentEvent event) {
-        // when a subagent registry is bound (TUI), the subagent stream is captured
-        // per-subagent (the /subagents modal) and never reaches the parent shell,
-        // which keeps the parent tab clean; the lifecycle markers still go to the
-        // parent so the user sees spawn/done lines. Unbound (run/cli) keeps the
-        // historical forwarding so prefixed live output still renders.
+        // Capture child streams for /subagents in every shell. The TUI additionally
+        // isolates them from the parent tab; CLI/run retain live forwarding.
+        // Lifecycle markers always reach the parent.
         final var subagents = subagentRegistry;
         if (subagents != null
                 && event.subagentId() != null
                 && !(event instanceof AgentEvent.SubagentStarted)
                 && !(event instanceof AgentEvent.SubagentCompleted)) {
             subagents.transcriptOf(event.subagentId()).onEvent(event);
-            return;
+            if (isolateSubagents) {
+                return;
+            }
         }
         final var env = active(event.sessionId());
         if (env != null) {

@@ -34,7 +34,7 @@ import java.util.concurrent.CompletableFuture;
  * {@link SlashCommandSet} bean.
  */
 @ApplicationScoped
-@Order(2000)
+@Order(1900)
 public class TuiSlashCommands implements SlashCommandSet {
     private static final String SHORTCUTS = KeymapCatalog.markdown();
 
@@ -95,10 +95,10 @@ public class TuiSlashCommands implements SlashCommandSet {
                 SlashCommand.of(
                         new SlashCommandSpec(
                                 "/subagents",
-                                "[id]",
+                        "[id|name]",
                                 "list the session subagents, or open the transcript of the given subagent",
                                 SlashGroup.SESSION),
-                        ArgCompletion.from("subagent", ArgCompletion.Env::subagents),
+                ArgCompletion.wholeArgument("subagent", ArgCompletion.Env::subagents),
                         SlashAction.sync(this::subagentsOutcome)));
     }
 

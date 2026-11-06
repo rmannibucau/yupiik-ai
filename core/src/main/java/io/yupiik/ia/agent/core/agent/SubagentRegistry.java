@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.core.agent;
 
+import static java.util.stream.Collectors.joining;
+
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
@@ -30,6 +32,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
+import java.util.stream.Stream;
 
 @ApplicationScoped
 public class SubagentRegistry {
@@ -391,6 +394,39 @@ public class SubagentRegistry {
                 .filter(s -> parentSessionId == null || parentSessionId.equals(s.parentSessionId()))
                 .sorted((a, b) -> Long.compare(a.startedAt(), b.startedAt()))
                 .toList();
+    }
+
+    /** Exact ids are global; otherwise exact names are resolved within the parent session. */
+    public List<SubagentState> resolve(final String parentSessionId, final String reference) {
+        if (reference == null || reference.isBlank()) {
+            return List.of();
+        }
+        final var byId = get(reference);
+        if (byId.isPresent()) {
+            return List.of(byId.get());
+        }
+        return listAll(parentSessionId).stream()
+                .filter(state -> reference.equals(state.name()))
+                .toList();
+    }
+
+    /** Sorted, unique ids and nonblank names of running and completed children. */
+    public List<String> completionCandidates(final String parentSessionId) {
+        return listAll(parentSessionId).stream()
+                .flatMap(state -> Stream.of(state.id(), state.name()))
+                .filter(value -> value != null && !value.isBlank())
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
+    /** Shared diagnostic for an unknown or ambiguous selection. */
+    public String selectionError(final String reference, final List<SubagentState> matches) {
+        if (matches.isEmpty()) {
+            return "Unknown subagent: " + reference;
+        }
+        return "Ambiguous subagent: " + reference + ". Use an id: "
+                + matches.stream().map(SubagentState::id).sorted().collect(joining(", "));
     }
 
     /** The number of in-flight sub-agents on a provider (informational; 0 for unknown ids). */

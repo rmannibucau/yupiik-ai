@@ -94,6 +94,60 @@ class SubagentRegistryTest {
     }
 
     @Test
+    void resolvesExactNamesWithinSessionIncludingCompletedChildren() {
+        final var registry = new SubagentRegistry(config(Map.of()), providerManager(10));
+        final var mine = registry.start("parent", "task", "review code").orElseThrow();
+        registry.start("other", "task", "review code").orElseThrow();
+        registry.complete(mine.id(), SubagentRegistry.SubagentResult.success("done", "conversation", List.of()));
+
+        assertEquals(List.of(mine), registry.resolve("parent", "review code"));
+        assertTrue(registry.resolve("parent", "review").isEmpty());
+        assertTrue(registry.resolve("parent", "Review code").isEmpty());
+        assertTrue(registry.resolve("missing", "review code").isEmpty());
+        assertTrue(registry.resolve("parent", null).isEmpty());
+        assertTrue(registry.resolve("parent", "  ").isEmpty());
+        assertTrue(registry.resolve("parent", "").isEmpty());
+    }
+
+    @Test
+    void duplicateNamesAreAmbiguousButGlobalExactIdWinsOverLocalNames() {
+        final var registry = new SubagentRegistry(config(Map.of()), providerManager(10));
+        final var first = registry.start("parent", "task", "review").orElseThrow();
+        final var second = registry.start("parent", "task", "review").orElseThrow();
+        final var elsewhere = registry.start("other", "task", "review").orElseThrow();
+        registry.start("parent", "task", elsewhere.id()).orElseThrow();
+
+        final var matches = registry.resolve("parent", "review");
+        assertEquals(2, matches.size());
+        assertTrue(matches.containsAll(List.of(first, second)));
+        final var diagnostic = registry.selectionError("review", matches);
+        assertTrue(diagnostic.contains("Ambiguous"));
+        assertTrue(diagnostic.contains(first.id()));
+        assertTrue(diagnostic.contains(second.id()));
+        assertFalse(diagnostic.contains(elsewhere.id()));
+        assertEquals(List.of(elsewhere), registry.resolve("parent", elsewhere.id()));
+        assertEquals("Unknown subagent: missing", registry.selectionError("missing", List.of()));
+    }
+
+    @Test
+    void completionCandidatesAreScopedSortedAndDeduplicated() {
+        final var registry = new SubagentRegistry(config(Map.of()), providerManager(10));
+        final var first = registry.start("parent", "task", "review code").orElseThrow();
+        final var second = registry.start("parent", "task", "review code").orElseThrow();
+        final var blank = registry.start("parent", "task", "  ").orElseThrow();
+        final var unnamed = registry.start("parent", "task").orElseThrow();
+        final var idNamed = registry.start("parent", "task", first.id()).orElseThrow();
+        registry.start("other", "task", "elsewhere").orElseThrow();
+        registry.complete(first.id(), SubagentRegistry.SubagentResult.success("done", "conversation", List.of()));
+
+        assertEquals(
+                List.of(first.id(), second.id(), blank.id(), unnamed.id(), idNamed.id(), "review code")
+                        .stream().sorted().toList(),
+                registry.completionCandidates("parent"));
+        assertTrue(registry.completionCandidates("missing").isEmpty());
+    }
+
+    @Test
     void startSucceedsWhenEnabledAndUnderLimit() {
         final var registry = new SubagentRegistry(config(Map.of()), providerManager(4));
         final var state = registry.start("parent", "task");

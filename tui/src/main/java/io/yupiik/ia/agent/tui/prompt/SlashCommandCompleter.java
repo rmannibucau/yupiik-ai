@@ -16,12 +16,17 @@
 package io.yupiik.ia.agent.tui.prompt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.ShellRegistered;
+import io.yupiik.ia.agent.core.shell.ShellSession;
+import io.yupiik.ia.agent.core.shell.ShellUnregistered;
 import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.CompletionEngine;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
@@ -34,6 +39,7 @@ import org.jline.reader.Candidate;
 import org.jline.reader.Completer;
 import org.jline.reader.LineReader;
 import org.jline.reader.ParsedLine;
+import org.jline.reader.Parser;
 
 /**
  * JLine {@link Completer} for the plain {@code cli} REPL: completes the slash
@@ -46,10 +52,13 @@ import org.jline.reader.ParsedLine;
 public class SlashCommandCompleter implements Completer {
     private final List<String> slashNames;
     private final CompletionEngine engine;
+    private final Parser parser;
+    private volatile ShellSession session;
 
     protected SlashCommandCompleter() {
         this.slashNames = null;
         this.engine = null;
+        this.parser = null;
     }
 
     public SlashCommandCompleter(
@@ -59,7 +68,19 @@ public class SlashCommandCompleter implements Completer {
             final AgentProvider agentProvider,
             final SessionStore sessionStore,
             final McpManager mcpManager) {
+        this(registry, chatClient, providerManager, agentProvider, sessionStore, mcpManager, null);
+    }
+
+    public SlashCommandCompleter(
+            final SlashRegistry registry,
+            final ChatClient chatClient,
+            final ProviderManager providerManager,
+            final AgentProvider agentProvider,
+            final SessionStore sessionStore,
+            final McpManager mcpManager,
+            final SubagentRegistry subagentRegistry) {
         this.slashNames = registry.names();
+        this.parser = new SlashCommandParser(registry);
         this.engine = new CompletionEngine(registry, new ArgCompletion.Env() {
             @Override
             public List<String> models() {
@@ -92,6 +113,14 @@ public class SlashCommandCompleter implements Completer {
             }
 
             @Override
+            public List<String> subagents() {
+                final var current = session;
+                return subagentRegistry == null || current == null || current.sessionId() == null
+                        ? List.of()
+                        : subagentRegistry.completionCandidates(current.sessionId());
+            }
+
+            @Override
             public List<String> variants(final String model) {
                 return variantsOf(chatClient, model);
             }
@@ -106,6 +135,20 @@ public class SlashCommandCompleter implements Completer {
                 return CompletionEngine.pathCandidates(token);
             }
         });
+    }
+
+    public void onRegistered(@OnEvent final ShellRegistered event) {
+        session = event.env().session();
+    }
+
+    public Parser parser() {
+        return parser;
+    }
+
+    public void onUnregistered(@OnEvent final ShellUnregistered event) {
+        if (session == event.env().session()) {
+            session = null;
+        }
     }
 
     @Override

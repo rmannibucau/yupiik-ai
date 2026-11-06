@@ -117,6 +117,25 @@ public interface ArgCompletion {
         return (arg, token, env) -> fuzzyResult(label, values.apply(env), token);
     }
 
+    /** Completes one literal argument, including spaces, rather than individual words. */
+    static ArgCompletion wholeArgument(final String label, final Function<Env, List<String>> values) {
+        return new ArgCompletion() {
+            @Override
+            public boolean wholeArgument() {
+                return true;
+            }
+
+            @Override
+            public Result complete(final String arg, final String token, final Env env) {
+                return fuzzyResult(label, values.apply(env), token);
+            }
+        };
+    }
+
+    default boolean wholeArgument() {
+        return false;
+    }
+
     /**
      * The token typed before the current one, when {@code arg} (the raw text
      * stripped of the command and the current token) is non-blank - the helper

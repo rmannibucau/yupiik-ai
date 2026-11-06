@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -841,7 +842,7 @@ class TuiCommandRenderTest {
         // repaint must drop the cut head and keep only the surviving tail
         final var sessionId = shellRegistry.sessions().iterator().next();
         final var transcript = shellRegistry.active(sessionId).transcript();
-        ((TuiTranscriptModel) transcript).maxHistoryCharacters(8);
+        transcript.maxHistoryCharacters(8);
         // force a repaint deterministically (a key event always renders): the render loop
         // applies trim() on the frame it draws
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.LEFT));
@@ -2930,7 +2931,7 @@ class TuiCommandRenderTest {
                 backend.awaitFrame(1_000);
             }
         }
-        assertTrue(squareFrame != null, "expected the square-corner thinking spinner on screen:\n" + backend.text());
+        assertNotNull(squareFrame, "expected the square-corner thinking spinner on screen:\n" + backend.text());
         final var hasClock = squareFrame.contains("\ud83d\udd50")
                 || squareFrame.contains("\ud83d\udd51")
                 || squareFrame.contains("\ud83d\udd52")
@@ -4705,17 +4706,18 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        // a real tracked subagent with a captured thought/answer/tool stream
+        // a real tracked subagent with a multiword name and captured stream
         final var sessionId = sid(shellRegistry);
         final var sub =
-                subagentRegistry.start(sessionId, "do the thing", "child").orElseThrow();
+                subagentRegistry.start(sessionId, "do the thing", "code reviewer").orElseThrow();
         shellRegistry.onEvent(new AgentEvent.ThinkingDelta("kid thinks", sessionId, sub.id(), "child"));
         shellRegistry.onEvent(new AgentEvent.TextDelta("kid answer", sessionId, sub.id(), "child"));
         shellRegistry.onEvent(new AgentEvent.ToolStarted("grep", "{\"q\":\"x\"}", -1L, sessionId, sub.id(), "child"));
         shellRegistry.onEvent(new AgentEvent.ToolFinished("grep", "match line", true, sessionId, sub.id(), "child"));
 
         // the detail view renders the captured regions - never the raw yca markers
-        tuiRef.get().dispatch(new PasteEvent("/subagents " + sub.id()));
+        tuiRef.get().dispatch(new PasteEvent("/subagents code rev"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("kid thinks");
         awaitText("kid answer");

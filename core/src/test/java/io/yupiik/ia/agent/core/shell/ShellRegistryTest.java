@@ -19,14 +19,33 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class ShellRegistryTest {
+    @Test
+    void capturesSubagentConversationWithoutSuppressingCliLiveOutput() {
+        final var subagents = new SubagentRegistry(null, null);
+        final var frontend = new RecordingFrontend();
+        final var registry = new ShellRegistry(collecting(null), subagents);
+        registry.register(env(frontend, "parent"));
+        registry.onEvent(new AgentEvent.TextDelta("child response", "parent", "child-id", "reviewer"));
+        assertEquals(List.of("transcript:child response"), frontend.calls);
+        registry.onEvent(new AgentEvent.TurnDone("child response", "parent", "child-id", "reviewer"));
+        assertTrue(subagents.transcriptOf("child-id").markdown("", "").contains("child response"));
+        registry.bindSubagents(subagents);
+        registry.onEvent(new AgentEvent.TextDelta("modal only", "parent", "child-id", "reviewer"));
+        registry.onEvent(new AgentEvent.TurnDone("modal only", "parent", "child-id", "reviewer"));
+        assertEquals(List.of("transcript:child response"), frontend.calls);
+        assertTrue(subagents.transcriptOf("child-id").markdown("", "").contains("modal only"));
+    }
+
     @Test
     void registersAndForwardsEventsToTheOwningFrontend() {
         final var frontend = new RecordingFrontend();

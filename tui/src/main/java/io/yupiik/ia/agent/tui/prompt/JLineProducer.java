@@ -69,6 +69,7 @@ public class JLineProducer {
         return LineReaderBuilder.builder()
                 .terminal(terminal)
                 .completer(completer)
+                .parser(completer.parser())
                 .option(LineReader.Option.DISABLE_EVENT_EXPANSION, true)
                 // AUTO_FRESH_LINE is deliberately NOT set: its freshLine() widget runs
                 // `clr_eol` + `columns-2` spaces at every prompt, which erases whatever

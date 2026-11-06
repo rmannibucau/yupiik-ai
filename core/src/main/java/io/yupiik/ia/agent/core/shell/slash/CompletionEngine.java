@@ -99,7 +99,18 @@ public final class CompletionEngine {
         final var typed = text.substring(0, tokenStart).strip();
         final var typedTokens = typed.split("\\s+", 2);
         final var arg = typedTokens.length > 1 ? typedTokens[1].strip() : "";
-        final var result = registry.completionFor(command).complete(arg, prefixInner, env);
+        final var completion = registry.completionFor(command);
+        if (completion.wholeArgument()) {
+            int argumentStart = text.indexOf(firstToken) + firstToken.length();
+            while (argumentStart < cursor && Character.isWhitespace(text.charAt(argumentStart))) {
+                argumentStart++;
+            }
+            final var result = completion.complete("", text.substring(argumentStart, cursor), env);
+            return result.empty()
+                    ? Suggestion.none()
+                    : new Suggestion(result.items(), argumentStart, text.length(), result.label());
+        }
+        final var result = completion.complete(arg, prefixInner, env);
         if (result.empty()) {
             return Suggestion.none();
         }
