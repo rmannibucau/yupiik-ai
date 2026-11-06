@@ -30,6 +30,8 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
@@ -43,7 +45,9 @@ import java.util.logging.Logger;
  *
  * <p>Refresh cadence: fetched at provider attach, then at most once per {@link #TTL_MILLIS} (~5 min)
  * unless forced (a {@code /usage} slash command always forces a refresh). The access token is
- * resolved through {@link CodexAuthTemplateHelper} and never leaves yca.</p>
+     * resolved through {@link CodexAuthTemplateHelper} and never leaves yca. With a shared scheduler,
+     * {@link #activity(String, boolean)} enables TTL polling during turns and one final refresh after
+     * turn end. Attach alone never starts recurring polling.</p>
  *
  * <p>Blocking semantics. When an {@link ExecutorService} is injected (the normal application wiring)
  * refreshes run asynchronously on that shared pool so provider attachment and a stale (non-forced)
@@ -69,6 +73,7 @@ public class QuotaSnapshotStore {
     private final ProviderManager providerManager;
     private final Clock clock;
     private final ExecutorService executor;
+    private final ScheduledExecutorService scheduler;
     private final boolean async;
     private final ConcurrentHashMap<String, SessionQuota> sessions = new ConcurrentHashMap<>();
     /**
@@ -81,7 +86,7 @@ public class QuotaSnapshotStore {
     private final ConcurrentHashMap<String, InFlightRefresh> inFlight = new ConcurrentHashMap<>();
 
     /** An in-flight refresh: the provider generation it was scheduled for, and the future the caller observes. */
-    private record InFlightRefresh(long generation, CompletableFuture<CodexUsageSnapshot> future) {}
+    private record InFlightRefresh(SessionQuota quota, long generation, CompletableFuture<CodexUsageSnapshot> future) {}
 
     /**
      * A session-scoped quota: the provider it runs on, a provider generation (bumped on every provider
@@ -94,6 +99,11 @@ public class QuotaSnapshotStore {
         volatile CodexUsageSnapshot snapshot = CodexUsageSnapshot.empty();
         volatile long lastFetchMillis;
         volatile long providerGeneration;
+        Runnable listener;
+        boolean active;
+        boolean finalRefresh;
+        ScheduledFuture<?> timer;
+        long timerGeneration;
 
         boolean stale(final long now) {
             return snapshot == null || now - lastFetchMillis >= TTL_MILLIS;
@@ -116,10 +126,23 @@ public class QuotaSnapshotStore {
             final ProviderManager providerManager,
             final Clock clock,
             final ExecutorService executor) {
+        this(mapper, httpClient, codexAuth, providerManager, clock, executor, null);
+    }
+
+    /** Uses shared application executors; neither executor is owned or closed by this store. */
+    public QuotaSnapshotStore(
+            final JsonMapper mapper,
+            final ExtendedHttpClient httpClient,
+            final CodexAuthTemplateHelper codexAuth,
+            final ProviderManager providerManager,
+            final Clock clock,
+            final ExecutorService executor,
+            final ScheduledExecutorService scheduler) {
         this.client = new CodexUsageClient(mapper, httpClient, codexAuth);
         this.providerManager = providerManager;
         this.clock = clock;
         this.executor = executor;
+        this.scheduler = scheduler;
         // A provided (app-managed, injected) executor enables non-blocking background refreshes; without
         // one (tests/programmatic use) the historical synchronous blocking semantics are preserved.
         this.async = executor != null;
@@ -131,6 +154,7 @@ public class QuotaSnapshotStore {
         this.providerManager = null;
         this.clock = null;
         this.executor = null;
+        this.scheduler = null;
         this.async = false;
     }
 
@@ -146,18 +170,106 @@ public class QuotaSnapshotStore {
         }
         final SessionQuota quota = sessions.computeIfAbsent(sessionId, s -> new SessionQuota());
         final ProviderConfiguration provider = resolveProvider(settings);
-        final ProviderConfiguration previous = quota.provider;
-        quota.settings = settings;
-        quota.provider = provider;
-        // bump the generation when the provider actually changes so an older in-flight refresh of the
-        // previous provider cannot publish its snapshot onto the newly selected one
-        if (previous != provider) {
-            quota.providerGeneration++;
+        final boolean refresh;
+        synchronized (quota) {
+            final ProviderConfiguration previous = quota.provider;
+            quota.settings = settings;
+            quota.provider = provider;
+            // A different provider invalidates both old fetches and the old polling deadline.
+            if (previous != provider) {
+                cancelTimer(quota);
+                quota.providerGeneration++;
+                quota.snapshot = CodexUsageSnapshot.empty();
+                quota.lastFetchMillis = clock.millis() - TTL_MILLIS;
+            }
+            refresh = usageEnabled(provider) && isCodexProvider(provider) && quota.stale(clock.millis());
+            armTimer(sessionId, quota);
         }
-        // attach on a fresh session (or after the TTL) refreshes the gauge; re-attaching the same provider
-        // within the TTL is a no-op. Async when an executor is wired (non-blocking), else synchronous.
-        if (usageEnabled(provider) && isCodexProvider(provider) && quota.stale(clock.millis())) {
+        if (refresh) {
             refreshIfEnabled(sessionId, quota);
+        }
+    }
+
+    /** Replaces the session's single publication listener; null removes it. May precede attach. */
+    public void listen(final String sessionId, final Runnable listener) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        final var quota = sessions.computeIfAbsent(sessionId, s -> new SessionQuota());
+        synchronized (quota) {
+            quota.listener = listener;
+        }
+    }
+
+    /** Marks turn start/end. End requests one last refresh at the next eligible TTL, then stops. */
+    public void activity(final String sessionId, final boolean active) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        final var quota = sessions.get(sessionId);
+        if (quota == null) {
+            return; // A turn finishing after close must not recreate the released session.
+        }
+        synchronized (quota) {
+            quota.active = active;
+            quota.finalRefresh = !active;
+            armTimer(sessionId, quota);
+        }
+    }
+
+    // All timer and activity state is protected by the session monitor. Scheduler threads only
+    // dispatch work; even a slow HTTP fetch or listener never runs on the scheduler thread.
+    private void cancelTimer(final SessionQuota quota) {
+        quota.timerGeneration++;
+        if (quota.timer != null) {
+            quota.timer.cancel(false);
+            quota.timer = null;
+        }
+    }
+
+    private void armTimer(final String sessionId, final SessionQuota quota) {
+        cancelTimer(quota);
+        if (scheduler == null || executor == null || sessions.get(sessionId) != quota
+                || (!quota.active && !quota.finalRefresh)
+                || !usageEnabled(quota.provider) || !isCodexProvider(quota.provider)) {
+            return;
+        }
+        final long token = quota.timerGeneration;
+        final long delay = Math.max(0, TTL_MILLIS - (clock.millis() - quota.lastFetchMillis));
+        try {
+            quota.timer = scheduler.schedule(() -> {
+                try {
+                    executor.submit(() -> onTimer(sessionId, quota, token));
+                } catch (final RuntimeException e) {
+                    LOGGER.log(Level.FINE, "Quota timer dispatch rejected", e);
+                }
+            }, delay, TimeUnit.MILLISECONDS);
+        } catch (final RuntimeException e) {
+            LOGGER.log(Level.FINE, "Quota timer scheduling rejected", e);
+        }
+    }
+
+    private void onTimer(final String sessionId, final SessionQuota quota, final long token) {
+        synchronized (quota) {
+            if (sessions.get(sessionId) != quota || quota.timerGeneration != token) {
+                return;
+            }
+            quota.timer = null;
+            if (!quota.stale(clock.millis())) {
+                armTimer(sessionId, quota);
+                return;
+            }
+            quota.finalRefresh = false;
+            final var future = scheduleAsync(sessionId, quota);
+            if (future != null) {
+                future.whenComplete((_, _) -> {
+                    synchronized (quota) {
+                        armTimer(sessionId, quota);
+                    }
+                });
+            } else {
+                armTimer(sessionId, quota);
+            }
         }
     }
 
@@ -225,7 +337,16 @@ public class QuotaSnapshotStore {
 
     /** Releases a session's quota entry (called when the session closes). */
     public void close(final String sessionId) {
-        sessions.remove(sessionId);
+        if (sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        final var quota = sessions.remove(sessionId);
+        if (quota != null) {
+            synchronized (quota) {
+                cancelTimer(quota);
+                quota.listener = null;
+            }
+        }
         inFlight.remove(sessionId);
     }
 
@@ -264,14 +385,15 @@ public class QuotaSnapshotStore {
         // so a provider switch never lets the new provider's refresh ride on (and be dropped by) the old one.
         final InFlightRefresh held = inFlight.compute(sessionId, (_, current) -> {
             if (current != null
+                    && current.quota() == quota
                     && current.generation() == generation
                     && !current.future().isDone()) {
                 return current; // coalesce: same provider's refresh is already in flight
             }
             final var task = new CompletableFuture<CodexUsageSnapshot>();
             try {
-                executor.submit(() -> runAsyncRefresh(sessionId, task, provider, generation));
-                return new InFlightRefresh(generation, task);
+                executor.submit(() -> runAsyncRefresh(sessionId, quota, task, provider, generation));
+                return new InFlightRefresh(quota, generation, task);
             } catch (final RuntimeException e) {
                 // pool rejected/shut down: do not leave a dead entry behind; the caller fell back to cached
                 return null;
@@ -283,16 +405,16 @@ public class QuotaSnapshotStore {
     /** The async refresh body: fetch, publish (guarded by the provider generation), handle failures, clear in-flight. */
     private void runAsyncRefresh(
             final String sessionId,
+            final SessionQuota quota,
             final CompletableFuture<CodexUsageSnapshot> task,
             final ProviderConfiguration provider,
             final long generation) {
         try {
             final CodexUsageSnapshot fresh = client.fetch(codexRoot(provider), providerId(provider));
-            publishIfCurrent(sessionId, provider, generation, fresh);
+            publishIfCurrent(sessionId, quota, provider, generation, fresh);
             task.complete(fresh);
         } catch (final Throwable e) {
             final Throwable cause = unwrap(e);
-            task.completeExceptionally(cause);
             if (cause instanceof CodexUsageClient.NeedsLoginException) {
                 LOGGER.log(
                         Level.FINE,
@@ -303,11 +425,12 @@ public class QuotaSnapshotStore {
                         () -> "Could not refresh Codex usage for session " + sessionId + ": " + cause.getMessage());
             }
             // back off on failure so a broken/unauthorized backend is not hammered on every stale read
-            backOffIfCurrent(sessionId, provider, generation);
+            backOffIfCurrent(sessionId, quota, provider, generation);
+            task.completeExceptionally(cause);
         } finally {
             // remove only if this exact generation/task is still the map entry: a provider switch already
             // replaced it with a fresh refresh, which must stay in the map even as the stale task completes
-            inFlight.remove(sessionId, new InFlightRefresh(generation, task));
+            inFlight.remove(sessionId, new InFlightRefresh(quota, generation, task));
         }
     }
 
@@ -338,36 +461,55 @@ public class QuotaSnapshotStore {
             final long generation) {
         try {
             final CodexUsageSnapshot fresh = client.fetch(codexRoot(provider), providerId(provider));
-            publishIfCurrent(sessionId, provider, generation, fresh);
+            publishIfCurrent(sessionId, quota, provider, generation, fresh);
         } catch (final CodexUsageClient.NeedsLoginException e) {
             LOGGER.log(Level.FINE, () -> "Codex usage not refreshed for session " + sessionId + ": " + e.getMessage());
-            backOffIfCurrent(sessionId, provider, generation);
+            backOffIfCurrent(sessionId, quota, provider, generation);
         } catch (final RuntimeException e) {
             LOGGER.log(
                     Level.WARNING,
                     () -> "Could not refresh Codex usage for session " + sessionId + ": " + e.getMessage());
-            backOffIfCurrent(sessionId, provider, generation);
+            backOffIfCurrent(sessionId, quota, provider, generation);
         }
     }
 
     /** Publishes a fetched snapshot only if the session is still on the same provider lineage. */
     private void publishIfCurrent(
             final String sessionId,
+            final SessionQuota quota,
             final ProviderConfiguration provider,
             final long generation,
             final CodexUsageSnapshot fresh) {
-        final SessionQuota current = sessions.get(sessionId);
-        if (current != null && current.provider == provider && current.providerGeneration == generation) {
-            current.snapshot = fresh;
-            current.lastFetchMillis = clock.millis();
+        final Runnable listener;
+        synchronized (quota) {
+            if (sessions.get(sessionId) != quota || quota.provider != provider || quota.providerGeneration != generation) {
+                return;
+            }
+            quota.snapshot = fresh;
+            quota.lastFetchMillis = clock.millis();
+            armTimer(sessionId, quota);
+            listener = quota.listener;
+        }
+        if (listener != null) {
+            try {
+                listener.run();
+            } catch (final Throwable e) {
+                LOGGER.log(Level.WARNING, "Quota publication listener failed", e);
+            }
         }
     }
 
     /** Records the failure back-off (so a broken backend is not re-polled every stale read) when still current. */
-    private void backOffIfCurrent(final String sessionId, final ProviderConfiguration provider, final long generation) {
-        final SessionQuota current = sessions.get(sessionId);
-        if (current != null && current.provider == provider && current.providerGeneration == generation) {
-            current.lastFetchMillis = clock.millis();
+    private void backOffIfCurrent(
+            final String sessionId,
+            final SessionQuota quota,
+            final ProviderConfiguration provider,
+            final long generation) {
+        synchronized (quota) {
+            if (sessions.get(sessionId) == quota && quota.provider == provider && quota.providerGeneration == generation) {
+                quota.lastFetchMillis = clock.millis();
+                armTimer(sessionId, quota);
+            }
         }
     }
 

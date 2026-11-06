@@ -38,11 +38,22 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Delayed;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -70,6 +81,7 @@ class QuotaSnapshotStoreTest {
     private CodexAuthTemplateHelper auth;
     private final AtomicInteger fetches = new AtomicInteger();
     private final AtomicInteger usedPercent = new AtomicInteger(10);
+    private final AtomicInteger responseStatus = new AtomicInteger(200);
     /** When true, the very next /wham/usage request blocks until {@link #releaseFirstCall} is counted down. */
     private volatile boolean holdFirstCall;
 
@@ -91,7 +103,7 @@ class QuotaSnapshotStoreTest {
                     Thread.currentThread().interrupt();
                 }
             }
-            respond(exchange, 200, """
+            respond(exchange, responseStatus.get(), """
                     {"plan_type":"plus",
                      "rate_limit":{"primary_window":{"used_percent":%d,"limit_window_seconds":18000,"reset_at":1700000000}},
                      "credits":{"has_credits":true,"balance":"10"}}
@@ -108,12 +120,15 @@ class QuotaSnapshotStoreTest {
 
         final var props = new HashMap<String, String>();
         props.put("yca.storageHome", storage.toString());
-        props.put("yca.provider.providers.length", "1");
+        props.put("yca.provider.providers.length", "2");
         // a codex provider with usage enabled
         props.put("yca.provider.providers.0.id", "codex");
         props.put("yca.provider.providers.0.baseUrl", serverUrl + "/codex");
         props.put("yca.provider.providers.0.apiKey", "");
         props.put("yca.provider.providers.0.capabilities.codex.enableUsage", "true");
+        props.put("yca.provider.providers.1.id", "plain");
+        props.put("yca.provider.providers.1.baseUrl", serverUrl + "/v1");
+        props.put("yca.provider.providers.1.apiKey", "k");
         configuration = new CodingAgentConfiguration$FusionConfigurationFactory(
                         key -> Optional.ofNullable(props.get(key)))
                 .get();
@@ -328,6 +343,310 @@ class QuotaSnapshotStoreTest {
                     store.snapshot("s1", false).primaryWindow().usedPercent(),
                     0.001,
                     "the stale in-flight refresh of the previous provider must not overwrite the new provider's quota");
+        }
+    }
+
+    @Test
+    void activePollingAndOneFinalRefresh(final JsonMapper mapper) {
+        final var clock = new MutableClock();
+        try (final var worker = new ControlledExecutor(); final var scheduler = new CapturedScheduler()) {
+            final var store = new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
+            final var notifications = new AtomicInteger();
+            store.listen("s1", notifications::incrementAndGet); // registration before attach is retained
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
+            worker.drain();
+            assertEquals(1, notifications.get());
+            assertEquals(0, scheduler.pending(), "attach alone must not poll");
+
+            store.activity("s1", true);
+            assertEquals(QuotaSnapshotStore.TTL_MILLIS, scheduler.latest().delay);
+            for (int i = 0; i < 2; i++) {
+                clock.advance(QuotaSnapshotStore.TTL_MILLIS);
+                scheduler.fire();
+                assertEquals(i + 1, fetches.get(), "scheduler must only dispatch, never fetch");
+                worker.drain();
+                assertEquals(i + 2, fetches.get());
+                assertEquals(1, scheduler.pending());
+            }
+
+            clock.advance(1000);
+            store.activity("s1", false);
+            assertEquals(QuotaSnapshotStore.TTL_MILLIS - 1000, scheduler.latest().delay);
+            assertEquals(3, fetches.get(), "turn end must not force an early refresh");
+            clock.advance(QuotaSnapshotStore.TTL_MILLIS - 1000);
+            scheduler.fire();
+            worker.drain();
+            assertEquals(4, fetches.get());
+            assertEquals(4, notifications.get());
+            assertEquals(0, scheduler.pending(), "final refresh must stop polling");
+            store.close("s1");
+            assertFalse(scheduler.isShutdown(), "store must not close the shared scheduler");
+            assertFalse(worker.isShutdown(), "store must not close the shared executor");
+        }
+    }
+
+    @Test
+    void listenerReplacementFailureIsolationAndClose(final JsonMapper mapper) {
+        final var store = store(mapper);
+        final var old = new AtomicInteger();
+        final var replacement = new AtomicInteger();
+        store.listen("s1", old::incrementAndGet);
+        store.listen("s1", () -> {
+            replacement.incrementAndGet();
+            throw new IllegalStateException("test callback failure");
+        });
+        store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
+        assertEquals(0, old.get());
+        assertEquals(1, replacement.get());
+        assertNotNull(store.cachedSnapshot("s1").primaryWindow());
+        store.refresh("s1");
+        assertEquals(2, replacement.get(), "listener failure must not prevent subsequent publications");
+        store.close("s1");
+        store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
+        assertEquals(2, replacement.get(), "close must remove the listener");
+        store.listen(null, old::incrementAndGet);
+        store.activity(" ", true);
+        store.close(null);
+    }
+
+    @Test
+    void timerHonorsBackoffAndDoesNotNotifyOnFailure(final JsonMapper mapper) {
+        final var clock = new MutableClock();
+        try (final var worker = new ControlledExecutor(); final var scheduler = new CapturedScheduler()) {
+            final var store = new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
+            final var notifications = new AtomicInteger();
+            store.listen("s1", notifications::incrementAndGet);
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
+            worker.drain();
+            store.activity("s1", true);
+            responseStatus.set(500);
+            clock.advance(QuotaSnapshotStore.TTL_MILLIS);
+            scheduler.fire();
+            worker.drain();
+            assertEquals(2, fetches.get());
+            assertEquals(1, notifications.get());
+            assertEquals(QuotaSnapshotStore.TTL_MILLIS, scheduler.latest().delay);
+            store.snapshot("s1", false);
+            worker.drain();
+            assertEquals(2, fetches.get(), "failure must back off stale reads too");
+            responseStatus.set(200);
+            store.activity("s1", false);
+            clock.advance(QuotaSnapshotStore.TTL_MILLIS);
+            scheduler.fire();
+            worker.drain();
+            assertEquals(3, fetches.get());
+            assertEquals(2, notifications.get());
+            assertEquals(0, scheduler.pending());
+        }
+    }
+
+    @Test
+    void closeCancelsTimerAndRejectsOldFetchForRecreatedSession(final JsonMapper mapper) {
+        final var clock = new MutableClock();
+        try (final var worker = new ControlledExecutor(); final var scheduler = new CapturedScheduler()) {
+            final var store = new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
+            store.activity("s1", true);
+            final var oldTimer = scheduler.latest();
+            store.close("s1");
+            assertTrue(oldTimer.isCancelled());
+            store.activity("s1", false); // a turn may unwind after the tab has closed
+            assertTrue(store.sessions().isEmpty(), "late turn end must not recreate a closed session");
+            final var notifications = new AtomicInteger();
+            store.listen("s1", notifications::incrementAndGet);
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
+            worker.runNext(); // old identity's queued fetch must not publish into the recreated session
+            assertEquals(0, notifications.get());
+            assertEquals(null, store.cachedSnapshot("s1").primaryWindow());
+            oldTimer.callback.run(); // model a timer already dispatched when cancellation happened
+            worker.drain();
+            assertEquals(2, fetches.get());
+            assertEquals(1, notifications.get());
+            assertEquals(0, scheduler.pending());
+        }
+    }
+
+    @Test
+    void staleTimerIsCancelledByProviderChangeAndReadsCoalesce(final JsonMapper mapper) {
+        final var clock = new MutableClock();
+        try (final var worker = new ControlledExecutor(); final var scheduler = new CapturedScheduler()) {
+            final var store = new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
+            worker.drain();
+            store.activity("s1", true);
+            clock.advance(QuotaSnapshotStore.TTL_MILLIS);
+            scheduler.fire();
+            worker.runNext(); // timer dispatch queues the actual fetch
+            store.snapshot("s1", false);
+            store.snapshot("s1", false);
+            worker.drain();
+            assertEquals(2, fetches.get(), "timer and stale reads must coalesce");
+            final var oldTimer = scheduler.latest();
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("plain"));
+            assertTrue(oldTimer.isCancelled());
+            oldTimer.callback.run();
+            worker.drain();
+            assertEquals(2, fetches.get());
+            assertEquals(0, scheduler.pending());
+        }
+    }
+
+    @Test
+    void oldProviderGenerationDoesNotNotify(final JsonMapper mapper) {
+        try (final var worker = new ControlledExecutor(); final var scheduler = new CapturedScheduler()) {
+            final var store = new QuotaSnapshotStore(
+                    mapper, httpClient, auth, providerManager, new MutableClock(), worker, scheduler);
+            final var notifications = new AtomicInteger();
+            store.listen("s1", notifications::incrementAndGet);
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("plain"));
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
+            worker.runNext();
+            assertEquals(0, notifications.get(), "old generation must not publish even on the same provider");
+            worker.drain();
+            assertEquals(2, fetches.get());
+            assertEquals(1, notifications.get());
+        }
+    }
+
+    @Test
+    void forcedPublicationMovesPollingDeadline(final JsonMapper mapper) throws Exception {
+        final var clock = new MutableClock();
+        try (final var worker = Executors.newSingleThreadExecutor(); final var scheduler = new CapturedScheduler()) {
+            final var store = new QuotaSnapshotStore(mapper, httpClient, auth, providerManager, clock, worker, scheduler);
+            store.attach("s1", ChatSettings.EMPTY.withProviderId("codex"));
+            worker.submit(() -> {}).get(10, TimeUnit.SECONDS);
+            store.activity("s1", true);
+            final var oldTimer = scheduler.latest();
+            clock.advance(1000);
+            store.refresh("s1");
+            worker.submit(() -> {}).get(10, TimeUnit.SECONDS);
+            assertTrue(oldTimer.isCancelled());
+            assertEquals(QuotaSnapshotStore.TTL_MILLIS, scheduler.latest().delay);
+            assertEquals(2, fetches.get());
+            store.close("s1");
+        }
+    }
+
+    private static final class MutableClock extends Clock {
+        private long now = 1_800_000_000_000L;
+
+        private void advance(final long millis) {
+            now += millis;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(final ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return Instant.ofEpochMilli(now);
+        }
+    }
+
+    private static final class ControlledExecutor extends AbstractExecutorService {
+        private final ArrayDeque<Runnable> tasks = new ArrayDeque<>();
+        private boolean shutdown;
+
+        private void runNext() {
+            tasks.removeFirst().run();
+        }
+
+        private void drain() {
+            while (!tasks.isEmpty()) {
+                runNext();
+            }
+        }
+
+        @Override
+        public void execute(final Runnable command) {
+            tasks.addLast(command);
+        }
+
+        @Override
+        public void shutdown() {
+            shutdown = true;
+        }
+
+        @Override
+        public List<Runnable> shutdownNow() {
+            shutdown();
+            final var remaining = List.copyOf(tasks);
+            tasks.clear();
+            return remaining;
+        }
+
+        @Override
+        public boolean isShutdown() {
+            return shutdown;
+        }
+
+        @Override
+        public boolean isTerminated() {
+            return shutdown && tasks.isEmpty();
+        }
+
+        @Override
+        public boolean awaitTermination(final long timeout, final TimeUnit unit) {
+            return isTerminated();
+        }
+    }
+
+    /** Captures one-shot tasks without starting any scheduler threads. */
+    private static final class CapturedScheduler extends ScheduledThreadPoolExecutor {
+        private final List<CapturedTask> tasks = new ArrayList<>();
+
+        private CapturedScheduler() {
+            super(1);
+        }
+
+        @Override
+        public ScheduledFuture<?> schedule(final Runnable command, final long delay, final TimeUnit unit) {
+            final var task = new CapturedTask(command, unit.toMillis(delay));
+            tasks.add(task);
+            return task;
+        }
+
+        private CapturedTask latest() {
+            return tasks.getLast();
+        }
+
+        private long pending() {
+            return tasks.stream().filter(t -> !t.isDone()).count();
+        }
+
+        private void fire() {
+            final var pending = tasks.stream().filter(t -> !t.isDone()).toList();
+            assertEquals(1, pending.size());
+            pending.getFirst().run();
+        }
+    }
+
+    private static final class CapturedTask extends FutureTask<Void> implements ScheduledFuture<Void> {
+        private final Runnable callback;
+        private final long delay;
+
+        private CapturedTask(final Runnable callback, final long delay) {
+            super(callback, null);
+            this.callback = callback;
+            this.delay = delay;
+        }
+
+        @Override
+        public long getDelay(final TimeUnit unit) {
+            return unit.convert(delay, TimeUnit.MILLISECONDS);
+        }
+
+        @Override
+        public int compareTo(final Delayed other) {
+            return Long.compare(delay, other.getDelay(TimeUnit.MILLISECONDS));
         }
     }
 

@@ -21,11 +21,79 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.usage.CodexUsageSnapshot;
+import io.yupiik.ia.agent.core.usage.QuotaSnapshotStore;
 import java.time.Clock;
 import java.util.ArrayList;
 import org.junit.jupiter.api.Test;
 
 class SessionUsageReporterTest {
+
+    @Test
+    void completionPushesCachedQuotaWithoutRefreshingOrResettingContext() {
+        final var events = new ArrayList<AgentEvent.UsageUpdated>();
+        final var store = new CompletionStore();
+        final var reporter = new SessionUsageReporter(
+                null, store, new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        if (event instanceof AgentEvent.UsageUpdated usage) {
+                            events.add(usage);
+                        }
+                    }
+                }, () -> null, "s1", () -> ChatSettings.EMPTY, () -> null, null, null);
+        reporter.pushUsageContext(1234, "model-x");
+        reporter.refreshUsage("model-x");
+        final var reads = store.refreshingReads;
+        final var before = events.getLast();
+        store.completion.run();
+        final var after = events.getLast();
+        assertEquals(before.estimatedContextTokens(), after.estimatedContextTokens());
+        assertEquals(before.contextPercent(), after.contextPercent());
+        assertEquals(before.usage(), after.usage());
+        assertEquals("model-x", after.model());
+        assertEquals("s1", after.sessionId());
+        assertTrue(after.quota().supported());
+        assertEquals(reads, store.refreshingReads, "completion must not trigger a quota refresh");
+        final var count = events.size();
+        reporter.close();
+        assertEquals("s1", store.closedSession);
+        store.completion.run();
+        assertEquals(count, events.size(), "late completion after close must not publish");
+    }
+
+    private static class CompletionStore extends QuotaSnapshotStore {
+        private Runnable completion;
+        private int refreshingReads;
+        private String closedSession;
+
+        @Override
+        public void listen(final String id, final Runnable listener) {
+            assertEquals("s1", id);
+            completion = listener;
+        }
+
+        @Override
+        public void attach(final String id, final ChatSettings settings) {
+            assertTrue(completion != null, "subscribe before starting the initial fetch");
+        }
+
+        @Override
+        public QuotaView snapshot(final String id, final boolean force) {
+            refreshingReads++;
+            return cachedSnapshot(id);
+        }
+
+        @Override
+        public QuotaView cachedSnapshot(final String id) {
+            return new QuotaView(true, true, CodexUsageSnapshot.empty());
+        }
+
+        @Override
+        public void close(final String id) {
+            closedSession = id;
+        }
+    }
 
     @Test
     void pushUsageContextCarriesTheProvidedEstimateAndRefreshesTheGaugeCache() {

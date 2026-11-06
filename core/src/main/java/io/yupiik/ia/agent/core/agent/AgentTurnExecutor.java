@@ -488,6 +488,10 @@ public class AgentTurnExecutor {
         }
 
         try {
+            host.usageReporter.attachQuota(runSettings);
+            if (host.quotaStore != null) {
+                host.quotaStore.activity(host.currentSessionId, true);
+            }
             return loop(
                     sessionId,
                     messages,
@@ -516,6 +520,9 @@ public class AgentTurnExecutor {
             host.emit(host.error("unexpected failure: " + e));
             return null;
         } finally {
+            if (host.quotaStore != null) {
+                host.quotaStore.activity(host.currentSessionId, false);
+            }
             host.pauseListener = null;
             host.statusReporter.setSink(null);
             // run exit invalidates speculation: late workers may still finish remotely but their
@@ -1766,7 +1773,7 @@ public class AgentTurnExecutor {
             host.usageTracker.attach(settings);
         }
         if (host.quotaStore != null) {
-            host.quotaStore.attach(host.currentSessionId, settings);
+            host.usageReporter.attachQuota(settings);
         }
     }
 

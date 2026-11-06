@@ -44,6 +44,10 @@ public class SessionUsageReporter {
 
     private volatile int lastUsageContextTokens = -1;
     private volatile double lastUsageContextPercent = -1;
+    private volatile String lastUsageModel;
+    private volatile String quotaSessionId;
+    private volatile boolean closed;
+    private final ThreadLocal<Boolean> attachingQuota = new ThreadLocal<>();
 
     public SessionUsageReporter(
             final UsageTracker usageTracker,
@@ -67,6 +71,7 @@ public class SessionUsageReporter {
     }
 
     public void emitUsage(final List<Message> messages, final int toolsTokens, final String model) {
+        lastUsageModel = model;
         final var effective = usageTracker.effectiveContext(messages, toolsTokens);
         lastUsageContextTokens = effective;
         lastUsageContextPercent = usageTracker.contextPercent(effective);
@@ -88,6 +93,7 @@ public class SessionUsageReporter {
      * that the notice prints, instead of leaving a stale pre-turn snapshot on screen.
      */
     public void pushUsageContext(final int estimatedContextTokens, final String model) {
+        lastUsageModel = model;
         if (emitter == null) {
             return;
         }
@@ -112,6 +118,11 @@ public class SessionUsageReporter {
      * empty list), so the push refreshes the quota without clobbering the live context gauge.
      */
     public void pushUsageQuota(final String model) {
+        lastUsageModel = model;
+        pushUsageQuota(model, currentQuota());
+    }
+
+    private void pushUsageQuota(final String model, final AgentEvent.UsageUpdated.Quota quota) {
         if (emitter == null) {
             return;
         }
@@ -123,7 +134,46 @@ public class SessionUsageReporter {
                 usageTracker == null ? 0 : usageTracker.lastRealPromptTokens(),
                 usageTracker == null ? -1 : usageTracker.calibrationRatio(),
                 model,
-                currentQuota()));
+                quota));
+    }
+
+    /** Subscribes before attach so even the first asynchronous fetch reaches the UI. */
+    public void attachQuota(final ChatSettings settings) {
+        if (quotaStore == null || closed) {
+            return;
+        }
+        final var id = currentSessionId.get() != null ? currentSessionId.get() : sessionId;
+        if (id == null || id.isBlank()) {
+            return;
+        }
+        if (!id.equals(quotaSessionId)) {
+            if (quotaSessionId != null) {
+                quotaStore.close(quotaSessionId);
+            }
+            quotaSessionId = id;
+            quotaStore.listen(id, () -> {
+                if (!closed && id.equals(quotaSessionId) && !Boolean.TRUE.equals(attachingQuota.get())) {
+                    // A completion must read only the cache: never start another refresh from an event.
+                    pushUsageQuota(lastUsageModel, cachedQuotaSnapshot());
+                }
+            });
+        }
+        // Legacy stores can complete inline; the caller already pushes that result. Only the
+        // asynchronous completion needs an extra event, avoiding duplicate startup/switch pushes.
+        attachingQuota.set(true);
+        try {
+            quotaStore.attach(id, settings);
+        } finally {
+            attachingQuota.remove();
+        }
+    }
+
+    /** Releases the callback and any pending refresh along with the owning session. */
+    public void close() {
+        closed = true;
+        if (quotaStore != null && quotaSessionId != null) {
+            quotaStore.close(quotaSessionId);
+        }
     }
 
     /**
@@ -135,9 +185,8 @@ public class SessionUsageReporter {
      * registry routes it to the owning shell.
      */
     public void refreshUsage(final String model) {
-        if (quotaStore != null) {
-            quotaStore.attach(currentSessionId.get() != null ? currentSessionId.get() : sessionId, chatSettings.get());
-        }
+        lastUsageModel = model;
+        attachQuota(chatSettings.get());
         pushUsageQuota(model);
     }
 

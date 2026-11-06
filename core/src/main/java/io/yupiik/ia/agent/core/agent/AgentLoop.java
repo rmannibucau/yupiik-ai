@@ -786,7 +786,7 @@ public class AgentLoop {
                 // before the first turn currentSessionId is still null: key the quota on the loop's
                 // stable session id (the id doRun will set later), otherwise a switch issued as the
                 // very first command would leave the session unattached and the UIs without a gauge
-                quotaStore.attach(currentSessionId != null ? currentSessionId : this.sessionId, alt);
+                usageReporter.attachQuota(alt);
             }
             pushUsageQuota();
         }
@@ -822,6 +822,7 @@ public class AgentLoop {
             return;
         }
         closed = true;
+        usageReporter.close();
         if (contextManager != null) {
             contextManager.shutdownSpeculation();
         }
