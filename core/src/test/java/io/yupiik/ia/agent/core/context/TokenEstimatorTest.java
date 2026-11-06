@@ -22,6 +22,12 @@ import org.junit.jupiter.api.Test;
 
 class TokenEstimatorTest {
     @Test
+    void oneCommaDoesNotClassifyAnEntireParagraphAsDenseCode() {
+        final var prose = "ordinary words ".repeat(100);
+        assertTrue(TokenEstimator.estimate(prose + ",") - TokenEstimator.estimate(prose) < 5);
+    }
+
+    @Test
     void nullAndEmptyAreZero() {
         assertEquals(0, TokenEstimator.estimate(null));
         assertEquals(0, TokenEstimator.estimate(""));
@@ -29,14 +35,14 @@ class TokenEstimatorTest {
 
     @Test
     void plainTextEstimate() {
-        assertEquals(3, TokenEstimator.estimate("abcdefgh"));
+        assertEquals(2, TokenEstimator.estimate("abcdefgh"));
     }
 
     @Test
     void codeSyntaxCostsMore() {
         final var plain = TokenEstimator.estimate("abcdef");
         final var code = TokenEstimator.estimate("a{b}=c");
-        assertEquals(4, code);
+        assertEquals(3, code);
         assertTrue(code > plain * 0.8);
     }
 }

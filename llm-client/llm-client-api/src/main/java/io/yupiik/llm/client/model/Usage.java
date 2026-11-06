@@ -36,7 +36,32 @@ public record Usage(
         Long cacheReadTokens,
         Long cacheWriteTokens,
         Long reasoningTokens,
-        Long generationTimeMs) {
+        Long generationTimeMs,
+        Long contextInputTokens) {
+
+    public Usage(
+            final Long promptTokens,
+            final Long completionTokens,
+            final Long totalTokens,
+            final Long cacheReadTokens,
+            final Long cacheWriteTokens,
+            final Long reasoningTokens,
+            final Long generationTimeMs) {
+        this(
+                promptTokens,
+                completionTokens,
+                totalTokens,
+                cacheReadTokens,
+                cacheWriteTokens,
+                reasoningTokens,
+                generationTimeMs,
+                promptTokens);
+    }
+
+    /** Full input occupancy, independent of provider-specific billing/cache conventions. */
+    public long contextInput() {
+        return contextInputTokens == null ? prompt() : contextInputTokens;
+    }
 
     public static final Usage EMPTY = new Usage(0L, 0L, 0L, 0L, 0L, null, null);
 

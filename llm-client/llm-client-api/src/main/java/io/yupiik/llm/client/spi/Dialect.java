@@ -47,6 +47,11 @@ public interface Dialect {
      */
     String name();
 
+    /** Local wire serialization for diagnostics/accounting; performs no network requests. */
+    default byte[] requestPayload(final LlmRequest request) {
+        throw new UnsupportedOperationException("Local payload projection unavailable for " + name());
+    }
+
     /**
      * Run a single completion.
      *

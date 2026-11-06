@@ -196,6 +196,36 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void localProjectionIncludesInstructionsToolsAndCapturesFallbackRoute() throws Exception {
+        final var tracker =
+                new io.yupiik.ia.agent.core.context.UsageTracker(providerManager(), client, null, Clock.systemUTC());
+        final var request = new ChatCompletionRequest(
+                "test-model",
+                List.of(Message.system("Keep the instructions"), Message.user("hi")),
+                null,
+                null,
+                null,
+                List.of(Tool.function("read", "Read a file", Map.of("type", "object"))),
+                "auto",
+                null,
+                null,
+                null);
+        final var before = client.contextPayload(request, tracker);
+        assertTrue(before.messages().stream().anyMatch(m -> m.contains("Keep the instructions")));
+        assertTrue(before.toolsKey().contains("Read a file"));
+        assertTrue(bodies.isEmpty(), "local projection must not send a generation request");
+        final var captured = new java.util.concurrent.atomic.AtomicReference<
+                io.yupiik.ia.agent.core.context.ContextMeasurement.Payload>();
+        try (final var capture = client.captureContext(captured::set)) {
+            assertNotNull(capture);
+            client.stream(request, _ -> {}, () -> false);
+        }
+        assertTrue(captured.get().modelKey().contains("COMPLETIONS"));
+        assertEquals(client.contextPayload(request, tracker), captured.get());
+        assertEquals(1, bodies.size(), "capture must not add generation calls");
+    }
+
+    @Test
     void sessionFlavorHonorsPerSessionProviderOverride() {
         // the sidebar flavor row must follow a per-session provider override (e.g. after /provider),
         // not always reflect the process-default provider. The no-arg flavor() reads the default
@@ -282,7 +312,7 @@ class ChatClientFlavorTest {
         // RESPONSES and CODEX share the Responses wire: the structured field must be text.format with
         // an OpenAI-strict schema (not the chat-completions response_format that codex rejects), and
         // every property must be required (optional ones widened to a nullable type).
-        final var schema = Map.<String, Object>of(
+        final var schema = Map.of(
                 "type",
                 "object",
                 "properties",
@@ -322,7 +352,7 @@ class ChatClientFlavorTest {
             // the Responses wire uses text.format, never the chat-completions response_format field
             assertTrue(body.contains("\"text\":{\"format\":"), api + " must use text.format: " + body);
             assertTrue(body.contains("\"type\":\"json_schema\""), api + " body: " + body);
-            assertTrue(!body.contains("\"response_format\""), api + " must not send response_format: " + body);
+            assertFalse(body.contains("\"response_format\""), api + " must not send response_format: " + body);
             // strict mode on, and the schema normalized: additionalProperties:false + every property required
             assertTrue(body.contains("\"strict\":true"), api + " body: " + body);
             assertTrue(body.contains("\"additionalProperties\":false"), api + " body: " + body);
@@ -346,7 +376,7 @@ class ChatClientFlavorTest {
         // required, optional ones widened to a nullable type) - a strict validator (eg. Azure / litellm)
         // rejects the raw caller schema with a 400 e.g. 'required ... Missing p'. The COMPLETIONS branch
         // must therefore normalize with strictSchema() like RESPONSES/CODEX.
-        final var schema = Map.<String, Object>of(
+        final var schema = Map.of(
                 "type",
                 "object",
                 "properties",
@@ -401,7 +431,7 @@ class ChatClientFlavorTest {
     @Test
     void chatStructuredKeepsStrictFieldForAlreadyStrictSchemas() throws Exception {
         // an already-conformant strict schema must be returned unchanged (the normalizer is idempotent)
-        final var schema = Map.<String, Object>of(
+        final var schema = Map.of(
                 "type",
                 "object",
                 "properties",
@@ -799,7 +829,7 @@ class ChatClientFlavorTest {
     void unconfiguredBudgetIsNotSentForCompletions() throws Exception {
         assertEquals("hello there", client.chat(request()).message().content());
         assertTrue(bodies.getLast().contains("\"model\":\"test-model\""), bodies.getLast());
-        assertTrue(!bodies.getLast().contains("\"max_tokens\""), bodies.getLast());
+        assertFalse(bodies.getLast().contains("\"max_tokens\""), bodies.getLast());
     }
 
     @Test
@@ -880,7 +910,7 @@ class ChatClientFlavorTest {
 
         assertEquals("hello there", client.chat(request(null)).message().content());
         assertTrue(bodies.getLast().contains("\"model\":\"deepseek-v4-flash\""), bodies.getLast());
-        assertTrue(!bodies.getLast().contains("\"model\":\" deepseek-v4-flash\""), bodies.getLast());
+        assertFalse(bodies.getLast().contains("\"model\":\" deepseek-v4-flash\""), bodies.getLast());
     }
 
     private static int occurrences(final String body, final String needle) {
@@ -931,7 +961,7 @@ class ChatClientFlavorTest {
         assertEquals("missing", client.variant(settings));
         final var body = bodies.getLast();
         // no configured variant was applied and the model has no implicit default
-        assertTrue(!body.contains("\"temperature\""), body);
+        assertFalse(body.contains("\"temperature\""), body);
     }
 
     @Test
@@ -974,7 +1004,7 @@ class ChatClientFlavorTest {
                         .content());
         final var body = bodies.getLast();
         assertEquals(1, occurrences(body, "\"temperature\":0.3"), body);
-        assertTrue(!body.contains("\"temperature\":0.7"), body);
+        assertFalse(body.contains("\"temperature\":0.7"), body);
         assertEquals("fast", client.resolvedVariant(settings), "explicit selection wins in the display helper too");
     }
 
@@ -994,7 +1024,7 @@ class ChatClientFlavorTest {
                         .content());
         final var body = bodies.getLast();
         // the dangling default matches no variant: the implicit defaults apply, never a failure
-        assertTrue(!body.contains("\"temperature\""), body);
+        assertFalse(body.contains("\"temperature\""), body);
         assertNull(client.resolvedVariant(ChatSettings.EMPTY));
     }
 
@@ -1088,7 +1118,7 @@ class ChatClientFlavorTest {
                 "hello there",
                 client.chat(request().withSettings(tabA), () -> false).message().content());
         final var bodyA = bodies.getLast();
-        assertTrue(!bodyA.contains("\"max_tokens\""), bodyA);
+        assertFalse(bodyA.contains("\"max_tokens\""), bodyA);
 
         // tab B (override with outputTokens=4321) -> 4321 is injected for its requests only
         final var tabB = ChatSettings.EMPTY.withProviderId("other");
@@ -1137,7 +1167,7 @@ class ChatClientFlavorTest {
                         .message()
                         .content());
         final var body = bodies.getLast();
-        assertTrue(!body.contains("\"temperature\""), body);
+        assertFalse(body.contains("\"temperature\""), body);
     }
 
     @Test
@@ -1269,7 +1299,7 @@ class ChatClientFlavorTest {
         // first request carried the stale blob, the retry dropped it and succeeded
         assertEquals(2, bodies.size(), "the invalid_encrypted_content rejection must retry once");
         assertTrue(bodies.get(0).contains("gAAAAStaleBlob"), "first attempt must carry the blob: " + bodies.get(0));
-        assertTrue(!bodies.get(1).contains("gAAAAStaleBlob"), "retry must drop the stale blob: " + bodies.get(1));
+        assertFalse(bodies.get(1).contains("gAAAAStaleBlob"), "retry must drop the stale blob: " + bodies.get(1));
     }
 
     @Test
@@ -1307,7 +1337,7 @@ class ChatClientFlavorTest {
                 "hello there",
                 client.chat(request("$other/model-x"), () -> false).message().content());
         assertTrue(bodies.getLast().contains("\"model\":\"model-x\""), bodies.getLast());
-        assertTrue(!bodies.getLast().contains("default-model"), bodies.getLast());
+        assertFalse(bodies.getLast().contains("default-model"), bodies.getLast());
     }
 
     @Test
@@ -1354,20 +1384,20 @@ class ChatClientFlavorTest {
 
         // first call: structured rejected -> degrades once to plain, remembered
         final var first = client.chatStructured(request(), "todo_steps", Map.of("type", "object"));
-        assertEquals(false, first.structured());
+        assertFalse(first.structured());
         assertEquals(1, structHits.get());
         assertEquals(1, plainHits.get());
 
         // while the memo is fresh, the structured path is skipped (straight to plain)
         final var second = client.chatStructured(request(), "todo_steps", Map.of("type", "object"));
-        assertEquals(false, second.structured());
+        assertFalse(second.structured());
         assertEquals(1, structHits.get(), "memoized rejection must skip the structured request");
         assertEquals(2, plainHits.get());
 
         // after the TTL the structured path is retried (and rejected again, degrading once more)
         clock.advance(20 * 60 * 1000L);
         final var third = client.chatStructured(request(), "todo_steps", Map.of("type", "object"));
-        assertEquals(false, third.structured());
+        assertFalse(third.structured());
         assertEquals(2, structHits.get(), "the expiration must re-enable the structured attempt");
         assertEquals(3, plainHits.get());
     }

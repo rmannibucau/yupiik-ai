@@ -37,23 +37,26 @@ graph LR
 
 == Usage tracking: real tokens first
 
-Threshold decisions are anchored on real usage whenever the provider reports
-it: the last observed `prompt_tokens` value is used as an anchor and the
-messages appended since that call are estimated on top.
-The appended estimate is calibrated by the ratio between the anchor and the
-estimate of the anchored request, clamped to `[0.5, 2.0]`, so a conservative
-heuristic never turns into an over-aggressive trigger once real data exists.
-Before the first response of a session (no anchor yet), the raw heuristic
-estimate is used.
+The shared measurement counts the effective request after compression and reference rendering, including dialect-specific instructions, messages and tool definitions.
+Local payload projection never fires outbound observers and does not use a remote token-count endpoint.
+The actual request is captured after outbound filters and provider transformations, including repaired or fallback attempts, before its response usage becomes an anchor.
 
-In the TUI sidebar the estimate is labeled `context ~` and, when the provider
-has reported usage at least once, a `last real` row underneath shows the exact
-provider-billed `prompt_tokens` of the last anchored request (the real base the
-estimate is built on). The absence of that row means no anchor exists yet, so the
-`~` value is heuristic only. `/context llm-payload` prints the same contract as
-text: the footprint estimate, the last real prompt tokens and the calibration
-ratio, plus whether the context window came from an explicit value or the
-auto-detected baseline.
+An unchanged request uses the provider-reported full input count.
+A verified append-only extension uses that count plus a calibrated estimate of pending additions.
+Request identity includes provider, model, dialect, tool schemas and message content; equal estimated sizes do not establish identity.
+Rewriting or reducing context invalidates the exact anchor, but retains a model-specific tokenizer correction for the next estimate.
+A new successful response refreshes the anchor, while subagents maintain independent observations.
+For Anthropic, full input includes uncached input plus cache-read and cache-creation tokens; billing counters remain separate.
+
+The displayed best estimate does not include safety padding.
+Capacity guards add a 20% uncertainty allowance to estimated content only; an unchanged provider-measured request is not padded.
+Before any compatible usage observation, the fallback blends prose and punctuation density rather than classifying an entire paragraph as code because it contains one comma.
+
+The TUI context hover and compaction notices identify the measurement source: `provider-reported`, `provider-anchored`, `calibrated`, or `heuristic`.
+Hover details include the anchored input count and estimated pending additions when available.
+The sidebar, model guidance and compression status count the same effective context, without subtracting compression savings a second time.
+Provider-reported input is real for the completed request, not an exact measurement of unsent additions.
+Server-only framing, multimodal processing and custom outbound transformations can still make previews approximate; actual response observations calibrate later estimates.
 
 All percentages are computed against the _usable_ window: the configured or auto-detected context window minus the output budget the model declares, so prompts leave room for completions.
 The declared output budget comes from the per-model `behavior.outputTokens`, the provider `outputTokens`, or the detected `/v1/models` `max_tokens` / `top_provider.max_completion_tokens`: a 262144 window declaring 32768 completion tokens leaves a usable window of 229376.

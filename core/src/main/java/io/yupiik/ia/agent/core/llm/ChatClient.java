@@ -27,7 +27,10 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.ReasoningFormatMode;
+import io.yupiik.ia.agent.core.context.ContextMeasurement;
 import io.yupiik.ia.agent.core.context.ContextWindowCache;
+import io.yupiik.ia.agent.core.context.TokenEstimator;
+import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.wiring.OpenCodeHttpClient;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -91,6 +94,26 @@ public class ChatClient implements AutoCloseable {
 
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
+    private final ThreadLocal<Consumer<ContextMeasurement.Payload>> contextCapture = new ThreadLocal<>();
+
+    /** Scoped to the synchronous request owner, including every repaired/fallback attempt. */
+    public ContextCapture captureContext(final Consumer<ContextMeasurement.Payload> capture) {
+        final var previous = contextCapture.get();
+        contextCapture.set(capture);
+        return () -> {
+            if (previous == null) {
+                contextCapture.remove();
+            } else {
+                contextCapture.set(previous);
+            }
+        };
+    }
+
+    public interface ContextCapture extends AutoCloseable {
+        @Override
+        void close();
+    }
+
     private final ProviderManager providerManager;
     private final Clock clock;
     private final ToolCallArgumentsRepairer toolCallArgumentsRepairer;
@@ -650,7 +673,7 @@ public class ChatClient implements AutoCloseable {
      * before it becomes the active one. Blank model falls back to the current model.
      */
     public List<ModelVariantConfiguration> variants(final String model) {
-        return variants((ChatSettings) null, model);
+        return variants(null, model);
     }
 
     /** Variants for {@code model} against the session's provider ({@code settings}), blank model falls back to the current one. */
@@ -935,6 +958,51 @@ public class ChatClient implements AutoCloseable {
         final var provider = target(routed.request());
         final var mode = providerManager.compressionBoundaryOnly(provider, routed.model());
         return mode != BoundaryOnlyRefMode.DISABLED;
+    }
+
+    /** Local projection only: never invokes outbound observers or a token-count endpoint. */
+    public ContextMeasurement.Payload contextPayload(final ChatCompletionRequest request, final UsageTracker tracker)
+            throws IOException {
+        if (providerManager == null || mapper == null) {
+            return tracker.payload(
+                    String.valueOf(request.settings()) + ":" + request.model(),
+                    String.valueOf(request.tools()),
+                    request.messages(),
+                    TokenEstimator.estimate(String.valueOf(request.tools())));
+        }
+        final var defaults = useModel(request);
+        final var provider = provider(defaults.settings());
+        final var flavor = flavorForRouting(defaults.settings());
+        final var effective = applyClaudeThinking(applyOutputBudget(defaults, flavor), flavor);
+        return contextPayloadEffective(effective, provider, flavor);
+    }
+
+    private ContextMeasurement.Payload contextPayloadEffective(
+            final ChatCompletionRequest effective, final ProviderConfiguration provider, final ApiFlavor flavor) {
+        final var wire = LlmWire.toLlmRequest(effective, openaiSessionIdEnabledKeys(provider, flavor));
+        final var bytes = dialectClient(flavor, provider).requestPayload(wire);
+        final var body = mapper.fromString(Map.class, new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+        final var input = body.containsKey("input") ? body.get("input") : body.get("messages");
+        final var messages = new ArrayList<String>();
+        for (final var key : List.of("system", "instructions")) {
+            if (body.get(key) != null) {
+                messages.add(mapper.toString(Map.of(key, body.get(key))));
+            }
+        }
+        if (input instanceof List<?> list) {
+            list.forEach(item -> messages.add(mapper.toString(item)));
+        } else if (input != null) {
+            messages.add(mapper.toString(input));
+        }
+        final var tools = mapper.toString(body.getOrDefault("tools", List.of()));
+        final var shape = tools + ":" + mapper.toString(body.get("tool_choice"));
+        long estimate = TokenEstimator.estimate(tools);
+        for (final var message : messages) {
+            estimate += 4L + TokenEstimator.estimate(message);
+        }
+        return new ContextMeasurement.Payload(
+                providerIdOf(provider) + ":" + effective.model() + ":" + flavor, shape, messages, (int)
+                        Math.min(Integer.MAX_VALUE, estimate));
     }
 
     private ChatCompletionRequest useModel(final ChatCompletionRequest request) throws IOException {
@@ -1683,7 +1751,7 @@ public class ChatClient implements AutoCloseable {
 
     public ChatResult chat(final ChatCompletionRequest request, final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        return chat(request, (Consumer<PauseEvent>) null, cancelled);
+        return chat(request, null, cancelled);
     }
 
     public ChatResult chat(
@@ -2287,7 +2355,7 @@ public class ChatClient implements AutoCloseable {
             final Consumer<LlmStreamEvent> onDelta,
             final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        return stream(request, (Consumer<PauseEvent>) null, onDelta, cancelled);
+        return stream(request, null, onDelta, cancelled);
     }
 
     /** Stream a completion for the request's selection ({@link ChatCompletionRequest#settings()}). */
@@ -2344,6 +2412,10 @@ public class ChatClient implements AutoCloseable {
                 pauseListener == null ? null : event -> onLibraryPause(event, pauseListener);
         final var dialect = dialectClient(flavorForRouting(settings), provider);
         try {
+            final var capture = contextCapture.get();
+            if (capture != null) {
+                capture.accept(contextPayloadEffective(effective, provider, flavor));
+            }
             if (stream) {
                 final var publisher = LlmWire.join(dialect.stream(
                         LlmWire.toLlmRequest(effective, openaiSessionIdEnabledKeys(provider, flavor)),

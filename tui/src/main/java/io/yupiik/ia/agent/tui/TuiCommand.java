@@ -4247,9 +4247,8 @@ public class TuiCommand implements Runnable {
                 Span.styled(
                         formatTokens(state.model.estimatedContext()) + " tok (" + state.model.contextPercent() + "%)",
                         value)));
-        // the provider-billed prompt tokens of the last anchored request: only shown when an anchor
-        // exists (absent = raw heuristic estimate only), so the row doubles as the "is this real?"
-        // indicator for the `context ~` estimate above it
+        // Full provider-reported input for a matching anchor, including cached input.
+        // Without a matching anchor the estimate can still use learned calibration.
         if (state.model.lastRealPromptTokens() > 0) {
             text.add(Line.from(
                     Span.styled("last real  ", label),
@@ -6926,9 +6925,8 @@ public class TuiCommand implements Runnable {
                 rows.add(Line.from(Span.styled("no subagents for this session", muted)));
             }
             for (final var sub : list) {
-                final var label = sub.name() == null || sub.name().isBlank()
-                        ? sub.id()
-                        : sub.name() + "  (" + sub.id() + ")";
+                final var label =
+                        sub.name() == null || sub.name().isBlank() ? sub.id() : sub.name() + "  (" + sub.id() + ")";
                 final var status = sub.isDone() ? (sub.isCancelled() ? "cancelled" : "completed") : "running";
                 final var effective = subagentRegistry
                         .identityOf(sub.id())

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.context;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -205,8 +206,8 @@ class ContextManagerTest {
                 .toList();
         assertEquals(1, digests.size(), "the fold must produce ONE digest, never a stacked second one");
         final var digest = String.valueOf(digests.getFirst().content());
-        assertTrue(
-                !digest.contains("Previous context:"),
+        assertFalse(
+                digest.contains("Previous context:"),
                 "the prior state is folded by the summarizer, never re-prepended textually");
         assertTrue(
                 digest.contains("folded-into-previous + new tool work"),
@@ -796,8 +797,9 @@ class ContextManagerTest {
                 2,
                 8_000,
                 Map.ofEntries(
+                        Map.entry("yca.compaction.tail.budgetTokens", "1"),
                         Map.entry("yca.pruning.protectTurns", "1"),
-                        Map.entry("yca.pruning.minPruneTokens", "1000"),
+                        Map.entry("yca.pruning.minPruneTokens", "700"),
                         Map.entry("yca.pruning.protectRecentTokens", "10"),
                         Map.entry("yca.pruning.shrinkOutputChars", "2000")));
         final var manager = manager(cfg, null);
@@ -891,7 +893,7 @@ class ContextManagerTest {
 
     @Test
     void compactReanchorsOnThePreviousSummaryAndAsksForTheStructuredTemplate() throws Exception {
-        final var cfg = config(2, 128_000, Map.of("yca.compaction.tail.budgetTokens", "2000"));
+        final var cfg = config(2, 128_000, Map.of("yca.compaction.tail.budgetTokens", "1000"));
         final var captured = new ArrayList<List<Message>>();
         final var manager = manager(cfg, chatRecording("updated digest", captured));
         final var messages = new ArrayList<Message>();
@@ -1164,7 +1166,7 @@ class ContextManagerTest {
                 progress.message().startsWith("Compaction in progress... (\u2248"),
                 "progress notice must carry the estimated token count: " + progress.message());
         assertTrue(
-                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens\\)"),
+                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens; [a-z-]+\\)"),
                 "progress notice must carry a numeric estimate: " + progress.message());
         assertTrue(
                 notices.stream()
@@ -1215,7 +1217,7 @@ class ContextManagerTest {
         assertTrue(raw > rawAtAnchor, "the full list must estimate above the anchor list");
         // provider billed only a fraction of what the raw conservative heuristic guessed for the
         // anchored list: ratio 0.25 clamps to 0.5, so the calibrated figure is strictly below raw
-        tracker.anchor(Math.max(1, rawAtAnchor / 4), rawAtAnchor);
+        tracker.anchor(Math.max(1, rawAtAnchor / 4), tracker.contextPayload(anchorList, 0));
 
         final var result = manager.compact(messages, true);
         assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
@@ -1226,10 +1228,10 @@ class ContextManagerTest {
                 .toList();
         final var progress = notices.get(0);
         assertTrue(
-                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens\\)"),
+                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens; [a-z-]+\\)"),
                 "progress notice must carry a numeric estimate: " + progress.message());
         final var real = Math.max(1, rawAtAnchor / 4);
-        final var expected = (int) Math.round(real + 0.5 * (raw - rawAtAnchor));
+        final var expected = (int) Math.round(real + ((double) real / rawAtAnchor) * (raw - rawAtAnchor));
         assertTrue(
                 progress.message().contains("≈" + expected + " estimated tokens"),
                 "progress notice must report the calibrated effectiveContext (" + expected + "), got: "
@@ -1272,28 +1274,16 @@ class ContextManagerTest {
         }
         messages.add(Message.user("current task"));
 
-        // anchor (real, estimateAtAnchor) between the raw full-list estimate and the tools-inclusive
-        // one: with ZERO extra tokens the estimate stays <= the anchor so effectiveContext falls back
-        // to the raw conservative bound (the old notice bug); with the wire tool tokens folded in the
-        // estimate crosses the anchor and the calibrated path applies - proving the tools flip the
-        // raw-fallback bug while keeping a clamped ratio (real = raw/4 clamps to 0.5).
+        // Tool schemas participate in both request identity and input occupancy.
         final var raw = tracker.estimateContext(messages);
-        final var estimateAtAnchor = raw + 1_000;
         final var real = Math.max(1, raw / 4);
-        tracker.anchor(real, estimateAtAnchor);
-        // old code (0 tools): effectiveContext(messages, 0) -> estimate raw <= anchor -> raw (fallback)
-        assertEquals(
-                raw,
-                tracker.effectiveContext(messages, 0),
-                "precondition: without tools the effective estimate must stay on the raw fallback");
-        // new code: effectiveContext(messages, tools) -> estimate raw+3000 > anchor -> calibrated
         final var toolTokens = 3_000;
-        final var expected = (int) Math.round(real + 0.5 * (raw + toolTokens - estimateAtAnchor));
-        assertEquals(
-                expected,
-                tracker.effectiveContext(messages, toolTokens),
-                "precondition: with tools the effective estimate must be the calibrated one");
-        assertTrue(expected != raw, "the calibrated figure must differ from the raw fallback: " + expected);
+        tracker.anchor(real, tracker.contextPayload(messages, toolTokens));
+        final var expected = tracker.effectiveContext(messages, toolTokens);
+        assertEquals(real, expected);
+        assertTrue(
+                tracker.effectiveContext(messages, 0) < expected,
+                "removing schemas must re-estimate a different request");
 
         final var result = contextManager.compact(
                 messages,
@@ -1328,7 +1318,7 @@ class ContextManagerTest {
                 .toList();
         final var progress = notices.get(0);
         assertTrue(
-                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens\\)"),
+                progress.message().matches("Compaction in progress... \\(≈[0-9]+ estimated tokens; [a-z-]+\\)"),
                 "progress notice must carry a numeric estimate: " + progress.message());
         assertTrue(
                 progress.message().contains("≈" + expected + " estimated tokens"),
@@ -1429,26 +1419,17 @@ class ContextManagerTest {
                         null,
                         "s1",
                         new BackoffSleeper()));
-        assertTrue(!manager.speculationEnabled(), "speculation must be off under ignoreLlm");
+        assertFalse(manager.speculationEnabled(), "speculation must be off under ignoreLlm");
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 3; i++) {
             messages.add(Message.user("step " + i));
         }
-        assertTrue(
-                !manager.maybeLaunchSpeculation(
-                        messages,
-                        0,
-                        () -> false,
-                        new io.yupiik.ia.agent.core.llm.ChatSettings("default", "m", null, null)),
+        assertFalse(
+                manager.maybeLaunchSpeculation(messages, 0, () -> false, new ChatSettings("default", "m", null, null)),
                 "launch must be a no-op under ignoreLlm");
-        assertEquals(
-                null,
-                manager.adoptSpeculation(
-                        messages,
-                        0,
-                        () -> false,
-                        new io.yupiik.ia.agent.core.llm.ChatSettings("default", "m", null, null)),
+        assertNull(
+                manager.adoptSpeculation(messages, 0, () -> false, new ChatSettings("default", "m", null, null)),
                 "adoption must be a no-op under ignoreLlm");
     }
 }

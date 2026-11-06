@@ -117,6 +117,11 @@ public record WebEventDto(
                 data.put("reasoningTokens", t.usage() == null ? 0 : t.usage().reasoningTokens());
                 data.put("cacheReadTokens", t.usage() == null ? 0 : t.usage().cacheReadTokens());
                 data.put("estimatedContextTokens", t.estimatedContextTokens());
+                if (t.contextMeasurement() != null) {
+                    data.put("contextSource", t.contextMeasurement().source());
+                    data.put("pendingContextTokens", t.contextMeasurement().pendingTokens());
+                    data.put("contextBudgetTokens", t.contextMeasurement().budgetTokens());
+                }
                 data.put("contextPercent", t.contextPercent());
                 final var quota = new LinkedHashMap<String, Object>();
                 if (t.quota() != null) {

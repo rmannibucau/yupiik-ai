@@ -105,7 +105,7 @@ public class AgentTurnExecutor {
         // dedup: skip when the newest state tail already carries exactly this state
         for (var i = messages.size() - 1; i >= 0; i--) {
             final var m = messages.get(i);
-            if (host.isVolatileTail(m)) {
+            if (AgentLoop.isVolatileTail(m)) {
                 if (state.equals(String.valueOf(m.content()))) {
                     return tier; // nothing changed since the last tail: keep the prefix byte-stable
                 }
@@ -161,11 +161,11 @@ public class AgentTurnExecutor {
         // (already-seen files flagged as such); a write is a hard reset signal for the round.
         if (outcome.success() && roundCoverage != null) {
             if (AgentLoop.FILE_WRITE_TOOLS.contains(outcome.name())) {
-                roundCoverage.add(host.WRITE_MARKER);
+                roundCoverage.add(AgentLoop.WRITE_MARKER);
             } else {
                 for (final var key : outcome.coverage()) {
                     final var seen = host.seenFiles.add(key);
-                    roundCoverage.add(seen ? key : host.REDUNDANT_MARKER + key);
+                    roundCoverage.add(seen ? key : AgentLoop.REDUNDANT_MARKER + key);
                 }
             }
         }
@@ -246,7 +246,7 @@ public class AgentTurnExecutor {
         host.emit(host.compacted(
                 "tool",
                 result.mode().name(),
-                host.compactionTokens(
+                AgentLoop.compactionTokens(
                         beforeDirectiveContext, host.usageTracker.estimateContext(messages, toolsTokens))));
         persistContext(sessionId, messages);
         host.emit(host.notice(
@@ -257,6 +257,7 @@ public class AgentTurnExecutor {
                         + ")."));
         host.usageTracker
                 .clearAnchor(); // the anchor predates the reduction: fall back to estimates until the next call
+        emitUsage(messages, toolsTokens);
     }
 
     String capIngestionOutput(final String output) {
@@ -322,9 +323,10 @@ public class AgentTurnExecutor {
         if (!appliedKinds.isEmpty()) {
             host.emit(host.compacted(
                     appliedKinds,
-                    host.bestMode(appliedModes),
-                    host.compactionTokens(
+                    AgentLoop.bestMode(appliedModes),
+                    AgentLoop.compactionTokens(
                             beforeRoundContext, host.usageTracker.estimateContext(messages, toolsTokens))));
+            emitUsage(messages, toolsTokens);
         }
     }
 
@@ -377,7 +379,8 @@ public class AgentTurnExecutor {
                         upper.cacheRead(),
                         upper.cacheWrite(),
                         Math.toIntExact(upper.reasoning()),
-                        upper.generationTime());
+                        upper.generationTime(),
+                        Math.toIntExact(upper.contextInput()));
             }
             // NOTE: the logical request counter is NOT incremented here. A dialect may split the wire
             // into two End events (a usage-only End plus a separate finish-reason End), so incrementing
@@ -515,8 +518,8 @@ public class AgentTurnExecutor {
             host.emit(host.error("Interrupted"));
             return null;
         } catch (final RuntimeException e) {
-            host.LOGGER.log(
-                    SessionAwareLogRecord.of(host.LOGGER, host.currentSessionId, Level.SEVERE, "agent turn failed", e));
+            AgentLoop.LOGGER.log(SessionAwareLogRecord.of(
+                    AgentLoop.LOGGER, host.currentSessionId, Level.SEVERE, "agent turn failed", e));
             host.emit(host.error("unexpected failure: " + e));
             return null;
         } finally {
@@ -648,10 +651,10 @@ public class AgentTurnExecutor {
             // (AgentLoop persistence scrub above): a model echoing the injected "@N@" metadata in
             // its reasoning must not persist it either - the web replay rebuilds thinking-delta
             // from this key, so an unclean value would leak straight into a fresh tab.
-            others.put(host.THINKING_KEY, scrub(thinking));
+            others.put(AgentLoop.THINKING_KEY, scrub(thinking));
         }
         if (!reasoningItems.isEmpty()) {
-            others.put(host.REASONING_ITEMS_KEY, reasoningItems);
+            others.put(AgentLoop.REASONING_ITEMS_KEY, reasoningItems);
         }
         return others;
     }
@@ -771,11 +774,33 @@ public class AgentTurnExecutor {
         final var plateauLimit = host.resolvedPlateauRounds(resolved);
         final var plateauFeedback = host.resolvedPlateauFeedback(resolved);
         final var explorationNudgeRounds = host.resolvedModelExplorationNudgeRounds(resolved);
-        final var turnContinuesOnTextEnd = resolved == null || host.providerManager == null
-                ? false
-                : host.providerManager.turnContinuesOnTextEnd(resolved.provider(), resolved.model());
+        final var turnContinuesOnTextEnd = resolved != null
+                && host.providerManager != null
+                && host.providerManager.turnContinuesOnTextEnd(resolved.provider(), resolved.model());
         final var tools = host.wireTools();
         final var toolsTokens = host.toolTokens(tools);
+        host.usageTracker.contextProjection((history, ignoredToolTokens) -> {
+            final var selection = useProfileModel && !host.skipConfiguredAgentModel ? runSettings : host.chatSettings;
+            final var selectedModel = host.requestModel(host.resolvedModel(selection), selection);
+            final var base = new ChatCompletionRequest(
+                            selectedModel, history, null, null, null, tools, "auto", null, null, null)
+                    .withSessionId(sessionId)
+                    .withSettings(selection)
+                    .withTuning(runTuning);
+            try {
+                final var projected = host.contextView == null
+                        ? history
+                        : host.contextView.compression().project(history, host.compressionBoundaryOnly(base));
+                final var preview = new ChatCompletionRequest(
+                                selectedModel, projected, null, null, null, tools, "auto", null, null, null)
+                        .withSessionId(sessionId)
+                        .withSettings(selection)
+                        .withTuning(runTuning);
+                return host.contextPayload(preview);
+            } catch (final IOException e) {
+                throw new IllegalStateException("Cannot project the context request", e);
+            }
+        });
         // snapshot which tools the registry actually serves (unfiltered by mode): plan mode may hide an EDIT
         // tool from this turn's wire list, so a call to a served EDIT tool in plan mode is a hidden-tool call
         // to auto-reject (never gate). Bare/empty test registries simply serve nothing and stay unaffected.
@@ -948,7 +973,7 @@ public class AgentTurnExecutor {
                 // in that case the recovery pass and the local spill get their chance, and if they
                 // also reclaim nothing the context is declared non-compactable instead of limping.
                 if (!compactionGateEscalated
-                        && host.usageTracker.effectiveContext(messages, toolsTokens)
+                        && host.usageTracker.budgetContext(messages, toolsTokens)
                                 >= host.contextManager.compactionTriggerTokens()) {
                     final var gate = host.contextManager.resolvedGate(runSettings);
                     // per-session/per-provider overrides win over the global gate budgets (a session or
@@ -962,7 +987,7 @@ public class AgentTurnExecutor {
                     var gateBudgetExhausted = false;
                     while (!compactionGateEscalated
                             && !cancelled.getAsBoolean()
-                            && host.usageTracker.effectiveContext(messages, toolsTokens)
+                            && host.usageTracker.budgetContext(messages, toolsTokens)
                                     >= host.contextManager.compactionTriggerTokens()
                             && !gateBudgetExhausted) {
                         if (maxAttempts > 0 && forcedCompactionRecoveryAttempted >= maxAttempts) {
@@ -976,7 +1001,7 @@ public class AgentTurnExecutor {
                             break;
                         }
                         forcedCompactionRecoveryAttempted++;
-                        final var effectiveBefore = host.usageTracker.effectiveContext(messages, toolsTokens);
+                        final var effectiveBefore = host.usageTracker.budgetContext(messages, toolsTokens);
                         host.emit(host.status("Compacting... " + (int) host.usageTracker.contextPercent(effectiveBefore)
                                 + "% (trigger "
                                 + (int) host.usageTracker.contextPercent(host.contextManager.compactionTriggerTokens())
@@ -1016,7 +1041,7 @@ public class AgentTurnExecutor {
                         // twice in a row) means the context cannot be compacted further with the
                         // current strategy - escalate instead of blocking or silently limping. A
                         // genuine strong pass resets the weak-pass counter.
-                        final var effectiveAfter = host.usageTracker.effectiveContext(messages, toolsTokens);
+                        final var effectiveAfter = host.usageTracker.budgetContext(messages, toolsTokens);
                         final var reclaimed = effectiveBefore - effectiveAfter;
                         if (reclaimed <= 0) {
                             compactionGateEscalated = true;
@@ -1045,23 +1070,24 @@ public class AgentTurnExecutor {
                     if (!compactionGateEscalated
                             && !cancelled.getAsBoolean()
                             && gateBudgetExhausted
-                            && host.usageTracker.effectiveContext(messages, toolsTokens)
+                            && host.usageTracker.budgetContext(messages, toolsTokens)
                                     >= host.contextManager.compactionTriggerTokens()) {
                         // ran out of attempts or wall-clock budget while still over the trigger
                         compactionGateEscalated = true;
-                        host.escalateCompactionGate(host.usageTracker.effectiveContext(messages, toolsTokens));
+                        host.escalateCompactionGate(host.usageTracker.budgetContext(messages, toolsTokens));
                     }
                 }
                 if (!appliedKinds.isEmpty()) {
                     final var contextAfter = host.usageTracker.estimateContext(messages, toolsTokens);
                     host.emit(host.compacted(
                             appliedKinds,
-                            host.bestMode(appliedModes),
-                            host.compactionTokens(contextBefore, contextAfter)));
+                            AgentLoop.bestMode(appliedModes),
+                            AgentLoop.compactionTokens(contextBefore, contextAfter)));
                 }
                 if (compactedThisTurn) {
                     host.contextManager.resetSpeculation();
                     host.usageTracker.clearAnchor();
+                    emitUsage(messages, toolsTokens);
                 } else if (host.contextManager.speculationEnabled()) {
                     host.contextManager.maybeLaunchSpeculation(
                             messages,
@@ -1118,11 +1144,12 @@ public class AgentTurnExecutor {
                         .withSettings(requestSettings)
                         .withTuning(runTuning);
                 final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
+                final var sentPayload = new java.util.concurrent.atomic.AtomicReference<>(host.contextPayload(request));
                 final var finishReason = new String[] {null};
                 Message assistant;
                 final long llmStartNanos;
                 final long pausedBeforeMs = host.turnState.llmPausedMs;
-                try {
+                try (final var capture = host.captureContext(sentPayload::set)) {
                     llmStartNanos = host.precisionDurationMarker.now();
                     host.emitPhase(AgentEvent.Phase.REQUEST_SENT);
                     assistant = host.modelRoundProcessor.stream(
@@ -1211,7 +1238,7 @@ public class AgentTurnExecutor {
                         host.emit(host.compacted(
                                 "compact-retry",
                                 compacted.mode().name(),
-                                host.compactionTokens(
+                                AgentLoop.compactionTokens(
                                         beforeOverflowContext,
                                         host.usageTracker.estimateContext(messages, toolsTokens))));
                         persistContext(sessionId, messages);
@@ -1262,10 +1289,10 @@ public class AgentTurnExecutor {
                 // inbound restore: replace provenance fakes in the assistant reply with the real
                 // values (only what we emitted outbound; model-invented token shapes stay as-is)
                 final var inbound = new InboundLlmResponse(
-                        assistant.content() instanceof String s ? s : host.str(assistant.content()), sessionId);
+                        assistant.content() instanceof String s ? s : AgentLoop.str(assistant.content()), sessionId);
                 host.emitter.emit(inbound);
                 final var restored = inbound.restored();
-                if (!restored.equals(host.str(assistant.content()))) {
+                if (!restored.equals(AgentLoop.str(assistant.content()))) {
                     assistant = new Message(
                             assistant.role(),
                             restored,
@@ -1298,15 +1325,14 @@ public class AgentTurnExecutor {
                         pausedBeforeMs);
                 // anchor the hybrid usage on the real prompt tokens of the request we just sent: the
                 // estimate at the same moment calibrates later deltas until the next observation
-                host.usageTracker.anchor(
-                        usage[0].promptTokens(), host.usageTracker.estimateContext(messages, toolsTokens));
+                host.usageTracker.anchor(usage[0].contextInputTokens(), sentPayload.get());
                 messages.add(assistant);
                 host.sessionStore.append(
                         sessionId,
                         SessionEntry.of(
                                 host.clock.millis(),
                                 "assistant",
-                                host.str(assistant.content()),
+                                AgentLoop.str(assistant.content()),
                                 assistant.toolCalls(),
                                 null,
                                 null,
@@ -1337,11 +1363,11 @@ public class AgentTurnExecutor {
                         host.emit(new AgentEvent.TurnCancelled(
                                 host.currentSessionId, host.subagentId, host.subagentName));
                         host.emitTurnMetrics(null, turnStartNanos);
-                        return host.str(assistant.content());
+                        return AgentLoop.str(assistant.content());
                     }
-                    final var content = host.str(assistant.content());
+                    final var content = AgentLoop.str(assistant.content());
                     final var reason = finishReason[0];
-                    if (host.isTruncation(reason)) {
+                    if (AgentLoop.isTruncation(reason)) {
                         final var maxTruncationContinues =
                                 host.configuration.llm().truncationContinuesMax();
                         if (host.configuration.llm().continueOnTruncation()
@@ -1361,7 +1387,9 @@ public class AgentTurnExecutor {
                             final var changeStrategy =
                                     host.turnState.lastRequestProducedReasoning || truncationContinues >= 2;
                             messages.add(Message.user(
-                                    changeStrategy ? host.TRUNCATION_SPLIT_PROMPT : host.TRUNCATION_CONTINUE_PROMPT));
+                                    changeStrategy
+                                            ? AgentLoop.TRUNCATION_SPLIT_PROMPT
+                                            : AgentLoop.TRUNCATION_CONTINUE_PROMPT));
                             // the reasoning flag was consumed: a retry of this request must not re-trigger
                             // the "spent thinking" branch again on the same generation
                             host.turnState.lastRequestProducedReasoning = false;
@@ -1395,7 +1423,7 @@ public class AgentTurnExecutor {
                             // hit the same wall. Ask for a strategy change instead of a blind retry.
                             if (host.turnState.lastRequestProducedReasoning) {
                                 host.turnState.lastRequestProducedReasoning = false;
-                                messages.add(Message.user(host.EMPTY_REASONING_RETRY_PROMPT));
+                                messages.add(Message.user(AgentLoop.EMPTY_REASONING_RETRY_PROMPT));
                             }
                             continue;
                         }
@@ -1475,7 +1503,7 @@ public class AgentTurnExecutor {
                     host.emit(host.notice(
                             AgentEvent.Notice.Level.INFO,
                             "doom-loop refusal sent to the model: a repeated state-changing/bash call was withheld."));
-                    messages.add(Message.user(host.DOOM_LOOP_NUDGE_PROMPT));
+                    messages.add(Message.user(AgentLoop.DOOM_LOOP_NUDGE_PROMPT));
                     continue windowLoop;
                 }
                 // a tool round is progress too: a later empty/truncated reply starts its retry budget fresh
@@ -1492,8 +1520,8 @@ public class AgentTurnExecutor {
                         host.noProgressRounds = 0;
                     } else {
                         host.noProgressRounds++;
-                        if (host.noProgressRounds >= host.NO_PROGRESS_ROUNDS_LIMIT) {
-                            host.emit(host.error("No progress: the model made " + host.NO_PROGRESS_ROUNDS_LIMIT
+                        if (host.noProgressRounds >= AgentLoop.NO_PROGRESS_ROUNDS_LIMIT) {
+                            host.emit(host.error("No progress: the model made " + AgentLoop.NO_PROGRESS_ROUNDS_LIMIT
                                     + " consecutive tool calls returning the same results. Stopping the turn."));
                             host.emitTurnMetrics(null, turnStartNanos);
                             return null;
@@ -1504,7 +1532,7 @@ public class AgentTurnExecutor {
                 // files/results (novel call signatures, same targets) is not progress for flash-class
                 // models that explore one call per round: stop after the configured plateau rounds,
                 // keeping the todo auto-continue as the escape hatch when todos are open
-                if (plateauLimit != 0 && !roundCoverage.isEmpty() && host.isPlateauRound(roundCoverage)) {
+                if (plateauLimit != 0 && !roundCoverage.isEmpty() && AgentLoop.isPlateauRound(roundCoverage)) {
                     if (host.unfinishedTodos(toolsRanThisTurn) != null) {
                         host.plateauRounds = 0;
                     } else {
@@ -1515,15 +1543,16 @@ public class AgentTurnExecutor {
                         // hard stop the model gets a chance to adapt instead of losing the whole turn.
                         // In nudge-only mode (plateauLimit < 0) the guard never hard-stops, so the nudge
                         // fires when the streak reaches the cap (abs value) to remind without killing the turn.
-                        final int nudgeAt =
-                                plateauStops ? host.plateauFeedbackNudgeAt(plateauFeedback, plateauCap) : plateauCap;
+                        final int nudgeAt = plateauStops
+                                ? AgentLoop.plateauFeedbackNudgeAt(plateauFeedback, plateauCap)
+                                : plateauCap;
                         if (nudgeAt > 0 && !host.plateauNudged && host.plateauRounds >= nudgeAt) {
                             host.plateauNudged = true;
                             host.emit(host.notice(
                                     AgentEvent.Notice.Level.INFO,
                                     "exploration-plateau nudge sent to the model (round " + host.plateauRounds + '/'
                                             + plateauCap + (plateauStops ? "" : ",nudge-only") + ")"));
-                            messages.add(Message.user(host.PLATEAU_NUDGE_PROMPT));
+                            messages.add(Message.user(AgentLoop.PLATEAU_NUDGE_PROMPT));
                             continue windowLoop;
                         }
                         if (plateauStops && host.plateauRounds >= plateauCap) {
@@ -1546,8 +1575,9 @@ public class AgentTurnExecutor {
                 // and slips through. After llm.explorationNudgeRounds such consecutive rounds without
                 // an answer, inject a one-shot wrap-up directive (no hard stop: a genuinely deep task
                 // can still continue gathering - the model decides).
-                final var readOnlyRound =
-                        !roundCoverage.contains(host.WRITE_MARKER) && !roundCoverage.isEmpty() && !roundMutatingBash[0];
+                final var readOnlyRound = !roundCoverage.contains(AgentLoop.WRITE_MARKER)
+                        && !roundCoverage.isEmpty()
+                        && !roundMutatingBash[0];
                 if (readOnlyRound && roundInformative[0]) {
                     host.explorationRounds++;
                     if (explorationNudgeRounds > 0
@@ -1557,7 +1587,7 @@ public class AgentTurnExecutor {
                         host.emit(host.notice(
                                 AgentEvent.Notice.Level.INFO,
                                 "exploration nudge sent to the model (round " + host.explorationRounds + ')'));
-                        messages.add(Message.user(host.EXPLORATION_NUDGE_PROMPT));
+                        messages.add(Message.user(AgentLoop.EXPLORATION_NUDGE_PROMPT));
                         continue windowLoop;
                     }
                 } else {
@@ -1612,12 +1642,16 @@ public class AgentTurnExecutor {
             host.sessionStore.replace(
                     sessionId,
                     (messages.get(0).role().equals("system") ? messages.subList(1, messages.size()) : messages)
-                            .stream().filter(m -> !host.isVolatileTail(m)).toList());
+                            .stream().filter(m -> !AgentLoop.isVolatileTail(m)).toList());
             host.persistDirty = false;
         } catch (final RuntimeException e) {
             host.persistDirty = true; // retried at the next persistContext / compaction point
-            host.LOGGER.log(SessionAwareLogRecord.of(
-                    host.LOGGER, sessionId, Level.WARNING, "Could not persist the compacted session " + sessionId, e));
+            AgentLoop.LOGGER.log(SessionAwareLogRecord.of(
+                    AgentLoop.LOGGER,
+                    sessionId,
+                    Level.WARNING,
+                    "Could not persist the compacted session " + sessionId,
+                    e));
             host.emit(host.notice(
                     AgentEvent.Notice.Level.WARN, "Compacted context could not be persisted: " + e.getMessage()));
         }

@@ -360,42 +360,41 @@ class UsageTrackerTest {
     }
 
     @Test
-    void anchorCalibratesTheAppendedEstimateWithRealUsage() {
+    void anchorMeasuresUnchangedRequestAndItsVerifiedExtension() {
         final var tracker = calibratedTracker();
-        tracker.anchor(500, 100);
-        final var messages = List.of(Message.user("a".repeat(400)));
-        final var raw = tracker.estimateContext(messages, 0);
-        // ratio 500/100 = 5 clamped to 2.0
-        assertEquals((int) Math.round(500 + 2.0 * (raw - 100)), tracker.effectiveContext(messages, 0));
+        final var base = List.of(Message.user("a".repeat(400)));
+        final var payload = tracker.contextPayload(base, 0);
+        tracker.anchor(50, payload);
+        assertEquals(50, tracker.effectiveContext(base, 0));
+        assertEquals("provider-reported", tracker.lastContextMeasurement().source());
+        final var extended = List.of(base.getFirst(), Message.user("more input"));
+        final var raw = tracker.estimateContext(extended, 0);
+        assertEquals((int) Math.round(50.0 * raw / payload.estimatedTokens()), tracker.effectiveContext(extended, 0));
+        assertEquals("provider-anchored", tracker.lastContextMeasurement().source());
     }
 
     @Test
-    void anchorRatioIsClampedFromBelowToo() {
+    void rewrittenContextRetainsCalibrationButNotExactAnchor() {
         final var tracker = calibratedTracker();
-        tracker.anchor(25, 100);
-        final var messages = List.of(Message.user("a".repeat(400)));
-        final var raw = tracker.estimateContext(messages, 0);
-        // ratio 25/100 = 0.25 clamped to 0.5
-        assertEquals((int) Math.round(25 + 0.5 * (raw - 100)), tracker.effectiveContext(messages, 0));
-    }
-
-    @Test
-    void shrunkContextFallsBackToTheRawEstimate() {
-        final var tracker = calibratedTracker();
-        tracker.anchor(500, 100);
-        final var messages = List.of(Message.user("hi"));
-        assertEquals(tracker.estimateContext(messages, 0), tracker.effectiveContext(messages, 0));
-    }
-
-    @Test
-    void nonPositiveAnchorIsIgnoredAndResetClearsIt() {
-        final var tracker = calibratedTracker();
-        final var messages = List.of(Message.user("a".repeat(400)));
-        tracker.anchor(0, 100);
-        assertEquals(tracker.estimateContext(messages, 0), tracker.effectiveContext(messages, 0));
-        tracker.anchor(500, 100);
+        final var base = List.of(Message.user("a".repeat(400)));
+        final var payload = tracker.contextPayload(base, 0);
+        tracker.anchor(50, payload);
+        final var rewritten = List.of(Message.user("b".repeat(400)));
+        assertEquals(50, tracker.effectiveContext(rewritten, 0));
+        assertEquals("calibrated", tracker.lastContextMeasurement().source());
         tracker.clearAnchor();
+        assertEquals(50, tracker.effectiveContext(base, 0));
+        assertEquals("calibrated", tracker.lastContextMeasurement().source());
+        assertEquals(-1, tracker.lastRealPromptTokens());
+    }
+
+    @Test
+    void missingUsageDoesNotInventAnObservation() {
+        final var tracker = calibratedTracker();
+        final var messages = List.of(Message.user("hello"));
+        tracker.anchor(0, tracker.contextPayload(messages, 0));
         assertEquals(tracker.estimateContext(messages, 0), tracker.effectiveContext(messages, 0));
+        assertEquals("heuristic", tracker.lastContextMeasurement().source());
     }
 
     @Test

@@ -101,6 +101,11 @@ class CompactionGateTest {
         }
 
         @Override
+        public int budgetContext(final List<Message> messages, final int extraToolTokens) {
+            return effective;
+        }
+
+        @Override
         public double contextPercent(final int estimatedTokens) {
             return estimatedTokens * 100d / USABLE;
         }

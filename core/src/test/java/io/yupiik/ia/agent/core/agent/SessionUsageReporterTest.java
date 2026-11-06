@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
@@ -131,6 +132,6 @@ class SessionUsageReporterTest {
         assertEquals("s1", pushed.sessionId());
         assertEquals(-1, pushed.lastRealPromptTokens(), "no anchor: no real prompt base yet");
         assertEquals(-1, pushed.calibrationRatio(), "no anchor: no calibration ratio yet");
-        assertTrue(pushed.quota() == AgentEvent.UsageUpdated.Quota.NONE, "no quota store: NONE quota");
+        assertSame(pushed.quota(), AgentEvent.UsageUpdated.Quota.NONE, "no quota store: NONE quota");
     }
 }

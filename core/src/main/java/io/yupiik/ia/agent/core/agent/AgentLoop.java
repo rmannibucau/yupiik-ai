@@ -27,6 +27,7 @@ import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.ContextManager;
+import io.yupiik.ia.agent.core.context.ContextMeasurement;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.ia.agent.core.context.UsageTracker;
@@ -768,6 +769,9 @@ public class AgentLoop {
             }
         }
         this.chatSettings = alt;
+        if (usageTracker != null) {
+            usageTracker.attach(alt);
+        }
         if (emitter != null) {
             emitter.emit(new ModelSwitchedEvent(
                     new EventContextBuilder(configuration)
@@ -1438,6 +1442,14 @@ public class AgentLoop {
 
     boolean compressionBoundaryOnly(final ChatCompletionRequest request) throws IOException {
         return chatClient != null && chatClient.compressionBoundaryOnly(request);
+    }
+
+    ContextMeasurement.Payload contextPayload(final ChatCompletionRequest request) throws IOException {
+        return chatClient.contextPayload(request, usageTracker);
+    }
+
+    ChatClient.ContextCapture captureContext(final java.util.function.Consumer<ContextMeasurement.Payload> consumer) {
+        return chatClient.captureContext(consumer);
     }
 
     /**

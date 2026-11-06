@@ -84,14 +84,16 @@ class ManageContextToolTest {
     }
 
     @Test
-    void statusUsesThePublishedSnapshot() {
+    void statusRemeasuresPublishedMessagesInsteadOfReusingAStaleTokenCount() {
         final var view = new ContextView();
         view.publish(new ContextView.Snapshot(12, 5_000, 100_000, 80_000, 62.5, 65, 80));
         final var tool = new ManageContextTool(config(true), mapper, providerManager());
         final var result = tool.execute(Map.of("action", "status"), context(view));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("\"messageCount\":12"), result.output());
-        assertTrue(result.output().contains("\"rawTokens\":5000"), result.output());
+        assertTrue(result.output().contains("\"rawTokens\":0"), result.output());
+        assertTrue(result.output().contains("\"effectiveTokens\":0"), result.output());
+        assertTrue(result.output().contains("\"measurementSource\":\"heuristic\""), result.output());
     }
 
     @Test

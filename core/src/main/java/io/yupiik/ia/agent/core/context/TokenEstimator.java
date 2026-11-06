@@ -16,16 +16,12 @@
 package io.yupiik.ia.agent.core.context;
 
 /**
- * Heuristic token estimation used to decide when to compact/prune. It is deliberately a
- * conservative <em>upper</em> bound: dense JSON, short identifiers, base64 and punctuation-heavy
- * tool arguments tokenize at ~0.4-0.6 tokens/char and would otherwise be under-counted, which
- * makes the compaction thresholds fire too late (the dangerous direction). It therefore charges
- * code/JSON-heavy text at a higher per-char rate and applies an explicit safety margin.
+ * Best-effort text estimate with blended punctuation density. Capacity guards apply uncertainty
+ * separately, so displayed estimates do not include an unconditional safety multiplier.
  */
 public final class TokenEstimator {
-    private static final double PROSE_RATE = 0.30;
+    private static final double PROSE_RATE = 0.25;
     private static final double DENSE_RATE = 0.50;
-    private static final double SAFETY_MARGIN = 1.2;
 
     private TokenEstimator() {}
 
@@ -43,8 +39,8 @@ public final class TokenEstimator {
                 codeChars++;
             }
         }
-        tokens += text.length() * (codeChars > 0 ? DENSE_RATE : PROSE_RATE);
-        tokens *= SAFETY_MARGIN;
+        final var density = Math.min(1.0, codeChars / (text.length() * 0.20));
+        tokens += text.length() * (PROSE_RATE + (DENSE_RATE - PROSE_RATE) * density);
         return (int) Math.ceil(tokens);
     }
 }

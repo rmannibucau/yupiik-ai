@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.agent;
 
+import io.yupiik.ia.agent.core.context.ContextMeasurement;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.usage.CodexUsageSnapshot;
 import java.util.List;
@@ -144,8 +145,34 @@ public sealed interface AgentEvent {
             String sessionId,
             String subagentId,
             String subagentName,
-            Quota quota)
+            Quota quota,
+            ContextMeasurement.Snapshot contextMeasurement)
             implements AgentEvent {
+        public UsageUpdated(
+                final Usage usage,
+                final int estimatedContextTokens,
+                final double contextPercent,
+                final int lastRealPromptTokens,
+                final double calibrationRatio,
+                final String model,
+                final String sessionId,
+                final String subagentId,
+                final String subagentName,
+                final Quota quota) {
+            this(
+                    usage,
+                    estimatedContextTokens,
+                    contextPercent,
+                    lastRealPromptTokens,
+                    calibrationRatio,
+                    model,
+                    sessionId,
+                    subagentId,
+                    subagentName,
+                    quota,
+                    null);
+        }
+
         public UsageUpdated(Usage usage, int estimatedContextTokens, double contextPercent, String sessionId) {
             this(usage, estimatedContextTokens, contextPercent, 0, -1, null, sessionId, null, null, Quota.NONE);
         }

@@ -17,6 +17,7 @@ package io.yupiik.llm.client.anthropic;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -186,7 +187,7 @@ class AnthropicDialectTest {
         assertEquals("hello", response.text());
         assertEquals(6, response.usage().totalTokens());
         assertEquals(3L, response.usage().cacheRead());
-        assertEquals(2l, response.usage().cacheWrite());
+        assertEquals(2L, response.usage().cacheWrite());
         assertNull(response.usage().generationTimeMs(), "a standard Anthropic payload carries no timing");
         final var body = reqBody.get();
         assertTrue(body.contains("\"max_tokens\":64"));
@@ -429,6 +430,29 @@ class AnthropicDialectTest {
                         new LlmStreamEvent.TextDelta("lo"),
                         new LlmStreamEvent.End("stop", new Usage(5L, 2L, 7L))),
                 events);
+    }
+
+    @Test
+    void cachedInputSurvivesOutputOnlyFinalDelta(final JsonMapper mapper) throws Exception {
+        final var sse = """
+                event: message_start
+                data: {"type":"message_start","message":{"id":"m1","role":"assistant","content":[],"usage":{"input_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":0}}}
+
+                event: message_delta
+                data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}
+
+                """;
+        server.createContext("/v1/messages", exchange -> respondSse(exchange, sse));
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var events = collect(
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS));
+        final var usage = ((LlmStreamEvent.End) events.getLast()).usage();
+        assertEquals(5, usage.prompt());
+        assertEquals(100, usage.cacheRead());
+        assertEquals(20, usage.cacheWrite());
+        assertEquals(125, usage.contextInput());
+        assertEquals(2, usage.completion());
     }
 
     @Test
@@ -675,8 +699,9 @@ class AnthropicDialectTest {
         final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var completion = dialect.models().toCompletableFuture();
         final var failure = failureOf(completion).orElseThrow();
-        assertTrue(
-                failure instanceof DialectNotSupportedException,
+        assertInstanceOf(
+                DialectNotSupportedException.class,
+                failure,
                 () -> "expected DialectNotSupportedException but got " + failure);
     }
 
@@ -693,8 +718,9 @@ class AnthropicDialectTest {
         final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var completion = dialect.chat(request(false)).toCompletableFuture();
         final var failure = failureOf(completion).orElseThrow();
-        assertTrue(
-                failure instanceof DialectNotSupportedException,
+        assertInstanceOf(
+                DialectNotSupportedException.class,
+                failure,
                 () -> "expected DialectNotSupportedException but got " + failure);
     }
 

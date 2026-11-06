@@ -62,7 +62,7 @@ public class ContextManager {
     public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
         final var p = configuration.pruning();
         return p.enabled()
-                && usageTracker.contextPercent(usageTracker.effectiveContext(messages, extraToolTokens))
+                && usageTracker.contextPercent(usageTracker.budgetContext(messages, extraToolTokens))
                         >= p.thresholdPercent();
     }
 
@@ -75,7 +75,7 @@ public class ContextManager {
         if (!c.enabled()) {
             return false;
         }
-        final var effective = usageTracker.effectiveContext(messages, extraToolTokens);
+        final var effective = usageTracker.budgetContext(messages, extraToolTokens);
         if (c.thresholdPercent() > 0) {
             return usageTracker.contextPercent(effective) >= c.thresholdPercent();
         }

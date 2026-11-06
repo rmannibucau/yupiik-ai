@@ -530,7 +530,8 @@ public class WebSessionManager implements AutoCloseable {
                             sessionId,
                             null,
                             null,
-                            quota));
+                            quota,
+                            usage.lastContextMeasurement()));
                     final var data = new LinkedHashMap<String, Object>(usagePayload.data());
                     replay.add(new WebEventDto("usage-updated", sessionId, null, null, null, data));
                 }
@@ -752,7 +753,7 @@ public class WebSessionManager implements AutoCloseable {
         public FeedbackGate feedbackGate() {
             return questions -> {
                 final var serialized = questions.stream()
-                        .map(q -> (Map<String, Object>) Map.<String, Object>of(
+                        .map(q -> Map.of(
                                 "id", q.id(),
                                 "prompt", q.prompt(),
                                 "options", q.options() == null ? List.of() : q.options(),

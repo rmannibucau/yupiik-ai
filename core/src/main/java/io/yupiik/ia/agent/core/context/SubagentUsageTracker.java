@@ -36,14 +36,11 @@ public class SubagentUsageTracker extends UsageTracker {
     private final AtomicLong optimizedOutputs = new AtomicLong();
     private final AtomicLong optimizedCharsBefore = new AtomicLong();
     private final AtomicLong optimizedCharsAfter = new AtomicLong();
-    private volatile Anchor anchor;
 
     public SubagentUsageTracker(final UsageTracker parent, final String subagentId) {
         super(null, null, null, parent.clock);
         this.parent = parent;
         this.subagentId = subagentId;
-        // Copy parent's anchor for calibration
-        this.anchor = parent.anchor;
     }
 
     @Override
@@ -75,40 +72,6 @@ public class SubagentUsageTracker extends UsageTracker {
         optimizedOutputs.incrementAndGet();
         optimizedCharsBefore.addAndGet(beforeChars);
         optimizedCharsAfter.addAndGet(afterChars);
-    }
-
-    @Override
-    public void anchor(final int realPromptTokens, final int estimateAtAnchor) {
-        this.anchor =
-                realPromptTokens > 0 && estimateAtAnchor > 0 ? new Anchor(realPromptTokens, estimateAtAnchor) : null;
-    }
-
-    @Override
-    public void clearAnchor() {
-        this.anchor = null;
-    }
-
-    @Override
-    public int lastRealPromptTokens() {
-        return anchor == null ? -1 : anchor.realPromptTokens();
-    }
-
-    @Override
-    public double calibrationRatio() {
-        return anchor == null
-                ? -1
-                : Math.clamp((double) anchor.realPromptTokens() / anchor.estimateAtAnchor(), 0.5, 2.0);
-    }
-
-    @Override
-    public int effectiveContext(final List<Message> messages, final int extraToolTokens) {
-        final var current = anchor;
-        final var estimate = estimateContext(messages, extraToolTokens);
-        if (current == null || estimate <= current.estimateAtAnchor()) {
-            return estimate;
-        }
-        final var ratio = Math.clamp((double) current.realPromptTokens() / current.estimateAtAnchor(), 0.5, 2.0);
-        return (int) Math.round(current.realPromptTokens() + ratio * (estimate - current.estimateAtAnchor()));
     }
 
     @Override
@@ -190,7 +153,7 @@ public class SubagentUsageTracker extends UsageTracker {
         optimizedOutputs.set(0);
         optimizedCharsBefore.set(0);
         optimizedCharsAfter.set(0);
-        anchor = null;
+        clearAnchor();
     }
 
     @Override

@@ -50,6 +50,11 @@ public final class DialectLlmClient implements LlmClient {
         this.helper = helper;
     }
 
+    /** Serializes through the actual dialect without transport, retries, or observers. */
+    public byte[] requestPayload(final LlmRequest request) {
+        return delegate.requestPayload(request);
+    }
+
     /**
      * Creates a resilient client around a dialect, building the resilience layer from a config.
      *

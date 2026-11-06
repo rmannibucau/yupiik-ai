@@ -23,9 +23,6 @@ import io.yupiik.ia.agent.core.configuration.CompactionLlmMode;
 import io.yupiik.ia.agent.core.configuration.GateConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderCompactionConfiguration;
-import io.yupiik.ia.agent.core.configuration.SpeculativeConfiguration;
-import io.yupiik.ia.agent.core.configuration.SummarizerConfiguration;
-import io.yupiik.ia.agent.core.configuration.TailConfiguration;
 import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
 import io.yupiik.ia.agent.core.context.SpeculativeCompaction.Candidate;
 import io.yupiik.ia.agent.core.events.CompactionStartingEvent;
@@ -672,7 +669,9 @@ public class CompactionCoordinator {
                 progress.tokensPublished().accept(effective);
             }
             emit(AgentEvent.Notice.compactionStart(
-                    "Compaction in progress... (\u2248" + effective + " estimated tokens)", sessionId));
+                    "Compaction in progress... (\u2248" + effective + " estimated tokens; "
+                            + usageTracker.lastContextMeasurement().source() + ")",
+                    sessionId));
         }
         Outcome outcome;
         while (true) {
@@ -1627,60 +1626,6 @@ public class CompactionCoordinator {
                 : configuration.compaction().resolvedGate();
     }
 
-    /**
-     * The merged summarizer input caps for the session's provider (per-provider override over
-     * global over default), or the global group when no provider manager is wired.
-     */
-    public SummarizerConfiguration resolvedSummarizer(final ChatSettings settings) {
-        if (providerManager != null) {
-            return providerManager.resolvedSummarizer(settings);
-        }
-        return configuration == null || configuration.compaction() == null
-                ? new SummarizerConfiguration(
-                        SummarizerConfiguration.DEFAULT_CHUNK_CHARS,
-                        SummarizerConfiguration.DEFAULT_MIN_CHUNK_CHARS,
-                        SummarizerConfiguration.DEFAULT_DIGEST_CHARS,
-                        SummarizerConfiguration.DEFAULT_TOOL_OUTPUT_CHARS)
-                : configuration.compaction().resolvedSummarizer();
-    }
-
-    /**
-     * The merged speculative-compaction knobs for the session's provider (per-provider override over
-     * global over default), or the global group when no provider manager is wired.
-     */
-    public SpeculativeConfiguration resolvedSpeculative(final ChatSettings settings) {
-        if (providerManager != null) {
-            return providerManager.resolvedSpeculative(settings);
-        }
-        return configuration == null || configuration.compaction() == null
-                ? new SpeculativeConfiguration(
-                        SpeculativeConfiguration.DEFAULT_POLICY, SpeculativeConfiguration.DEFAULT_START_PERCENT)
-                : configuration.compaction().resolvedSpeculative();
-    }
-
-    /**
-     * The merged verbatim recent-tail knobs for the session's provider (per-provider override over
-     * global over default), or the global group when no provider manager is wired.
-     */
-    public TailConfiguration resolvedTail(final ChatSettings settings) {
-        if (providerManager != null) {
-            return providerManager.resolvedTail(settings);
-        }
-        return configuration == null || configuration.compaction() == null
-                ? new TailConfiguration(
-                        TailConfiguration.DEFAULT_BUDGET_TOKENS,
-                        TailConfiguration.DEFAULT_TOOL_ARGUMENTS_CAP_CHARS,
-                        TailConfiguration.DEFAULT_OVERFLOW_SPLICE_CHARS)
-                : configuration.compaction().resolvedTail();
-    }
-
-    /*
-     * Cap resolution. Defaults live in @Property(defaultValue) (summarizerChunkChars=0 auto,
-     * summarizerMinChunkChars=12000, summarizerDigestChars=0 auto, summarizerToolOutputChars=2000,
-     * overflowSpliceChars=500); the null-config/test fallback mirrors those defaults without
-     * duplicating them as code constants.
-     */
-
     private boolean compactionConfigured() {
         return configuration != null && configuration.compaction() != null;
     }
@@ -1721,9 +1666,6 @@ public class CompactionCoordinator {
      * usable window (in chars, ~4 chars/token), floored at the configured minimum so small models
      * stay safe. No upper ceiling: the fraction itself is self-bounding (a quarter of the window can
      * never exceed the window), and a too-optimistic estimate is recovered by the halving retry.
-     *
-     * @param compactModel reference of the summarizer model ({@code null} falls back to the
-     *                     conversation model, the historical behavior when no background model)
      */
     int effectiveChunkCap() {
         return effectiveChunkCap(null);
@@ -1745,7 +1687,7 @@ public class CompactionCoordinator {
         // ~4 chars per token: the classic code/JSON average; conservative (window is already
         // reduced by the output reserve), and a too-large cap is recovered by the halving retry
         final var derived = (usable / 4L) * 4L;
-        return (int) Math.max(floor, Math.min(Integer.MAX_VALUE, derived));
+        return Math.clamp(derived, floor, Integer.MAX_VALUE);
     }
 
     /**

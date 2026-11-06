@@ -188,6 +188,11 @@ public abstract class AbstractDialect implements Dialect {
      */
     protected abstract byte[] encodeRequest(LlmRequest request, boolean stream);
 
+    @Override
+    public byte[] requestPayload(final LlmRequest request) {
+        return encodeRequest(request, true);
+    }
+
     /**
      * The chat route suffix appended to the provider origin, e.g. {@code /chat/completions}.
      *

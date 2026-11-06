@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.llm.Usage;
@@ -68,7 +69,7 @@ class WebEventDtoTest {
         assertEquals("do the thing", started.message());
         assertEquals("sub-1", started.data().get("subagentId"));
         assertEquals("child", started.data().get("subagentName"));
-        assertEquals(null, started.data().get("model"), "the model is unresolved at spawn");
+        assertNull(started.data().get("model"), "the model is unresolved at spawn");
 
         final var completed = WebEventDto.of(
                 new AgentEvent.SubagentCompleted("done", true, false, "s1", "sub-1", "child", "gpt-5.5"));
@@ -93,13 +94,18 @@ class WebEventDtoTest {
                 "s1",
                 null,
                 null,
-                AgentEvent.UsageUpdated.Quota.NONE));
+                AgentEvent.UsageUpdated.Quota.NONE,
+                new io.yupiik.ia.agent.core.context.ContextMeasurement.Snapshot(
+                        50, 52, "provider-anchored", 40, 10, 1.0)));
         assertEquals("usage-updated", dto.type());
         assertEquals("model-x", dto.message());
         assertEquals(120, dto.data().get("completionTokens"));
         // reasoning is carried for the frontend's live per-turn "out + reasoning" display
         assertEquals(40, dto.data().get("reasoningTokens"));
         assertEquals(50, dto.data().get("estimatedContextTokens"));
+        assertEquals("provider-anchored", dto.data().get("contextSource"));
+        assertEquals(10, dto.data().get("pendingContextTokens"));
+        assertEquals(52, dto.data().get("contextBudgetTokens"));
         assertEquals(2.0, dto.data().get("contextPercent"));
     }
 
@@ -111,8 +117,8 @@ class WebEventDtoTest {
         final var dto = WebEventDto.of(new AgentEvent.Compacted(List.of("dedup", "prune"), "CLEARED", "s1"));
         assertEquals("compacted", dto.type());
         assertEquals("dedup,prune|CLEARED", dto.message());
-        assertEquals(null, dto.data().get("tokensBefore"), "no tokens carried -> no before key");
-        assertEquals(null, dto.data().get("tokensAfter"), "no tokens carried -> no after key");
+        assertNull(dto.data().get("tokensBefore"), "no tokens carried -> no before key");
+        assertNull(dto.data().get("tokensAfter"), "no tokens carried -> no after key");
     }
 
     @Test
@@ -149,6 +155,6 @@ class WebEventDtoTest {
         // a non-compaction notice never flips the flag (absent, not false)
         final var unrelated =
                 WebEventDto.of(new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, "retrying (1/3)", "s1"));
-        assertEquals(null, unrelated.data().get("compacting"));
+        assertNull(unrelated.data().get("compacting"));
     }
 }

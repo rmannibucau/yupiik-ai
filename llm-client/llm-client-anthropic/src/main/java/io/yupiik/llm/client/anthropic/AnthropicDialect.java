@@ -182,6 +182,7 @@ public final class AnthropicDialect extends AbstractDialect {
                         if (wire.message() != null) {
                             id[0] = wire.message().id();
                             model[0] = wire.message().model();
+                            usage[0] = toUsage(wire.message().usage());
                         }
                     }
                     case "content_block_delta" -> {
@@ -225,7 +226,7 @@ public final class AnthropicDialect extends AbstractDialect {
                             finish[0] = finishReason(wire.delta().stopReason());
                         }
                         if (wire.usage() != null) {
-                            usage[0] = toUsage(wire.usage());
+                            usage[0] = mergeUsage(usage[0], wire.usage());
                         }
                     }
                     default -> {
@@ -380,10 +381,11 @@ public final class AnthropicDialect extends AbstractDialect {
             final LlmRequest request, final BooleanSupplier cancelled) {
         try {
             final var payload = mapper.toBytes(toWire(request, true));
+            final var usage = new Usage[] {Usage.EMPTY};
             return openStream(payload, cancelled)
                     .thenCompose(attempt -> attempt.ok()
-                            ? CompletableFuture.completedFuture(
-                                    Streams.toEvents(attempt.live(), cancelled, this::mapEvent, () -> null, onRawLine))
+                            ? CompletableFuture.completedFuture(Streams.toEvents(
+                                    attempt.live(), cancelled, event -> mapEvent(event, usage), () -> null, onRawLine))
                             : streamError(attempt));
         } catch (final RuntimeException e) {
             return failed(e);
@@ -794,7 +796,7 @@ public final class AnthropicDialect extends AbstractDialect {
         };
     }
 
-    private List<LlmStreamEvent> mapEvent(final SseParser.Event event) {
+    private List<LlmStreamEvent> mapEvent(final SseParser.Event event, final Usage[] usage) {
         try {
             if (event.data() == null) {
                 return List.of();
@@ -802,6 +804,11 @@ public final class AnthropicDialect extends AbstractDialect {
             final var wire = parse(AnthropicStreamEvent.class, event.data());
             final var result = new ArrayList<LlmStreamEvent>();
             switch (wire.type()) {
+                case "message_start" -> {
+                    if (wire.message() != null) {
+                        usage[0] = toUsage(wire.message().usage());
+                    }
+                }
                 case "content_block_delta" -> {
                     if (wire.delta() != null) {
                         final var text = wire.delta().text();
@@ -831,9 +838,10 @@ public final class AnthropicDialect extends AbstractDialect {
                     }
                 }
                 case "message_delta" -> {
+                    usage[0] = mergeUsage(usage[0], wire.usage());
                     if (wire.delta() != null && wire.delta().stopReason() != null) {
                         result.add(
-                                new LlmStreamEvent.End(finishReason(wire.delta().stopReason()), toUsage(wire.usage())));
+                                new LlmStreamEvent.End(finishReason(wire.delta().stopReason()), usage[0]));
                     }
                 }
                 default -> {
@@ -860,19 +868,39 @@ public final class AnthropicDialect extends AbstractDialect {
                 usage.cacheReadInputTokens(),
                 usage.cacheCreationInputTokens(),
                 thinkingTokens(usage),
-                UsageExtensions.generationTimeMs(usage.others(), out));
+                UsageExtensions.generationTimeMs(usage.others(), out),
+                in
+                        + (usage.cacheReadInputTokens() == null ? 0 : usage.cacheReadInputTokens())
+                        + (usage.cacheCreationInputTokens() == null ? 0 : usage.cacheCreationInputTokens()));
     }
 
-    /**
-     * The Anthropic reasoning breakdown: {@code output_tokens_details.thinking_tokens} of the usage
-     * payload. Anthropic-compatible gateways (eg. Azure AI Gateway) report the hidden chain-of-thought
-     * tokens this way when adaptive/enabled thinking is on; those are already counted in
-     * {@code output_tokens}. Returns null when the breakdown is absent, mirroring the OpenAI dialect
-     * which reads {@code output_tokens_details.reasoning_tokens}.
-     *
-     * @param usage the wire usage payload.
-     * @return the thinking token count reported by the provider, or {@code null} when absent.
-     */
+    /** Delta usage is cumulative; omitted input/cache fields retain the message-start values. */
+    private static Usage mergeUsage(final Usage previous, final AnthropicMessagesResponse.AnthropicUsage update) {
+        if (update == null) {
+            return previous;
+        }
+        if (previous == Usage.EMPTY) {
+            return toUsage(update);
+        }
+        final var input = update.inputTokens() == null ? previous.prompt() : update.inputTokens();
+        final var output = update.outputTokens() == null ? previous.completion() : update.outputTokens();
+        final var read =
+                update.cacheReadInputTokens() == null ? previous.cacheReadTokens() : update.cacheReadInputTokens();
+        final var write = update.cacheCreationInputTokens() == null
+                ? previous.cacheWriteTokens()
+                : update.cacheCreationInputTokens();
+        final var thinking = thinkingTokens(update);
+        return new Usage(
+                input,
+                output,
+                input + output,
+                read,
+                write,
+                thinking == null ? previous.reasoningTokens() : thinking,
+                UsageExtensions.generationTimeMs(update.others(), output),
+                input + (read == null ? 0 : read) + (write == null ? 0 : write));
+    }
+
     private static Long thinkingTokens(final AnthropicMessagesResponse.AnthropicUsage usage) {
         if (usage == null || usage.others() == null) {
             return null;

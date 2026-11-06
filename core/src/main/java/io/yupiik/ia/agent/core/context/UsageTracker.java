@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.context;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.llm.LlmWire;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.llm.Usage;
@@ -30,6 +31,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiFunction;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -77,23 +79,58 @@ public class UsageTracker {
     /** Stable identity for the (provider id, model) dimension over which auto-detection is coalesced. */
     private record Key(String providerId, String model) {}
 
-    protected volatile Anchor anchor;
+    private final ContextMeasurement measurement = new ContextMeasurement();
+    private volatile BiFunction<List<Message>, Integer, ContextMeasurement.Payload> contextProjection;
+
+    /** Installs a pure projection of active history to model-visible request content. */
+    public void contextProjection(final BiFunction<List<Message>, Integer, ContextMeasurement.Payload> projection) {
+        contextProjection = projection;
+    }
+
+    public ContextMeasurement.Payload contextPayload(final List<Message> messages, final int toolTokens) {
+        final var projection = contextProjection;
+        if (projection != null) {
+            return projection.apply(messages, toolTokens);
+        }
+        return payload(String.valueOf(settings), Integer.toString(toolTokens), messages, toolTokens);
+    }
+
+    public ContextMeasurement.Payload payload(
+            final String modelKey, final String toolsKey, final List<Message> messages, final int toolTokens) {
+        return new ContextMeasurement.Payload(
+                modelKey,
+                toolsKey,
+                messages == null
+                        ? List.of()
+                        : messages.stream()
+                                .map(LlmWire::toLlmMessage)
+                                .map(Object::toString)
+                                .toList(),
+                estimateContext(messages, toolTokens));
+    }
+
+    public ContextMeasurement.Snapshot contextMeasurement(final List<Message> messages, final int toolTokens) {
+        return measurement.measure(contextPayload(messages, toolTokens));
+    }
+
+    public ContextMeasurement.Snapshot lastContextMeasurement() {
+        return measurement.latest();
+    }
+
+    public int budgetContext(final List<Message> messages, final int toolTokens) {
+        return contextMeasurement(messages, toolTokens).budgetTokens();
+    }
 
     /** The session's per-tab selection (provider/model): when set, context window resolution follows it. */
     protected volatile ChatSettings settings;
 
     /** Attach the owning session's model/provider selection so this tracker resolves the right window. */
     public void attach(final ChatSettings sessionSettings) {
+        if (!java.util.Objects.equals(settings, sessionSettings)) {
+            clearAnchor();
+        }
         this.settings = sessionSettings;
     }
-
-    /**
-     * Last real API usage observation: the prompt tokens billed by the provider for the exact
-     * message list that was sent, plus the estimate that was computed for that same list. The
-     * ratio between both calibrates later estimates so they stop being over-aggressive against
-     * the ground truth.
-     */
-    record Anchor(int realPromptTokens, int estimateAtAnchor) {}
 
     public UsageTracker(
             final ProviderManager providerManager,
@@ -197,60 +234,26 @@ public class UsageTracker {
         optimizedCharsAfter.addAndGet(after);
     }
 
-    /**
-     * Anchors the hybrid usage computation on a real provider observation: {@code realPromptTokens}
-     * is what the provider billed for the request built from the message list whose estimate is
-     * {@code estimateAtAnchor}. Called after each successful LLM call, before the reply is appended.
-     *
-     * <p>Thread confinement: {@link #anchor(int, int)}, {@link #clearAnchor()} and
-     * {@link #lastRealPromptTokens()} are expected to be called from the agent-loop thread that
-     * owns the turn (the same thread appending messages and reading {@link #effectiveContext}).
-     * The anchor field read in {@link #effectiveContext} is volatile, but the estimate/messages
-     * correlation is only meaningful under this single-owner discipline; concurrent writers from
-     * other threads would interleave anchors with unrelated estimates.</p>
-     */
-    public void anchor(final int realPromptTokens, final int estimateAtAnchor) {
-        this.anchor =
-                realPromptTokens > 0 && estimateAtAnchor > 0 ? new Anchor(realPromptTokens, estimateAtAnchor) : null;
+    /** Associates normalized provider input occupancy with the immutable request captured before sending. */
+    public void anchor(final int realPromptTokens, final ContextMeasurement.Payload payload) {
+        measurement.observe(payload, realPromptTokens);
     }
 
-    /** Drops the current anchor: usage falls back to the raw estimate until the next LLM call. */
+    /** Drops exact request identity while retaining model-specific tokenizer calibration. */
     public void clearAnchor() {
-        this.anchor = null;
+        measurement.invalidate();
     }
 
-    /**
-     * The provider-billed prompt tokens of the last anchored request, the real base the hybrid
-     * estimate is built on; {@code -1} when no anchor exists yet (raw heuristic estimate).
-     */
     public int lastRealPromptTokens() {
-        return anchor == null ? -1 : anchor.realPromptTokens();
+        return measurement.latest().lastInputTokens();
     }
 
-    /**
-     * The clamped calibration ratio (real/estimate at anchor time, in {@code [0.5, 2.0]}) applied to
-     * the estimated tail, or {@code -1} when no anchor exists yet.
-     */
     public double calibrationRatio() {
-        return anchor == null
-                ? -1
-                : Math.clamp((double) anchor.realPromptTokens() / anchor.estimateAtAnchor(), 0.5, 2.0);
+        return measurement.latest().correction();
     }
-    /**
-     * Best known context usage in tokens: the last real prompt token count when available, plus a
-     * calibrated estimate of what was appended since; a raw estimate otherwise (no anchor yet, or
-     * the context shrank after a compaction, which invalidates the anchor). The calibration ratio
-     * (real/estimate at anchor time) is clamped to [0.5, 2.0] so a single outlier never swings the
-     * trigger wildly in either direction.
-     */
+
     public int effectiveContext(final List<Message> messages, final int extraToolTokens) {
-        final var current = anchor;
-        final var estimate = estimateContext(messages, extraToolTokens);
-        if (current == null || estimate <= current.estimateAtAnchor()) {
-            return estimate;
-        }
-        final var ratio = Math.clamp((double) current.realPromptTokens() / current.estimateAtAnchor(), 0.5, 2.0);
-        return (int) Math.round(current.realPromptTokens() + ratio * (estimate - current.estimateAtAnchor()));
+        return contextMeasurement(messages, extraToolTokens).tokens();
     }
 
     /**

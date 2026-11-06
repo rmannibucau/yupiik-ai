@@ -26,7 +26,27 @@ public record Usage(
         @JsonProperty("cache_read_tokens") long cacheReadTokens,
         @JsonProperty("cache_write_tokens") long cacheWriteTokens,
         @JsonProperty("reasoning_tokens") int reasoningTokens,
-        @JsonProperty("generation_time_ms") long generationTimeMs) {
+        @JsonProperty("generation_time_ms") long generationTimeMs,
+        @JsonProperty("context_input_tokens") int contextInputTokens) {
+
+    public Usage(
+            final int promptTokens,
+            final int completionTokens,
+            final int totalTokens,
+            final long cacheReadTokens,
+            final long cacheWriteTokens,
+            final int reasoningTokens,
+            final long generationTimeMs) {
+        this(
+                promptTokens,
+                completionTokens,
+                totalTokens,
+                cacheReadTokens,
+                cacheWriteTokens,
+                reasoningTokens,
+                generationTimeMs,
+                promptTokens);
+    }
 
     public static Usage EMPTY = new Usage(0, 0, 0, 0, 0, 0, 0);
 

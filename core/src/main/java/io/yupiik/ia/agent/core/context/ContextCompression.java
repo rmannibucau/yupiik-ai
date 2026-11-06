@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -266,6 +267,28 @@ public final class ContextCompression {
      * Boundary refs retain the identities of the published messages, even after rewriting blocks.
      */
     public List<Message> renderRefs(final List<Message> messages, final boolean boundaryOnly) {
+        return renderRefs(messages, boundaryOnly, true);
+    }
+
+    /** Preview the model-visible context without publishing seams or absorbing blocks. */
+    public List<Message> project(final List<Message> messages, final boolean boundaryOnly) {
+        lock.lock();
+        final var originalRefs = new IdentityHashMap<>(refsByMessage);
+        final var originalMessages = new HashMap<>(messagesByRef);
+        final var originalNext = nextRef.get();
+        try {
+            return renderRefs(rewrite(messages, false), boundaryOnly, false);
+        } finally {
+            refsByMessage.clear();
+            refsByMessage.putAll(originalRefs);
+            messagesByRef.clear();
+            messagesByRef.putAll(originalMessages);
+            nextRef.set(originalNext);
+            lock.unlock();
+        }
+    }
+
+    private List<Message> renderRefs(final List<Message> messages, final boolean boundaryOnly, final boolean publish) {
         lock.lock();
         try {
             if (!enabled() || messages == null) {
@@ -278,9 +301,8 @@ public final class ContextCompression {
             // explicit inclusive pair ("compactIds=start-end") on the user message that opens it,
             // so the model copies real boundaries instead of reconstructing them from scattered refs.
             // Legacy mode keeps the per-message "@N@" seams for strong/other models that opt out.
-            final var closedTurns = boundaryOnly
-                    ? collectCompressibleClosedTurns(List.<Message>of(), Integer.MAX_VALUE)
-                    : List.<ClosedTurn>of();
+            final var closedTurns =
+                    boundaryOnly ? collectCompressibleClosedTurns(List.of(), Integer.MAX_VALUE) : List.<ClosedTurn>of();
             final var compactIdsByMessage = new IdentityHashMap<Message, String>();
             for (final var turn : closedTurns) {
                 if (messages != null && !messageVisible(messages, turn.startMessage())) {
@@ -331,7 +353,9 @@ public final class ContextCompression {
                         message.toolCallId(),
                         message.others()));
             }
-            renderedRefs = Set.copyOf(refs);
+            if (publish) {
+                renderedRefs = Set.copyOf(refs);
+            }
             return out;
         } finally {
             lock.unlock();
@@ -343,6 +367,10 @@ public final class ContextCompression {
      * message carrying the model's summary. The original list is never mutated.
      */
     public List<Message> rewrite(final List<Message> messages) {
+        return rewrite(messages, true);
+    }
+
+    private List<Message> rewrite(final List<Message> messages, final boolean absorb) {
         lock.lock();
         try {
             if (!enabled() || blocks.isEmpty()) {
@@ -365,7 +393,11 @@ public final class ContextCompression {
                 final var end = indexOf(messages, block.endRef(), start);
                 if (start < 0 || end < 0 || end < start) {
                     // the block boundaries are no longer in this list (e.g. a core compaction rewrote it)
-                    markAbsorbed(block);
+                    if (absorb) {
+                        if (absorb) {
+                            markAbsorbed(block);
+                        }
+                    }
                     continue;
                 }
                 if (start < index) {

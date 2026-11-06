@@ -252,7 +252,8 @@ public class SessionUsageReporter {
                 currentSessionId.get() != null ? currentSessionId.get() : sessionId,
                 subagentId,
                 subagentName,
-                quota);
+                quota,
+                usageTracker == null ? null : usageTracker.lastContextMeasurement());
     }
 
     private void emit(final AgentEvent.UsageUpdated event) {

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.context.ContextCompression;
+import io.yupiik.ia.agent.core.context.ContextMeasurement;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
 import java.util.ArrayDeque;
@@ -91,6 +92,12 @@ public class ConversationTranscript {
     private volatile int estimatedContext;
     private volatile int lastRealPromptTokens;
     private volatile double calibrationRatio;
+    private volatile ContextMeasurement.Snapshot contextMeasurement;
+
+    public ContextMeasurement.Snapshot contextMeasurement() {
+        return contextMeasurement;
+    }
+
     private volatile int contextPercent;
     // the last account quota carried by a usage event; kept as atomic scalars so readers stay cheap
     private volatile boolean quotaVisible;
@@ -533,11 +540,13 @@ public class ConversationTranscript {
                         String sessionId,
                         String subagentId,
                         String subagentName,
-                        AgentEvent.UsageUpdated.Quota quota)) {
+                        AgentEvent.UsageUpdated.Quota quota,
+                        ContextMeasurement.Snapshot measurement)) {
             promptTokens = usage == null ? 0 : usage.promptTokens();
             completionTokens = usage == null ? 0 : usage.completionTokens();
             cacheReadTokens = usage == null ? 0 : usage.cacheReadTokens();
             estimatedContext = estimatedContextTokens;
+            contextMeasurement = measurement;
             this.lastRealPromptTokens = lastRealPromptTokens;
             this.calibrationRatio = calibrationRatio;
             contextPercent = (int) Math.round(percent);
@@ -1135,7 +1144,7 @@ public class ConversationTranscript {
                 case "user" ->
                     transcript
                             .append("\n\n---\n\n" + markerFor(message, true) + "\n\n")
-                            .append(String.valueOf(message.content()))
+                            .append(message.content())
                             .append('\n');
                 case "assistant" -> {
                     // persisted sessions keep the raw <think> content: split it so the
@@ -1225,6 +1234,7 @@ public class ConversationTranscript {
         estimatedContext = 0;
         lastRealPromptTokens = 0;
         calibrationRatio = -1;
+        contextMeasurement = null;
         contextPercent = 0;
         quotaVisible = false;
         quotaPlanType = null;

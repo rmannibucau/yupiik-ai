@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -347,7 +348,7 @@ class AgentLoopTest {
         assertEquals(1, notices.size());
         assertEquals(AgentEvent.Notice.Level.WARN, ((AgentEvent.Notice) notices.getFirst()).level());
         assertTrue(((AgentEvent.Notice) notices.getFirst()).message().contains("(1/3)"));
-        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+        assertInstanceOf(AgentEvent.TurnDone.class, events.getLast());
     }
 
     @Test
@@ -404,7 +405,7 @@ class AgentLoopTest {
         assertEquals(4, notices.size(), "3 continuation warnings then the give-up error");
         assertEquals(AgentEvent.Notice.Level.ERROR, ((AgentEvent.Notice) notices.getLast()).level());
         assertTrue(((AgentEvent.Notice) notices.getLast()).message().contains("Gave up after 3 continuations"));
-        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+        assertInstanceOf(AgentEvent.TurnDone.class, events.getLast());
     }
 
     @Test
@@ -443,7 +444,7 @@ class AgentLoopTest {
         assertEquals(2, notices.size(), "1 continuation warning then the give-up error");
         assertEquals(AgentEvent.Notice.Level.ERROR, ((AgentEvent.Notice) notices.getLast()).level());
         assertTrue(((AgentEvent.Notice) notices.getLast()).message().contains("Gave up after 1 continuation."));
-        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+        assertInstanceOf(AgentEvent.TurnDone.class, events.getLast());
     }
 
     /**
@@ -1051,7 +1052,7 @@ class AgentLoopTest {
         assertNotNull(
                 notice.cause(),
                 "the retry notice must carry the underlying failure so the TUI can show/copy its stack trace");
-        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+        assertInstanceOf(AgentEvent.TurnDone.class, events.getLast());
     }
 
     @Test
@@ -1674,7 +1675,7 @@ class AgentLoopTest {
         assertEquals(AgentEvent.Notice.Level.WARN, ((AgentEvent.Notice) notices.getFirst()).level());
         assertTrue(((AgentEvent.Notice) notices.getFirst()).message().contains("empty completion"));
         assertTrue(((AgentEvent.Notice) notices.getFirst()).message().contains("retrying (1/2)"));
-        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+        assertInstanceOf(AgentEvent.TurnDone.class, events.getLast());
     }
 
     /** After the configured budget the empty-completion retry gives up with an error notice, not a blank stop. */
@@ -1699,7 +1700,7 @@ class AgentLoopTest {
         assertEquals(AgentEvent.Notice.Level.WARN, ((AgentEvent.Notice) notices.get(0)).level());
         assertEquals(AgentEvent.Notice.Level.ERROR, ((AgentEvent.Notice) notices.getLast()).level());
         assertTrue(((AgentEvent.Notice) notices.getLast()).message().contains("gave up after 2 retries"));
-        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+        assertInstanceOf(AgentEvent.TurnDone.class, events.getLast());
     }
 
     /**
@@ -1813,7 +1814,7 @@ class AgentLoopTest {
         assertEquals(1, notices.size());
         assertEquals(AgentEvent.Notice.Level.ERROR, ((AgentEvent.Notice) notices.getFirst()).level());
         assertTrue(((AgentEvent.Notice) notices.getFirst()).message().contains("emptyCompletionRetriesMax is 0"));
-        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+        assertInstanceOf(AgentEvent.TurnDone.class, events.getLast());
     }
 
     /** P3: an empty completion that followed reasoning (the model burned its whole output budget
@@ -4879,7 +4880,7 @@ class AgentLoopTest {
         assertTrue(
                 String.valueOf(tail.content()).startsWith("<session-state>"),
                 "the session state is a standalone trailing message: " + tail.content());
-        assertTrue(Boolean.TRUE.equals(tail.others().get("volatileTail")), "the tail is flagged volatile");
+        assertEquals(Boolean.TRUE, tail.others().get("volatileTail"), "the tail is flagged volatile");
     }
 
     @Test
@@ -6585,7 +6586,7 @@ class AgentLoopTest {
                 .map(m -> String.valueOf(m.content()))
                 .findFirst()
                 .orElse(null);
-        assertTrue(tail != null, "the second request must carry the volatile session-state tail");
+        assertNotNull(tail, "the second request must carry the volatile session-state tail");
         assertFalse(tail.contains("<memory-diff>"), "no memory refresh in the tail: " + tail);
         assertFalse(tail.contains("<memory>"), "the tail must not re-send the memory section: " + tail);
         assertFalse(tail.contains("fact after"), "the tail must not carry the mid-turn fact: " + tail);
@@ -7394,7 +7395,7 @@ class AgentLoopTest {
                 },
                 null,
                 Clock.systemUTC(),
-                (SnapshotStore) null,
+                null,
                 todoStore,
                 executor,
                 sessionId,

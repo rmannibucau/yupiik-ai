@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.context;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -26,7 +27,7 @@ import io.yupiik.ia.agent.core.configuration.ContextLimit;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -129,6 +130,32 @@ class ContextCompressionTest {
                 Message.assistant("also done", List.of()));
     }
 
+    @Test
+    void projectionMatchesWireRenderingWithoutPublishingOrAbsorbing() {
+        final var compression = new ContextCompression(config());
+        final var messages = simpleConversation();
+        assignedRefs(compression, messages);
+        assertTrue(compression
+                .compress("closed", List.of(new ContextCompression.Range("1", "2", "done")))
+                .success());
+        final var tracker = new UsageTracker(null, null, null, java.time.Clock.systemUTC());
+        tracker.contextProjection(
+                (history, tools) -> tracker.payload("model", "tools", compression.project(history, false), tools));
+        final var projected = compression.project(messages, false);
+        assertEquals(compression.renderRefs(compression.rewrite(messages), false), projected);
+        final var raw = tracker.estimateContext(messages, 0);
+        final var effective = tracker.effectiveContext(messages, 0);
+        assertTrue(effective > 0);
+        tracker.anchor(100, tracker.contextPayload(messages, 0));
+        assertEquals(100, tracker.effectiveContext(messages, 0), "compressed savings must not be deducted twice");
+        compression.project(List.of(Message.system("new context")), false);
+        assertEquals(
+                ContextCompression.Status.ACTIVE,
+                compression.blocks().getFirst().status(),
+                "preview must not absorb missing blocks");
+        assertTrue(raw > 0);
+    }
+
     private static List<Message> toolConversation() {
         return List.of(
                 Message.system("system"),
@@ -182,10 +209,9 @@ class ContextCompressionTest {
         // the second user turn is the current open turn: it must not be advertised
         assertEquals("next task", rendered.get(3).content());
         assertEquals("also done", rendered.get(4).content());
-        assertTrue(compression
-                        .compress("first", List.of(new ContextCompression.Range("1", "2", "done")))
-                        .blockId()
-                != null);
+        assertNotNull(compression
+                .compress("first", List.of(new ContextCompression.Range("1", "2", "done")))
+                .blockId());
         final var rewritten = compression.renderRefs(compression.rewrite(messages), true);
         assertTrue(rewritten.get(1).content().toString().contains("@b1@"));
         assertFalse(rewritten.get(2).content().toString().contains("@2@"));
@@ -226,7 +252,7 @@ class ContextCompressionTest {
         // the advertised pair compresses its exact turn without snapping
         final var result = compression.compress("t", List.of(range));
         assertTrue(result.success(), result.message());
-        assertTrue(result.blockId() != null);
+        assertNotNull(result.blockId());
         // after compression the first turn is covered by an ACTIVE block, so it stops being advertised
         final var after = compression.compressibleClosedTurns();
         assertTrue(after.isEmpty(), "the compressed turn is no longer eligible");
@@ -530,7 +556,7 @@ class ContextCompressionTest {
         // second stays on the wire, first is pruned
         compression.publish(List.of(second));
         assertSame(second, compression.messageOf(ref2));
-        assertEquals(null, compression.messageOf(ref1));
+        assertNull(compression.messageOf(ref1));
     }
 
     @Test
@@ -970,7 +996,7 @@ class ContextCompressionTest {
         assertFalse(compression.compress("t", null).success());
         // a null element is a per-item skip (success) matching the non-null-skip behavior
         assertTrue(compression
-                .compress("t", Arrays.asList((ContextCompression.Range) null))
+                .compress("t", Collections.singletonList((ContextCompression.Range) null))
                 .success());
         assertTrue(compression.blocks().isEmpty());
     }

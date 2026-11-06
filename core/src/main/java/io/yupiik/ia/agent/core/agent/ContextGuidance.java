@@ -76,7 +76,7 @@ public class ContextGuidance {
             final var window = usageTracker.get().contextWindowTokenCount().value();
             final var targets = contextView.get().compression().targets(window, resolvedContextLimit());
             final var raw = usageTracker.get().effectiveContext(messages, toolsTokens);
-            final var effective = contextView.get().compression().effectiveTokens(messages, raw);
+            final var effective = raw;
             final var percent = Math.round(usageTracker.get().contextPercent(effective) / 5d) * 5;
             // report the working-context targets exactly as the nudge and the status tool see them,
             // so the line, the nudge and `compress status` never appear to contradict one another.
@@ -109,7 +109,7 @@ public class ContextGuidance {
         final var tier = compressionNudgeTier(messages, toolsTokens);
         if (tier == 2) {
             final var raw = usageTracker.get().effectiveContext(messages, toolsTokens);
-            final var effective = contextView.get().compression().effectiveTokens(messages, raw);
+            final var effective = raw;
             final var targets = contextView
                     .get()
                     .compression()
@@ -123,7 +123,7 @@ public class ContextGuidance {
         }
         if (tier == 1) {
             final var raw = usageTracker.get().effectiveContext(messages, toolsTokens);
-            final var effective = contextView.get().compression().effectiveTokens(messages, raw);
+            final var effective = raw;
             final var targets = contextView
                     .get()
                     .compression()
@@ -240,7 +240,7 @@ public class ContextGuidance {
         }
         final var sinceLastUser = iterationsSinceLastUser(messages);
         final var raw = usageTracker.get().effectiveContext(messages, toolsTokens);
-        final var effective = contextView.get().compression().effectiveTokens(messages, raw);
+        final var effective = raw;
         // strong tier: above the (buffered) working target, cadenced on REAL rounds so a tool batch
         // that appends many messages cannot make it fire erratically, and spaced at nudgeFrequency.
         if (targets.effectiveMax() > 0
