@@ -472,11 +472,19 @@ public final class ContextCompression {
                 continue;
             }
             final var start = indexOf(published, startRef, 0);
-            final var end = indexOf(published, endRef, start);
-            if (start < 0 || end < 0 || end < start) {
+            final var end = indexOf(published, endRef, 0);
+            if (start < 0 || end < 0) {
                 refLookupSkips++;
+                final var missing = start < 0 && end < 0
+                        ? "startId " + range.startId() + " and endId " + range.endId() + " are"
+                        : (start < 0 ? "startId " + range.startId() : "endId " + range.endId()) + " is";
+                skipped.add("range " + range.startId() + ".." + range.endId() + ": " + missing
+                        + " not in the live conversation");
+                continue;
+            }
+            if (end < start) {
                 skipped.add("range " + range.startId() + ".." + range.endId()
-                        + ": not in the live conversation or is reversed");
+                        + ": both endpoints exist, but endId precedes startId in conversation order");
                 continue;
             }
             if (start == 0
@@ -660,9 +668,12 @@ public final class ContextCompression {
                 : "Compressed " + created.size() + " range(s): " + String.join(", ", created)
                         + ". The transcript is unchanged; these blocks are now applied to outgoing requests.";
         final var parts = new ArrayList<String>(2);
+        final var outcome = created.isEmpty() ? "no_change" : skipped.isEmpty() ? "applied" : "partial_success";
+        parts.add("outcome: " + outcome + "\ncreated: " + created.size() + "\nskipped: " + skipped.size());
         parts.add(base);
         if (!skipped.isEmpty()) {
             parts.add("skipped: " + String.join("; ", skipped) + ".");
+            parts.add("Skipped ranges were not applied. Do not retry rejected ranges unchanged.");
         }
         if (!nudges.isEmpty()) {
             parts.add(String.join("\n", nudges));
@@ -687,8 +698,10 @@ public final class ContextCompression {
                 if (omitted > 0) {
                     refsText.append(" (+").append(omitted).append(" omitted)");
                 }
-                refsText.append(
-                        " - use exact startId/endId only for genuinely finished work; otherwise continue the current task.");
+                refsText.append(" - use exact startId/endId only for genuinely finished work."
+                        + " Do not substitute these IDs into old summaries. Verify the content of a current pair"
+                        + " and write a summary for that span; if its content is unavailable or the work is unfinished,"
+                        + " continue the current task.");
                 parts.add(refsText.toString());
             }
         }

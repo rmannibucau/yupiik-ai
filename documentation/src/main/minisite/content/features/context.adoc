@@ -632,6 +632,11 @@ If the boundary meta-data is not visible (for example after a whole-context
 the first attempt valid instead of guessing.
 
 By default, all models and variants receive boundary pairs.
+Compression replies report an `outcome` (`applied`, `partial_success`, or `no_change`) and counts of created blocks and skipped ranges.
+A successful tool invocation does not necessarily mean any range was compressed; `no_change` means no blocks were created.
+Missing endpoints are identified separately from endpoints in reversed conversation order.
+Do not retry rejected ranges unchanged or substitute current IDs into old summaries.
+Verify the content of a current candidate and write a summary for that span; if the content is unavailable or the work is unfinished, continue the task instead.
 Provider tuning or model behavior `compressionBoundaryOnly=DISABLED` retains legacy per-message `@N@` seams, which the tool still accepts.
 `AUTO` and `ENABLED` use boundary pairs; model `AUTO` inherits provider tuning, while an explicit model setting overrides it.
 Both soft and hard nudges supply bounded candidate pairs with an omitted count when necessary.

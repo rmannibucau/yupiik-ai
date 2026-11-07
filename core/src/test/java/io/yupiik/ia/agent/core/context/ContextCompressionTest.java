@@ -1208,6 +1208,89 @@ class ContextCompressionTest {
     }
 
     @Test
+    void missingEndpointsReportNoChangeAndSafeRecovery() {
+        final var compression = new ContextCompression(config());
+        final var messages = simpleConversation();
+        assignedRefs(compression, messages);
+        final var result = compression.compress(
+                "missing",
+                List.of(
+                        new ContextCompression.Range("999", "2", "missing start"),
+                        new ContextCompression.Range("1", "998", "missing end"),
+                        new ContextCompression.Range("997", "996", "both missing")));
+
+        assertTrue(result.success(), result.message());
+        assertNull(result.blockId());
+        assertTrue(compression.blocks().isEmpty());
+        assertEquals(messages, compression.rewrite(messages));
+        assertTrue(result.message().startsWith("outcome: no_change\ncreated: 0\nskipped: 3\n"), result.message());
+        assertTrue(result.message().contains("startId 999 is not in the live conversation"), result.message());
+        assertTrue(result.message().contains("endId 998 is not in the live conversation"), result.message());
+        assertTrue(
+                result.message().contains("startId 997 and endId 996 are not in the live conversation"),
+                result.message());
+        assertFalse(result.message().contains("precedes"), result.message());
+        assertTrue(result.message().contains("Do not retry rejected ranges unchanged"), result.message());
+        assertTrue(result.message().contains("compressible inclusive ranges: 1-2"), result.message());
+        assertTrue(result.message().contains("Do not substitute these IDs into old summaries"), result.message());
+        assertTrue(result.message().contains("Verify the content of a current pair"), result.message());
+        assertTrue(
+                result.message().contains("if its content is unavailable or the work is unfinished"), result.message());
+    }
+
+    @Test
+    void reversedLiveEndpointsAreNotReportedAsUnknownRefs() {
+        final var compression = new ContextCompression(config());
+        assignedRefs(compression, simpleConversation());
+        final var notified = new AtomicBoolean();
+        compression.onUnknownRefs(ranges -> notified.set(true));
+        final var result = compression.compress("reversed", List.of(new ContextCompression.Range("2", "1", "wrong")));
+
+        assertTrue(result.success(), result.message());
+        assertNull(result.blockId());
+        assertTrue(compression.blocks().isEmpty());
+        assertTrue(result.message().startsWith("outcome: no_change\ncreated: 0\nskipped: 1\n"), result.message());
+        assertTrue(
+                result.message().contains("both endpoints exist, but endId precedes startId in conversation order"),
+                result.message());
+        assertFalse(result.message().contains("not in the live conversation"), result.message());
+        assertFalse(notified.get(), "reversed live endpoints must not fire the unknown-refs observer");
+    }
+
+    @Test
+    void appliedBatchReportsCreatedBlocksWithoutSkips() {
+        final var compression = new ContextCompression(config());
+        assignedRefs(compression, simpleConversation());
+        final var result = compression.compress("finished", List.of(new ContextCompression.Range("1", "2", "done")));
+
+        assertTrue(result.success(), result.message());
+        assertEquals("b1", result.blockId());
+        assertEquals(1, compression.blocks().size());
+        assertTrue(result.message().startsWith("outcome: applied\ncreated: 1\nskipped: 0\n"), result.message());
+        assertFalse(result.message().contains("Do not retry"), result.message());
+    }
+
+    @Test
+    void mixedMissingRefBatchReportsPartialSuccessWithoutRemapping() {
+        final var compression = new ContextCompression(config());
+        final var messages = simpleConversation();
+        assignedRefs(compression, messages);
+        final var result = compression.compress(
+                "mixed",
+                List.of(
+                        new ContextCompression.Range("999", "998", "stale summary"),
+                        new ContextCompression.Range("1", "2", "finished work")));
+
+        assertTrue(result.success(), result.message());
+        assertEquals("b1", result.blockId());
+        assertTrue(result.message().startsWith("outcome: partial_success\ncreated: 1\nskipped: 1\n"), result.message());
+        assertTrue(result.message().contains("Skipped ranges were not applied"), result.message());
+        assertEquals(1, compression.blocks().size());
+        assertEquals("finished work", compression.blocks().getFirst().summary());
+        assertEquals(messages.get(3), compression.rewrite(messages).get(2));
+    }
+
+    @Test
     void unknownRefsObserverFiresOnlyOnRefLookupSkip() {
         final var compression = new ContextCompression(config());
         final var messages = simpleConversation();
