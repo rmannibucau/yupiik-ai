@@ -15,20 +15,166 @@
  */
 package io.yupiik.ia.agent.core.llm;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.llm.client.model.LlmStreamEvent;
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 class LlmWireTest {
+    @Test
+    void publisherWaitPollsCancellationAndDiscardsLatePublisher() throws Exception {
+        final var transport = new CompletableFuture<Flow.Publisher<LlmStreamEvent>>();
+        // Model the dependent stage returned by the dialect/resilience chain.
+        final var stage = transport.thenApply(publisher -> publisher);
+        final var cancelled = new AtomicBoolean();
+        final var waiting = new CountDownLatch(1);
+        final var result = CompletableFuture.supplyAsync(() -> assertThrows(
+                IOException.class,
+                () -> LlmWire.join(
+                        stage,
+                        () -> {
+                            waiting.countDown();
+                            return cancelled.get();
+                        },
+                        LlmWire::discard)));
+        try {
+            assertTrue(waiting.await(5, TimeUnit.SECONDS));
+            assertFalse(result.isDone());
+            cancelled.set(true);
+            assertEquals("Cancelled", result.get(2, TimeUnit.SECONDS).getMessage());
+            assertFalse(stage.isCancelled(), "late publishers must remain observable");
+            final var cancellations = new AtomicInteger();
+            final var requests = new AtomicInteger();
+            transport.complete(subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+                @Override
+                public void request(final long n) {
+                    requests.incrementAndGet();
+                }
+
+                @Override
+                public void cancel() {
+                    cancellations.incrementAndGet();
+                }
+            }));
+            assertEquals(1, cancellations.get(), "release the late transport and concurrency permit exactly once");
+            assertEquals(0, requests.get(), "never consume an abandoned response");
+        } finally {
+            cancelled.set(true);
+            transport.completeExceptionally(new IOException("test cleanup"));
+        }
+    }
+
+    @Test
+    void publisherWaitPreservesSuccessAndFailure() throws Exception {
+        final var discarded = new AtomicBoolean();
+        assertEquals(
+                "ready",
+                LlmWire.join(CompletableFuture.completedFuture("ready"), () -> false, v -> discarded.set(true)));
+        final var failure = new IOException("transport failure");
+        assertEquals(
+                failure,
+                assertThrows(
+                        IOException.class,
+                        () -> LlmWire.join(
+                                CompletableFuture.failedFuture(failure), () -> false, v -> discarded.set(true))));
+        assertFalse(discarded.get());
+    }
+
+    @Test
+    void interruptedPumpCancelsLateSubscription() throws Exception {
+        final var subscribed = new CompletableFuture<Flow.Subscriber<? super LlmStreamEvent>>();
+        final var result = new CompletableFuture<Throwable>();
+        final var thread = Thread.ofVirtual().start(() -> {
+            try {
+                LlmWire.pump(subscribed::complete, event -> {}, () -> false);
+                result.complete(new AssertionError("pump returned without interruption"));
+            } catch (final Throwable e) {
+                result.complete(e);
+            }
+        });
+        try {
+            final var subscriber = subscribed.get(5, TimeUnit.SECONDS);
+            thread.interrupt();
+            assertTrue(result.get(2, TimeUnit.SECONDS) instanceof InterruptedException);
+            final var cancellations = new AtomicInteger();
+            subscriber.onSubscribe(new Flow.Subscription() {
+                @Override
+                public void request(final long n) {
+                    throw new AssertionError("abandoned stream must not request data");
+                }
+
+                @Override
+                public void cancel() {
+                    cancellations.incrementAndGet();
+                }
+            });
+            assertEquals(1, cancellations.get());
+        } finally {
+            thread.interrupt();
+            thread.join(2000);
+        }
+    }
+
+    @Test
+    void interruptedPublisherWaitDiscardsLatePublisherAndRestoresInterrupt() throws Exception {
+        final var stage = new CompletableFuture<Flow.Publisher<LlmStreamEvent>>();
+        final var waiting = new CountDownLatch(1);
+        final var interrupted = new AtomicBoolean();
+        final var failure = new CompletableFuture<Throwable>();
+        final var thread = Thread.ofVirtual().start(() -> {
+            try {
+                LlmWire.join(
+                        stage,
+                        () -> {
+                            waiting.countDown();
+                            return false;
+                        },
+                        LlmWire::discard);
+                failure.complete(new AssertionError("wait returned without interruption"));
+            } catch (final InterruptedException e) {
+                interrupted.set(Thread.currentThread().isInterrupted());
+                failure.complete(e);
+            } catch (final Throwable e) {
+                failure.complete(e);
+            }
+        });
+        try {
+            assertTrue(waiting.await(5, TimeUnit.SECONDS));
+            thread.interrupt();
+            assertTrue(failure.get(2, TimeUnit.SECONDS) instanceof InterruptedException);
+            assertTrue(interrupted.get());
+            final var released = new AtomicBoolean();
+            stage.complete(subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+                @Override
+                public void request(final long n) {}
+
+                @Override
+                public void cancel() {
+                    released.set(true);
+                }
+            }));
+            assertTrue(released.get());
+        } finally {
+            thread.interrupt();
+            stage.completeExceptionally(new IOException("test cleanup"));
+            thread.join(2000);
+        }
+    }
+
     @Test
     void codexCacheAffinityIsStableAndSessionScoped() {
         final var request = new ChatCompletionRequest(

@@ -33,6 +33,10 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
@@ -43,6 +47,61 @@ import org.junit.jupiter.api.Test;
  * retry budget immediately instead of blindly re-sending the same broken history up to the max attempts.
  */
 class ModelRoundProcessorTest {
+
+    @Test
+    void flagCancellationDuringBackoffStopsWithoutAnotherAttempt() throws Exception {
+        final var cancelled = new AtomicBoolean();
+        final var sleeping = new CountDownLatch(1);
+        final var clientCalls = new AtomicInteger();
+        final var chatClient = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final java.util.function.Consumer<PauseEvent> pauseListener,
+                    final java.util.function.Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancellation)
+                    throws IOException {
+                clientCalls.incrementAndGet();
+                throw new IOException("transport failure");
+            }
+        };
+        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
+                "yca.llm.streamRetriesMaxAttempts", "2",
+                "yca.llm.retriesBaseDelayMs", "30000",
+                "yca.llm.retryAfterMaxWaitMs", "30000"));
+        // The second clock read is inside the sleep loop, after the initial flag check.
+        final var reads = new AtomicInteger();
+        final var clock = new PrecisionDurationMarkerProvider() {
+            @Override
+            public long now() {
+                if (reads.incrementAndGet() >= 2) {
+                    sleeping.countDown();
+                }
+                return System.nanoTime();
+            }
+        };
+        final var observer = new RecordingObserver();
+        final var processor = new ModelRoundProcessor(chatClient, configuration, clock);
+        final var result = CompletableFuture.supplyAsync(() -> assertThrows(
+                IOException.class,
+                () -> processor.stream(
+                        new ChatCompletionRequest("m", List.of(), null, null, null, null, "auto", null, null, null),
+                        new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY},
+                        cancelled::get,
+                        pause -> {},
+                        delta -> {},
+                        observer)));
+        try {
+            assertTrue(sleeping.await(5, TimeUnit.SECONDS));
+            assertFalse(result.isDone());
+            cancelled.set(true);
+            assertEquals("Cancelled", result.get(2, TimeUnit.SECONDS).getMessage());
+            assertEquals(1, clientCalls.get());
+            assertEquals(30000, observer.pausedMs);
+        } finally {
+            cancelled.set(true);
+        }
+    }
 
     private static final String PAIRING_BODY =
             "{\"detail\":\"litellm.BadRequestError: AzureException BadRequestError - An assistant message with "

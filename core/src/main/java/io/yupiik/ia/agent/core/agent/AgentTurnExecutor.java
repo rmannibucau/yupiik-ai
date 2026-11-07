@@ -515,7 +515,11 @@ public class AgentTurnExecutor {
             return null;
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
-            host.emit(host.error("Interrupted"));
+            if (cancelled.getAsBoolean()) {
+                host.emit(new AgentEvent.TurnCancelled(host.currentSessionId, host.subagentId, host.subagentName));
+            } else {
+                host.emit(host.error("Interrupted"));
+            }
             return null;
         } catch (final RuntimeException e) {
             AgentLoop.LOGGER.log(SessionAwareLogRecord.of(

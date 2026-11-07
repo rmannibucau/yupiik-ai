@@ -101,7 +101,7 @@ public final class ModelRoundProcessor {
                         e);
                 final var backoffMs = streamRetryBackoffMs(attempt);
                 observer.paused(backoffMs);
-                if (cancelled.getAsBoolean() || !interruptibleSleep(backoffMs)) {
+                if (!interruptibleSleep(backoffMs, cancelled)) {
                     throw new IOException("Cancelled");
                 }
             }
@@ -119,9 +119,12 @@ public final class ModelRoundProcessor {
         return Math.min(delay, cap);
     }
 
-    private boolean interruptibleSleep(final long millis) {
+    private boolean interruptibleSleep(final long millis, final BooleanSupplier cancelled) {
         final var deadline = clock.now() + TimeUnit.MILLISECONDS.toNanos(millis);
         while (true) {
+            if (cancelled.getAsBoolean()) {
+                return false;
+            }
             final var remaining = deadline - clock.now();
             if (remaining <= 0) {
                 return true;

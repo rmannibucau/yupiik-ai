@@ -1359,7 +1359,13 @@ public class TuiCommand implements Runnable {
      */
     private void interruptTurn(final UiState state) {
         state.interrupted = true;
-        waiting(state, "interrupting...", SpinnerStyle.CLOCK);
+        closeBtw(state);
+        if (subagentRegistry != null) {
+            subagentRegistry.cancelByParentSession(state.sessionId);
+        }
+        if (state.model.busy() || state.session.busy()) {
+            waiting(state, "interrupting...", SpinnerStyle.CLOCK);
+        }
         final var queued = state.pendingPrompts.size();
         state.pendingPrompts.clear();
         final var scheduled = state.initialPrompts.size();
@@ -2074,13 +2080,12 @@ public class TuiCommand implements Runnable {
                 state.selection.clear();
                 return true;
             }
-            // no more-specific overlay open and no selection: Esc also dismisses a lingering error banner,
-            // matching the "Esc closes / cancels" convention from the keymap
-            if (state.errorDetail != null) {
+            // A passive error banner must not swallow the active session's stop key.
+            if (state.model.busy() || state.session.busy()) {
+                interruptTurn(state);
+            } else if (state.errorDetail != null) {
                 clearError(state);
-                return true;
-            }
-            if (state.model.busy()) {
+            } else {
                 interruptTurn(state);
             }
             return true;

@@ -5112,10 +5112,9 @@ class TuiCommandRenderTest {
     @Test
     void escInterruptsTheRunningTurn() throws Exception {
         final var shellRegistry = testRegistry();
-        // the stub turn parks on releaseTurn once it signaled turnStarted, so the
-        // Esc interrupt is exercised over a deterministically-live turn
+        // A blocked tool must be woken by cancellation, without a test-side release.
         final var turnStarted = new CountDownLatch(1);
-        final var releaseTurn = new CountDownLatch(1);
+        final var turnStopped = new CountDownLatch(1);
         final var agentLoop = new AgentLoop() {
             @Override
             public String run(
@@ -5126,12 +5125,14 @@ class TuiCommandRenderTest {
                     final BooleanSupplier cancelled) {
                 try {
                     turnStarted.countDown();
-                    releaseTurn.await();
+                    new CountDownLatch(1).await();
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId));
+                if (cancelled.getAsBoolean()) {
+                    shellRegistry.onEvent(new AgentEvent.TurnCancelled(sessionId));
+                    turnStopped.countDown();
+                }
                 return "ok";
             }
 
@@ -5158,12 +5159,25 @@ class TuiCommandRenderTest {
         assertTrue(
                 turnStarted.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "the stub turn did not start before the timeout");
 
-        // Esc while the turn runs must flag it as interrupted (same path Ctrl+C uses)
-        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
-        awaitText("interrupting...");
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        shellRegistry
+                .active(sessionId)
+                .frontend()
+                .onEvent(new AgentEvent.Notice(
+                        AgentEvent.Notice.Level.ERROR,
+                        "passive error must not swallow stop",
+                        null,
+                        sessionId,
+                        null,
+                        null,
+                        null));
+        awaitText("passive error must not swallow stop");
 
-        releaseTurn.countDown();
-        awaitText("hello from stub");
+        // A passive banner must not consume Esc; the real blocked turn must stop.
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        assertTrue(turnStopped.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "Esc must stop the active turn");
+        awaitTextGone("interrupting...");
+        awaitText("cancelled");
 
         quit();
     }

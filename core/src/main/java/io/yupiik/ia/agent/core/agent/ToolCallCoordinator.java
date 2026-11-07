@@ -66,12 +66,20 @@ public final class ToolCallCoordinator {
                 if (end - index > 1 && parallelEnabled) {
                     final var batchStartNanos = nanoTime.getAsLong();
                     final var futures = new ArrayList<Future<O>>(end - index);
-                    for (var cursor = index; cursor < end; cursor++) {
-                        futures.add(parallelExecution.apply(calls.get(cursor)));
-                    }
-                    for (final var future : futures) {
-                        append.accept(await.await(future));
-                        checkBudget.run();
+                    try {
+                        for (var cursor = index; cursor < end; cursor++) {
+                            futures.add(parallelExecution.apply(calls.get(cursor)));
+                        }
+                        for (final var future : futures) {
+                            append.accept(await.await(future));
+                            checkBudget.run();
+                        }
+                    } finally {
+                        for (final var future : futures) {
+                            if (!future.isDone()) {
+                                future.cancel(true);
+                            }
+                        }
                     }
                     recordParallelWallTime.accept((nanoTime.getAsLong() - batchStartNanos) / 1_000_000);
                 } else {

@@ -2417,10 +2417,13 @@ public class ChatClient implements AutoCloseable {
                 capture.accept(contextPayloadEffective(effective, provider, flavor));
             }
             if (stream) {
-                final var publisher = LlmWire.join(dialect.stream(
-                        LlmWire.toLlmRequest(effective, openaiSessionIdEnabledKeys(provider, flavor)),
+                final var publisher = LlmWire.join(
+                        dialect.stream(
+                                LlmWire.toLlmRequest(effective, openaiSessionIdEnabledKeys(provider, flavor)),
+                                cancelled,
+                                libraryListener),
                         cancelled,
-                        libraryListener));
+                        LlmWire::discard);
                 return (A) repairToolCalls(
                         LlmWire.pump(publisher, onDeltaSafe, cancelled, effective.sessionId()), effective, provider);
             }

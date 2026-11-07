@@ -1089,6 +1089,34 @@ class AgentLoopTest {
     }
 
     @Test
+    void interruptedCancelledTurnEmitsCancellationInsteadOfError() {
+        final var cancelled = new AtomicBoolean();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier probe)
+                    throws InterruptedException {
+                cancelled.set(true);
+                throw new InterruptedException("cancelled blocking wait");
+            }
+        };
+        try {
+            assertNull(loop(client, null, configuration(true)).run("go", null, "s1", null, cancelled::get));
+            assertEquals(
+                    1,
+                    events.stream()
+                            .filter(AgentEvent.TurnCancelled.class::isInstance)
+                            .count());
+            assertTrue(events.stream().noneMatch(AgentEvent.Error.class::isInstance));
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
     void resiliencePausesAreSurfacedAndTheListenerNeverLeaksToTheNextTurn() {
         final var replies = new ArrayDeque<>(List.of(new ScriptedReply("done", "stop", true)));
         final var client = chatClient(replies, new ArrayList<>());

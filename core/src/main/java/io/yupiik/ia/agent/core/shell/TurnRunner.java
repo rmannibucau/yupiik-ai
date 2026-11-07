@@ -28,7 +28,10 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
@@ -145,15 +148,18 @@ public class TurnRunner {
         env.session().busy(true);
         final var done = new CompletableFuture<Boolean>();
         executor.execute(() -> {
+            final var cancellation = new TurnCancellation(cancelled, request.sessionId());
+            Throwable failure = null;
             try {
-                runTurnOrLogin(request, loop, history, cancelled, env);
+                runTurnOrLogin(request, loop, history, cancellation, env);
             } catch (final Throwable t) {
-                done.completeExceptionally(t);
+                failure = t;
             } finally {
+                cancellation.close();
                 // an interrupt also stops the sub-agents this session spawned: their probe is
                 // latched here, while the flag still reads true - a child polling after the next
                 // turn reset it would otherwise never see the cancel
-                if (subagentRegistry != null && cancelled.getAsBoolean()) {
+                if (subagentRegistry != null && cancellation.getAsBoolean()) {
                     subagentRegistry.cancelByParentSession(request.sessionId());
                 }
                 // a mode switch queued while the turn was running is applied now, before the next turn
@@ -178,10 +184,68 @@ public class TurnRunner {
                 env.session().busy(false);
                 env.frontend().endTurn();
                 // completing last so awaiters observe the turn fully finished
-                done.complete(Boolean.TRUE);
+                if (failure == null) {
+                    done.complete(Boolean.TRUE);
+                } else {
+                    done.completeExceptionally(failure);
+                }
             }
         });
         return done;
+    }
+
+    /** A scoped watcher wakes blocking tools as well as code which polls the turn probe. */
+    private final class TurnCancellation implements BooleanSupplier, AutoCloseable {
+        private final BooleanSupplier source;
+        private final AtomicBoolean latched = new AtomicBoolean();
+        private final CountDownLatch finished = new CountDownLatch(1);
+        private final Thread watcher;
+
+        private TurnCancellation(final BooleanSupplier source, final String sessionId) {
+            this.source = source;
+            final var worker = Thread.currentThread();
+            watcher = Thread.ofVirtual().name("turn-cancellation").start(() -> {
+                try {
+                    while (!finished.await(50, TimeUnit.MILLISECONDS)) {
+                        if (getAsBoolean()) {
+                            if (subagentRegistry != null) {
+                                subagentRegistry.cancelByParentSession(sessionId);
+                            }
+                            worker.interrupt();
+                            return;
+                        }
+                    }
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+        }
+
+        @Override
+        public boolean getAsBoolean() {
+            if (source.getAsBoolean()) {
+                latched.set(true);
+            }
+            return latched.get();
+        }
+
+        @Override
+        public void close() {
+            finished.countDown();
+            var interrupted = Thread.interrupted();
+            // Join before returning the worker to its executor: a late watcher must never
+            // interrupt another task, nor interrupt the endTurn/next-turn callbacks.
+            while (watcher.isAlive()) {
+                try {
+                    watcher.join();
+                } catch (final InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+            if (interrupted && !latched.get()) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     /** Runs a turn, auto-completing the interactive Codex login on first use and retrying once. */

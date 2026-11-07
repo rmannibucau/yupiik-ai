@@ -15,10 +15,12 @@
  */
 package io.yupiik.ia.agent.core.llm;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
@@ -35,9 +37,11 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -53,6 +57,62 @@ class ChatClientMidStreamTest {
 
     @TempDir
     Path storageHome;
+
+    @Test
+    void cancellationBeforeHeadersReturnsPromptlyAndReleasesLateStream(final JsonMapper mapper) throws Exception {
+        final var received = new CountDownLatch(1);
+        final var sendHeaders = new CountDownLatch(1);
+        final var cancelled = new AtomicBoolean();
+        final var server = HttpServer.create(new java.net.InetSocketAddress("localhost", 0), 0);
+        server.createContext("/", exchange -> {
+            try (exchange) {
+                exchange.getRequestBody().readAllBytes();
+                received.countDown();
+                try {
+                    if (!sendHeaders.await(5, TimeUnit.SECONDS)) {
+                        return;
+                    }
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                final var body = "data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            }
+        });
+        server.start();
+        try {
+            final var cfg = configuration(server.getAddress().getPort());
+            try (final var http = new HttpClientProducer().httpClient(cfg);
+                    final var client =
+                            new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http)) {
+                final var result = CompletableFuture.supplyAsync(() ->
+                        assertThrows(IOException.class, () -> client.stream(request(), event -> {}, cancelled::get)));
+                try {
+                    assertTrue(received.await(5, TimeUnit.SECONDS), "request must be waiting for headers");
+                    cancelled.set(true);
+                    assertEquals("Cancelled", result.get(2, TimeUnit.SECONDS).getMessage());
+                } finally {
+                    cancelled.set(true);
+                    sendHeaders.countDown();
+                }
+                // maxConcurrent=1: this cannot complete if the abandoned late publisher leaks its permit.
+                final var next = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return client.stream(request(), event -> {}, () -> false);
+                    } catch (final Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+                assertEquals("assistant", next.get(5, TimeUnit.SECONDS).role());
+            }
+        } finally {
+            sendHeaders.countDown();
+            server.stop(0);
+        }
+    }
 
     @Test
     void midStreamDisconnectSurfacesAsMidStreamFailure(final JsonMapper mapper) throws Exception {

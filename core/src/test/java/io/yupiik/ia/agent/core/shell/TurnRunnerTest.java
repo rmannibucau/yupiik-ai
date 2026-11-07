@@ -36,8 +36,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
@@ -183,6 +185,89 @@ class TurnRunnerTest {
                 .join();
 
         assertNull(latched.get(), "a turn which was not interrupted must not cancel sub-agents");
+    }
+
+    @Test
+    void cancellationWakesABlockedTurnWithoutAffectingAnotherSession() throws Exception {
+        final var started = new CountDownLatch(2);
+        final var releaseOther = new CountDownLatch(1);
+        final var stopped = new CountDownLatch(1);
+        final var cancelled = new AtomicBoolean();
+        final var otherInterrupted = new AtomicBoolean();
+        final var latched = new AtomicReference<String>();
+        final var loop = new RecordingLoop();
+        loop.onRun = () -> {
+            started.countDown();
+            try {
+                new CountDownLatch(1).await();
+            } catch (final InterruptedException e) {
+                stopped.countDown();
+                Thread.currentThread().interrupt();
+            }
+        };
+        final var other = new RecordingLoop();
+        other.onRun = () -> {
+            started.countDown();
+            try {
+                releaseOther.await();
+            } catch (final InterruptedException e) {
+                otherInterrupted.set(true);
+                Thread.currentThread().interrupt();
+            }
+        };
+        final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService(), recordingRegistry(latched));
+        final var session = new ShellSession();
+        final var first = runner.submit(new TurnRunner.TurnRequest(
+                        loop,
+                        new ShellEnv(new RecordingFrontend(), new FixedIo(true), session, null),
+                        "cancel-me",
+                        null,
+                        "go",
+                        List::of,
+                        cancelled::get))
+                .toCompletableFuture();
+        final var second = runner.submit(new TurnRunner.TurnRequest(
+                        other,
+                        new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null),
+                        "keep-running",
+                        null,
+                        "go",
+                        List::of,
+                        () -> false))
+                .toCompletableFuture();
+        try {
+            assertTrue(started.await(5, TimeUnit.SECONDS));
+            cancelled.set(true);
+            assertTrue(stopped.await(5, TimeUnit.SECONDS), "cancellation must wake a blocked tool/turn");
+            assertTrue(first.get(5, TimeUnit.SECONDS));
+            assertFalse(session.busy());
+            assertEquals("cancel-me", latched.get());
+            assertFalse(second.isDone(), "the other session must remain running");
+            assertFalse(otherInterrupted.get());
+        } finally {
+            cancelled.set(true);
+            releaseOther.countDown();
+        }
+        assertTrue(second.get(5, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void completedTurnDoesNotInterruptReusedWorker() throws Exception {
+        try (final var executor = Executors.newSingleThreadExecutor()) {
+            final var cancelled = new AtomicBoolean();
+            final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null);
+            final var runner = new TurnRunner(noIndexing(), executor, agentSessionService());
+            runner.submit(new TurnRunner.TurnRequest(
+                            new RecordingLoop(), env, "done", null, "go", List::of, cancelled::get))
+                    .toCompletableFuture()
+                    .get(5, TimeUnit.SECONDS);
+            cancelled.set(true);
+            assertFalse(executor.submit(() -> {
+                        Thread.sleep(200);
+                        return Thread.currentThread().isInterrupted();
+                    })
+                    .get(5, TimeUnit.SECONDS));
+        }
     }
 
     /** Registry recording the sessions whose children a turn-end cancel asked to latch. */

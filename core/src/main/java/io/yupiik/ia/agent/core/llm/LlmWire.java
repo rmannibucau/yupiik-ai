@@ -293,7 +293,12 @@ public final class LlmWire {
             public void onSubscribe(final Flow.Subscription s) {
                 this.subscription = s;
                 subscriptionHolder.set(s);
-                s.request(Long.MAX_VALUE);
+                if (done.isDone() || cancelled.getAsBoolean()) {
+                    s.cancel();
+                    done.complete(new Message("assistant", "", null, null, null, null));
+                } else {
+                    s.request(Long.MAX_VALUE);
+                }
             }
 
             @Override
@@ -419,6 +424,13 @@ public final class LlmWire {
                 throw codex;
             }
             throw translate(cause);
+        } finally {
+            if (done.cancel(false)) {
+                final var subscription = subscriptionHolder.get();
+                if (subscription != null) {
+                    subscription.cancel();
+                }
+            }
         }
     }
 
@@ -539,6 +551,60 @@ public final class LlmWire {
             }
             throw translate(cause);
         }
+    }
+
+    /** Wait without hiding a late result by cancelling a composed transport stage. */
+    static <A> A join(final CompletionStage<A> stage, final BooleanSupplier cancelled, final Consumer<A> discard)
+            throws IOException, InterruptedException {
+        final var future = stage.toCompletableFuture();
+        var handedOff = false;
+        try {
+            while (true) {
+                if (cancelled.getAsBoolean()) {
+                    throw new IOException("Cancelled");
+                }
+                try {
+                    final var result = future.get(100, TimeUnit.MILLISECONDS);
+                    if (cancelled.getAsBoolean()) {
+                        throw new IOException("Cancelled");
+                    }
+                    handedOff = true;
+                    return result;
+                } catch (final TimeoutException e) {
+                    // Poll the flag even while headers, transport setup or a permit are pending.
+                } catch (final ExecutionException e) {
+                    // Keep the same exception translation as the historical blocking bridge.
+                    return join(stage);
+                }
+            }
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw e;
+        } finally {
+            if (!handedOff) {
+                // Do not cancel the composed future: upstream can still succeed, and dropping its
+                // publisher would leak the body subscription and the resilience concurrency permit.
+                stage.thenAccept(discard);
+            }
+        }
+    }
+
+    static void discard(final Flow.Publisher<LlmStreamEvent> publisher) {
+        publisher.subscribe(new Flow.Subscriber<>() {
+            @Override
+            public void onSubscribe(final Flow.Subscription subscription) {
+                subscription.cancel();
+            }
+
+            @Override
+            public void onNext(final LlmStreamEvent event) {}
+
+            @Override
+            public void onError(final Throwable throwable) {}
+
+            @Override
+            public void onComplete() {}
+        });
     }
 
     /**
