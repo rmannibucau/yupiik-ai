@@ -77,7 +77,10 @@ class CompletionEngineTest {
                 spec("/mcp", MCP_COMPLETION, SlashGroup.MAINTAIN),
                 spec("/theme", ArgCompletion.options("light", "dark"), SlashGroup.CONFIG),
                 spec("/tabs", ArgCompletion.options("last", "+", "-"), SlashGroup.SESSION),
-                spec("/subagents", ArgCompletion.wholeArgument("subagent", ArgCompletion.Env::subagents), SlashGroup.SESSION),
+                spec(
+                        "/subagents",
+                        ArgCompletion.wholeArgument("subagent", ArgCompletion.Env::subagents),
+                        SlashGroup.SESSION),
                 spec("/compact", ArgCompletion.options("force"), SlashGroup.MAINTAIN),
                 spec("/snapshot", ArgCompletion.options("save", "cancel", "restore", "status"), SlashGroup.MAINTAIN),
                 spec("/context", ArgCompletion.PATH, SlashGroup.INSPECT),
@@ -165,8 +168,11 @@ class CompletionEngineTest {
         assertEquals(List.of("code reviewer"), suggestion.items());
         assertEquals(11, suggestion.replaceStart());
         assertEquals(text.length(), suggestion.replaceEnd());
-        assertEquals("/subagents code reviewer", text.substring(0, suggestion.replaceStart())
-                + suggestion.items().getFirst() + text.substring(suggestion.replaceEnd()));
+        assertEquals(
+                "/subagents code reviewer",
+                text.substring(0, suggestion.replaceStart())
+                        + suggestion.items().getFirst()
+                        + text.substring(suggestion.replaceEnd()));
         final var middle = engine().suggest("/subagents code rev-old", text.length());
         assertEquals("/subagents code rev-old".length(), middle.replaceEnd());
         assertEquals(List.of("code reviewer"), middle.items());

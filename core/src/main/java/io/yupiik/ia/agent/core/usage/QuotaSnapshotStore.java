@@ -45,9 +45,9 @@ import java.util.logging.Logger;
  *
  * <p>Refresh cadence: fetched at provider attach, then at most once per {@link #TTL_MILLIS} (~5 min)
  * unless forced (a {@code /usage} slash command always forces a refresh). The access token is
-     * resolved through {@link CodexAuthTemplateHelper} and never leaves yca. With a shared scheduler,
-     * {@link #activity(String, boolean)} enables TTL polling during turns and one final refresh after
-     * turn end. Attach alone never starts recurring polling.</p>
+ * resolved through {@link CodexAuthTemplateHelper} and never leaves yca. With a shared scheduler,
+ * {@link #activity(String, boolean)} enables TTL polling during turns and one final refresh after
+ * turn end. Attach alone never starts recurring polling.</p>
  *
  * <p>Blocking semantics. When an {@link ExecutorService} is injected (the normal application wiring)
  * refreshes run asynchronously on that shared pool so provider attachment and a stale (non-forced)
@@ -229,21 +229,27 @@ public class QuotaSnapshotStore {
 
     private void armTimer(final String sessionId, final SessionQuota quota) {
         cancelTimer(quota);
-        if (scheduler == null || executor == null || sessions.get(sessionId) != quota
+        if (scheduler == null
+                || executor == null
+                || sessions.get(sessionId) != quota
                 || (!quota.active && !quota.finalRefresh)
-                || !usageEnabled(quota.provider) || !isCodexProvider(quota.provider)) {
+                || !usageEnabled(quota.provider)
+                || !isCodexProvider(quota.provider)) {
             return;
         }
         final long token = quota.timerGeneration;
         final long delay = Math.max(0, TTL_MILLIS - (clock.millis() - quota.lastFetchMillis));
         try {
-            quota.timer = scheduler.schedule(() -> {
-                try {
-                    executor.submit(() -> onTimer(sessionId, quota, token));
-                } catch (final RuntimeException e) {
-                    LOGGER.log(Level.FINE, "Quota timer dispatch rejected", e);
-                }
-            }, delay, TimeUnit.MILLISECONDS);
+            quota.timer = scheduler.schedule(
+                    () -> {
+                        try {
+                            executor.submit(() -> onTimer(sessionId, quota, token));
+                        } catch (final RuntimeException e) {
+                            LOGGER.log(Level.FINE, "Quota timer dispatch rejected", e);
+                        }
+                    },
+                    delay,
+                    TimeUnit.MILLISECONDS);
         } catch (final RuntimeException e) {
             LOGGER.log(Level.FINE, "Quota timer scheduling rejected", e);
         }
@@ -482,7 +488,9 @@ public class QuotaSnapshotStore {
             final CodexUsageSnapshot fresh) {
         final Runnable listener;
         synchronized (quota) {
-            if (sessions.get(sessionId) != quota || quota.provider != provider || quota.providerGeneration != generation) {
+            if (sessions.get(sessionId) != quota
+                    || quota.provider != provider
+                    || quota.providerGeneration != generation) {
                 return;
             }
             quota.snapshot = fresh;
@@ -506,7 +514,9 @@ public class QuotaSnapshotStore {
             final ProviderConfiguration provider,
             final long generation) {
         synchronized (quota) {
-            if (sessions.get(sessionId) == quota && quota.provider == provider && quota.providerGeneration == generation) {
+            if (sessions.get(sessionId) == quota
+                    && quota.provider == provider
+                    && quota.providerGeneration == generation) {
                 quota.lastFetchMillis = clock.millis();
                 armTimer(sessionId, quota);
             }

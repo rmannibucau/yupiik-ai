@@ -141,8 +141,9 @@ class SubagentRegistryTest {
         registry.complete(first.id(), SubagentRegistry.SubagentResult.success("done", "conversation", List.of()));
 
         assertEquals(
-                List.of(first.id(), second.id(), blank.id(), unnamed.id(), idNamed.id(), "review code")
-                        .stream().sorted().toList(),
+                List.of(first.id(), second.id(), blank.id(), unnamed.id(), idNamed.id(), "review code").stream()
+                        .sorted()
+                        .toList(),
                 registry.completionCandidates("parent"));
         assertTrue(registry.completionCandidates("missing").isEmpty());
     }

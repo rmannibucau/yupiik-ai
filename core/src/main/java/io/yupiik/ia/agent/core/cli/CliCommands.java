@@ -70,7 +70,8 @@ public class CliCommands implements SlashCommandSet {
         if (subagents == null) {
             return ShellOutcome.transcript("No subagents.");
         }
-        final var sessionId = env == null || env.session() == null ? null : env.session().sessionId();
+        final var sessionId =
+                env == null || env.session() == null ? null : env.session().sessionId();
         if (reference == null || reference.isBlank()) {
             final var states = subagents.listAll(sessionId);
             final var out = new StringBuilder("## Subagents\n\n");
@@ -78,7 +79,11 @@ public class CliCommands implements SlashCommandSet {
                 out.append("No subagents.");
             }
             for (final var state : states) {
-                out.append("- ").append(label(state)).append(" - ").append(status(state)).append('\n');
+                out.append("- ")
+                        .append(label(state))
+                        .append(" - ")
+                        .append(status(state))
+                        .append('\n');
             }
             return ShellOutcome.transcript(out.toString());
         }
@@ -88,9 +93,13 @@ public class CliCommands implements SlashCommandSet {
         }
         final var state = matches.getFirst();
         final var out = new StringBuilder("## Subagent ")
-                .append(label(state)).append("\n\nStatus: ").append(status(state));
-        final var model = subagents.identityOf(state.id())
-                .map(SubagentRegistry.TranscriptIdentity::model).orElse(state.model());
+                .append(label(state))
+                .append("\n\nStatus: ")
+                .append(status(state));
+        final var model = subagents
+                .identityOf(state.id())
+                .map(SubagentRegistry.TranscriptIdentity::model)
+                .orElse(state.model());
         out.append("\n\nModel: ").append(model == null || model.isBlank() ? "(inherited)" : model);
         final var result = state.result();
         if (result != null) {
@@ -107,11 +116,13 @@ public class CliCommands implements SlashCommandSet {
                 }
             }
         }
-        final var conversation = result != null && result.fullConversation() != null
+        final var conversation = result != null
+                        && result.fullConversation() != null
                         && !result.fullConversation().isBlank()
                 ? result.fullConversation()
                 : subagents.transcriptOf(state.id()).markdown("", "(no conversation yet)");
-        return ShellOutcome.transcript(out.append("\n\n### Conversation\n\n").append(conversation).toString());
+        return ShellOutcome.transcript(
+                out.append("\n\n### Conversation\n\n").append(conversation).toString());
     }
 
     private String label(final SubagentState state) {

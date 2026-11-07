@@ -35,7 +35,8 @@ final class SlashCommandParser extends DefaultParser {
         while (commandEnd < line.length() && !Character.isWhitespace(line.charAt(commandEnd))) {
             commandEnd++;
         }
-        if (!line.startsWith("/") || commandEnd == line.length()
+        if (!line.startsWith("/")
+                || commandEnd == line.length()
                 || !registry.completionFor(line.substring(1, commandEnd)).wholeArgument()) {
             return super.parse(line, cursor, context);
         }

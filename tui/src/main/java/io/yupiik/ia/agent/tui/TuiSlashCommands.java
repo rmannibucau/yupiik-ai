@@ -95,10 +95,10 @@ public class TuiSlashCommands implements SlashCommandSet {
                 SlashCommand.of(
                         new SlashCommandSpec(
                                 "/subagents",
-                        "[id|name]",
+                                "[id|name]",
                                 "list the session subagents, or open the transcript of the given subagent",
                                 SlashGroup.SESSION),
-                ArgCompletion.wholeArgument("subagent", ArgCompletion.Env::subagents),
+                        ArgCompletion.wholeArgument("subagent", ArgCompletion.Env::subagents),
                         SlashAction.sync(this::subagentsOutcome)));
     }
 

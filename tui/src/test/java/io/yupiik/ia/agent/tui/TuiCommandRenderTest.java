@@ -4704,8 +4704,9 @@ class TuiCommandRenderTest {
 
         // a real tracked subagent with a multiword name and captured stream
         final var sessionId = sid(shellRegistry);
-        final var sub =
-                subagentRegistry.start(sessionId, "do the thing", "code reviewer").orElseThrow();
+        final var sub = subagentRegistry
+                .start(sessionId, "do the thing", "code reviewer")
+                .orElseThrow();
         shellRegistry.onEvent(new AgentEvent.ThinkingDelta("kid thinks", sessionId, sub.id(), "child"));
         shellRegistry.onEvent(new AgentEvent.TextDelta("kid answer", sessionId, sub.id(), "child"));
         shellRegistry.onEvent(new AgentEvent.ToolStarted("grep", "{\"q\":\"x\"}", -1L, sessionId, sub.id(), "child"));

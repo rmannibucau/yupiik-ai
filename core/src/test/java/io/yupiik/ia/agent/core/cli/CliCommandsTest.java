@@ -64,15 +64,24 @@ class CliCommandsTest {
     @Test
     void detailByNameShowsFinalResultAndPrefersFullConversationOverLiveCapture() {
         final var registry = registry();
-        final var state = registry.start("parent", "task", "review code", "requested-model").orElseThrow();
+        final var state = registry.start("parent", "task", "review code", "requested-model")
+                .orElseThrow();
         registry.setTranscriptIdentity(state.id(), "provider", "effective-model");
         registry.transcriptOf(state.id()).appendTranscript("stale live capture");
         final var full = "User: inspect all files\n\nAssistant: complete transcript\n\nTool: detailed output";
-        registry.complete(state.id(), SubagentResult.success("final summary", full, List.of("src/Fix.java", "report.txt")));
+        registry.complete(
+                state.id(), SubagentResult.success("final summary", full, List.of("src/Fix.java", "report.txt")));
 
         final var output = transcript(registry, "review code");
         for (final var expected : List.of(
-                state.id(), "review code", "SUCCEEDED", "effective-model", "final summary", "src/Fix.java", "report.txt", full)) {
+                state.id(),
+                "review code",
+                "SUCCEEDED",
+                "effective-model",
+                "final summary",
+                "src/Fix.java",
+                "report.txt",
+                full)) {
             assertTrue(output.contains(expected), output);
         }
         assertFalse(output.contains("stale live capture"));
@@ -83,7 +92,8 @@ class CliCommandsTest {
     @Test
     void runningAndEmptyFinalConversationFallBackToLiveCapture() {
         final var registry = registry();
-        final var state = registry.start("parent", "task", "review", "requested-model").orElseThrow();
+        final var state =
+                registry.start("parent", "task", "review", "requested-model").orElseThrow();
         registry.transcriptOf(state.id()).appendTranscript("live conversation content");
         final var running = transcript(registry, "review");
         assertTrue(running.contains("RUNNING"));
@@ -129,25 +139,32 @@ class CliCommandsTest {
     }
 
     private SubagentRegistry registry() {
-        return new SubagentRegistry(TestConfigs.codingAgent(Map.of(
-                "yca.storageHome", storageHome.toString(),
-                "yca.subagents.enabled", "true",
-                "yca.llm.maxConcurrent", "-1")), null);
+        return new SubagentRegistry(
+                TestConfigs.codingAgent(Map.of(
+                        "yca.storageHome", storageHome.toString(),
+                        "yca.subagents.enabled", "true",
+                        "yca.llm.maxConcurrent", "-1")),
+                null);
     }
 
     private SlashCommand command(final SubagentRegistry registry) {
-        return new CliCommands(null, registry).commands().stream()
-                .filter(command -> command.spec().name().equals("/subagents"))
-                .findFirst().orElseThrow();
+        return new CliCommands(null, registry)
+                .commands().stream()
+                        .filter(command -> command.spec().name().equals("/subagents"))
+                        .findFirst()
+                        .orElseThrow();
     }
 
     private ShellOutcome invoke(final SubagentRegistry registry, final String reference) {
-        return command(registry).action()
+        return command(registry)
+                .action()
                 .apply(reference, new ShellEnv(null, null, new ShellSession().sessionId("parent"), null))
-                .toCompletableFuture().join();
+                .toCompletableFuture()
+                .join();
     }
 
     private String transcript(final SubagentRegistry registry, final String reference) {
-        return assertInstanceOf(ShellOutcome.Transcript.class, invoke(registry, reference)).markdown();
+        return assertInstanceOf(ShellOutcome.Transcript.class, invoke(registry, reference))
+                .markdown();
     }
 }
