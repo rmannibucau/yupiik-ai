@@ -674,7 +674,6 @@ public class AgentLoop {
                 () -> this.currentSessionId,
                 this.sessionId,
                 () -> this.chatSettings,
-                () -> resolvedModel(),
                 subagentId,
                 subagentName);
         this.toolExecution = new ToolCallExecution(

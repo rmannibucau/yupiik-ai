@@ -73,7 +73,6 @@ import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.ia.agent.test.TestJsonMapper;
-import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -2834,13 +2833,10 @@ class TuiCommandRenderTest {
                 new SpeakerLabels(List.of(new FormatDatePromptHelper(clock)), configuration, chatClient),
                 new AutoLogConfigurer(configuration),
                 mcpManager,
-                new ProcessService(),
                 executor,
                 providerManager,
                 new AgentProvider(configuration),
                 agentSessionService,
-                new MavenRepositoryKnowledgeService(
-                        configuration, null, Executors.newVirtualThreadPerTaskExecutor(), null),
                 new TurnRunner(
                         new MavenRepositoryKnowledgeService(
                                 configuration, null, Executors.newVirtualThreadPerTaskExecutor(), null),

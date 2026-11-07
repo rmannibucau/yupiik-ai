@@ -279,7 +279,7 @@ public class SubagentRunner {
 
         // Create isolated services for this subagent: explicit instances built from shared infrastructure and
         // child-owned policy/history/todo state. The parent approval UI and usage aggregation are reused.
-        final var subagentSessionStore = new InMemorySessionStore(mapper, clock);
+        final var subagentSessionStore = new InMemorySessionStore(clock);
         final var subagentTodoStore = new InMemoryTodoStore();
         final var parentUsage = parentContext != null && parentContext.usage() != null
                 ? parentContext.usage()

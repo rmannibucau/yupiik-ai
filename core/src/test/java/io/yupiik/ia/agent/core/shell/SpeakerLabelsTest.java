@@ -32,8 +32,8 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
-import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.session.SessionEntry;
+import io.yupiik.ia.agent.core.session.TestSessionStores;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -210,7 +210,7 @@ class SpeakerLabelsTest {
         assertTrue(history.get(0).content().toString().contains("question"));
 
         // the persisted session is label-free: roles stay user/assistant, no label text stored
-        final var store = new InMemorySessionStore();
+        final var store = TestSessionStores.ephemeral();
         store.append("s", SessionEntry.of(1L, "assistant", "answer", null, null));
         final var stored = store.load("s");
         assertEquals(1, stored.size());

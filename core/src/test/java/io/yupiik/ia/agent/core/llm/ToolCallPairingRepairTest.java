@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
+import io.yupiik.ia.agent.core.session.TestSessionStores;
 import io.yupiik.llm.client.LlmHttpFailureException;
 import java.io.IOException;
 import java.time.Clock;
@@ -29,7 +30,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class ToolCallPairingRepairTest {
-    private final InMemorySessionStore store = new InMemorySessionStore();
+    private final InMemorySessionStore store = TestSessionStores.ephemeral();
     private final ToolCallPairingRepair repair = new ToolCallPairingRepair(store, Clock.systemUTC());
 
     @Test

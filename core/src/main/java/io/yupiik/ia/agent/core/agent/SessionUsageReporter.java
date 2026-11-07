@@ -21,7 +21,6 @@ import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.usage.QuotaSnapshotStore;
-import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -38,7 +37,6 @@ public class SessionUsageReporter {
     private final Supplier<String> currentSessionId;
     private final String sessionId;
     private final Supplier<ChatSettings> chatSettings;
-    private final Supplier<ProviderManager.ResolvedModel> resolvedModel;
     private final String subagentId;
     private final String subagentName;
 
@@ -56,7 +54,6 @@ public class SessionUsageReporter {
             final Supplier<String> currentSessionId,
             final String sessionId,
             final Supplier<ChatSettings> chatSettings,
-            final Supplier<ProviderManager.ResolvedModel> resolvedModel,
             final String subagentId,
             final String subagentName) {
         this.usageTracker = usageTracker;
@@ -65,7 +62,6 @@ public class SessionUsageReporter {
         this.currentSessionId = currentSessionId;
         this.sessionId = sessionId;
         this.chatSettings = chatSettings;
-        this.resolvedModel = resolvedModel;
         this.subagentId = subagentId;
         this.subagentName = subagentName;
     }

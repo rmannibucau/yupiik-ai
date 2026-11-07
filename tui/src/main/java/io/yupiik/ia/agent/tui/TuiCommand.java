@@ -72,7 +72,6 @@ import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
-import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
@@ -105,7 +104,6 @@ import io.yupiik.ia.agent.core.util.OpenBrowser;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
-import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -184,14 +182,12 @@ public class TuiCommand implements Runnable {
     private final SpeakerLabels speakerLabels;
     private final AutoLogConfigurer autoLogConfigurer;
     private final McpManager mcpManager;
-    private final ProcessService processes;
     private final ExecutorService executor;
     private final ProviderManager providerManager;
     private final AgentProvider agentProvider;
     private final AgentSessionService agentSessionService;
     private final SubagentRegistry subagentRegistry;
     private final ScrollService scrollService;
-    private final MavenRepositoryKnowledgeService mavenKnowledgeService;
     private final TurnRunner turnRunner;
     private final ThinkTagSplitter thinkTags;
     private final TuiRunnerFactory tuiRunnerFactory;
@@ -304,12 +300,10 @@ public class TuiCommand implements Runnable {
             final SpeakerLabels speakerLabels,
             final AutoLogConfigurer autoLogConfigurer,
             final McpManager mcpManager,
-            final ProcessService processes,
             final ExecutorService executor,
             final ProviderManager providerManager,
             final AgentProvider agentProvider,
             final AgentSessionService agentSessionService,
-            final MavenRepositoryKnowledgeService mavenKnowledgeService,
             final TurnRunner turnRunner,
             final ThinkTagSplitter thinkTags,
             final TuiRunnerFactory tuiRunnerFactory,
@@ -335,12 +329,10 @@ public class TuiCommand implements Runnable {
         this.speakerLabels = speakerLabels;
         this.autoLogConfigurer = autoLogConfigurer;
         this.mcpManager = mcpManager;
-        this.processes = processes;
         this.executor = executor;
         this.providerManager = providerManager;
         this.agentProvider = agentProvider;
         this.agentSessionService = agentSessionService;
-        this.mavenKnowledgeService = mavenKnowledgeService;
         this.turnRunner = turnRunner;
         this.thinkTags = thinkTags;
         this.tuiRunnerFactory = tuiRunnerFactory;

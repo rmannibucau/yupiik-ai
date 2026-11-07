@@ -44,7 +44,6 @@ import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
 import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
 import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.MarkupToolCallScanner;
-import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -55,7 +54,6 @@ import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.test.TestJsonMapper;
-import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
@@ -674,12 +672,10 @@ class TuiCommandHeadlessTest {
                             d.chatClient()),
                     autoLogConfigurer.instance(),
                     d.mcpManager(),
-                    new ProcessService(),
                     runExecutor,
                     d.providerManager(),
                     d.agentProvider(),
                     d.agentSessionService(),
-                    new MavenRepositoryKnowledgeService(d.configuration(), null, d.executor(), null),
                     turnRunner.instance(),
                     d.thinkTags(),
                     headlessFactory(),

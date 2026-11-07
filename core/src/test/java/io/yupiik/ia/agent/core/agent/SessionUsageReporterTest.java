@@ -35,14 +35,21 @@ class SessionUsageReporterTest {
         final var events = new ArrayList<AgentEvent.UsageUpdated>();
         final var store = new CompletionStore();
         final var reporter = new SessionUsageReporter(
-                null, store, new Emitter() {
+                null,
+                store,
+                new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
                         if (event instanceof AgentEvent.UsageUpdated usage) {
                             events.add(usage);
                         }
                     }
-                }, () -> null, "s1", () -> ChatSettings.EMPTY, () -> null, null, null);
+                },
+                () -> null,
+                "s1",
+                () -> ChatSettings.EMPTY,
+                null,
+                null);
         reporter.pushUsageContext(1234, "model-x");
         reporter.refreshUsage("model-x");
         final var reads = store.refreshingReads;
@@ -118,7 +125,6 @@ class SessionUsageReporterTest {
                 () -> null,
                 "s1",
                 () -> ChatSettings.EMPTY,
-                () -> null,
                 null,
                 null);
 

@@ -32,6 +32,7 @@ import io.yupiik.ia.agent.core.llm.MarkupToolCallScanner;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
+import io.yupiik.ia.agent.core.session.TestSessionStores;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
@@ -107,7 +108,7 @@ class BtwAnswererTest {
         serverExecutor = Executors.newVirtualThreadPerTaskExecutor();
         server.setExecutor(serverExecutor);
         server.start();
-        sessionStore = new InMemorySessionStore();
+        sessionStore = TestSessionStores.ephemeral();
         usageTracker = new UsageTracker(null, null, null, Clock.systemUTC());
         toolRegistry = registry();
         answerer = answerer(Map.of());

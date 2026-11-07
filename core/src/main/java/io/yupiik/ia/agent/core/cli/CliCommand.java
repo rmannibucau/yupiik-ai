@@ -28,7 +28,6 @@ import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
-import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
@@ -88,7 +87,6 @@ public class CliCommand implements Runnable {
     private final SessionRuntimeFactory sessionRuntimeFactory;
     private final ChatClient chatClient;
     private final AgentSessionService agentSessionService;
-    private final MavenRepositoryKnowledgeService mavenKnowledgeService;
     private final SlashRegistry slashRegistry;
     private final ShellRegistry shellRegistry;
     private final ConversationCoordinator coordinator;
@@ -163,7 +161,6 @@ public class CliCommand implements Runnable {
             final AgentProvider agentProvider,
             final ChatClient chatClient,
             final AgentSessionService agentSessionService,
-            final MavenRepositoryKnowledgeService mavenKnowledgeService,
             final TurnRunner turnRunner,
             final JsonMapper mapper,
             final SlashRegistry slashRegistry,
@@ -183,7 +180,6 @@ public class CliCommand implements Runnable {
         this.sessionRuntimeFactory = sessionRuntimeFactory;
         this.chatClient = chatClient;
         this.agentSessionService = agentSessionService;
-        this.mavenKnowledgeService = mavenKnowledgeService;
         this.turnRunner = turnRunner;
         this.slashRegistry = slashRegistry;
         this.shellRegistry = shellRegistry;

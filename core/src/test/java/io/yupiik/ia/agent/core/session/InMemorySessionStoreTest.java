@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 class InMemorySessionStoreTest {
-    private final InMemorySessionStore store = new InMemorySessionStore(null, Clock.systemUTC());
+    private final InMemorySessionStore store = new InMemorySessionStore(Clock.systemUTC());
 
     @Test
     void createAppendLoadReplaceAndDelete() {

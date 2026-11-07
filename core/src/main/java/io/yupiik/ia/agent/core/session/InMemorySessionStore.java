@@ -15,7 +15,6 @@
  */
 package io.yupiik.ia.agent.core.session;
 
-import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.llm.Message;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -28,17 +27,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * Thread-safe for concurrent access from multiple subagents.
  */
 public class InMemorySessionStore implements SessionStore {
-    private final JsonMapper mapper;
     private final Clock clock;
     private final Map<String, List<SessionEntry>> sessions = new ConcurrentHashMap<>();
 
-    public InMemorySessionStore(final JsonMapper mapper, final Clock clock) {
-        this.mapper = mapper;
+    public InMemorySessionStore(final Clock clock) {
         this.clock = clock;
-    }
-
-    public InMemorySessionStore() {
-        this(null, null);
     }
 
     @Override
