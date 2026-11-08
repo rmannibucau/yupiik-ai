@@ -22,6 +22,11 @@ Configuration is resolved from, highest priority first:
 . Environment variables: `YCA_PROVIDER_MODEL` style keys (dots/hyphens become
   underscores, uppercased)
 
+Automatic session housekeeping is enabled by default.
+For sandboxed runs, pass `--yca.sessions.startupCleanup false` after `tui`, `cli`, `web`, or `run` to skip startup retention/compression, orphan snapshot/todo cleanup, and the startup session-directory scan.
+The JSON equivalent is `{"yca":{"sessions":{"startupCleanup":false}}}`; command-line values override JSON.
+Explicit cleanup operations remain available, and normal session reads/writes still require a dedicated writable storage root selected with `--yca.storageHome /absolute/sandbox/storage`.
+
 [mermaid]
 ....
 flowchart TD

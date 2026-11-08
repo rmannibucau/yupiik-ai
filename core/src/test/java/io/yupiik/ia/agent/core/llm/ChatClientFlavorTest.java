@@ -216,13 +216,77 @@ class ChatClientFlavorTest {
         assertTrue(bodies.isEmpty(), "local projection must not send a generation request");
         final var captured = new java.util.concurrent.atomic.AtomicReference<
                 io.yupiik.ia.agent.core.context.ContextMeasurement.Payload>();
-        try (final var capture = client.captureContext(captured::set)) {
-            assertNotNull(capture);
-            client.stream(request, _ -> {}, () -> false);
-        }
+        client.withContextCapture(captured::set, () -> client.stream(request, _ -> {}, () -> false));
         assertTrue(captured.get().modelKey().contains("COMPLETIONS"));
         assertEquals(client.contextPayload(request, tracker), captured.get());
         assertEquals(1, bodies.size(), "capture must not add generation calls");
+    }
+
+    @Test
+    void contextCaptureRestoresNestedBindingsAndClearsAfterFailure() throws Exception {
+        final var outer = new CopyOnWriteArrayList<String>();
+        final var inner = new CopyOnWriteArrayList<String>();
+        client.withContextCapture(payload -> outer.add(payload.modelKey()), () -> {
+            client.chat(request("outer-before"));
+            assertThrows(
+                    IOException.class,
+                    () -> client.withContextCapture(payload -> inner.add(payload.modelKey()), () -> {
+                        client.chat(request("inner"));
+                        throw new IOException("capture failure");
+                    }));
+            client.chat(request("outer-after"));
+            return null;
+        });
+        client.chat(request("unbound"));
+        assertEquals(2, outer.size());
+        assertTrue(outer.getFirst().contains("outer-before"));
+        assertTrue(outer.getLast().contains("outer-after"));
+        assertEquals(1, inner.size());
+        assertTrue(inner.getFirst().contains("inner"));
+
+        assertThrows(
+                IOException.class,
+                () -> client.withContextCapture(payload -> outer.add(payload.modelKey()), () -> {
+                    throw new IOException("outer failure");
+                }));
+        client.chat(request("after-failure"));
+        assertEquals(2, outer.size(), "an exceptional scope must not retain its capture");
+    }
+
+    @Test
+    void contextCaptureIsIsolatedAcrossConcurrentVirtualThreads() throws Exception {
+        final var first = new CopyOnWriteArrayList<String>();
+        final var second = new CopyOnWriteArrayList<String>();
+        final var bound = new java.util.concurrent.CountDownLatch(2);
+        try (final var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            final var one =
+                    executor.submit(() -> client.withContextCapture(payload -> first.add(payload.modelKey()), () -> {
+                        bound.countDown();
+                        assertTrue(bound.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                        return client.chat(request("first-model"));
+                    }));
+            final var two =
+                    executor.submit(() -> client.withContextCapture(payload -> second.add(payload.modelKey()), () -> {
+                        bound.countDown();
+                        assertTrue(bound.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                        return client.chat(request("second-model"));
+                    }));
+            one.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            two.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        assertEquals(1, first.size());
+        assertEquals(1, second.size());
+        assertTrue(first.getFirst().contains("first-model"));
+        assertTrue(second.getFirst().contains("second-model"));
+    }
+
+    @Test
+    void contextCaptureIsIsolatedBetweenClients() throws Exception {
+        final var captured = new AtomicInteger();
+        try (final var other = new ChatClient(configuration(), mapper, providerManager(), Clock.systemUTC(), http)) {
+            client.withContextCapture(payload -> captured.incrementAndGet(), () -> other.chat(request()));
+        }
+        assertEquals(0, captured.get());
     }
 
     @Test

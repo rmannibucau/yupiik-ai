@@ -45,7 +45,7 @@ public class SessionUsageReporter {
     private volatile String lastUsageModel;
     private volatile String quotaSessionId;
     private volatile boolean closed;
-    private final ThreadLocal<Boolean> attachingQuota = new ThreadLocal<>();
+    private final ScopedValue<Boolean> attachingQuota = ScopedValue.newInstance();
 
     public SessionUsageReporter(
             final UsageTracker usageTracker,
@@ -148,7 +148,7 @@ public class SessionUsageReporter {
             }
             quotaSessionId = id;
             quotaStore.listen(id, () -> {
-                if (!closed && id.equals(quotaSessionId) && !Boolean.TRUE.equals(attachingQuota.get())) {
+                if (!closed && id.equals(quotaSessionId) && !attachingQuota.isBound()) {
                     // A completion must read only the cache: never start another refresh from an event.
                     pushUsageQuota(lastUsageModel, cachedQuotaSnapshot());
                 }
@@ -156,12 +156,7 @@ public class SessionUsageReporter {
         }
         // Legacy stores can complete inline; the caller already pushes that result. Only the
         // asynchronous completion needs an extra event, avoiding duplicate startup/switch pushes.
-        attachingQuota.set(true);
-        try {
-            quotaStore.attach(id, settings);
-        } finally {
-            attachingQuota.remove();
-        }
+        ScopedValue.where(attachingQuota, true).run(() -> quotaStore.attach(id, settings));
     }
 
     /** Releases the callback and any pending refresh along with the owning session. */

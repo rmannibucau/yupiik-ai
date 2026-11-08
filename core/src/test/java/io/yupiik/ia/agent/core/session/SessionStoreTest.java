@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.session;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -53,7 +54,7 @@ class SessionStoreTest {
     }
 
     private FileSessionStore newStore() {
-        return newStore(new SessionConfiguration(30, 15));
+        return newStore(new SessionConfiguration(30, 15, true));
     }
 
     private FileSessionStore newStore(final SessionConfiguration sessions) {
@@ -65,7 +66,8 @@ class SessionStoreTest {
                 io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
                         "yca.storageHome", dir.toString(),
                         "yca.sessions.retentionDays", String.valueOf(sessions.retentionDays()),
-                        "yca.sessions.compressDays", String.valueOf(sessions.compressDays()))),
+                        "yca.sessions.compressDays", String.valueOf(sessions.compressDays()),
+                        "yca.sessions.startupCleanup", String.valueOf(sessions.startupCleanup()))),
                 mapper,
                 clock);
     }
@@ -73,6 +75,80 @@ class SessionStoreTest {
     private static void setAge(final Path file, final long daysOld) throws Exception {
         Files.setLastModifiedTime(
                 file, FileTime.fromMillis(Instant.now().toEpochMilli() - daysOld * 24L * 60L * 60L * 1000L));
+    }
+
+    @Test
+    void disabledStartupDoesNotAccessStorage() {
+        // Resolving any storage path, including for the last-session scan, would fail.
+        final var store = new FileSessionStore(
+                io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+                        Map.of("yca.storageHome", dir + "\u0000", "yca.sessions.startupCleanup", "false")),
+                mapper,
+                Clock.systemUTC());
+
+        assertDoesNotThrow(() -> store.onStart(null));
+    }
+
+    @Test
+    void disabledStartupPreservesSessionsAndOrphans() throws Exception {
+        final var store = newStore(new SessionConfiguration(30, 15, false));
+        final var expired = store.create();
+        final var aged = store.create();
+        setAge(store.path(expired), 40);
+        setAge(store.path(aged), 20);
+        final var orphanTodos = dir.resolve("todos-orphan.json");
+        final var orphanSnap = dir.resolve("snapshots/orphan.snap");
+        Files.createDirectories(orphanSnap.getParent());
+        Files.writeString(orphanTodos, "[]");
+        Files.writeString(orphanSnap, "SUMMARY x\n");
+
+        store.onStart(null);
+
+        assertTrue(Files.exists(store.path(expired)));
+        assertTrue(Files.exists(store.path(aged)));
+        assertFalse(Files.exists(store.sessionDir(aged).resolve(aged + ".jsonl.gz")));
+        assertEquals("[]", Files.readString(orphanTodos));
+        assertEquals("SUMMARY x\n", Files.readString(orphanSnap));
+    }
+
+    @Test
+    void defaultStartupStillPerformsHousekeeping() throws Exception {
+        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+                Map.of("yca.storageHome", dir.toString()));
+        assertTrue(configuration.sessions().startupCleanup());
+        final var store = new FileSessionStore(configuration, mapper, Clock.systemUTC());
+        final var expired = store.create();
+        final var aged = store.create();
+        setAge(store.path(expired), 20);
+        setAge(store.path(aged), 10);
+
+        store.onStart(null);
+
+        assertFalse(Files.exists(store.path(expired)));
+        assertFalse(Files.exists(store.path(aged)));
+        assertTrue(Files.exists(store.sessionDir(aged).resolve(aged + ".jsonl.gz")));
+    }
+
+    @Test
+    void explicitCleanupAndHousekeepingWorkWithStartupDisabled() throws Exception {
+        final var store = newStore(new SessionConfiguration(30, 15, false));
+        final var expired = store.create();
+        final var aged = store.create();
+        setAge(store.path(expired), 40);
+        setAge(store.path(aged), 20);
+        store.onStart(null);
+
+        store.cleanup();
+
+        assertFalse(Files.exists(store.path(expired)));
+        assertTrue(Files.exists(store.sessionDir(aged).resolve(aged + ".jsonl.gz")));
+        final var empty = store.create();
+
+        final var report = store.housekeeping(true);
+
+        assertFalse(Files.exists(store.path(empty)));
+        assertEquals(1, report.deleted());
+        assertEquals(1, report.kept());
     }
 
     @Test
@@ -116,7 +192,7 @@ class SessionStoreTest {
 
     @Test
     void cleanupWithDefaultsDisabled() throws Exception {
-        final var store = newStore(new SessionConfiguration(0, 0));
+        final var store = newStore(new SessionConfiguration(0, 0, true));
         final var first = store.create();
         final var second = store.create();
         setAge(store.path(first), 40);
@@ -197,7 +273,7 @@ class SessionStoreTest {
         // pin the clock so two creates land in the same wall-clock second: only the random suffix differs,
         // which is what makes the id collision-free without having to scan the store
         final var fixed = Clock.fixed(Instant.EPOCH, java.time.ZoneOffset.UTC);
-        final var store = newStore(new SessionConfiguration(30, 15), fixed);
+        final var store = newStore(new SessionConfiguration(30, 15, true), fixed);
         final var first = store.create();
         final var second = store.create();
 
@@ -538,7 +614,7 @@ class SessionStoreTest {
 
     @Test
     void housekeepingDeletesEmptySessions() throws Exception {
-        final var store = newStore(new SessionConfiguration(0, 0));
+        final var store = newStore(new SessionConfiguration(0, 0, true));
         final var onlyPrompt = store.create();
         store.append(onlyPrompt, SessionEntry.of(1, "user", "hi", null, null));
 

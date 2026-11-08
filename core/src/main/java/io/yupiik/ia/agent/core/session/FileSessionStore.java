@@ -70,6 +70,9 @@ public class FileSessionStore implements SessionStore {
     }
 
     public void onStart(@OnEvent final Start start) {
+        if (configuration.sessions() != null && !configuration.sessions().startupCleanup()) {
+            return;
+        }
         cleanup();
         // remember the most recent stored session so startup housekeeping can never delete
         // the session the user is about to resume (it exists before the frontends resolve it)

@@ -104,6 +104,59 @@ class SessionUsageReporterTest {
     }
 
     @Test
+    void attachSuppressesOnlyInlineCompletionAndRestoresScopeAfterFailure() throws Exception {
+        final var events = new java.util.concurrent.CopyOnWriteArrayList<AgentEvent.UsageUpdated>();
+        final var listener = new java.util.concurrent.atomic.AtomicReference<Runnable>();
+        final var fail = new java.util.concurrent.atomic.AtomicBoolean();
+        final var store = new CompletionStore() {
+            @Override
+            public void listen(final String id, final Runnable callback) {
+                listener.set(callback);
+            }
+
+            @Override
+            public void attach(final String id, final ChatSettings settings) {
+                listener.get().run();
+                assertTrue(events.isEmpty(), "inline completion must be suppressed");
+                if (fail.get()) {
+                    throw new IllegalStateException("attach failed");
+                }
+                try (final var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+                    executor.submit(listener.get()).get(5, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (final Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        };
+        final var reporter = new SessionUsageReporter(
+                null,
+                store,
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        if (event instanceof AgentEvent.UsageUpdated usage) {
+                            events.add(usage);
+                        }
+                    }
+                },
+                () -> null,
+                "s1",
+                () -> ChatSettings.EMPTY,
+                null,
+                null);
+        reporter.attachQuota(ChatSettings.EMPTY);
+        assertEquals(1, events.size(), "background completion during attach must still publish");
+        events.clear();
+        fail.set(true);
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class, () -> reporter.attachQuota(ChatSettings.EMPTY));
+        assertTrue(events.isEmpty());
+        listener.get().run();
+        assertEquals(1, events.size(), "exceptional attach must restore the unbound scope");
+        reporter.close();
+    }
+
+    @Test
     void pushUsageContextCarriesTheProvidedEstimateAndRefreshesTheGaugeCache() {
         final var events = new ArrayList<AgentEvent>();
         final var reporter = new SessionUsageReporter(

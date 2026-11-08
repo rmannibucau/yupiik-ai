@@ -30,4 +30,9 @@ public record SessionConfiguration(
                 defaultValue = "7",
                 documentation =
                         "Sessions inactive longer than this many days are gzip compressed at startup (0 disables compression).")
-        int compressDays) {}
+        int compressDays,
+
+        @Property(
+                defaultValue = "true",
+                documentation = "Whether to scan session storage and perform housekeeping at startup.")
+        boolean startupCleanup) {}

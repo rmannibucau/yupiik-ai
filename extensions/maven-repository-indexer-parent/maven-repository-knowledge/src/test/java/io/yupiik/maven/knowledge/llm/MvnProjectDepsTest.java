@@ -104,6 +104,31 @@ class MvnProjectDepsTest {
     }
 
     @Test
+    void fingerprintsStayIndependentAcrossProjectsAndConcurrentCalls(@TempDir final Path tmp) throws Exception {
+        final var first = Files.createDirectories(tmp.resolve("first"));
+        final var second = Files.createDirectories(tmp.resolve("second"));
+        Files.writeString(first.resolve("pom.xml"), "<project>first</project>");
+        Files.writeString(second.resolve("pom.xml"), "<project>second</project>");
+        final var firstHash = MvnProjectDeps.fingerprint(first);
+        final var secondHash = MvnProjectDeps.fingerprint(second);
+        Assertions.assertNotEquals(firstHash, secondHash);
+        assertEquals(firstHash, MvnProjectDeps.fingerprint(first));
+        assertEquals(secondHash, MvnProjectDeps.fingerprint(second));
+        try (final var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            final var tasks = new java.util.ArrayList<java.util.concurrent.Future<String>>();
+            for (int i = 0; i < 20; i++) {
+                final var project = i % 2 == 0 ? first : second;
+                tasks.add(executor.submit(() -> MvnProjectDeps.fingerprint(project)));
+            }
+            for (int i = 0; i < tasks.size(); i++) {
+                assertEquals(
+                        i % 2 == 0 ? firstHash : secondHash,
+                        tasks.get(i).get(5, java.util.concurrent.TimeUnit.SECONDS));
+            }
+        }
+    }
+
+    @Test
     void resolveUsesCacheWithoutRunningMvn(@TempDir final Path tmp) throws Exception {
         final var project = tmp.resolve("project");
         Files.createDirectories(project);

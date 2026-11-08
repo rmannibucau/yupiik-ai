@@ -1447,8 +1447,11 @@ public class AgentLoop {
         return chatClient.contextPayload(request, usageTracker);
     }
 
-    ChatClient.ContextCapture captureContext(final java.util.function.Consumer<ContextMeasurement.Payload> consumer) {
-        return chatClient.captureContext(consumer);
+    <T, X extends Throwable> T withContextCapture(
+            final java.util.function.Consumer<ContextMeasurement.Payload> consumer,
+            final ScopedValue.CallableOp<T, X> operation)
+            throws X {
+        return chatClient.withContextCapture(consumer, operation);
     }
 
     /**

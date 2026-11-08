@@ -25,6 +25,7 @@ import io.yupiik.fusion.httpserver.jre.JreHttpServerConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.jsonrpc.JsonRpcEndpoint;
 import io.yupiik.fusion.jsonrpc.JsonRpcHandler;
+import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.util.OpenBrowser;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
@@ -50,6 +51,8 @@ public class WebCommand implements Runnable, AutoCloseable {
     private JreHttpServer server;
     private final AtomicBoolean closed = new AtomicBoolean();
 
+    private final McpManager mcpManager;
+
     public WebCommand(
             final WebConf conf,
             final SseBroker broker,
@@ -57,7 +60,9 @@ public class WebCommand implements Runnable, AutoCloseable {
             final WebRestoreSessions restoreSessions,
             final JsonRpcHandler jsonRpc,
             final JsonMapper mapper,
-            final ScheduledExecutorService scheduler) {
+            final ScheduledExecutorService scheduler,
+            final McpManager mcpManager) {
+        this.mcpManager = mcpManager;
         this.conf = conf;
         this.broker = broker;
         this.sessionManager = sessionManager;
@@ -69,6 +74,7 @@ public class WebCommand implements Runnable, AutoCloseable {
 
     @Override
     public void run() {
+        mcpManager.start();
         // publish the sessions the user asked to restore OOTB; the frontend reads them (sessions.restore)
         // on boot and opens a tab for each, so `yca web --session a --session b` restores those tabs.
         restoreSessions.sessions(conf.session());

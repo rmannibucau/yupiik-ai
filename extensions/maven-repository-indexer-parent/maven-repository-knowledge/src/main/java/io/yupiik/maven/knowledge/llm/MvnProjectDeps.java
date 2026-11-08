@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -306,7 +307,7 @@ public final class MvnProjectDeps {
 
     /** SHA-256 hex of the concatenated content of every project build file (poms + gradle + catalogs). */
     static String fingerprint(final Path projectDir) {
-        final var md = MessageDigestHolder.digest();
+        final var md = digest();
         try (final var stream = Files.walk(projectDir)) {
             final var files = stream.filter(Files::isRegularFile)
                     .filter(path -> isBuildFile(path.getFileName().toString()))
@@ -338,20 +339,11 @@ public final class MvnProjectDeps {
                 || name.equals("libs.versions.toml");
     }
 
-    /** Small holder to avoid importing MessageDigest statics every call. */
-    private static final class MessageDigestHolder {
-        private static final ThreadLocal<MessageDigest> MD = ThreadLocal.withInitial(() -> {
-            try {
-                return MessageDigest.getInstance("SHA-256");
-            } catch (final Exception e) {
-                throw new IllegalStateException(e);
-            }
-        });
-
-        private static MessageDigest digest() {
-            final var md = MD.get();
-            md.reset();
-            return md;
+    private static MessageDigest digest() {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (final NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
         }
     }
 

@@ -39,10 +39,13 @@ import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
@@ -51,6 +54,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 @ExtendWith(TestJsonMapper.class)
 class McpManagerTest {
@@ -340,6 +346,165 @@ class McpManagerTest {
                 manager.toolsByServer().get("yca").stream()
                         .map(EmbeddedTool::name)
                         .toList());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"tools,false", "tools,true", "toolsByServer,false", "toolsByServer,true", "call,false", "call,true"})
+    void firstUseStartsLazily(final String operation, final boolean async) throws Exception {
+        final var initializations = new AtomicInteger();
+        bootProbeServer(initializations, new CountDownLatch(0));
+        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var manager = probeManager(async ? executor : null);
+            try {
+                assertEquals(
+                        List.of(new McpManager.ServerStatus("test", McpManager.ServerState.NOT_STARTED)),
+                        manager.serverStatuses());
+                assertEquals(0, initializations.get());
+                switch (operation) {
+                    case "tools" ->
+                        assertEquals("test_probe", manager.tools().getFirst().name());
+                    case "toolsByServer" ->
+                        assertEquals(
+                                "test_probe",
+                                manager.toolsByServer().get("test").getFirst().name());
+                    case "call" -> assertEquals("probe result", manager.call("test", "probe", Map.of()));
+                    default -> throw new IllegalArgumentException(operation);
+                }
+                manager.start();
+                assertEquals(1, manager.tools().size());
+                assertEquals(1, initializations.get(), "explicit start after lazy use must be a no-op");
+            } finally {
+                manager.close();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void concurrentStartAndFirstUseInitializeOnlyOnce(final boolean async) throws Exception {
+        final var initializations = new AtomicInteger();
+        final var initializeGate = new CountDownLatch(1);
+        bootProbeServer(initializations, initializeGate);
+        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var manager = probeManager(async ? executor : null);
+            final var ready = new CountDownLatch(24);
+            final var go = new CountDownLatch(1);
+            final var tasks = new ArrayList<Future<?>>();
+            try {
+                for (int i = 0; i < 24; i++) {
+                    final var operation = i % 4;
+                    tasks.add(executor.submit(() -> {
+                        ready.countDown();
+                        assertTrue(go.await(5, TimeUnit.SECONDS));
+                        switch (operation) {
+                            case 0 -> manager.start();
+                            case 1 -> assertEquals(1, manager.tools().size());
+                            case 2 ->
+                                assertEquals(
+                                        1, manager.toolsByServer().get("test").size());
+                            case 3 -> assertEquals("probe result", manager.call("test", "probe", Map.of()));
+                            default -> throw new IllegalStateException();
+                        }
+                        return null;
+                    }));
+                }
+                assertTrue(ready.await(5, TimeUnit.SECONDS));
+                go.countDown();
+                initializeGate.countDown();
+                for (final var task : tasks) {
+                    task.get(10, TimeUnit.SECONDS);
+                }
+                assertEquals(1, initializations.get());
+                manager.reset();
+                assertEquals(2, initializations.get(), "reset must still restart synchronously");
+                assertEquals(1, manager.tools().size());
+                assertEquals(2, initializations.get());
+            } finally {
+                go.countDown();
+                initializeGate.countDown();
+                manager.close();
+            }
+        }
+    }
+
+    @Test
+    void unusedManagerStatusAndCloseDoNotStartServers() throws Exception {
+        final var initializations = new AtomicInteger();
+        bootProbeServer(initializations, new CountDownLatch(0));
+        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var manager = probeManager(executor);
+            assertEquals(
+                    List.of(new McpManager.ServerStatus("test", McpManager.ServerState.NOT_STARTED)),
+                    manager.serverStatuses());
+            manager.close();
+            assertEquals(0, initializations.get());
+        }
+        final var local = new McpManager(TestConfigs.codingAgent(Map.of()), mapper, List.of(), httpClient, null);
+        assertEquals(
+                List.of(new McpManager.ServerStatus("yca", McpManager.ServerState.NOT_STARTED)),
+                local.serverStatuses());
+        local.close();
+    }
+
+    private McpManager probeManager(final ExecutorService executor) {
+        return new McpManager(
+                configuration(List.of(new McpServerConfiguration(
+                        "test",
+                        null,
+                        List.of(),
+                        List.of(),
+                        null,
+                        "http://localhost:" + server.getAddress().getPort() + "/mcp",
+                        null,
+                        List.of(),
+                        true,
+                        List.of()))),
+                mapper,
+                List.of(),
+                httpClient,
+                new ProcessService(),
+                executor);
+    }
+
+    private void bootProbeServer(final AtomicInteger initializations, final CountDownLatch initializeGate)
+            throws IOException {
+        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/mcp", exchange -> {
+            final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            if (body.contains("\"method\":\"initialize\"")) {
+                initializations.incrementAndGet();
+                try {
+                    if (!initializeGate.await(5, TimeUnit.SECONDS)) {
+                        respond(exchange, 500, "{}", "application/json");
+                        return;
+                    }
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    respond(exchange, 500, "{}", "application/json");
+                    return;
+                }
+                respond(
+                        exchange,
+                        200,
+                        "{\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}",
+                        "application/json");
+            } else if (body.contains("\"method\":\"tools/list\"")) {
+                respond(
+                        exchange,
+                        200,
+                        "{\"result\":{\"tools\":[{\"name\":\"probe\",\"description\":\"probe\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
+                        "application/json");
+            } else if (body.contains("\"method\":\"tools/call\"")) {
+                respond(
+                        exchange,
+                        200,
+                        "{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"probe result\"}]},\"id\":3}",
+                        "application/json");
+            } else {
+                respond(exchange, 200, "{}", "application/json");
+            }
+        });
+        server.start();
     }
 
     private static CodingAgentConfiguration configuration(final List<McpServerConfiguration> servers) {

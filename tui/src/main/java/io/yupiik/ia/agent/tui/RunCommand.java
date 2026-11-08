@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.MetricsFormat;
@@ -61,12 +62,16 @@ public class RunCommand implements Runnable {
     private final SessionStore sessionStore;
     private final AgentProvider agentProvider;
 
+    private final McpManager mcpManager;
+
     public RunCommand(
             final RunConf conf,
             final ShellRegistry shellRegistry,
             final SessionRuntimeFactory sessionRuntimeFactory,
             final SessionStore sessionStore,
-            final AgentProvider agentProvider) {
+            final AgentProvider agentProvider,
+            final McpManager mcpManager) {
+        this.mcpManager = mcpManager;
         this.conf = conf;
         this.shellRegistry = shellRegistry;
         this.sessionRuntimeFactory = sessionRuntimeFactory;
@@ -132,6 +137,7 @@ public class RunCommand implements Runnable {
 
     @Override
     public void run() {
+        mcpManager.start();
         final var sessionId =
                 conf.session() == null || conf.session().isBlank() ? sessionStore.create() : conf.session();
         final var failed = new AtomicBoolean();

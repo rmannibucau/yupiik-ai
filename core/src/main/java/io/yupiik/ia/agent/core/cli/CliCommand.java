@@ -28,6 +28,7 @@ import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
@@ -153,6 +154,8 @@ public class CliCommand implements Runnable {
 
     private final HackStdIo stdio;
 
+    private final McpManager mcpManager;
+
     public CliCommand(
             final CliConf conf,
             final SessionLifecycle sessionLifecycle,
@@ -172,7 +175,9 @@ public class CliCommand implements Runnable {
             final Clock clock,
             final CodingAgentConfiguration configuration,
             final SpeakerLabels speakerLabels,
-            final HackStdIo stdio) {
+            final HackStdIo stdio,
+            final McpManager mcpManager) {
+        this.mcpManager = mcpManager;
         this.conf = conf;
         this.sessionLifecycle = sessionLifecycle;
         this.sessionStore = sessionStore;
@@ -334,6 +339,7 @@ public class CliCommand implements Runnable {
 
     @Override
     public void run() {
+        mcpManager.start();
         installInterruptHandler();
         // from here on this command owns the terminal: every writer (ours, the JUL root
         // handlers, a dependency) is funnelled through the prompt aware sink, so a log line

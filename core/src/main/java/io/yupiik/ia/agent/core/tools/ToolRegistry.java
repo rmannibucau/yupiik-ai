@@ -15,9 +15,7 @@
  */
 package io.yupiik.ia.agent.core.tools;
 
-import io.yupiik.fusion.framework.api.lifecycle.Start;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.ia.agent.core.codegraph.CodeResolveTool;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.mcp.McpManager;
@@ -35,10 +33,6 @@ public class ToolRegistry {
 
     protected ToolRegistry() {
         this.mcpManager = null;
-    }
-
-    public void onStart(@OnEvent final Start start) {
-        mcpManager.start();
     }
 
     public List<EmbeddedTool> tools() {

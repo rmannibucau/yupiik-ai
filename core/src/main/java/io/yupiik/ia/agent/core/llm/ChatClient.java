@@ -94,24 +94,12 @@ public class ChatClient implements AutoCloseable {
 
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
-    private final ThreadLocal<Consumer<ContextMeasurement.Payload>> contextCapture = new ThreadLocal<>();
+    private final ScopedValue<Consumer<ContextMeasurement.Payload>> contextCapture = ScopedValue.newInstance();
 
     /** Scoped to the synchronous request owner, including every repaired/fallback attempt. */
-    public ContextCapture captureContext(final Consumer<ContextMeasurement.Payload> capture) {
-        final var previous = contextCapture.get();
-        contextCapture.set(capture);
-        return () -> {
-            if (previous == null) {
-                contextCapture.remove();
-            } else {
-                contextCapture.set(previous);
-            }
-        };
-    }
-
-    public interface ContextCapture extends AutoCloseable {
-        @Override
-        void close();
+    public <T, X extends Throwable> T withContextCapture(
+            final Consumer<ContextMeasurement.Payload> capture, final ScopedValue.CallableOp<T, X> operation) throws X {
+        return ScopedValue.where(contextCapture, capture).call(operation);
     }
 
     private final ProviderManager providerManager;
@@ -2382,7 +2370,6 @@ public class ChatClient implements AutoCloseable {
         return doWithFallback(withPromotedExtras(effective), pauseListener, cancelled, true, onDelta);
     }
 
-    @SuppressWarnings("unchecked")
     private <A> A doWithFallback(
             final ChatCompletionRequest request,
             final Consumer<PauseEvent> pauseListener,
@@ -2393,6 +2380,7 @@ public class ChatClient implements AutoCloseable {
         return doWithFallback(request, pauseListener, cancelled, stream, onDelta, false, false, false);
     }
 
+    @SuppressWarnings("unchecked")
     private <A> A doWithFallback(
             final ChatCompletionRequest request,
             final Consumer<PauseEvent> pauseListener,
@@ -2412,8 +2400,8 @@ public class ChatClient implements AutoCloseable {
                 pauseListener == null ? null : event -> onLibraryPause(event, pauseListener);
         final var dialect = dialectClient(flavorForRouting(settings), provider);
         try {
-            final var capture = contextCapture.get();
-            if (capture != null) {
+            if (contextCapture.isBound()) {
+                final var capture = contextCapture.get();
                 capture.accept(contextPayloadEffective(effective, provider, flavor));
             }
             if (stream) {

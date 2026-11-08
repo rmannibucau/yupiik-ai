@@ -33,6 +33,7 @@ import io.yupiik.ia.agent.core.configuration.PermissionsConfiguration;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -171,6 +172,7 @@ class RunCommandTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
+                assertTrue(mcpStarted.get(), "MCP warm-up must begin before the first agent request");
                 calls.add(new String[] {prompt, agentName, sessionId});
                 assertNull(history);
                 shellRegistry.onEvent(new AgentEvent.TextDelta("hel", sessionId));
@@ -184,8 +186,10 @@ class RunCommandTest {
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
-                null);
+                null,
+                mcpManager());
 
+        assertFalse(mcpStarted.get(), "Constructing a command must not start MCP servers");
         command.run();
 
         assertEquals(1, calls.size());
@@ -216,7 +220,8 @@ class RunCommandTest {
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
-                null);
+                null,
+                mcpManager());
 
         final var error = assertThrows(IllegalStateException.class, command::run);
 
@@ -258,7 +263,8 @@ class RunCommandTest {
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
-                new AgentProvider(configuration));
+                new AgentProvider(configuration),
+                mcpManager());
 
         command.run();
 
@@ -300,7 +306,8 @@ class RunCommandTest {
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
-                new AgentProvider(configuration));
+                new AgentProvider(configuration),
+                mcpManager());
 
         command.run();
 
@@ -333,7 +340,8 @@ class RunCommandTest {
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
-                new AgentProvider(configuration));
+                new AgentProvider(configuration),
+                mcpManager());
 
         command.run();
 
@@ -372,7 +380,8 @@ class RunCommandTest {
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
-                new AgentProvider(configuration));
+                new AgentProvider(configuration),
+                mcpManager());
 
         command.run();
 
@@ -406,7 +415,8 @@ class RunCommandTest {
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
-                null);
+                null,
+                mcpManager());
 
         command.run();
 
@@ -437,7 +447,8 @@ class RunCommandTest {
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
-                null);
+                null,
+                mcpManager());
 
         command.run();
 
@@ -458,7 +469,8 @@ class RunCommandTest {
                 shellRegistry,
                 runtimeFactory(stubAgentLoop(), new PermissionService(null)),
                 sessionStore(),
-                new AgentProvider(configuration));
+                new AgentProvider(configuration),
+                mcpManager());
 
         final var error = assertThrows(IllegalArgumentException.class, command::run);
         assertTrue(error.getMessage().contains("Unknown agent"));
@@ -539,7 +551,8 @@ class RunCommandTest {
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
-                null);
+                null,
+                mcpManager());
         command.run();
         final var line = Files.readString(metricsFile, StandardCharsets.UTF_8);
         assertTrue(line.contains("llmCalls=1"), "display refresh must not count as a request: " + line);
@@ -577,13 +590,25 @@ class RunCommandTest {
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
-                null);
+                null,
+                mcpManager());
         command.run();
         final var line = Files.readString(metricsFile, StandardCharsets.UTF_8);
         assertTrue(line.contains("llmCalls=2"), "only the real requests count, refresh excluded: " + line);
         assertTrue(
                 line.contains("promptTokens=15 completionTokens=25 totalTokens=40"),
                 "per-request usage aggregated once, the display refresh must not double-count: " + line);
+    }
+
+    private final AtomicBoolean mcpStarted = new AtomicBoolean();
+
+    private McpManager mcpManager() {
+        return new McpManager() {
+            @Override
+            public void start() {
+                mcpStarted.set(true);
+            }
+        };
     }
 
     private static ShellRegistry testRegistry() {

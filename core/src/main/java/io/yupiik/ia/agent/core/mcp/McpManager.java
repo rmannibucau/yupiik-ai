@@ -37,6 +37,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -58,10 +59,11 @@ public class McpManager {
     private final boolean async;
     private final Map<String, McpClient> clients = new ConcurrentHashMap<>();
     private final Map<String, List<EmbeddedTool>> toolsByServer = new ConcurrentHashMap<>();
+    private final ReentrantLock lifecycleLock = new ReentrantLock();
     // In-flight remote MCP server initialize handshakes, keyed by server name. They are kicked off
-    // asynchronously from start() so the container startup (ToolRegistry#onStart on the main thread)
-    // never blocks on a network round-trip or subprocess spawn; they are joined lazily on first real
-    // use (tools()/call()/serverStatuses()) and awaited in close() so the process does not exit
+    // asynchronously from start() so an explicit warmup never blocks on a network round-trip or
+    // subprocess spawn; they are joined lazily on first real
+    // use (tools()/toolsByServer()/call()) and awaited in close() so the process does not exit
     // mid-handshake or leak a subprocess.
     private final Map<String, CompletableFuture<Void>> pending = new ConcurrentHashMap<>();
 
@@ -114,24 +116,29 @@ public class McpManager {
     private volatile boolean started;
 
     public void start() {
-        if (started) {
-            return;
-        }
-        // not set until every server (or its no-op disabled skip) has gone through startServer once,
-        // so a partial failure is retried on a subsequent start rather than silently skipped
-        if (configuration.tools().builtin().enabled()) {
-            startLocal(); // in-process only: no I/O, stays synchronous
-        }
-        for (final var server : configuration.mcp().servers()) {
-            if (server.enabled()) {
-                if (async) {
-                    startServerAsync(server);
-                } else {
-                    startServer(server);
+        lifecycleLock.lock();
+        try {
+            if (started) {
+                return;
+            }
+            // not set until every server (or its no-op disabled skip) has gone through startServer once,
+            // so a partial failure is retried on a subsequent start rather than silently skipped
+            if (configuration.tools().builtin().enabled()) {
+                startLocal(); // in-process only: no I/O, stays synchronous
+            }
+            for (final var server : configuration.mcp().servers()) {
+                if (server.enabled()) {
+                    if (async) {
+                        startServerAsync(server);
+                    } else {
+                        startServer(server);
+                    }
                 }
             }
+            started = true;
+        } finally {
+            lifecycleLock.unlock();
         }
-        started = true;
     }
 
     /**
@@ -144,16 +151,22 @@ public class McpManager {
      * returns.</p>
      */
     public void reset() {
-        started = false; // an explicit reset may re-run even after an automatic start (see start())
-        if (configuration.tools().builtin().enabled()) {
-            startLocal();
-        }
-        for (final var server : configuration.mcp().servers()) {
-            if (server.enabled()) {
-                startServer(server);
+        lifecycleLock.lock();
+        try {
+            awaitAllPending();
+            started = false; // an explicit reset may re-run even after an automatic start (see start())
+            if (configuration.tools().builtin().enabled()) {
+                startLocal();
             }
+            for (final var server : configuration.mcp().servers()) {
+                if (server.enabled()) {
+                    startServer(server);
+                }
+            }
+            started = true;
+        } finally {
+            lifecycleLock.unlock();
         }
-        started = true;
     }
 
     /**
@@ -166,22 +179,28 @@ public class McpManager {
      * @param name the server name.
      */
     public void reset(final String name) {
-        if ("yca".equals(name)) {
-            if (!configuration.tools().builtin().enabled()) {
-                throw new IllegalArgumentException("the built-in 'yca' MCP server is disabled");
+        lifecycleLock.lock();
+        try {
+            awaitPending(name);
+            if ("yca".equals(name)) {
+                if (!configuration.tools().builtin().enabled()) {
+                    throw new IllegalArgumentException("the built-in 'yca' MCP server is disabled");
+                }
+                startLocal();
+                return;
             }
-            startLocal();
-            return;
+            final var server = configuration.mcp().servers().stream()
+                    .filter(candidate -> name.equals(candidate.name()))
+                    .findFirst()
+                    .orElseThrow(() ->
+                            new IllegalArgumentException("unable to reset MCP server '" + name + "': no such server"));
+            if (!server.enabled()) {
+                throw new IllegalArgumentException("MCP server '" + name + "' is disabled");
+            }
+            startServer(server);
+        } finally {
+            lifecycleLock.unlock();
         }
-        final var server = configuration.mcp().servers().stream()
-                .filter(candidate -> name.equals(candidate.name()))
-                .findFirst()
-                .orElseThrow(() ->
-                        new IllegalArgumentException("unable to reset MCP server '" + name + "': no such server"));
-        if (!server.enabled()) {
-            throw new IllegalArgumentException("MCP server '" + name + "' is disabled");
-        }
-        startServer(server);
     }
 
     private void startLocal() {
@@ -203,7 +222,7 @@ public class McpManager {
      */
     private void startServerAsync(final McpServerConfiguration server) {
         // register the in-flight future BEFORE the task is handed to the executor, and never remove it
-        // here: a first-use join (tools()/call()/serverStatuses()) must be able to observe the future as
+        // here: a first-use join (tools()/toolsByServer()/call()) must be able to observe the future as
         // soon as it is scheduled, otherwise a fast first-use can run while the async body is still
         // populating toolsByServer and observe a half-initialized server (or miss the join entirely).
         final var future = new CompletableFuture<Void>();
@@ -296,6 +315,7 @@ public class McpManager {
     }
 
     public List<EmbeddedTool> tools() {
+        start();
         awaitAllPending();
         final var out = new ArrayList<EmbeddedTool>();
         toolsByServer.values().forEach(out::addAll);
@@ -303,6 +323,7 @@ public class McpManager {
     }
 
     public Map<String, List<EmbeddedTool>> toolsByServer() {
+        start();
         awaitAllPending();
         final var out = new LinkedHashMap<String, List<EmbeddedTool>>();
         toolsByServer.forEach((server, serverTools) -> out.put(server, List.copyOf(serverTools)));
@@ -321,10 +342,11 @@ public class McpManager {
     }
 
     public enum ServerState {
+        NOT_STARTED,
         ENABLED,
         DISABLED,
         // the handshake is still in flight (start() fired it asynchronously); it will transition to
-        // ENABLED or FAILED as soon as it completes and is observed (a status read joins it).
+        // ENABLED or FAILED as soon as it completes. Status reads never join or start a handshake.
         PENDING,
         FAILED
     }
@@ -335,7 +357,8 @@ public class McpManager {
         final var out = new ArrayList<ServerStatus>();
         final var mcp = configuration.mcp();
         if (configuration.tools().builtin().enabled()) {
-            out.add(new ServerStatus("yca", ServerState.ENABLED));
+            out.add(new ServerStatus(
+                    "yca", toolsByServer.containsKey("yca") ? ServerState.ENABLED : ServerState.NOT_STARTED));
         }
         if (mcp != null && mcp.servers() != null) {
             for (final var server : mcp.servers()) {
@@ -346,7 +369,9 @@ public class McpManager {
                             server.name(),
                             clients.containsKey(server.name())
                                     ? ServerState.ENABLED
-                                    : pending.containsKey(server.name()) ? ServerState.PENDING : ServerState.FAILED));
+                                    : pending.containsKey(server.name())
+                                            ? ServerState.PENDING
+                                            : started ? ServerState.FAILED : ServerState.NOT_STARTED));
                 }
             }
         }
@@ -354,6 +379,7 @@ public class McpManager {
     }
 
     public String call(final String serverName, final String toolName, final Map<String, Object> args) {
+        start();
         awaitPending(serverName);
         final var client = clients.get(serverName);
         if (client == null) {
@@ -398,29 +424,34 @@ public class McpManager {
      */
     @Destroy
     public void close() {
-        final var start = System.nanoTime();
-        // await still-in-flight handshakes so we do not tear down clients while an initialize is in
-        // the middle of its setup (and so a subprocess-originated client is disposed and reaped). Give
-        // it a bounded grace: the handshake is bounded by the request timeout, but a remote that never
-        // answers would otherwise keep the JVM alive at exit thanks to an unsettled common-pool task.
-        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-        for (final var future : pending.values()) {
-            try {
-                future.get(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (final ExecutionException | TimeoutException e) {
-                logger.warning("MCP handshake not fully settled at shutdown: " + e.getMessage());
+        lifecycleLock.lock();
+        try {
+            final var start = System.nanoTime();
+            // await still-in-flight handshakes so we do not tear down clients while an initialize is in
+            // the middle of its setup (and so a subprocess-originated client is disposed and reaped). Give
+            // it a bounded grace: the handshake is bounded by the request timeout, but a remote that never
+            // answers would otherwise keep the JVM alive at exit thanks to an unsettled common-pool task.
+            final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            for (final var future : pending.values()) {
+                try {
+                    future.get(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (final ExecutionException | TimeoutException e) {
+                    logger.warning("MCP handshake not fully settled at shutdown: " + e.getMessage());
+                }
             }
-        }
-        pending.clear();
-        clients.values().forEach(this::quietClose);
-        clients.clear();
-        toolsByServer.clear();
-        if (logger.isLoggable(Level.FINE)) {
-            logger.fine(() -> "[yca-shutdown] McpManager.close: MCP clients closed in "
-                    + (System.nanoTime() - start) / 1_000_000L + " ms");
+            pending.clear();
+            clients.values().forEach(this::quietClose);
+            clients.clear();
+            toolsByServer.clear();
+            if (logger.isLoggable(Level.FINE)) {
+                logger.fine(() -> "[yca-shutdown] McpManager.close: MCP clients closed in "
+                        + (System.nanoTime() - start) / 1_000_000L + " ms");
+            }
+        } finally {
+            lifecycleLock.unlock();
         }
     }
 

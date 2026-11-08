@@ -617,6 +617,7 @@ public class TuiCommand implements Runnable {
 
     @Override
     public void run() {
+        mcpManager.start();
         slashCommands.bind(arg -> {
             final var current = active();
             return current == null ? ShellOutcome.none() : themeOutcome(arg, current);
@@ -4218,7 +4219,7 @@ public class TuiCommand implements Runnable {
             final var dotColor =
                     switch (status.state()) {
                         case ENABLED -> Color.hex(palette.success());
-                        case DISABLED -> Color.hex(palette.textMuted());
+                        case DISABLED, NOT_STARTED -> Color.hex(palette.textMuted());
                         case PENDING -> Color.hex(palette.warning());
                         case FAILED -> Color.hex(palette.error());
                     };

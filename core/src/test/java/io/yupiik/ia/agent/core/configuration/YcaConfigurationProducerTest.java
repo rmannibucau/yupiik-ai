@@ -16,7 +16,9 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.configuration.ConfigurationSource;
 import io.yupiik.fusion.framework.api.configuration.impl.MapConfigSource;
@@ -33,6 +35,8 @@ import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Exercises {@link YcaConfigurationProducer} wiring end to end (file resolution + {@code $inherit}
@@ -77,6 +81,35 @@ class YcaConfigurationProducerTest {
     private void write(final Path path, final String content) throws IOException {
         Files.createDirectories(path.getParent());
         Files.writeString(path, content);
+    }
+
+    @Test
+    void startupCleanupDefaultsToEnabled() {
+        assertTrue(config(baseArgs()).sessions().startupCleanup());
+    }
+
+    @Test
+    void startupCleanupCanBeDisabledInJson() throws IOException {
+        write(Path.of(globalConfigPath()), "{\"yca\":{\"sessions\":{\"startupCleanup\":false}}}");
+        assertFalse(config(baseArgs()).sessions().startupCleanup());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"tui", "cli", "web", "run"})
+    void startupCleanupCommandOptionOverridesJson(final String command) throws IOException {
+        write(Path.of(globalConfigPath()), "{\"yca\":{\"sessions\":{\"startupCleanup\":true}}}");
+        write(temp.resolve(".yca/configuration.json"), "{\"yca\":{\"sessions\":{\"startupCleanup\":true}}}");
+        for (final var option : List.of("--yca.sessions.startupCleanup", "--sessions-startupCleanup")) {
+            final var args = new ArrayList<String>();
+            args.add(command);
+            args.addAll(baseArgs());
+            args.add(option);
+            args.add("false");
+            if ("run".equals(command)) {
+                args.addAll(List.of("--run-prompt", "test"));
+            }
+            assertFalse(config(args).sessions().startupCleanup(), command + " " + option);
+        }
     }
 
     @Test

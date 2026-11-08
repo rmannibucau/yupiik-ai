@@ -1151,63 +1151,67 @@ public class AgentTurnExecutor {
                 final var sentPayload = new java.util.concurrent.atomic.AtomicReference<>(host.contextPayload(request));
                 final var finishReason = new String[] {null};
                 Message assistant;
-                final long llmStartNanos;
+                final long llmStartNanos = host.precisionDurationMarker.now();
                 final long pausedBeforeMs = host.turnState.llmPausedMs;
-                try (final var capture = host.captureContext(sentPayload::set)) {
-                    llmStartNanos = host.precisionDurationMarker.now();
+                try {
                     host.emitPhase(AgentEvent.Phase.REQUEST_SENT);
-                    assistant = host.modelRoundProcessor.stream(
-                            request,
-                            usage,
-                            cancelled,
-                            host.pauseListener,
-                            delta -> dispatch(delta, usage, finishReason),
-                            new ModelRoundProcessor.Observer() {
-                                @Override
-                                public void begin() {
-                                    host.turnState.lastRequestProducedReasoning = false;
-                                    host.resetInlineSplitter();
-                                }
+                    assistant = host.withContextCapture(
+                            sentPayload::set,
+                            () -> host.modelRoundProcessor.stream(
+                                    request,
+                                    usage,
+                                    cancelled,
+                                    host.pauseListener,
+                                    delta -> dispatch(delta, usage, finishReason),
+                                    new ModelRoundProcessor.Observer() {
+                                        @Override
+                                        public void begin() {
+                                            host.turnState.lastRequestProducedReasoning = false;
+                                            host.resetInlineSplitter();
+                                        }
 
-                                @Override
-                                public void resetText() {
-                                    // a retry is a fresh generation: rebuild the inline splitter (dropping the
-                                    // failed attempt's stale, possibly half-consumed carry) and drop the stale
-                                    // partial reasoning text + opaque blobs so nothing leaks into the persisted
-                                    // message's thinking / reasoningItems
-                                    host.resetInlineSplitter();
-                                    host.emit(textReset());
-                                }
+                                        @Override
+                                        public void resetText() {
+                                            // a retry is a fresh generation: rebuild the inline splitter (dropping the
+                                            // failed attempt's stale, possibly half-consumed carry) and drop the stale
+                                            // partial reasoning text + opaque blobs so nothing leaks into the persisted
+                                            // message's thinking / reasoningItems
+                                            host.resetInlineSplitter();
+                                            host.emit(textReset());
+                                        }
 
-                                @Override
-                                public void retrying(final String message, final Throwable cause) {
-                                    host.emit(host.notice(AgentEvent.Notice.Level.WARN, message, null, cause));
-                                }
+                                        @Override
+                                        public void retrying(final String message, final Throwable cause) {
+                                            host.emit(host.notice(AgentEvent.Notice.Level.WARN, message, null, cause));
+                                        }
 
-                                @Override
-                                public void malformedToolArguments() {
-                                    host.emit(
-                                            host.notice(
-                                                    AgentEvent.Notice.Level.WARN,
-                                                    "Server rejected the request: malformed tool call arguments (parse_error.101). "
-                                                            + "The arguments were kept as-is (repair failed or disabled); remove the "
-                                                            + "corrupted call from the transcript or retry with the repair enabled."));
-                                }
+                                        @Override
+                                        public void malformedToolArguments() {
+                                            host.emit(
+                                                    host.notice(
+                                                            AgentEvent.Notice.Level.WARN,
+                                                            "Server rejected the request: malformed tool call arguments (parse_error.101). "
+                                                                    + "The arguments were kept as-is (repair failed or disabled); remove the "
+                                                                    + "corrupted call from the transcript or retry with the repair enabled."));
+                                        }
 
-                                @Override
-                                public void toolCallPairingRejected() {
-                                    // Signalled by ModelRoundProcessor when it short-circuits a tool-pairing 400
-                                    // (instead of wasting the generic retry budget on the same broken history). The
-                                    // host.notice and the actual history repair are emitted/done by the
-                                    // catch(IOException)
-                                    // below, which runs on the rethrown 400 and stays the single emission point.
-                                }
+                                        @Override
+                                        public void toolCallPairingRejected() {
+                                            // Signalled by ModelRoundProcessor when it short-circuits a tool-pairing
+                                            // 400
+                                            // (instead of wasting the generic retry budget on the same broken history).
+                                            // The
+                                            // host.notice and the actual history repair are emitted/done by the
+                                            // catch(IOException)
+                                            // below, which runs on the rethrown 400 and stays the single emission
+                                            // point.
+                                        }
 
-                                @Override
-                                public void paused(final long millis) {
-                                    host.turnState.llmPausedMs += millis;
-                                }
-                            });
+                                        @Override
+                                        public void paused(final long millis) {
+                                            host.turnState.llmPausedMs += millis;
+                                        }
+                                    }));
                 } catch (final ContextWindowExceededException e) {
                     if (!retryOnOverflow || overflowRetried) {
                         throw e;
@@ -1275,6 +1279,12 @@ public class AgentTurnExecutor {
                         continue;
                     }
                     throw e;
+                } catch (final InterruptedException | RuntimeException e) {
+                    throw e;
+                } catch (final Exception e) {
+                    // CallableOp infers Exception for an operation throwing both IOException and
+                    // InterruptedException; all declared checked failures are handled above.
+                    throw new IllegalStateException(e);
                 }
                 host.usageTracker.record(usage[0]);
                 // exactly one logical (main) LLM request per stream invocation: this is the undo of the
