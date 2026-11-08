@@ -4,7 +4,7 @@
   <parent />
   <artifactId>yca-bin</artifactId>
   <name>YCA :: Aggregator (fatjar + native)</name>
-  <description>Aggregates core + tui + web into the single runnable fatjar (and the optional native binary) that carries the cli, run, tui and web commands plus the bundled web UI.</description>
+  <description>Aggregates core + tui + web + nono companion into the single runnable fatjar (and the optional native binary) that carries the cli, run, tui, web and nono serve commands plus the bundled web UI.</description>
 
   <properties>
     <graalvm.version>25.0.2</graalvm.version>
@@ -13,8 +13,13 @@
     <image.name>${image.registry}/coding-agent-${project.artifactId}:${project.version}</image.name>
   </properties>
 
-  <!-- the fatjar then contains every command: cli + run + tui + web + META-INF/resources frontend -->
+  <!-- the fatjar then contains every command: cli + run + tui + web + nono serve + META-INF/resources frontend -->
   <dependencies>
+    <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>nono-notifications-linux</artifactId>
+      <version>${project.version}</version>
+    </dependency>
     <dependency>
       <groupId>io.yupiik.ia.agent</groupId>
       <artifactId>core</artifactId>
@@ -138,7 +143,6 @@
               <reportUnsupportedElementsAtRuntime>false</reportUnsupportedElementsAtRuntime>
               <customOptions>
                 <customOption>-Djava.util.logging.manager=io.yupiik.logging.jul.YupiikLogManager</customOption>
-                <customOption>-Djava.net.preferIPv4Stack=true</customOption>
                 <customOption>-Duser.language=en</customOption>
                 <customOption>-Duser.country=US</customOption>
                 <customOption>-Dfile.encoding=UTF-8</customOption>

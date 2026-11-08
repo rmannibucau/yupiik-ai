@@ -9,5 +9,6 @@
 
   <subprojects>
     <subproject>maven-repository-indexer-parent</subproject>
+    <subproject>nono-notifications</subproject>
   </subprojects>
 </project>
