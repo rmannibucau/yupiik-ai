@@ -9,6 +9,68 @@ Model calls are protected against transient failures: yca applies rate
 limiting, automatic retries and concurrency limits so bursts and API hiccups do
 not break a session.
 
+== Concurrency limiting
+
+A provider account (or API key) only serves a bounded number of concurrent
+requests; beyond it the provider answers `429 concurrency_limit_exceeded` and
+burns the caller's quota on retries.
+
+yca caps the in-flight requests of a provider with a concurrency gate: one
+permit per request attempt, returned as soon as the answer (or the failure) is
+in - never held during a retry backoff, so a retrying caller does not keep a
+slot the other callers of the budget need.
+
+=== Per-process budget (default)
+
+By default each yca process owns one in-memory gate per provider, with a strict
+FIFO admission: waiters are served in arrival order and a newcomer never barges
+a slot a queued caller was about to get. The configured cap is
+`yca.llm.maxConcurrent` (or the per-provider `maxConcurrent`); when no limit is
+configured the first `429 concurrency_limit_exceeded` response lazily creates a
+gate bounded by the announced `"limit": N`, and the limit relaxes back to the
+configured cap after `yca.llm.concurrencyAdaptationMs`.
+
+A request which cannot get a slot waits up to
+`yca.llm.concurrencyAcquireTimeoutMs` (default 5 minutes), then fails with a
+retryable timeout instead of hanging forever on a saturated budget - another
+process holding every lease, or a suspended one.
+
+=== Account-wide budget (file leases)
+
+Several yca sessions on the same machine talk to the same account, so
+per-process gates multiply the concurrency the provider actually sees.
+
+When a provider opts into `capabilities.concurrency.useFileLock`, the budget of
+that provider is shared across every yca process of the machine through file
+leases under the storage home (`llm-concurrency/<providerId>`): each grant
+holds an OS file lock, so two processes cannot hold the same slot. The
+directory is local to the machine, so the lease only coordinates the processes
+of that machine - not multiple machines.
+
+This requires a local POSIX filesystem (record locks are unreliable on
+NFS/CIFS) and an explicit `maxConcurrent > 0`, because a provider-adapted
+429-only limit is not a licence to create files for a provider the user did not
+opt in. When the filesystem refuses the locks the gate degrades to a
+per-process budget instead of failing the request.
+
+The learned capacity (from a `429`) is persisted with a TTL so a restart seeds
+the gate with the last known limit instead of starting unlimited again.
+
+The `/btw` side questions share the same per-provider gates as the main
+conversations: the dedicated client built for a `/btw` call draws from the same
+budget, so a burst of side questions cannot bypass the account-wide limit.
+
+NOTE: A POSIX semaphore would be the textbook implementation of an account-wide
+budget, but it is not crash-resilient: a process killed with `kill -9` leaves
+the semaphore acquired forever. File leases are released by the kernel when the
+owning process dies, which is why this implementation uses them.
+
+=== Bounded waits and cancellation
+
+Queued callers observe the wait through the same pause notifications as
+throttling and backoffs, and an abandoned turn (interrupt, tab close) gives up
+its place in the queue instead of parking for nothing.
+
 == Turn loop guards
 
 A single turn can run many LLM round-trips. Iteration bounds (the per-window

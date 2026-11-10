@@ -116,6 +116,12 @@ public class ChatClient implements AutoCloseable {
     private final CodexAuthTemplateHelper codexAuthTemplateHelper;
     /** User-registered custom dynamic-header helpers, injected after the built-in ones; empty when none. */
     private final List<CustomDynamicHeaderTemplateHelper> customDynamicHeaderTemplateHelpers;
+    /**
+     * Concurrency gates shared by every client of a provider - the {@code /btw} dedicated client and
+     * this one must not each get their own copy of the limit. Never {@code null}: a client built
+     * without a registry (tests) owns a private one.
+     */
+    private final ProviderConcurrencyGates concurrencyGates;
 
     private final Map<ClientKey, DialectLlmClient> dialectClients = new ConcurrentHashMap<>();
     private final Map<ClientKey, LlmClientResilienceWrapper> resiliences = new ConcurrentHashMap<>();
@@ -150,7 +156,8 @@ public class ChatClient implements AutoCloseable {
             final ScheduledExecutorService scheduler,
             final ExecTemplateHelper execTemplateHelper,
             final CodexAuthTemplateHelper codexAuthTemplateHelper,
-            final List<CustomDynamicHeaderTemplateHelper> customDynamicHeaderTemplateHelpers) {
+            final List<CustomDynamicHeaderTemplateHelper> customDynamicHeaderTemplateHelpers,
+            final ProviderConcurrencyGates concurrencyGates) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.providerManager = providerManager;
@@ -167,6 +174,8 @@ public class ChatClient implements AutoCloseable {
         this.customDynamicHeaderTemplateHelpers = customDynamicHeaderTemplateHelpers == null
                 ? List.of()
                 : List.copyOf(customDynamicHeaderTemplateHelpers);
+        this.concurrencyGates =
+                concurrencyGates == null ? new ProviderConcurrencyGates(configuration) : concurrencyGates;
         // context overflow is handled by the agent loop (context compaction), retries after are
         // honored by the library resilience layer; per-provider clients get their own resilience
         // wrapper so the concurrency budget is scoped to one provider base URL
@@ -179,6 +188,18 @@ public class ChatClient implements AutoCloseable {
             final Clock clock,
             final ExtendedHttpClient httpClient,
             final ToolCallArgumentsRepairer toolCallArgumentsRepairer) {
+        this(configuration, mapper, providerManager, clock, httpClient, toolCallArgumentsRepairer, null);
+    }
+
+    /** Same as the 6-arg constructor, with a caller-owned shared concurrency gate registry. */
+    public ChatClient(
+            final CodingAgentConfiguration configuration,
+            final JsonMapper mapper,
+            final ProviderManager providerManager,
+            final Clock clock,
+            final ExtendedHttpClient httpClient,
+            final ToolCallArgumentsRepairer toolCallArgumentsRepairer,
+            final ProviderConcurrencyGates concurrencyGates) {
         this(
                 configuration,
                 mapper,
@@ -190,7 +211,8 @@ public class ChatClient implements AutoCloseable {
                 null,
                 null,
                 null,
-                List.of());
+                List.of(),
+                concurrencyGates);
     }
 
     /** Convenience constructor using a caller-owned HTTP client. */
@@ -228,7 +250,8 @@ public class ChatClient implements AutoCloseable {
                         configuration.llm().retryAfterMaxWaitMs(),
                         1.0d,
                         configuration.llm().concurrencyAdaptationMs(),
-                        configuration.llm().usageLimitRetryThresholdMs()),
+                        configuration.llm().usageLimitRetryThresholdMs(),
+                        configuration.llm().concurrencyAcquireTimeoutMs()),
                 null,
                 // the shared scheduler makes the retry waits cancellable (interrupt during a
                 // 429/retry-after backoff ends the wait early); null keeps the JDK fallback
@@ -236,7 +259,10 @@ public class ChatClient implements AutoCloseable {
                 // injected clock + mapper let the wrapper soft-parse a 429 usage_limit_reached body
                 // and skip pointless retries when the quota window still holds
                 clock,
-                mapper);
+                mapper,
+                // one gate per provider, shared by every client of the process (and, when the
+                // provider opts in, by the other yca processes of the machine)
+                capacity -> concurrencyGates.gate(provider, capacity));
     }
 
     protected ChatClient() {
@@ -252,6 +278,7 @@ public class ChatClient implements AutoCloseable {
         this.execTemplateHelper = null;
         this.codexAuthTemplateHelper = null;
         this.customDynamicHeaderTemplateHelpers = List.of();
+        this.concurrencyGates = null;
     }
 
     /** Cache key: a resilient dialect client is built per (flavor, provider) pair. */
@@ -352,7 +379,7 @@ public class ChatClient implements AutoCloseable {
                         headers.accept(builder);
                         transport.accept(builder);
                     });
-            final var bounds = provider.maxConcurrent() >= 0
+            final var bounds = provider.maxConcurrent() > 0
                     ? provider.maxConcurrent()
                     : configuration.llm().maxConcurrent();
             return new DialectLlmClient(

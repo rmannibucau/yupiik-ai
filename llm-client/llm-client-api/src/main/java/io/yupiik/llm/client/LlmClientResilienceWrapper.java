@@ -20,7 +20,9 @@ import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
+import io.yupiik.llm.client.spi.ConcurrencyGate;
 import io.yupiik.llm.client.spi.Dialect;
+import io.yupiik.llm.client.spi.InMemoryGate;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.ZonedDateTime;
@@ -35,12 +37,13 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.IntFunction;
 import java.util.regex.Pattern;
 
 /**
@@ -89,12 +92,15 @@ public final class LlmClientResilienceWrapper {
      */
     private final JsonMapper mapper;
     /**
-     * Concurrency gate. May be {@code null} while the configured cap is unlimited
-     * (negative/zero): the first provider {@code concurrency_limit_exceeded} response
-     * lazily creates it bounded by the announced limit so the adaptation still applies
-     * even without a statically configured cap.
+     * Concurrency gate, shared across the clients of a same provider when the caller injects a
+     * factory (that is how several processes can honour an account-wide budget). May be
+     * {@code null} while the configured cap is unlimited (negative/zero): the first provider
+     * {@code concurrency_limit_exceeded} response lazily creates it bounded by the announced limit
+     * so the adaptation still applies even without a statically configured cap.
      */
-    private volatile Semaphore semaphore;
+    private volatile ConcurrencyGate gate;
+    /** Builds the gate for a given configured capacity; {@code null} means the in-memory default. */
+    private final IntFunction<ConcurrencyGate> gateFactory;
 
     private final ArrayDeque<Long> requestTimes;
     private final ReentrantLock concurrencyLock;
@@ -102,7 +108,7 @@ public final class LlmClientResilienceWrapper {
     private long adaptedUntilMs;
 
     /**
-     * Creates the wrapper with explicit clock and mapper.
+     * Creates the wrapper with explicit clock, mapper and gate factory.
      *
      * @param config resilience knobs (defaults applied when {@code null}).
      * @param pauseListener listener notified of throttle/backoff pauses (may be {@code null}).
@@ -114,6 +120,37 @@ public final class LlmClientResilienceWrapper {
      *     {@code 429} body (assumed non-null).
      * @param mapper mapper used to softly parse a provider {@code 429} body for the usage-limit window;
      *     when {@code null} the window is never inspected and every 429 keeps the normal retry behavior.
+     * @param gateFactory builds the concurrency gate for a configured capacity, allowing a caller to
+     *     share - or cross processes - the budget of a provider. {@code null} (the default) keeps an
+     *     in-memory {@link InMemoryGate}. It is only invoked for a strictly positive capacity, the
+     *     lazily learned limit included.
+     */
+    public LlmClientResilienceWrapper(
+            final LlmResilienceConfig config,
+            final Consumer<PauseEvent> pauseListener,
+            final ScheduledExecutorService scheduler,
+            final Clock clock,
+            final JsonMapper mapper,
+            final IntFunction<ConcurrencyGate> gateFactory) {
+        this.config = config == null ? LlmResilienceConfig.defaults() : config;
+        this.pauseListener = pauseListener;
+        this.scheduler = scheduler;
+        this.clock = clock;
+        this.mapper = mapper;
+        this.gateFactory = gateFactory;
+        this.gate = this.config.maxConcurrent() > 0 ? newGate(this.config.maxConcurrent()) : null;
+        this.requestTimes = new ArrayDeque<>();
+        this.concurrencyLock = new ReentrantLock();
+    }
+
+    /**
+     * Creates the wrapper with explicit clock and mapper.
+     *
+     * @param config resilience knobs (defaults applied when {@code null}).
+     * @param pauseListener listener notified of throttle/backoff pauses (may be {@code null}).
+     * @param scheduler scheduler used to park retry waits and poll the cancellation probe.
+     * @param clock clock used to evaluate the {@code resets_at} of a {@code usage_limit_reached} body.
+     * @param mapper mapper used to softly parse a provider {@code 429} body for the usage-limit window.
      */
     public LlmClientResilienceWrapper(
             final LlmResilienceConfig config,
@@ -121,14 +158,7 @@ public final class LlmClientResilienceWrapper {
             final ScheduledExecutorService scheduler,
             final Clock clock,
             final JsonMapper mapper) {
-        this.config = config == null ? LlmResilienceConfig.defaults() : config;
-        this.pauseListener = pauseListener;
-        this.scheduler = scheduler;
-        this.clock = clock;
-        this.mapper = mapper;
-        this.semaphore = this.config.maxConcurrent() > 0 ? new Semaphore(this.config.maxConcurrent()) : null;
-        this.requestTimes = new ArrayDeque<>();
-        this.concurrencyLock = new ReentrantLock();
+        this(config, pauseListener, scheduler, clock, mapper, null);
     }
 
     /**
@@ -212,9 +242,9 @@ public final class LlmClientResilienceWrapper {
             final Consumer<PauseEvent> listener,
             final boolean skipRetries) {
         final var pause = listener == null ? pauseListener : listener;
-        return acquire(pause)
-                .thenCompose(acquired -> attempt(dialect, request, cancelled, pause, skipRetries)
-                        .whenComplete((result, error) -> release(acquired)));
+        // no permit at this level: one is taken around each attempt and returned before any backoff
+        // wait, so a retrying caller never parks on a slot the other callers of the budget need
+        return attempt(dialect, request, cancelled, pause, skipRetries);
     }
 
     /**
@@ -244,14 +274,9 @@ public final class LlmClientResilienceWrapper {
         // HTTP 429/5xx...) are transient and safe to retry: nothing was delivered yet, same
         // semantics as chat(). Once the publisher is handed out, mid-stream failures are the
         // caller's concern (it owns the partial content and decides whether to replay).
-        return acquire(pause)
-                .thenCompose(acquired -> retryStream(dialect, request, cancelled, 1, pause)
-                        .whenComplete((publisher, error) -> {
-                            if (error != null) {
-                                release(acquired);
-                            }
-                        })
-                        .thenApply(publisher -> new ReleaseOnCompletePublisher<>(publisher, semaphore, acquired)));
+        // The permit of the successful attempt is handed to the publisher: a stream holds its slot
+        // for its whole consumption (minutes on a thinking model), the retried attempts do not.
+        return retryStream(dialect, request, cancelled, 1, pause);
     }
 
     /**
@@ -261,14 +286,10 @@ public final class LlmClientResilienceWrapper {
      * @return the listed models.
      */
     public CompletionStage<LlmModels> models(final Dialect dialect) {
-        return acquire(pauseListener)
-                .thenCompose(acquired -> dialect.models().whenComplete((result, error) -> release(acquired)));
-    }
-
-    private void release(final boolean acquired) {
-        if (acquired && semaphore != null) {
-            semaphore.release();
-        }
+        // the catalog call is a regular request for the provider budget: it takes one slot for its
+        // own duration only, and is released as soon as the answer (or the failure) is in
+        return acquire(pauseListener, null)
+                .thenCompose(release -> dialect.models().whenComplete((result, error) -> release.run()));
     }
 
     private CompletionStage<LlmResponse> attempt(
@@ -301,6 +322,11 @@ public final class LlmClientResilienceWrapper {
         return retry(dialect, request, cancelled, attempt, listener, false);
     }
 
+    /**
+     * Runs one attempt: the concurrency permit is taken around the provider call only, so a
+     * retrying caller never keeps a slot during its backoff wait (which lasts from a few hundreds of
+     * milliseconds up to several minutes for a {@code retry-after}).
+     */
     private CompletionStage<LlmResponse> retry(
             final Dialect dialect,
             final LlmRequest request,
@@ -309,34 +335,55 @@ public final class LlmClientResilienceWrapper {
             final Consumer<PauseEvent> listener,
             final boolean skipRetries) {
         final var result = new CompletableFuture<LlmResponse>();
-        final var future = dialect.chat(request, cancelled);
-        future.whenComplete((response, error) -> {
-            try {
-                if (error != null) {
-                    final var cause = unwrap(error);
-                    boolean retry = false;
-                    if (cause instanceof ContextWindowExceededException) {
-                        retry = !skipRetries
-                                && config.retryOnContextOverflow()
-                                && attempt < config.retriesMaxAttempts();
-                    } else if (!(cause instanceof DialectNotSupportedException)) {
-                        retry = !skipRetries && attempt < config.retriesMaxAttempts() && retryable(cause);
-                    }
-                    if (retry) {
-                        concurrencyLimitDetected(cause, listener);
-                        retryAfter(attempt, cause, dialect, request, cancelled, listener)
-                                .whenComplete((r, e) -> completeInto(result, r, e));
-                    } else {
-                        result.completeExceptionally(cause);
-                    }
-                } else if (response == null) {
-                    result.completeExceptionally(new IOException("null response"));
-                } else {
-                    result.complete(response);
-                }
-            } catch (final RuntimeException e) {
-                result.completeExceptionally(e);
+        acquire(listener, cancelled).whenComplete((release, acquireError) -> {
+            if (acquireError != null) {
+                result.completeExceptionally(unwrap(acquireError));
+                return;
             }
+            final CompletionStage<LlmResponse> call;
+            try {
+                if (cancelled != null && cancelled.getAsBoolean()) {
+                    // the turn was abandoned while we were queued for a slot: give it back instead
+                    // of issuing a request nobody is waiting for anymore
+                    release.run();
+                    result.completeExceptionally(new IOException("Cancelled"));
+                    return;
+                }
+                call = dialect.chat(request, cancelled);
+            } catch (final RuntimeException e) {
+                release.run();
+                result.completeExceptionally(e);
+                return;
+            }
+            call.whenComplete((response, error) -> {
+                release.run(); // the slot covers the request, never the retry wait below
+                try {
+                    if (error != null) {
+                        final var cause = unwrap(error);
+                        boolean retry = false;
+                        if (cause instanceof ContextWindowExceededException) {
+                            retry = !skipRetries
+                                    && config.retryOnContextOverflow()
+                                    && attempt < config.retriesMaxAttempts();
+                        } else if (!(cause instanceof DialectNotSupportedException)) {
+                            retry = !skipRetries && attempt < config.retriesMaxAttempts() && retryable(cause);
+                        }
+                        if (retry) {
+                            concurrencyLimitDetected(cause, listener);
+                            retryAfter(attempt, cause, dialect, request, cancelled, listener)
+                                    .whenComplete((r, e) -> completeInto(result, r, e));
+                        } else {
+                            result.completeExceptionally(cause);
+                        }
+                    } else if (response == null) {
+                        result.completeExceptionally(new IOException("null response"));
+                    } else {
+                        result.complete(response);
+                    }
+                } catch (final RuntimeException e) {
+                    result.completeExceptionally(e);
+                }
+            });
         });
         return result;
     }
@@ -463,10 +510,28 @@ public final class LlmClientResilienceWrapper {
             final int attempt,
             final Consumer<PauseEvent> listener) {
         final var result = new CompletableFuture<Flow.Publisher<LlmStreamEvent>>();
-        try {
-            dialect.stream(request, cancelled).whenComplete((publisher, error) -> {
+        acquire(listener, cancelled).whenComplete((release, acquireError) -> {
+            if (acquireError != null) {
+                result.completeExceptionally(unwrap(acquireError));
+                return;
+            }
+            final CompletionStage<Flow.Publisher<LlmStreamEvent>> setup;
+            try {
+                if (cancelled != null && cancelled.getAsBoolean()) {
+                    release.run();
+                    result.completeExceptionally(new IOException("Cancelled"));
+                    return;
+                }
+                setup = dialect.stream(request, cancelled);
+            } catch (final RuntimeException e) {
+                release.run();
+                result.completeExceptionally(e);
+                return;
+            }
+            setup.whenComplete((publisher, error) -> {
                 try {
                     if (error != null) {
+                        release.run(); // failed setup: the slot goes back before the backoff wait
                         final var cause = unwrap(error);
                         boolean retry = false;
                         if (cause instanceof ContextWindowExceededException) {
@@ -482,17 +547,19 @@ public final class LlmClientResilienceWrapper {
                             result.completeExceptionally(cause);
                         }
                     } else if (publisher == null) {
+                        release.run();
                         result.completeExceptionally(new IOException("null stream"));
                     } else {
-                        result.complete(publisher);
+                        // a stream keeps its slot for its whole consumption: the caller owns the
+                        // grant from now on and gets it back when the publisher terminates
+                        result.complete(new ReleaseOnCompletePublisher<>(publisher, release));
                     }
                 } catch (final RuntimeException e) {
+                    release.run();
                     result.completeExceptionally(e);
                 }
             });
-        } catch (final RuntimeException e) {
-            result.completeExceptionally(e);
-        }
+        });
         return result;
     }
 
@@ -540,8 +607,12 @@ public final class LlmClientResilienceWrapper {
                 waitReason = "retry-after=" + seconds + "s";
             } else if (isConcurrencyLimit(lastError)) {
                 // no explicit header on a concurrency limit: wait a sensible default so the
-                // provider has time to release the concurrent slots
-                waitMs = Math.min(Math.max(waitMs, CONCURRENCY_LIMIT_DEFAULT_WAIT_MS), config.retryAfterMaxWaitMs());
+                // provider has time to release the concurrent slots. The floor is jittered per
+                // attempt (75%..150% of the default) so several yca processes hitting the same
+                // provider do not pile up their retries on the exact same instants.
+                final var jitteredFloor = (long) (CONCURRENCY_LIMIT_DEFAULT_WAIT_MS
+                        * ThreadLocalRandom.current().nextDouble(0.75d, 1.5d));
+                waitMs = Math.min(Math.max(waitMs, jitteredFloor), config.retryAfterMaxWaitMs());
                 waitReason = "concurrency-limit (no retry-after)";
             }
         }
@@ -716,26 +787,25 @@ public final class LlmClientResilienceWrapper {
             return;
         }
         final boolean alreadyAdapted;
+        final var now = clock == null ? System.currentTimeMillis() : clock.millis();
         concurrencyLock.lock();
         try {
             // with an unlimited configured cap the gate is null: lazily create it bounded
             // by the provider-announced limit so the adaptation applies even then
-            if (semaphore == null && config.maxConcurrent() <= 0) {
-                semaphore = new Semaphore(Math.max(1, limit));
-            }
-            final var current = semaphore == null ? Integer.MAX_VALUE : semaphore.availablePermits();
-            if (semaphore != null && (limit < current || limit < config.maxConcurrent())) {
-                while (semaphore.availablePermits() > limit) {
-                    semaphore.tryAcquire();
-                }
+            if (gate == null && config.maxConcurrent() <= 0) {
+                gate = newGate(limit);
+            } else if (gate != null && limit < Math.max(1, config.maxConcurrent())) {
+                // a provider announcing a smaller budget than the configured ceiling caps the gate
+                // down; a larger announcement cannot widen that ceiling and is ignored
+                gate.setCapacity(limit);
             }
             // already adapted to this exact limit and the window has not relaxed yet:
             // a repeated 429 while the cap is active is absorbed silently - only the
             // initial adaptation (or a *changed* limit) is worth surfacing once.
-            alreadyAdapted = adaptedConcurrency == Math.max(1, limit) && System.currentTimeMillis() < adaptedUntilMs;
+            alreadyAdapted = adaptedConcurrency == Math.max(1, limit) && now < adaptedUntilMs;
             if (!alreadyAdapted) {
                 adaptedConcurrency = Math.max(1, limit);
-                adaptedUntilMs = System.currentTimeMillis() + config.concurrencyAdaptationMs();
+                adaptedUntilMs = now + config.concurrencyAdaptationMs();
             }
         } finally {
             concurrencyLock.unlock();
@@ -747,28 +817,33 @@ public final class LlmClientResilienceWrapper {
     }
 
     private void relaxAdaptedConcurrency() {
-        if (semaphore == null || adaptedConcurrency <= 0) {
+        if (adaptedConcurrency <= 0) { // hot path: relaxed between two provider signals
             return;
         }
+        final var now = clock == null ? System.currentTimeMillis() : clock.millis();
         concurrencyLock.lock();
         try {
-            if (adaptedConcurrency <= 0 || System.currentTimeMillis() < adaptedUntilMs) {
+            if (adaptedConcurrency <= 0 || now < adaptedUntilMs) {
                 return;
             }
-            if (config.maxConcurrent() > 0) {
-                // restore up to the configured cap
-                while (semaphore.availablePermits() < config.maxConcurrent()) {
-                    semaphore.release();
+            if (gate != null) {
+                if (config.maxConcurrent() > 0) {
+                    gate.setCapacity(config.maxConcurrent()); // restore the configured cap
+                } else {
+                    gate = null; // the cap was provider-adapted only: back to unlimited
                 }
-            } else {
-                // the cap was provider-adapted only: drop the gate back to unlimited
-                semaphore = null;
             }
             adaptedConcurrency = -1;
             adaptedUntilMs = 0;
         } finally {
             concurrencyLock.unlock();
         }
+    }
+
+    /** Builds the gate for a strictly positive capacity, in memory unless a factory was injected. */
+    private ConcurrencyGate newGate(final int capacity) {
+        final var bound = Math.max(1, capacity);
+        return gateFactory == null ? new InMemoryGate(bound) : gateFactory.apply(bound);
     }
 
     private static <A> void completeInto(final CompletableFuture<A> target, final A value, final Throwable error) {
@@ -779,31 +854,134 @@ public final class LlmClientResilienceWrapper {
         }
     }
 
-    /** Throttle (token bucket) then acquire the concurrency permit; both interruptible. */
-    private CompletionStage<Boolean> acquire(final Consumer<PauseEvent> listener) {
+    /** No slot to return: the release action is a no-op instead of {@code null}. */
+    private static final Runnable NOOP = () -> {};
+
+    /**
+     * Throttles (token bucket) then waits for a concurrency slot.
+     *
+     * @param listener pause listener notified of the throttle and of a non-immediate wait.
+     * @param cancelled cancellation probe, so an abandoned turn does not queue for nothing.
+     * @return the idempotent slot release action, a no-op when no gate is active - nothing was taken
+     *     then, and releasing anyway would inflate a gate the 429 adaptation creates mid-flight.
+     */
+    private CompletionStage<Runnable> acquire(final Consumer<PauseEvent> listener, final BooleanSupplier cancelled) {
         try {
-            throttle(null, listener);
-            relaxAdaptedConcurrency();
-            if (semaphore != null) {
-                // a concurrency wait is invisible to the UI otherwise: surface it once per
-                // blocked attempt through the same pause listener as throttling/backoffs
-                if (semaphore.availablePermits() == 0 && listener != null) {
-                    listener.accept(new PauseEvent(
-                            0,
-                            "concurrency limit reached, " + (semaphore.getQueueLength() + 1) + " requests waiting",
-                            0));
-                }
-                semaphore.acquire();
-                return completedFuture(true);
-            }
-            // no gate: there is nothing to release later, so the caller must know the permit
-            // was never taken (a release() without an acquire would inflate the gate above its
-            // cap once concurrencyLimitDetected() lazily creates it mid-flight)
-            return completedFuture(false);
+            throttle(cancelled, listener);
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
             return failed(new IOException(e));
         }
+        relaxAdaptedConcurrency();
+        final var current = gate;
+        if (current == null) {
+            return completedFuture(NOOP);
+        }
+        final var granted = current.acquire().toCompletableFuture();
+        if (!granted.isDone() && listener != null) {
+            // a concurrency wait is invisible to the UI otherwise: surface it once per blocked
+            // attempt through the same pause listener as the throttling and backoff ones
+            listener.accept(new PauseEvent(0, "concurrency limit reached, waiting for a free slot", 0));
+        }
+        return boundedAcquire(granted, cancelled);
+    }
+
+    /**
+     * Bounds the wait for a slot. An unbounded wait turns a permanently saturated budget (a peer
+     * process holding every lease, a {@code kill -STOP}'d one) into a silent hang, whereas a
+     * retryable timeout lets the caller surface it; the message carries a transient marker so the
+     * retry loop treats it like any other transport timeout.
+     */
+    private CompletionStage<Runnable> boundedAcquire(
+            final CompletableFuture<Runnable> granted, final BooleanSupplier cancelled) {
+        final var timeoutMs = config.concurrencyAcquireTimeoutMs();
+        final var bounded = timeoutMs > 0 || cancelled != null;
+        if (!bounded || granted.isDone()) {
+            return granted;
+        }
+        // the result is completed by this method (never by the gate directly) so the timeout - which
+        // is a retryable IOException - cannot be masked by the CancellationException a cancelled
+        // grant stage raises. The gate keeps granting attendants even after the timeout/cancel probe
+        // won: the late grant must hand its slot back to the caller instead of leaking it.
+        final var result = new CompletableFuture<Runnable>();
+        granted.whenComplete((release, error) -> {
+            if (error == null) {
+                // a timeout or cancel may have won the race a microsecond before this grant landed:
+                // the waiter's slot is real, so give it back instead of dropping it
+                if (!result.complete(release)) {
+                    release.run();
+                }
+            } else {
+                // the grant itself failed (gate closed): nothing was leased, surface the failure
+                result.completeExceptionally(unwrap(error));
+            }
+        });
+        final Runnable[] tasks = new Runnable[2];
+        if (timeoutMs > 0) {
+            final Runnable expire = () -> {
+                final var error = new IOException("Timed out waiting for a concurrency slot after " + timeoutMs + "ms");
+                if (result.completeExceptionally(error)) {
+                    granted.cancel(false); // leave the queue: no slot must be granted to a dead caller
+                }
+            };
+            if (scheduler == null) {
+                // one-shot: it only fires once and a late fire sees the completed result; the
+                // scheduler variant below is cancellable through the cleanup
+                CompletableFuture.delayedExecutor(timeoutMs, TimeUnit.MILLISECONDS)
+                        .execute(expire);
+            } else {
+                final var task = scheduler.schedule(expire, timeoutMs, TimeUnit.MILLISECONDS);
+                tasks[0] = () -> task.cancel(false);
+            }
+        }
+        if (cancelled != null) {
+            // a queued caller must be able to give up: the gate returns nothing until released, so
+            // the probe is polled (same cadence as the retry waits) and the wait ends on abort.
+            // Either way it self-terminates: the fixed-rate probe is cancelled by the cleanup below,
+            // the JDK fallback re-arms only while the wait is still pending (a trailing no-op fire
+            // sees the completed result and exits).
+            final Runnable poll = () -> {
+                if (cancelled.getAsBoolean()) {
+                    cancelWait(result, granted); // completion runs the cleanup, which stops the probe
+                }
+            };
+            if (scheduler == null) {
+                final Runnable reArm = new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!result.isDone() && !(cancelled.getAsBoolean() && cancelWait(result, granted))) {
+                            CompletableFuture.delayedExecutor(CANCEL_POLL_MS, TimeUnit.MILLISECONDS)
+                                    .execute(this);
+                        }
+                    }
+                };
+                CompletableFuture.delayedExecutor(CANCEL_POLL_MS, TimeUnit.MILLISECONDS)
+                        .execute(reArm);
+            } else {
+                final var probe = scheduler.scheduleAtFixedRate(poll, 0, CANCEL_POLL_MS, TimeUnit.MILLISECONDS);
+                tasks[1] = () -> probe.cancel(false);
+            }
+        }
+        // registered last: when the grant completes synchronously between the isDone() fast path and
+        // this registration, the tasks above were already assigned, so no scheduled task leaks
+        result.whenComplete((release, error) -> {
+            for (final var task : tasks) {
+                if (task != null) {
+                    task.run();
+                }
+            }
+        });
+        return result;
+    }
+
+    /** Ends a queued wait with the cancelled marker, unless a grant already won the race. */
+    private static boolean cancelWait(
+            final CompletableFuture<Runnable> result, final CompletableFuture<Runnable> granted) {
+        if (!result.completeExceptionally(new IOException("Cancelled"))) {
+            return false;
+        }
+        granted.cancel(false);
+        return true;
     }
 
     private void throttle(final BooleanSupplier cancelled, final Consumer<PauseEvent> listener)
@@ -865,18 +1043,31 @@ public final class LlmClientResilienceWrapper {
         return CompletableFuture.completedFuture(value);
     }
 
-    /** Wraps a publisher to release the concurrency permit when the stream ends or is cancelled. */
-    private record ReleaseOnCompletePublisher<T>(Flow.Publisher<T> delegate, Semaphore semaphore, boolean acquired)
+    /**
+     * Wraps a publisher to release the concurrency slot when the stream terminates or is cancelled.
+     *
+     * <p>On cancellation the upstream subscription is cancelled <em>before</em> the slot is handed
+     * back: admitting the next request while the previous connection is still being torn down would
+     * defeat the budget exactly when the provider is counting connections. On a terminal signal the
+     * slot is returned first, because the consumer of the publisher may synchronously start the next
+     * request (the next agent round) and would otherwise queue behind a slot that is already free.</p>
+     */
+    private record ReleaseOnCompletePublisher<T>(Flow.Publisher<T> delegate, Runnable release)
             implements Flow.Publisher<T> {
 
         @Override
         public void subscribe(final Flow.Subscriber<? super T> subscriber) {
-            final var released = new CompletableFuture<Void>();
+            final var released = new AtomicBoolean();
+            final Runnable releaseOnce = () -> {
+                if (released.compareAndSet(false, true)) {
+                    release.run();
+                }
+            };
             delegate.subscribe(new Flow.Subscriber<>() {
                 @Override
                 public void onSubscribe(final Flow.Subscription subscription) {
                     // a cancelled stream never delivers onError/onComplete upstream (the caller
-                    // abandons it by calling cancel() mid-stream), so the permit would leak:
+                    // abandons it by calling cancel() mid-stream), so the slot would leak:
                     // cancel() releases it exactly once, like the terminal callbacks below.
                     subscriber.onSubscribe(new Flow.Subscription() {
                         @Override
@@ -886,8 +1077,8 @@ public final class LlmClientResilienceWrapper {
 
                         @Override
                         public void cancel() {
-                            release();
                             subscription.cancel();
+                            releaseOnce.run();
                         }
                     });
                 }
@@ -899,20 +1090,17 @@ public final class LlmClientResilienceWrapper {
 
                 @Override
                 public void onError(final Throwable throwable) {
-                    release();
+                    // release before notifying: the terminal callback may itself start the next
+                    // request (a retried turn, the next round), which would queue behind a slot this
+                    // stream no longer uses
+                    releaseOnce.run();
                     subscriber.onError(throwable);
                 }
 
                 @Override
                 public void onComplete() {
-                    release();
+                    releaseOnce.run();
                     subscriber.onComplete();
-                }
-
-                private void release() {
-                    if (released.complete(null) && acquired && semaphore != null) {
-                        semaphore.release();
-                    }
                 }
             });
         }

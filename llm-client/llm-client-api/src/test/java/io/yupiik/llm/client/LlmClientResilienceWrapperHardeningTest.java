@@ -16,6 +16,7 @@
 package io.yupiik.llm.client;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -24,10 +25,11 @@ import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
+import io.yupiik.llm.client.spi.ConcurrencyGate;
 import io.yupiik.llm.client.spi.Dialect;
+import io.yupiik.llm.client.spi.InMemoryGate;
 import io.yupiik.llm.client.spi.StreamAttempt;
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.net.http.HttpResponse;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -35,7 +37,6 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Flow;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
@@ -45,24 +46,36 @@ class LlmClientResilienceWrapperHardeningTest {
 
     private static LlmResilienceConfig config(final int attempts, final long baseDelayMs, final int maxConcurrent) {
         return new LlmResilienceConfig(
-                attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, 1.0d, 900_000L, 3_600_000L);
+                attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, 1.0d, 900_000L, 3_600_000L, 300_000L);
     }
 
     private static LlmResilienceConfig config(
             final int attempts, final long baseDelayMs, final int maxConcurrent, final double waitScale) {
         return new LlmResilienceConfig(
-                attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, waitScale, 900_000L, 3_600_000L);
+                attempts,
+                baseDelayMs,
+                0,
+                maxConcurrent,
+                false,
+                true,
+                300_000L,
+                waitScale,
+                900_000L,
+                3_600_000L,
+                300_000L);
     }
 
     @Test
     void aNeverAcquiredPermitIsNotReleasedWhenTheGateAppearsMidFlight() throws Exception {
         // regression for the permit-inflation race: with an unlimited config the gate is absent,
         // so the first request acquires nothing; a concurrency-limit 429 then lazily creates the
-        // semaphore. The old code released unconditionally, inflating the new gate above its cap.
+        // gate. The old code released unconditionally, inflating the new gate above its cap.
         final var dial = new ScriptedDialect(
                 new IOException("LLM request failed (429): {\"error\":{\"code\":\"concurrency_limit_exceeded\","
                         + "\"message\":\"Too many concurrent requests\",\"limit\":2}}"));
-        final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 0, 0.0001d));
+        final var gate = new CountingGate(2);
+        final var wrapper =
+                new LlmClientResilienceWrapper(config(2, 0, 0, 0.0001d), null, null, null, null, capacity -> gate);
 
         assertEquals(
                 "ok",
@@ -71,20 +84,27 @@ class LlmClientResilienceWrapperHardeningTest {
                         .join()
                         .text());
 
-        // the lazily-created gate must still hold exactly its announced limit (2): a phantom
-        // release from the first (never-acquiring) request would have inflated it to 3+
-        final var semaphore = gate(wrapper);
-        if (semaphore != null) {
-            assertEquals(2, semaphore.availablePermits(), "no permit must be released without an acquire");
-        }
+        // the attempt which failed on the 429 never held a slot: only the retried one did, and it
+        // gave it back. A phantom release from the first attempt would show up as released > acquired
+        assertEquals(1, gate.acquired.get(), "only the retried attempt takes a slot");
+        assertEquals(1, gate.released.get(), "no slot must be released without an acquire");
+
+        // the lazily-created gate must still hold exactly its announced limit (2)
+        final var first = gate.acquire().toCompletableFuture().join();
+        final var second = gate.acquire().toCompletableFuture().join();
+        final var third = gate.acquire().toCompletableFuture();
+        assertFalse(third.isDone(), "an inflated gate would admit a third request");
+        first.run();
+        second.run();
+        assertTrue(third.isDone(), "the third request is served once a slot is returned");
+        third.join().run();
     }
 
     @Test
     void cancelledStreamNeverAcquiredDoesNotReleaseIntoTheNewGate() throws Exception {
         // stream path: the first (unlimited) stream attempt fails with a concurrency-limit 429,
         // creating the gate; the retried live stream is then cancelled by the subscriber. The
-        // wrapper must only release the permit the retry actually acquired (1), not one extra
-        // from the initial attempt that never held a permit.
+        // wrapper must only release the slot the retry actually acquired.
         final var calls = new AtomicInteger();
         final Dialect dial = new ScriptedDialect() {
             @Override
@@ -105,7 +125,9 @@ class LlmClientResilienceWrapperHardeningTest {
                 }));
             }
         };
-        final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 0, 0.0001d));
+        final var gate = new CountingGate(2);
+        final var wrapper =
+                new LlmClientResilienceWrapper(config(2, 0, 0, 0.0001d), null, null, null, null, capacity -> gate);
         final var published =
                 wrapper.stream(dial, null, () -> false).toCompletableFuture().join();
         // cancel immediately from the subscriber side
@@ -124,12 +146,17 @@ class LlmClientResilienceWrapperHardeningTest {
             @Override
             public void onComplete() {}
         });
-        // the retry acquired 1 permit and released it exactly once on cancel: the gate must be
-        // back to its announced limit (2), not 3
-        final var semaphore = gate(wrapper);
-        if (semaphore != null) {
-            assertEquals(2, semaphore.availablePermits(), "cancel must release exactly the acquired permit");
-        }
+        // the retry acquired one slot and released it exactly once on cancel: a failed setup never
+        // held one, so the pair must be 1/1 and the gate must be back to its announced limit
+        assertEquals(1, gate.acquired.get(), "only the successful stream setup takes a slot");
+        assertEquals(1, gate.released.get(), "cancel must release exactly the acquired slot");
+        final var first = gate.acquire().toCompletableFuture().join();
+        final var second = gate.acquire().toCompletableFuture().join();
+        final var third = gate.acquire().toCompletableFuture();
+        assertFalse(third.isDone(), "a leaked slot would admit a third stream");
+        first.run();
+        second.run();
+        third.join().run();
     }
 
     @Test
@@ -211,10 +238,32 @@ class LlmClientResilienceWrapperHardeningTest {
         assertEquals(1, dial.calls.get(), "a deterministic parse error must not be retried");
     }
 
-    private static Semaphore gate(final LlmClientResilienceWrapper wrapper) throws ReflectiveOperationException {
-        final Field field = LlmClientResilienceWrapper.class.getDeclaredField("semaphore");
-        field.setAccessible(true);
-        return (Semaphore) field.get(wrapper);
+    /**
+     * In-memory gate counting the acquire/release pairs: the point of the regression coverage is the
+     * pairing (a slot must never be returned without having been taken), not the semaphore internals.
+     */
+    private static class CountingGate implements ConcurrencyGate {
+        private final InMemoryGate delegate;
+        private final AtomicInteger acquired = new AtomicInteger();
+        private final AtomicInteger released = new AtomicInteger();
+
+        private CountingGate(final int capacity) {
+            this.delegate = new InMemoryGate(capacity);
+        }
+
+        @Override
+        public CompletionStage<Runnable> acquire() {
+            acquired.incrementAndGet();
+            return delegate.acquire().thenApply(release -> () -> {
+                released.incrementAndGet();
+                release.run();
+            });
+        }
+
+        @Override
+        public void setCapacity(final int capacity) {
+            delegate.setCapacity(capacity);
+        }
     }
 
     private static LlmResponse response() {

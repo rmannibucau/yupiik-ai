@@ -35,8 +35,13 @@ public record ProviderCapabilities(
         OpenAICapabilities openai,
 
         @Property(documentation = "Experimental OpenCode free inference transport settings.")
-        OpenCodeCapabilities opencode) {
+        OpenCodeCapabilities opencode,
+
+        @Property(
+                documentation =
+                        "Concurrency budget knobs: sharing the provider budget across the yca processes of the machine.")
+        ConcurrencyCapabilities concurrency) {
     public ProviderCapabilities(final CodexCapabilities codex, final OpenAICapabilities openai) {
-        this(codex, openai, null);
+        this(codex, openai, null, null);
     }
 }

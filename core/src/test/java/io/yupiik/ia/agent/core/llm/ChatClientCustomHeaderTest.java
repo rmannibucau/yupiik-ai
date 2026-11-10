@@ -165,7 +165,8 @@ class ChatClientCustomHeaderTest {
                 null,
                 new ExecTemplateHelper(),
                 new CodexAuthTemplateHelper(mapper, http, config),
-                List.of(new CustomAuthTemplateHelper(), new CustomAuthHeaderOverride()));
+                List.of(new CustomAuthTemplateHelper(), new CustomAuthHeaderOverride()),
+                null);
     }
 
     private CodingAgentConfiguration configuration(

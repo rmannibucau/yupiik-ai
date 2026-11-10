@@ -105,7 +105,8 @@ class WebSessionManagerPromptTest {
                 new SessionLifecycle(sessionStore),
                 broker,
                 this.mapper,
-                new BtwAnswerer(null, null, null, null, null, null, null, null, null, null, null, null, null, null));
+                new BtwAnswerer(
+                        null, null, null, null, null, null, null, null, null, null, null, null, null, null, null));
     }
 
     @Test

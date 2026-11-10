@@ -58,6 +58,12 @@ public record LlmConfiguration(
         long concurrencyAdaptationMs,
 
         @Property(
+                defaultValue = "300000L",
+                documentation =
+                        "Maximum time in milliseconds a request may wait for a free concurrency slot before failing with a retryable timeout (default 5 minutes; 0 or negative waits forever). It bounds a permanently saturated budget - another yca process holding every slot, or a suspended one - instead of hanging silently.")
+        long concurrencyAcquireTimeoutMs,
+
+        @Property(
                 defaultValue = "true",
                 documentation =
                         "On a provider 'context length exceeded' error, compact the context and retry the request once.")

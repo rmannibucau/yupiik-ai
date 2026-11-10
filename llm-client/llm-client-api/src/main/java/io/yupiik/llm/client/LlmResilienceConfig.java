@@ -37,6 +37,10 @@ package io.yupiik.llm.client;
  *     with a recovery window beyond this threshold (via {@code limit_window_minutes} or {@code resets_at})
  *     is treated as non-retryable (the quota will not clear in retry-seconds); default 1 hour. Shorter
  *     windows keep the normal retry behavior.
+ * @param concurrencyAcquireTimeoutMs max time a request may wait for a free concurrency slot before
+ *     failing with a retryable {@code IOException} (default 5 minutes; {@code 0} or negative waits
+ *     forever). Without it a permanently saturated gate - a peer process holding every slot, or a
+ *     {@code kill -STOP}'d one - would turn a {@code 429} into a silent hang.
  */
 public record LlmResilienceConfig(
         int retriesMaxAttempts,
@@ -48,16 +52,17 @@ public record LlmResilienceConfig(
         long retryAfterMaxWaitMs,
         double waitScale,
         long concurrencyAdaptationMs,
-        long usageLimitRetryThresholdMs) {
+        long usageLimitRetryThresholdMs,
+        long concurrencyAcquireTimeoutMs) {
 
     /**
      * The default configuration.
      *
      * @return 3 attempts, 500 ms base delay, throttling off, 4 concurrent, context overflow retry on,
      *     retry-after honoring on capped at 5 minutes, 15 minutes concurrency adaptation cooldown,
-     *     1 hour usage-limit window threshold.
+     *     1 hour usage-limit window threshold, 5 minutes concurrency-slot wait.
      */
     public static LlmResilienceConfig defaults() {
-        return new LlmResilienceConfig(3, 500, 0, 4, true, true, 300_000L, 1.0d, 900_000L, 3_600_000L);
+        return new LlmResilienceConfig(3, 500, 0, 4, true, true, 300_000L, 1.0d, 900_000L, 3_600_000L, 300_000L);
     }
 }

@@ -55,7 +55,7 @@ class SkipRetriesTest {
 
     private static LlmResilienceConfig config(final int attempts, final int maxConcurrent) {
         return new LlmResilienceConfig(
-                attempts, 0, 0, maxConcurrent, false, true, 300_000L, 1.0d, 900_000L, 3_600_000L);
+                attempts, 0, 0, maxConcurrent, false, true, 300_000L, 1.0d, 900_000L, 3_600_000L, 300_000L);
     }
 
     @Test

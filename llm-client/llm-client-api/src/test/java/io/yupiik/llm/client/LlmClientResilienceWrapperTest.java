@@ -64,13 +64,23 @@ class LlmClientResilienceWrapperTest {
 
     private static LlmResilienceConfig config(final int attempts, final long baseDelayMs, final int maxConcurrent) {
         return new LlmResilienceConfig(
-                attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, 1.0d, 900_000L, 3_600_000L);
+                attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, 1.0d, 900_000L, 3_600_000L, 300_000L);
     }
 
     private static LlmResilienceConfig config(
             final int attempts, final long baseDelayMs, final int maxConcurrent, final double waitScale) {
         return new LlmResilienceConfig(
-                attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, waitScale, 900_000L, 3_600_000L);
+                attempts,
+                baseDelayMs,
+                0,
+                maxConcurrent,
+                false,
+                true,
+                300_000L,
+                waitScale,
+                900_000L,
+                3_600_000L,
+                300_000L);
     }
 
     @Test
@@ -274,8 +284,8 @@ class LlmClientResilienceWrapperTest {
         assertTrue(
                 pauses.stream()
                         .anyMatch(p -> p.reason().contains("concurrency-limit")
-                                && p.waitMs() == LlmClientResilienceWrapper.CONCURRENCY_LIMIT_DEFAULT_WAIT_MS),
-                "the retry notice must surface the default wait and why it waits, got: " + pauses);
+                                && p.waitMs() >= LlmClientResilienceWrapper.CONCURRENCY_LIMIT_DEFAULT_WAIT_MS),
+                "the retry notice must surface a default-or-larger jittered wait and why it waits, got: " + pauses);
         assertTrue(
                 pauses.stream()
                         .anyMatch(p -> p.reason() != null && p.reason().startsWith("concurrency limit 2 detected")),
@@ -598,10 +608,20 @@ class LlmClientResilienceWrapperTest {
 
     @Test
     void cancelAlreadySetWhenFailureLandsSkipsTheWait() throws Exception {
-        final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30"));
+        final var cancelled = new AtomicBoolean();
+        final var calls = new AtomicInteger();
+        // the abort lands while the failed attempt is being handled (not before: an already
+        // cancelled turn never reaches the provider, see LlmClientResilienceWrapperCancellationTest)
+        final Dialect dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30")) {
+            @Override
+            public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier probe) {
+                calls.incrementAndGet();
+                cancelled.set(true);
+                return super.chat(request, probe);
+            }
+        };
         try (final var scheduler = Executors.newScheduledThreadPool(1)) {
             final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null, scheduler);
-            final var cancelled = new AtomicBoolean(true);
             final var failure = assertThrows(
                     ExecutionException.class,
                     () -> wrapper.chat(dial, null, cancelled::get)
@@ -611,7 +631,7 @@ class LlmClientResilienceWrapperTest {
                     failure.getCause() instanceof IOException
                             && "Cancelled".equals(failure.getCause().getMessage()),
                     "got: " + failure.getCause());
-            assertEquals(1, dial.calls.get(), "a canceled turn must not retry");
+            assertEquals(1, calls.get(), "a canceled turn must not retry");
         }
     }
 
@@ -620,9 +640,17 @@ class LlmClientResilienceWrapperTest {
         // regression: without an injected scheduler the wait is a plain delayed executor and
         // the probe is not polled mid-wait, so an already-set cancel used to park the whole
         // retry-after (30s) before the post-wait check could see it
-        final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30"));
+        final var cancelled = new AtomicBoolean();
+        final var calls = new AtomicInteger();
+        final Dialect dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30")) {
+            @Override
+            public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier probe) {
+                calls.incrementAndGet();
+                cancelled.set(true);
+                return super.chat(request, probe);
+            }
+        };
         final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
-        final var cancelled = new AtomicBoolean(true);
         final var failure = assertThrows(
                 ExecutionException.class,
                 () -> wrapper.chat(dial, null, cancelled::get)
@@ -632,7 +660,7 @@ class LlmClientResilienceWrapperTest {
                 failure.getCause() instanceof IOException
                         && "Cancelled".equals(failure.getCause().getMessage()),
                 "got: " + failure.getCause());
-        assertEquals(1, dial.calls.get(), "a canceled turn must not retry");
+        assertEquals(1, calls.get(), "a canceled turn must not retry");
     }
 
     @Test

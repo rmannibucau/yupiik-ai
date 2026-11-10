@@ -152,7 +152,8 @@ class BtwAnswererTest {
                 NOOP,
                 null,
                 new ToolCallPairingRepair(sessionStore, Clock.systemUTC()),
-                httpClient);
+                httpClient,
+                null);
         answerers.add(created);
         return created;
     }

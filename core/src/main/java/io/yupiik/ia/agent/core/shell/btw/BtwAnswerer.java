@@ -36,6 +36,7 @@ import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ProviderConcurrencyGates;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
@@ -135,6 +136,13 @@ public class BtwAnswerer {
     private final EventContextBuilder eventContextBuilder;
     private final ToolCallPairingRepair pairingRepair;
     private final Deque<BtwExchange> exchanges = new ConcurrentLinkedDeque<>();
+    /**
+     * Concurrency gates shared with the main client: a /btw question is issued while the main turn may
+     * still be streaming, so giving the dedicated client its own budget would double the provider
+     * limit. {@code null} (direct test construction) makes the dedicated client fall back to its own.
+     */
+    private final ProviderConcurrencyGates concurrencyGates;
+
     private volatile ChatClient dedicatedClient;
     private volatile ChatSettings dedicatedSettings;
 
@@ -152,7 +160,8 @@ public class BtwAnswerer {
             final Emitter emitter,
             final EventContextBuilder eventContextBuilder,
             final ToolCallPairingRepair pairingRepair,
-            final ExtendedHttpClient httpClient) {
+            final ExtendedHttpClient httpClient,
+            final ProviderConcurrencyGates concurrencyGates) {
         this.chatClient = chatClient;
         this.httpClient = httpClient;
         this.sessionStore = sessionStore;
@@ -167,6 +176,7 @@ public class BtwAnswerer {
         this.emitter = emitter;
         this.eventContextBuilder = eventContextBuilder;
         this.pairingRepair = pairingRepair;
+        this.concurrencyGates = concurrencyGates;
     }
 
     public record BtwExchange(String question, String answer) {}
@@ -546,7 +556,8 @@ public class BtwAnswerer {
         }
         synchronized (this) {
             if (dedicatedClient == null) {
-                final var created = new ChatClient(configuration, mapper, providerManager, clock, httpClient);
+                final var created = new ChatClient(
+                        configuration, mapper, providerManager, clock, httpClient, null, concurrencyGates);
                 final var settings = ChatSettings.EMPTY.withModel(model);
                 dedicatedClient = created;
                 dedicatedSettings = settings;
