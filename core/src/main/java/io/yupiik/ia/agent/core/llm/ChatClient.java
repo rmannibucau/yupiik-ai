@@ -496,8 +496,8 @@ public class ChatClient implements AutoCloseable {
                         openaiSessionIdEnabledKeys(provider, ApiFlavor.CODEX),
                         openaiXClientRequestId(provider));
                 if (providerId != null && !providerId.isBlank()) {
-                    d.setUnauthorizedRecovery(authorization ->
-                            codexAuthTemplateHelper.recoverUnauthorized(providerId, authorization));
+                    d.setUnauthorizedRecovery(
+                            authorization -> codexAuthTemplateHelper.recoverUnauthorized(providerId, authorization));
                 }
                 if (debugLogger != null) {
                     d.setOnRawLine(debugLogger::fine);

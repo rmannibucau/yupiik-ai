@@ -3626,8 +3626,9 @@ class TuiCommandRenderTest {
         quit();
     }
 
-    @Test
-    void clickingLoneShownCardHeaderCollapsesAndBorderRowClickAlsoHits() throws Exception {
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    void clickingLoneShownCardHeaderCollapsesAndBorderRowClickAlsoHits(final boolean clickBorder) throws Exception {
         // regression: the lone bordered card's click anchor used to sit on the block's
         // top-border row, so clicking the visible header text did nothing until a resize
         final var shellRegistry = testRegistry();
@@ -3644,12 +3645,18 @@ class TuiCommandRenderTest {
         // see hoveringLoneShownCardHeaderReversesTheHeaderRow: "ls -la" also matches the
         // collapsed line, so await the SHOWN-only card title before reading the row
         awaitOccurrences("#1 - ", 1);
-        final var headerRow = rowOf("ls -la");
-        // clicking the header text collapses the card (turns it into a dim one-liner)
-        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 5, headerRow));
-        awaitTextGone("total 8"); // clicking the dim one-liner re-opens the full output modal
-        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 5, rowOf("ls -la")));
+        awaitText("total 8");
+        final var clickRow = rowOf(clickBorder ? "#1 - " : "ls -la");
+        // Both the visible header and its top border collapse the card to a dim one-liner.
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 5, clickRow));
+        // Await the collapsed summary itself: absence of output alone must not let the
+        // next click use the expanded card's old header row while a render is pending.
+        awaitText("#1 - ls -la");
+        awaitOccurrences("#1 - ", 1);
+        awaitTextGone("total 8");
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 5, rowOf("#1 - ls -la")));
         awaitText("full output");
+        awaitText("total 8");
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
         awaitTextGone("full output");
         quit();
