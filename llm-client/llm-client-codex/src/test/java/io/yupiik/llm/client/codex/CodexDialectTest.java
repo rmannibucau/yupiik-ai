@@ -105,6 +105,56 @@ class CodexDialectTest {
     }
 
     @Test
+    void unauthorizedRecoversAndRendersNewHeaders(final JsonMapper mapper) throws Exception {
+        final var token = new AtomicReference<>("old");
+        final var calls = new AtomicInteger();
+        final var recoveries = new AtomicInteger();
+        server.createContext("/codex/responses", exchange -> {
+            calls.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            final var auth = exchange.getRequestHeaders().getFirst("authorization");
+            respond(exchange, "Bearer new".equals(auth) ? 200 : 401, "{}");
+        });
+        final var dialect = new CodexDialect(
+                mapper,
+                client,
+                new ProviderSpec(
+                        base + "/codex/responses",
+                        null,
+                        null,
+                        null,
+                        builder -> builder.setHeader("authorization", "Bearer " + token.get())));
+        dialect.setUnauthorizedRecovery(rejected -> {
+            assertEquals("Bearer old", rejected);
+            recoveries.incrementAndGet();
+            token.set("new");
+        });
+        dialect.chat(request()).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        dialect.chat(request()).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals(3, calls.get());
+        assertEquals(1, recoveries.get());
+    }
+
+    @Test
+    void unauthorizedRecoveryHasOneRetryBudget(final JsonMapper mapper) {
+        final var calls = new AtomicInteger();
+        final var recoveries = new AtomicInteger();
+        server.createContext("/codex/responses", exchange -> {
+            calls.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            respond(exchange, 401, "{}");
+        });
+        final var dialect =
+                new CodexDialect(mapper, client, new ProviderSpec(base + "/codex/responses", "key", null, null, null));
+        dialect.setUnauthorizedRecovery(rejected -> recoveries.incrementAndGet());
+        Assertions.assertThrows(
+                CompletionException.class,
+                () -> dialect.chat(request()).toCompletableFuture().join());
+        assertEquals(2, calls.get());
+        assertEquals(1, recoveries.get());
+    }
+
+    @Test
     void listsAndFiltersCodexModels(final JsonMapper mapper) throws Exception {
         server.createContext("/codex/models", exchange -> {
             reqPath.set(exchange.getRequestURI().toString());

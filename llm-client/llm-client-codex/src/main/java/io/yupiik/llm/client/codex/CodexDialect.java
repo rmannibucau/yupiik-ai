@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -75,6 +76,13 @@ public class CodexDialect extends OpenAIResponsesDialect {
      * (the default) disables the auto-upgrade, in which case the delegated-access 4xx surfaces as-is.
      */
     private final Function<String, String> assertionUpgrader;
+
+    private volatile Consumer<String> unauthorizedRecovery;
+
+    /** Registers recovery for a rejected bearer; called once before retrying an unopened stream. */
+    public void setUnauthorizedRecovery(final Consumer<String> recovery) {
+        unauthorizedRecovery = recovery;
+    }
 
     /**
      * Creates the dialect advertising the default Codex client version.
@@ -269,8 +277,14 @@ public class CodexDialect extends OpenAIResponsesDialect {
      */
     @Override
     protected CompletionStage<StreamAttempt> openStream(final byte[] payload, final BooleanSupplier cancelled) {
+        return openStream(payload, cancelled, true);
+    }
+
+    private CompletionStage<StreamAttempt> openStream(
+            final byte[] payload, final BooleanSupplier cancelled, final boolean allowRecovery) {
         try {
-            return client.sendAsync(http(payload), HttpResponse.BodyHandlers.ofPublisher())
+            final var request = http(payload);
+            return client.sendAsync(request, HttpResponse.BodyHandlers.ofPublisher())
                     .thenCompose(response -> {
                         if (response.statusCode() >= 200 && response.statusCode() <= 299) {
                             return CompletableFuture.completedFuture(new StreamAttempt(
@@ -280,9 +294,22 @@ public class CodexDialect extends OpenAIResponsesDialect {
                                 .thenApply(body ->
                                         new StreamAttempt(response.statusCode(), response.headers(), null, body));
                     })
-                    .thenCompose(attempt -> isDelegatedAccessBlocked(attempt)
-                            ? retryWithAgentAssertion(payload, cancelled)
-                            : CompletableFuture.completedFuture(attempt));
+                    .thenCompose(attempt -> {
+                        final var recovery = unauthorizedRecovery;
+                        final var authorization =
+                                request.headers().firstValue("authorization").orElse("");
+                        if (allowRecovery
+                                && attempt.statusCode() == 401
+                                && recovery != null
+                                && authorization.startsWith("Bearer ")
+                                && !cancelled.getAsBoolean()) {
+                            recovery.accept(authorization);
+                            return openStream(payload, cancelled, false);
+                        }
+                        return isDelegatedAccessBlocked(attempt)
+                                ? retryWithAgentAssertion(payload, cancelled)
+                                : CompletableFuture.completedFuture(attempt);
+                    });
         } catch (final RuntimeException e) {
             return failed(e);
         }

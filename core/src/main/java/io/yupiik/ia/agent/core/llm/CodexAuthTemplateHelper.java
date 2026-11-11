@@ -37,7 +37,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
-import java.util.logging.Logger;
 
 /**
  * Provides the {@code codexAuth} handlebars helpers used by Codex-flavored provider {@code
@@ -64,8 +63,6 @@ import java.util.logging.Logger;
 @ApplicationScoped
 public class CodexAuthTemplateHelper {
 
-    private static final Logger LOGGER = Logger.getLogger(CodexAuthTemplateHelper.class.getName());
-
     private final JsonMapper mapper;
     private final ExtendedHttpClient httpClient;
     private final Path providersHome;
@@ -74,7 +71,6 @@ public class CodexAuthTemplateHelper {
     private volatile CodexAgentIdentityClient agentIdentity;
     private volatile CodexLoginDispatcher codexLoginDispatcher;
     private final ConcurrentHashMap<String, Lock> refreshLocks = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, CodexTokenStore> authCache = new ConcurrentHashMap<>();
 
     public CodexAuthTemplateHelper(
             final JsonMapper mapper,
@@ -338,7 +334,8 @@ public class CodexAuthTemplateHelper {
         final Lock lock = refreshLocks.computeIfAbsent(providerName, k -> new ReentrantLock());
         lock.lock();
         try {
-            final CodexTokenStore store = load(providerName) == null ? initial : load(providerName);
+            final var current = load(providerName);
+            final CodexTokenStore store = current == null ? initial : current;
             return refreshWhenIdle ? refreshIfExpired(providerName, store) : store;
         } finally {
             lock.unlock();
@@ -356,8 +353,6 @@ public class CodexAuthTemplateHelper {
         }
         final CodexTokenStore signedIn = dispatcher.signIn(providerName);
         secretRegistration.register(signedIn);
-        // prefer the store the dispatcher produced: a later cache/service save may not be visible to this
-        // helper's cache yet, so reloading via load() could return a stale pre-login entry
         return signedIn == null ? load(providerName) : signedIn;
     }
 
@@ -391,7 +386,8 @@ public class CodexAuthTemplateHelper {
         final Lock lock = refreshLocks.computeIfAbsent(providerName, k -> new ReentrantLock());
         lock.lock();
         try {
-            final CodexTokenStore store = load(providerName) == null ? initial : load(providerName);
+            final var current = load(providerName);
+            final CodexTokenStore store = current == null ? initial : current;
             if (store.agentIdentity() == null) {
                 // first request for an enterprise-backed provider: enroll the identity lazily,
                 // using the OAuth access token (refreshed first) as the registration anchor
@@ -436,13 +432,38 @@ public class CodexAuthTemplateHelper {
             return store;
         }
         if (!store.refreshable()) {
-            LOGGER.warning(
-                    "Codex access token for provider '" + providerName + "' has no refresh token; re-login needed");
-            return store;
+            final var signedIn = lazySignIn(providerName);
+            if (signedIn != null) {
+                return signedIn;
+            }
+            throw new CodexNotAuthenticatedException(providerName);
         }
+        return refresh(providerName, store, refreshReason(store));
+    }
+
+    /** Recovers a rejected bearer under the refresh lock, without refreshing a newer session twice. */
+    public void recoverUnauthorized(final String providerName, final String rejectedAuthorization) {
+        final Lock lock = refreshLocks.computeIfAbsent(providerName, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            final var store = load(providerName);
+            if (store != null && !("Bearer " + store.accessToken()).equals(rejectedAuthorization)) {
+                return;
+            }
+            if (store != null && store.refreshable()) {
+                refresh(providerName, store, "unauthorized_recovery");
+            } else if (lazySignIn(providerName) == null) {
+                throw new CodexNotAuthenticatedException(providerName);
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private CodexTokenStore refresh(final String providerName, final CodexTokenStore store, final String reason) {
         final CodexTokenStore refreshed;
         try {
-            refreshed = oauth().refresh(store, refreshReason(store));
+            refreshed = oauth().refresh(store, reason);
         } catch (final RuntimeException refreshFailure) {
             // the refresh token is unusable (revoked/expired by the workspace: session-lifetime policy,
             // password rotation, revoked device, ...). Refresh must be transparent: when an interactive
@@ -467,12 +488,11 @@ public class CodexAuthTemplateHelper {
 
     /**
      * The OAuth {@code refresh_reason} for a lazy expiry-triggered refresh, mirroring upstream codex
-     * {@code proactive_refresh_reason}. yca only refreshes on the expiry path (see
-     * {@link #refreshIfExpired}), so the token is always at or past its expiry here and the reason is
+     * {@code proactive_refresh_reason}. On the expiry path (see
+     * {@link #refreshIfExpired}), the token is always at or past its expiry here and the reason is
      * {@code proactive_expiry}. The {@code scheduled} branch is defensive parity for a future
      * scheduled/background refresh (a not-expired token would report the 8-day staleness window); yca
-     * has no forced or 401-recovery trigger today, so {@code unauthorized_recovery}/{@code forced} are
-     * never produced here either.
+     * uses {@code unauthorized_recovery} separately when a request is rejected with HTTP 401.
      */
     private static String refreshReason(final CodexTokenStore store) {
         final long now = System.currentTimeMillis();
@@ -488,10 +508,8 @@ public class CodexAuthTemplateHelper {
     }
 
     private CodexTokenStore load(final String providerName) {
-        final CodexTokenStore cached = authCache.get(providerName);
-        if (cached != null) {
-            return cached;
-        }
+        // Login (including another process) can replace or remove the file at any time. Always read
+        // the current session rather than retaining credentials indefinitely in a process-local cache.
         final Path file = codexAuthFile(providerName);
         if (!Files.exists(file)) {
             return null;
@@ -499,7 +517,6 @@ public class CodexAuthTemplateHelper {
         try {
             final CodexTokenStore store = mapper.fromBytes(CodexTokenStore.class, Files.readAllBytes(file));
             secretRegistration.register(store);
-            authCache.put(providerName, store);
             return store;
         } catch (final IOException e) {
             throw new IllegalStateException("Cannot read the Codex auth file " + file + ": " + e.getMessage(), e);
@@ -521,7 +538,6 @@ public class CodexAuthTemplateHelper {
                 Files.deleteIfExists(tmp);
                 throw moveFailure;
             }
-            authCache.put(providerName, store);
         } catch (final IOException e) {
             throw new IllegalStateException("Cannot write the Codex auth file " + file + ": " + e.getMessage(), e);
         }

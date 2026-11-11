@@ -223,7 +223,9 @@ class CodexOAuthClientTest {
                         + "/auth/callback?state=" + callbackState.get() + "&code=thecode"))
                 .GET()
                 .build();
-        http.send(callback, HttpResponse.BodyHandlers.discarding());
+        assertEquals(
+                200, http.send(callback, HttpResponse.BodyHandlers.discarding()).statusCode());
+        http.close();
 
         final CodexTokenStore store = result.get(5, TimeUnit.SECONDS);
         assertEquals("acc", store.accessToken());
@@ -241,6 +243,27 @@ class CodexOAuthClientTest {
                 .matcher(query);
         assertTrue(m.find(), "cannot find the port in " + authorizeUrl);
         return Integer.parseInt(m.group(1));
+    }
+
+    @Test
+    void callbackReportsTokenExchangeFailure(final JsonMapper mapper) throws Exception {
+        issuer.createContext("/oauth/token", exchange -> respond(exchange, 400, "{\"error\":\"invalid_grant\"}"));
+        final var oauth = new CodexOAuthClient(mapper, client, issuerUrl);
+        final var authorizeUrl = new CompletableFuture<String>();
+        final var result = CompletableFuture.supplyAsync(() -> oauth.browserFlow(authorizeUrl::complete, b -> false));
+        final var url = authorizeUrl.get(5, TimeUnit.SECONDS);
+        final var callback = HttpRequest.newBuilder(URI.create(
+                        "http://127.0.0.1:" + portOf(url) + "/auth/callback?state=" + stateOf(url) + "&code=badcode"))
+                .GET()
+                .build();
+        try (final var http = HttpClient.newHttpClient()) {
+            final var response = http.send(callback, HttpResponse.BodyHandlers.ofString());
+            assertEquals(500, response.statusCode());
+            assertTrue(response.body().contains("Login failed"));
+        }
+        assertThrows(java.util.concurrent.ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
+        final var probe = HttpServer.create(new InetSocketAddress("127.0.0.1", portOf(url)), 0);
+        probe.stop(0);
     }
 
     private static String stateOf(final String authorizeUrl) {

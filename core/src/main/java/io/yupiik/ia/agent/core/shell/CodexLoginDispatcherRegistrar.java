@@ -15,7 +15,9 @@
  */
 package io.yupiik.ia.agent.core.shell;
 
+import io.yupiik.fusion.framework.api.lifecycle.Start;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.ia.agent.core.llm.CodexAuthTemplateHelper;
 import io.yupiik.ia.agent.core.llm.CodexLoginDispatcher;
 import io.yupiik.ia.agent.core.llm.CodexLoginService;
@@ -47,7 +49,10 @@ public class CodexLoginDispatcherRegistrar {
         this.templateHelper = templateHelper;
         this.loginService = loginService;
         this.shellRegistry = shellRegistry;
-        templateHelper.setCodexLoginDispatcher(providerName -> signInInteractively(providerName));
+    }
+
+    public void onStart(@OnEvent final Start start) {
+        templateHelper.setCodexLoginDispatcher(this::signInInteractively);
     }
 
     /**

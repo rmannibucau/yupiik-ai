@@ -21,6 +21,13 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
+import io.yupiik.fusion.framework.api.ConfiguringContainer;
+import io.yupiik.fusion.framework.api.RuntimeContainer;
+import io.yupiik.fusion.framework.api.container.FusionBean;
+import io.yupiik.fusion.framework.api.container.FusionListener;
+import io.yupiik.fusion.framework.api.container.FusionModule;
+import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
+import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
 import io.yupiik.fusion.framework.handlebars.spi.Template;
@@ -32,6 +39,8 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConf
 import io.yupiik.ia.agent.core.security.SecretRedactor;
 import io.yupiik.ia.agent.core.security.SecretRegistry;
 import io.yupiik.ia.agent.core.security.SecretVault;
+import io.yupiik.ia.agent.core.shell.CodexLoginDispatcherRegistrar;
+import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.codex.CodexOAuthConfig;
 import io.yupiik.llm.client.codex.Ed25519Util;
@@ -48,6 +57,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -133,6 +143,51 @@ class CodexAuthTemplateHelperTest {
     }
 
     @Test
+    void loginReplacesPreviouslyLoadedSessionAndLogoutRemovesIt(final JsonMapper mapper) throws Exception {
+        final var service = new CodexLoginService(mapper, client, config());
+        service.save("p", new CodexTokenStore("old", "refresh", "old-account", farFuture(), "id"));
+        final var helper = helper(mapper);
+        assertEquals("old", helper.resolveCredentials("p").accessToken());
+        service.save("p", new CodexTokenStore("new", "refresh-2", "new-account", farFuture(), "id"));
+        assertEquals("new", helper.resolveCredentials("p").accessToken());
+        assertEquals("new-account", helper.resolveCredentials("p").accountId());
+        Files.delete(storage.resolve("providers/p/codex.auth.json"));
+        assertThrows(
+                io.yupiik.llm.client.codex.CodexNotAuthenticatedException.class, () -> helper.resolveCredentials("p"));
+    }
+
+    @Test
+    void unauthorizedRefreshesUnexpiredTokenOnlyOnce(final JsonMapper mapper) throws Exception {
+        seed(mapper, "p", new CodexTokenStore("rejected", "refresh", "acc", farFuture(), "id"));
+        final var helper = helper(mapper);
+        helper.recoverUnauthorized("p", "Bearer rejected");
+        helper.recoverUnauthorized("p", "Bearer rejected");
+        assertEquals("refreshed", helper.resolveCredentials("p").accessToken());
+        assertEquals(1, refreshCalls.get());
+        assertTrue(lastRefreshBody.get().contains("\"refresh_reason\":\"unauthorized_recovery\""));
+    }
+
+    @Test
+    void unauthorizedWithRevokedRefreshSignsInOnce(final JsonMapper mapper) throws Exception {
+        seed(mapper, "p", new CodexTokenStore("rejected", "refresh", "acc", farFuture(), "id"));
+        failRefresh.set(true);
+        final var helper = helper(mapper);
+        final var signIns = new AtomicInteger();
+        final var service = new CodexLoginService(mapper, client, config());
+        helper.setCodexLoginDispatcher(provider -> {
+            signIns.incrementAndGet();
+            final var store = new CodexTokenStore("new", "refresh-2", "acc", farFuture(), "id");
+            service.save(provider, store);
+            return store;
+        });
+        helper.recoverUnauthorized("p", "Bearer rejected");
+        assertEquals("new", helper.resolveCredentials("p").accessToken());
+        assertEquals("new", helper.resolveCredentials("p").accessToken());
+        assertEquals(1, signIns.get());
+        assertEquals(1, refreshCalls.get());
+    }
+
+    @Test
     void expiredTokenRefreshesAndPersistsRotation(final JsonMapper mapper) throws Exception {
         seed(mapper, "p2", new CodexTokenStore("stale-access", "refresh-tok", "acc", past(), "id"));
         final var registry = new SecretRegistry(config(), List.of(), new SecretVault(), List.of());
@@ -201,6 +256,35 @@ class CodexAuthTemplateHelperTest {
     }
 
     @Test
+    void containerStartupRegistersDispatcherWithoutLookingUpRegistrar(final JsonMapper mapper) {
+        final var helper = helper(mapper);
+        final var service = new CodexLoginService(mapper, client, config());
+        final var registry = new ShellRegistry(null);
+        try (final var container = ConfiguringContainer.of()
+                .register(new ProvidedInstanceBean<>(DefaultScoped.class, CodexAuthTemplateHelper.class, () -> helper))
+                .register(new ProvidedInstanceBean<>(DefaultScoped.class, CodexLoginService.class, () -> service))
+                .register(new ProvidedInstanceBean<>(DefaultScoped.class, ShellRegistry.class, () -> registry))
+                .register(new FusionModule() {
+                    @Override
+                    public BiPredicate<RuntimeContainer, FusionBean<?>> beanFilter() {
+                        return (runtime, bean) -> bean instanceof ProvidedInstanceBean<?>
+                                || bean.type() == CodexLoginDispatcherRegistrar.class;
+                    }
+
+                    @Override
+                    public BiPredicate<RuntimeContainer, FusionListener<?>> listenerFilter() {
+                        return (runtime, listener) ->
+                                listener.getClass().getName().contains("CodexLoginDispatcherRegistrar");
+                    }
+                })
+                .start()) {
+            assertTrue(container.getBeans().getBeans().containsKey(CodexLoginDispatcherRegistrar.class));
+            final var failure = assertThrows(IllegalStateException.class, () -> helper.resolveCredentials("absent"));
+            assertTrue(failure.getMessage().contains("no interactive shell"), failure.getMessage());
+        }
+    }
+
+    @Test
     void missingSessionFailsLoudly(final JsonMapper mapper) {
         final var helper = helper(mapper);
         final var e = assertThrows(
@@ -239,6 +323,9 @@ class CodexAuthTemplateHelperTest {
         final CodexTokenStore saved = mapper.fromBytes(
                 CodexTokenStore.class, Files.readAllBytes(storage.resolve("providers/revoked-p/codex.auth.json")));
         assertEquals("re-signed-token", saved.accessToken());
+        final int calls = refreshCalls.get();
+        assertEquals("re-signed-token", render(helper, "{{codexAuth \"revoked-p\"}}"));
+        assertEquals(calls, refreshCalls.get(), "later requests must not retry the revoked refresh token");
     }
 
     @Test

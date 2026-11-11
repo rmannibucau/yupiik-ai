@@ -35,6 +35,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 
 /**
@@ -73,7 +74,7 @@ final class CodexBrowserFlow {
         final String challenge = sha256(verifier);
         final String state = base64Url(randomBytes(random, 32));
         final var config = oauth.config();
-        final CompletableFuture<String> codeFuture = new CompletableFuture<>();
+        final CompletableFuture<CodexTokenStore> tokenFuture = new CompletableFuture<>();
 
         HttpServer server = null;
         try {
@@ -86,15 +87,21 @@ final class CodexBrowserFlow {
                         e);
             }
             final int port = server.getAddress().getPort();
-            server.createContext("/auth/callback", exchange -> handleCallback(exchange, state, codeFuture));
             server.setExecutor(null); // one-shot callback: the default single-threaded dispatcher is enough
-            server.start();
 
             // the redirect_uri mirrors the loopback callback server and must be exactly
             // http://127.0.0.1:{port}/auth/callback: OpenAI registers 127.0.0.1 as the allowed
             // loopback redirect for the Codex client (a "localhost" variant is rejected with
             // invalid_authorize_request). The exchange must use the same redirect_uri.
             final String redirectUri = "http://127.0.0.1:" + port + "/auth/callback";
+            server.createContext(
+                    "/auth/callback",
+                    exchange -> handleCallback(
+                            exchange,
+                            state,
+                            tokenFuture,
+                            code -> oauth.toStore(oauth.exchangeCode(code, verifier, redirectUri))));
+            server.start();
             final String authorizeUrl = authorizeUrl(config, state, verifier, challenge, redirectUri);
 
             // surface the authorize URL to the caller (open a browser / show a modal / print)
@@ -106,9 +113,7 @@ final class CodexBrowserFlow {
             }
 
             try {
-                final String code = codeFuture.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                final Map<String, Object> tokens = oauth.exchangeCode(code, verifier, redirectUri);
-                return oauth.toStore(tokens);
+                return tokenFuture.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
             } catch (final TimeoutException e) {
                 throw new IllegalStateException("Codex browser login timed out waiting for the redirect", e);
             } catch (final InterruptedException e) {
@@ -141,7 +146,10 @@ final class CodexBrowserFlow {
     }
 
     private static void handleCallback(
-            final HttpExchange exchange, final String expectedState, final CompletableFuture<String> codeFuture) {
+            final HttpExchange exchange,
+            final String expectedState,
+            final CompletableFuture<CodexTokenStore> tokenFuture,
+            final Function<String, CodexTokenStore> exchangeCode) {
         try {
             final String query = exchange.getRequestURI().getRawQuery();
             final Map<String, String> params = parseQuery(query);
@@ -151,11 +159,12 @@ final class CodexBrowserFlow {
                 respond(exchange, 400, "State mismatch or missing code.");
                 return;
             }
-            respond(exchange, 200, "Login complete. You can close this tab and return to the terminal.");
-            codeFuture.complete(code);
+            final var store = exchangeCode.apply(code);
+            respond(exchange, 200, "Authorization complete. Return to the terminal to finish saving your session.");
+            tokenFuture.complete(store);
         } catch (final RuntimeException e) {
-            respond(exchange, 500, "Server error checking your login.");
-            codeFuture.completeExceptionally(e);
+            respond(exchange, 500, "Login failed while exchanging authorization. Return to the terminal for details.");
+            tokenFuture.completeExceptionally(e);
         }
     }
 
