@@ -72,10 +72,25 @@ class ExecTemplateHelperTest {
         final var tf = File.createTempFile(marker, ".txt");
         try {
             final var cmd = "printf x >> " + tf.getAbsolutePath() + " && wc -c < " + tf.getAbsolutePath();
-            final var template = compile("{{exec \"exec_options=ttl=1\" \"sh\" \"-c\" \"" + cmd + "\"}}");
+            final var helper = new ExecTemplateHelper();
+            final var template = compile("{{exec \"exec_options=ttl=60\" \"sh\" \"-c\" \"" + cmd + "\"}}", helper);
             assertEquals("1", template.render(Map.of()).strip());
-            Thread.sleep(1_200);
+            assertEquals("1", template.render(Map.of()).strip(), "the entry must be cached before expiry");
+            // No injectable clock: age the cached entry without waiting on wall time or clearing the cache.
+            final var cacheField = ExecTemplateHelper.class.getDeclaredField("cache");
+            cacheField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            final var cache = (Map<String, Object>) cacheField.get(helper);
+            assertEquals(1, cache.size());
+            final var entry = cache.entrySet().iterator().next();
+            final var cachedType = entry.getValue().getClass();
+            final var output = cachedType.getDeclaredMethod("output");
+            output.setAccessible(true);
+            final var constructor = cachedType.getDeclaredConstructor(String.class, long.class);
+            constructor.setAccessible(true);
+            entry.setValue(constructor.newInstance(output.invoke(entry.getValue()), System.nanoTime() - 1));
             assertEquals("2", template.render(Map.of()).strip(), "after expiry the command must re-run");
+            assertEquals("2", template.render(Map.of()).strip(), "the refreshed entry must be cached again");
         } finally {
             tf.delete();
         }
@@ -112,7 +127,11 @@ class ExecTemplateHelperTest {
     }
 
     private static Template compile(final String source) {
-        final Function<HelperContext, Object> exec = new ExecTemplateHelper().exec();
+        return compile(source, new ExecTemplateHelper());
+    }
+
+    private static Template compile(final String source, final ExecTemplateHelper helper) {
+        final Function<HelperContext, Object> exec = helper.exec();
         return new HandlebarsCompiler()
                 .compile(new HandlebarsCompiler.CompilationContext(
                         new HandlebarsCompiler.Settings().helpers(Map.of("exec", exec)), source));

@@ -57,7 +57,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class MemoryExtractorTest {
-    private static final ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+    // FIFO execution lets a bounded barrier wait for an entire background pass, including its watermark update.
+    private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
 
     @TempDir
     Path home;
@@ -520,7 +521,7 @@ class MemoryExtractorTest {
                 null);
         // tiny delta below the default 1000-char gate: no call (end-of-turn path only)
         gated.asyncExtractNow(List.of(Message.user("hi")), ChatSettings.EMPTY);
-        Thread.sleep(200); // give the async task a chance to (not) run
+        EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
         assertEquals(0, calls.get(), "a tiny delta must not fire an end-of-turn extraction");
     }
 
@@ -566,7 +567,7 @@ class MemoryExtractorTest {
                 null);
         // neither the end-of-turn hook nor the session-close forced pass may mine anything
         extractor.asyncExtractNow(List.of(Message.user("a durable fact appears here")), ChatSettings.EMPTY, true);
-        Thread.sleep(200);
+        EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
         assertEquals(0, calls.get(), "a disabled session must not fire an extraction call");
         assertFalse(
                 extractor.forceExtractNow(List.of(Message.user("a durable fact appears here"))),
@@ -693,11 +694,11 @@ class MemoryExtractorTest {
                 null);
         // the end-of-turn hook is not debounced: the first call must run right away
         extractor.asyncExtractNow(List.of(Message.user("one")), ChatSettings.EMPTY);
-        Thread.sleep(300); // give the async task time to run
+        EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
         assertEquals(1, calls.get(), "the async pass must run immediately (no debounce)");
         // a second hook on the same messages is a watermark no-op: the delta was already extracted
         extractor.asyncExtractNow(List.of(Message.user("one")), ChatSettings.EMPTY);
-        Thread.sleep(300);
+        EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
         assertEquals(1, calls.get(), "the watermark must dedup the already-extracted delta");
     }
 
@@ -956,15 +957,15 @@ class MemoryExtractorTest {
         final var two = List.of(Message.user("one"), Message.user("two"));
         // not eligible: nothing runs, watermark must stay put
         extractor.asyncExtractNow(one, ChatSettings.EMPTY, false);
-        Thread.sleep(300);
+        EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
         assertEquals(0, calls.get(), "ineligible pass must not call the LLM");
         // eligible: the pending delta (both messages) is extracted once
         extractor.asyncExtractNow(two, ChatSettings.EMPTY, true);
-        Thread.sleep(300);
+        EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
         assertEquals(1, calls.get(), "eligible pass must extract the pending delta");
         // a repeat eligible pass on the same messages is a watermark no-op
         extractor.asyncExtractNow(two, ChatSettings.EMPTY, true);
-        Thread.sleep(300);
+        EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
         assertEquals(1, calls.get(), "watermark must still dedup after the eligible pass");
     }
 

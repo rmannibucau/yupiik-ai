@@ -31,9 +31,26 @@ import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 class OpenCodeTlsConnectionTest {
+    private static KeyStore trustStore;
+    private static SSLContext serverContext;
+
+    @BeforeAll
+    static void initializeTlsFixtures() throws Exception {
+        trustStore = KeyStore.getInstance("PKCS12");
+        try (final var in = OpenCodeTlsConnectionTest.class.getResourceAsStream("localhost.p12")) {
+            assertNotNull(in);
+            trustStore.load(in, "changeit".toCharArray());
+        }
+        final var keys = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        keys.init(trustStore, "changeit".toCharArray());
+        serverContext = SSLContext.getInstance("TLS");
+        serverContext.init(keys.getKeyManagers(), null, null);
+    }
+
     @Test
     void x25519AllThreeSuitesFragmentationAndProgressiveStreams() throws Exception {
         for (final var suite : OpenCodeCipherProfile.DEFAULT.subList(0, 3)) {
@@ -50,6 +67,9 @@ class OpenCodeTlsConnectionTest {
                 assertArrayEquals(payload, tls.input().readNBytes(payload.length));
                 assertEquals(-1, tls.input().read());
                 assertEquals(-1, tls.input().read());
+                // JSSE waits for the peer's close_notify on close. This transport closes TCP
+                // instead, so close it before joining the server rather than paying its read timeout.
+                cancel(socket);
                 server.result.get(10, TimeUnit.SECONDS);
             }
         }
@@ -133,6 +153,7 @@ class OpenCodeTlsConnectionTest {
                 }
             });
             try (final var socket = new Socket(InetAddress.getLoopbackAddress(), listener.getLocalPort())) {
+                socket.setTcpNoDelay(true);
                 socket.setSoTimeout(5000);
                 assertThrows(
                         IOException.class, () -> OpenCodeTlsConnection.connect(socket, "localhost", store(), null));
@@ -155,13 +176,8 @@ class OpenCodeTlsConnectionTest {
         socket.close();
     }
 
-    private static KeyStore store() throws Exception {
-        final var store = KeyStore.getInstance("PKCS12");
-        try (final var in = OpenCodeTlsConnectionTest.class.getResourceAsStream("localhost.p12")) {
-            assertNotNull(in);
-            store.load(in, "changeit".toCharArray());
-        }
-        return store;
+    private static KeyStore store() {
+        return trustStore;
     }
 
     private static final class FaultSocket extends Socket {
@@ -169,6 +185,7 @@ class OpenCodeTlsConnectionTest {
 
         private FaultSocket(final int port) throws IOException {
             super(InetAddress.getLoopbackAddress(), port);
+            setTcpNoDelay(true);
             setSoTimeout(5000);
         }
 
@@ -203,12 +220,8 @@ class OpenCodeTlsConnectionTest {
         private final AtomicBoolean applicationReceived = new AtomicBoolean();
 
         private Server(final String protocol, final String suite, final boolean rejection) throws Exception {
-            final var keys = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-            keys.init(store(), "changeit".toCharArray());
-            final var context = SSLContext.getInstance("TLS");
-            context.init(keys.getKeyManagers(), null, null);
             listener = (SSLServerSocket)
-                    context.getServerSocketFactory().createServerSocket(0, 1, InetAddress.getLoopbackAddress());
+                    serverContext.getServerSocketFactory().createServerSocket(0, 1, InetAddress.getLoopbackAddress());
             final var parameters = listener.getSSLParameters();
             parameters.setProtocols(new String[] {protocol});
             parameters.setNamedGroups(new String[] {"X25519"});
@@ -220,6 +233,7 @@ class OpenCodeTlsConnectionTest {
             listener.setSSLParameters(parameters);
             result = CompletableFuture.runAsync(() -> {
                 try (final var peer = (SSLSocket) listener.accept()) {
+                    peer.setTcpNoDelay(true);
                     peer.setSoTimeout(5000);
                     peer.startHandshake();
                     if (rejection) {
@@ -248,6 +262,7 @@ class OpenCodeTlsConnectionTest {
 
         private Socket connect() throws IOException {
             final var socket = new Socket(InetAddress.getLoopbackAddress(), port());
+            socket.setTcpNoDelay(true);
             socket.setSoTimeout(5000);
             return socket;
         }

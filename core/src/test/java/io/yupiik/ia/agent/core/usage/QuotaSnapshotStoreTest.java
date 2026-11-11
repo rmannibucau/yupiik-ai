@@ -337,8 +337,9 @@ class QuotaSnapshotStoreTest {
             assertEquals(99.0, store.snapshot("s1", false).primaryWindow().usedPercent(), 0.001);
             releaseFirstCall.countDown(); // let the stale A completion land (it must be dropped)
             awaitFetchesAtLeast(2);
-            // give the dropped A write a short window to (wrongly) overwrite, then assert it was dropped
-            Thread.sleep(300);
+            // Wait for both provider tasks, including the stale write, rather than guessing when A finishes.
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS), "provider refreshes must finish");
             assertEquals(
                     99.0,
                     store.snapshot("s1", false).primaryWindow().usedPercent(),
