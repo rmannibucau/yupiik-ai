@@ -16,7 +16,7 @@
 package io.yupiik.llm.client;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -26,11 +26,15 @@ import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.spi.ConcurrencyGate;
+import io.yupiik.llm.client.spi.ConcurrencySlotTimeoutException;
 import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.InMemoryGate;
 import io.yupiik.llm.client.spi.StreamAttempt;
 import java.io.IOException;
 import java.net.http.HttpResponse;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -40,9 +44,56 @@ import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 /** Hardening coverage: permit acquire/release pairing, retry-after floor, legacy retryable classification. */
+@Timeout(20)
 class LlmClientResilienceWrapperHardeningTest {
+    @Test
+    void anInitiallyUnboundedPeerUsesTheBudgetLearnedByAnotherClient() {
+        final var gate = new InMemoryGate(0);
+        final var cfg = new LlmResilienceConfig(1, 0, 0, 0, false, false, 0, 0, 0, 3_600_000, 50);
+        final var first = new LlmClientResilienceWrapper(cfg, null, null, null, null, cap -> gate);
+        final var peer = new LlmClientResilienceWrapper(cfg, null, null, null, null, cap -> gate);
+        assertThrows(
+                CompletionException.class,
+                () -> first.chat(
+                                new ScriptedDialect(
+                                        new IOException(
+                                                "LLM request failed (429): {\"error\":{\"code\":\"concurrency_limit_exceeded\",\"limit\":1}}")),
+                                null,
+                                null)
+                        .toCompletableFuture()
+                        .join());
+        final var held = gate.acquire().join();
+        try {
+            assertInstanceOf(
+                    ConcurrencySlotTimeoutException.class,
+                    assertThrows(
+                                    CompletionException.class,
+                                    () -> peer.chat(new ScriptedDialect(), null, null)
+                                            .toCompletableFuture()
+                                            .join())
+                            .getCause());
+        } finally {
+            held.run();
+        }
+    }
+
+    @Test
+    void expiredWrapperAdaptationNeverRelaxesASharedGate() {
+        final var gate = new InMemoryGate(4);
+        final var cfg = new LlmResilienceConfig(2, 0, 0, 4, false, false, 0, 0, 0, 3_600_000, 100);
+        final var wrapper = new LlmClientResilienceWrapper(
+                cfg, null, null, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), null, cap -> gate);
+        final var dial = new ScriptedDialect(new IOException(
+                "LLM request failed (429): {\"error\":{\"code\":\"concurrency_limit_exceeded\",\"limit\":1}}"));
+        wrapper.chat(dial, null, null).toCompletableFuture().join();
+        wrapper.chat(dial, null, null).toCompletableFuture().join();
+        final var held = gate.acquire().join();
+        assertEquals(null, gate.tryAcquire(), "expired local adaptation must not restore the shared cap to 4");
+        held.run();
+    }
 
     private static LlmResilienceConfig config(final int attempts, final long baseDelayMs, final int maxConcurrent) {
         return new LlmResilienceConfig(
@@ -66,10 +117,7 @@ class LlmClientResilienceWrapperHardeningTest {
     }
 
     @Test
-    void aNeverAcquiredPermitIsNotReleasedWhenTheGateAppearsMidFlight() throws Exception {
-        // regression for the permit-inflation race: with an unlimited config the gate is absent,
-        // so the first request acquires nothing; a concurrency-limit 429 then lazily creates the
-        // gate. The old code released unconditionally, inflating the new gate above its cap.
+    void narrowingAnInitiallyUnboundedSharedGateKeepsAcquireReleasePaired() throws Exception {
         final var dial = new ScriptedDialect(
                 new IOException("LLM request failed (429): {\"error\":{\"code\":\"concurrency_limit_exceeded\","
                         + "\"message\":\"Too many concurrent requests\",\"limit\":2}}"));
@@ -84,20 +132,20 @@ class LlmClientResilienceWrapperHardeningTest {
                         .join()
                         .text());
 
-        // the attempt which failed on the 429 never held a slot: only the retried one did, and it
-        // gave it back. A phantom release from the first attempt would show up as released > acquired
-        assertEquals(1, gate.acquired.get(), "only the retried attempt takes a slot");
-        assertEquals(1, gate.released.get(), "no slot must be released without an acquire");
+        // Both attempts use the shared gate, even before it learns a positive bound.
+        assertEquals(2, gate.acquired.get(), "both attempts use the initially unbounded shared gate");
+        assertEquals(2, gate.released.get(), "no slot must be released without an acquire");
 
         // the lazily-created gate must still hold exactly its announced limit (2)
         final var first = gate.acquire().toCompletableFuture().join();
         final var second = gate.acquire().toCompletableFuture().join();
-        final var third = gate.acquire().toCompletableFuture();
-        assertFalse(third.isDone(), "an inflated gate would admit a third request");
+        final var third = gate.acquire(50L, null);
+        assertInstanceOf(
+                ConcurrencySlotTimeoutException.class,
+                assertThrows(CompletionException.class, third::join).getCause());
         first.run();
         second.run();
-        assertTrue(third.isDone(), "the third request is served once a slot is returned");
-        third.join().run();
+        gate.acquire(1000L, null).join().run();
     }
 
     @Test
@@ -146,17 +194,17 @@ class LlmClientResilienceWrapperHardeningTest {
             @Override
             public void onComplete() {}
         });
-        // the retry acquired one slot and released it exactly once on cancel: a failed setup never
-        // held one, so the pair must be 1/1 and the gate must be back to its announced limit
-        assertEquals(1, gate.acquired.get(), "only the successful stream setup takes a slot");
-        assertEquals(1, gate.released.get(), "cancel must release exactly the acquired slot");
+        assertEquals(2, gate.acquired.get(), "each stream setup takes a slot");
+        assertEquals(2, gate.released.get(), "failure and cancel must each release the acquired slot");
         final var first = gate.acquire().toCompletableFuture().join();
         final var second = gate.acquire().toCompletableFuture().join();
-        final var third = gate.acquire().toCompletableFuture();
-        assertFalse(third.isDone(), "a leaked slot would admit a third stream");
+        final var third = gate.acquire(50L, null);
+        assertInstanceOf(
+                ConcurrencySlotTimeoutException.class,
+                assertThrows(CompletionException.class, third::join).getCause());
         first.run();
         second.run();
-        third.join().run();
+        gate.acquire(1000L, null).join().run();
     }
 
     @Test
@@ -252,9 +300,9 @@ class LlmClientResilienceWrapperHardeningTest {
         }
 
         @Override
-        public CompletionStage<Runnable> acquire() {
+        public CompletableFuture<Runnable> acquire(final long timeoutMs, final BooleanSupplier cancelled) {
             acquired.incrementAndGet();
-            return delegate.acquire().thenApply(release -> () -> {
+            return delegate.acquire(timeoutMs, cancelled).thenApply(release -> () -> {
                 released.incrementAndGet();
                 release.run();
             });

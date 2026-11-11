@@ -38,9 +38,11 @@ package io.yupiik.llm.client;
  *     is treated as non-retryable (the quota will not clear in retry-seconds); default 1 hour. Shorter
  *     windows keep the normal retry behavior.
  * @param concurrencyAcquireTimeoutMs max time a request may wait for a free concurrency slot before
- *     failing with a retryable {@code IOException} (default 5 minutes; {@code 0} or negative waits
- *     forever). Without it a permanently saturated gate - a peer process holding every slot, or a
- *     {@code kill -STOP}'d one - would turn a {@code 429} into a silent hang.
+ *     failing with a {@link io.yupiik.llm.client.spi.ConcurrencySlotTimeoutException} (default 5
+ *     minutes; {@code 0} or negative waits forever). Without it a permanently saturated gate - a peer
+ *     process holding every slot, or a {@code kill -STOP}'d one - would turn a {@code 429} into a silent
+ *     hang. The bound applies to <em>one</em> admission, not to the whole retry loop: a slot timeout is
+ *     not retried, since the budget is exactly what the provider told us to respect.
  */
 public record LlmResilienceConfig(
         int retriesMaxAttempts,

@@ -24,46 +24,65 @@ slot the other callers of the budget need.
 
 By default each yca process owns one in-memory gate per provider, with a strict
 FIFO admission: waiters are served in arrival order and a newcomer never barges
-a slot a queued caller was about to get. The configured cap is
-`yca.llm.maxConcurrent` (or the per-provider `maxConcurrent`); when no limit is
-configured the first `429 concurrency_limit_exceeded` response lazily creates a
-gate bounded by the announced `"limit": N`, and the limit relaxes back to the
-configured cap after `yca.llm.concurrencyAdaptationMs`.
+a slot a queued caller was about to get. The gate is shared by every client of
+the provider in the process - the main conversations and the `/btw` side
+questions - so a side question cannot exceed the budget.
 
-A request which cannot get a slot waits up to
-`yca.llm.concurrencyAcquireTimeoutMs` (default 5 minutes), then fails with a
-retryable timeout instead of hanging forever on a saturated budget - another
-process holding every lease, or a suspended one.
+The cap is the per-provider `maxConcurrent` when it is strictly positive,
+otherwise `yca.llm.maxConcurrent`.
+A provider `maxConcurrent` of `0` defers to `yca.llm.maxConcurrent`.
+With neither value set, shared gates start unbounded and a provider-announced limit narrows the gate for all clients.
+
+When no limit is configured, the first `429 concurrency_limit_exceeded` response creates a gate bounded by the announced `"limit": N`.
+Shared provider gates retain learned narrowing for their lifetime so one client's cooldown cannot widen another client's budget.
+Private library gates relax back to the configured cap (or to no bound) after `concurrencyAdaptationMs`.
+
+An admission is bounded: a request which cannot get a slot within
+`yca.llm.concurrencyAcquireTimeoutMs` (default 5 minutes) fails with a
+`ConcurrencySlotTimeoutException` instead of hanging forever on a saturated
+budget - another process holding every lease, or a suspended one. That failure
+is deliberately its own type: a saturated budget is not a flaky transport read,
+so it is not retried (retrying would multiply the admission deadline by the
+attempt count while the provider is asking yca to slow down).
+
+The uncontended admission runs on the caller's thread; only a wait is moved to
+a virtual thread, so a slot holder never starts the next request from its own
+thread.
 
 === Account-wide budget (file leases)
 
 Several yca sessions on the same machine talk to the same account, so
-per-process gates multiply the concurrency the provider actually sees.
+per-process gates multiply the concurrency the provider actually sees: three
+sessions at `maxConcurrent = 2` issue six concurrent requests against a budget
+of two.
 
-When a provider opts into `capabilities.concurrency.useFileLock`, the budget of
-that provider is shared across every yca process of the machine through file
-leases under the storage home (`llm-concurrency/<providerId>`): each grant
-holds an OS file lock, so two processes cannot hold the same slot. The
-directory is local to the machine, so the lease only coordinates the processes
-of that machine - not multiple machines.
+When a provider opts into `capabilities.concurrency.useFileLock` _and_ a
+strictly positive bound is configured (the provider's `maxConcurrent` or the
+global `yca.llm.maxConcurrent`), the budget of that provider is shared across
+every yca process of the machine through file leases under the storage home
+(`llm-concurrency/<providerId>`): each grant holds an exclusive OS record lock
+on one `slot-N.lock` file, so two processes cannot hold the same slot. Record
+locks are released by the kernel when their holder dies, so a killed or crashed
+session never leaves a slot stranded.
 
-This requires a local POSIX filesystem (record locks are unreliable on
-NFS/CIFS) and an explicit `maxConcurrent > 0`, because a provider-adapted
-429-only limit is not a licence to create files for a provider the user did not
-opt in. When the filesystem refuses the locks the gate degrades to a
-per-process budget instead of failing the request.
+Record locks are reliable on a local POSIX filesystem only. On NFS/CIFS they
+may be ignored or coalesced by the client, so the leases only coordinate the
+processes of one machine sharing one storage home - and when the filesystem
+refuses them, the gate degrades to a per-process budget (logged once as a
+warning, also exposed through the gate) instead of failing requests.
 
-The learned capacity (from a `429`) is persisted with a TTL so a restart seeds
-the gate with the last known limit instead of starting unlimited again.
+The slot files are never deleted (a recreated file would be a different lock
+domain, hence a slot which looks free while it is still leased). The
+`llm-concurrency` directory is safe to remove while no yca process runs.
 
-The `/btw` side questions share the same per-provider gates as the main
-conversations: the dedicated client built for a `/btw` call draws from the same
-budget, so a burst of side questions cannot bypass the account-wide limit.
+A capacity learned from a `429` is persisted in a sibling `capacity` file with a 24-hour time-to-live, so a restart seeds the gate with the last known limit instead of burning another `429` to rediscover it.
+Concurrent writers retain the smallest unexpired learned value and publish it atomically.
+Only a learned value is persisted; a local capacity update does not erase what a peer learned.
 
-NOTE: A POSIX semaphore would be the textbook implementation of an account-wide
-budget, but it is not crash-resilient: a process killed with `kill -9` leaves
-the semaphore acquired forever. File leases are released by the kernel when the
-owning process dies, which is why this implementation uses them.
+Reconciliation is best effort: a `capacity` file written after a process started is not re-read by that process for admission.
+Use the same provider id, storage home and configured bound in all processes that share an account.
+Different ids do not coordinate even when they use the same API key, and unsafe directory ids are mapped to a SHA-256 directory name.
+A learned lower bound is not an instantaneous machine-wide guarantee: peers may still use their previous bound and existing requests are never preempted.
 
 === Bounded waits and cancellation
 

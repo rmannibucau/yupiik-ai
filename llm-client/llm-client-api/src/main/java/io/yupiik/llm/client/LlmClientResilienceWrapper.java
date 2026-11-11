@@ -21,6 +21,7 @@ import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.spi.ConcurrencyGate;
+import io.yupiik.llm.client.spi.ConcurrencySlotTimeoutException;
 import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.InMemoryGate;
 import java.io.IOException;
@@ -67,6 +68,17 @@ public final class LlmClientResilienceWrapper {
     /** Cadence (ms) at which the cancellation probe is polled during a scheduled retry wait. */
     private static final long CANCEL_POLL_MS = 100L;
 
+    /** Admission bound for the startup model-catalog lookup: a saturated budget must not block a UI. */
+    static final long CATALOG_ACQUIRE_TIMEOUT_MS = 10_000L;
+
+    /**
+     * Runs the blocking admission (token-bucket throttle and slot wait) off the caller's thread. A
+     * virtual thread per admission: it costs nothing measurable next to the request itself and it keeps
+     * the library API non-blocking while never running the request on a gate thread.
+     */
+    private static final java.util.concurrent.Executor ADMISSION_EXECUTOR =
+            command -> Thread.ofVirtual().name("llm-admission").start(command);
+
     private static final Pattern CONCURRENCY_LIMIT_JSON = Pattern.compile("\"limit\"\\s*:\\s*(\\d+)");
     private static final Pattern CONCURRENCY_FAILED = Pattern.compile("concurrency_limit_exceeded");
     private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter.RFC_1123_DATE_TIME;
@@ -104,8 +116,10 @@ public final class LlmClientResilienceWrapper {
 
     private final ArrayDeque<Long> requestTimes;
     private final ReentrantLock concurrencyLock;
-    private int adaptedConcurrency = -1;
-    private long adaptedUntilMs;
+    /** Adapted cap and its deadline: written under {@link #concurrencyLock}, read on the hot path. */
+    private volatile int adaptedConcurrency = -1;
+
+    private volatile long adaptedUntilMs;
 
     /**
      * Creates the wrapper with explicit clock, mapper and gate factory.
@@ -122,8 +136,8 @@ public final class LlmClientResilienceWrapper {
      *     when {@code null} the window is never inspected and every 429 keeps the normal retry behavior.
      * @param gateFactory builds the concurrency gate for a configured capacity, allowing a caller to
      *     share - or cross processes - the budget of a provider. {@code null} (the default) keeps an
-     *     in-memory {@link InMemoryGate}. It is only invoked for a strictly positive capacity, the
-     *     lazily learned limit included.
+     *     in-memory {@link InMemoryGate}. Nonpositive capacity requests an initially unbounded shared
+     *     gate, so learning by one client also constrains already-created peer clients.
      */
     public LlmClientResilienceWrapper(
             final LlmResilienceConfig config,
@@ -138,7 +152,9 @@ public final class LlmClientResilienceWrapper {
         this.clock = clock;
         this.mapper = mapper;
         this.gateFactory = gateFactory;
-        this.gate = this.config.maxConcurrent() > 0 ? newGate(this.config.maxConcurrent()) : null;
+        this.gate = this.config.maxConcurrent() > 0
+                ? newGate(this.config.maxConcurrent())
+                : gateFactory == null ? null : gateFactory.apply(this.config.maxConcurrent());
         this.requestTimes = new ArrayDeque<>();
         this.concurrencyLock = new ReentrantLock();
     }
@@ -287,9 +303,32 @@ public final class LlmClientResilienceWrapper {
      */
     public CompletionStage<LlmModels> models(final Dialect dialect) {
         // the catalog call is a regular request for the provider budget: it takes one slot for its
-        // own duration only, and is released as soon as the answer (or the failure) is in
-        return acquire(pauseListener, null)
-                .thenCompose(release -> dialect.models().whenComplete((result, error) -> release.run()));
+        // own duration only, and is released as soon as the answer (or the failure) is in. It is a
+        // short, startup-time lookup though: it is bounded to a fraction of the request admission
+        // deadline so a saturated budget cannot park a UI initialization for minutes.
+        final var timeout = config.concurrencyAcquireTimeoutMs();
+        final var bounded = timeout <= 0 ? CATALOG_ACQUIRE_TIMEOUT_MS : Math.min(timeout, CATALOG_ACQUIRE_TIMEOUT_MS);
+        final var result = new CompletableFuture<LlmModels>();
+        acquire(pauseListener, result::isCancelled, bounded).whenComplete((release, error) -> {
+            if (error != null) {
+                result.completeExceptionally(unwrap(error));
+                return;
+            }
+            try {
+                if (result.isCancelled()) {
+                    release.run();
+                    return;
+                }
+                dialect.models().whenComplete((models, failure) -> {
+                    release.run();
+                    completeInto(result, models, failure);
+                });
+            } catch (final RuntimeException e) {
+                release.run();
+                result.completeExceptionally(e);
+            }
+        });
+        return result;
     }
 
     private CompletionStage<LlmResponse> attempt(
@@ -298,19 +337,7 @@ public final class LlmClientResilienceWrapper {
             final BooleanSupplier cancelled,
             final Consumer<PauseEvent> listener,
             final boolean skipRetries) {
-        final var result = new CompletableFuture<LlmResponse>();
-        try {
-            retry(dialect, request, cancelled, 1, listener, skipRetries).whenComplete((response, error) -> {
-                if (error != null) {
-                    result.completeExceptionally(unwrap(error));
-                } else {
-                    result.complete(response);
-                }
-            });
-        } catch (final RuntimeException e) {
-            result.completeExceptionally(e);
-        }
-        return result;
+        return retry(dialect, request, cancelled, 1, listener, skipRetries);
     }
 
     private CompletionStage<LlmResponse> retry(
@@ -335,21 +362,22 @@ public final class LlmClientResilienceWrapper {
             final Consumer<PauseEvent> listener,
             final boolean skipRetries) {
         final var result = new CompletableFuture<LlmResponse>();
-        acquire(listener, cancelled).whenComplete((release, acquireError) -> {
+        final BooleanSupplier stopped = () -> result.isCancelled() || (cancelled != null && cancelled.getAsBoolean());
+        acquire(listener, stopped).whenComplete((release, acquireError) -> {
             if (acquireError != null) {
                 result.completeExceptionally(unwrap(acquireError));
                 return;
             }
             final CompletionStage<LlmResponse> call;
             try {
-                if (cancelled != null && cancelled.getAsBoolean()) {
+                if (stopped.getAsBoolean()) {
                     // the turn was abandoned while we were queued for a slot: give it back instead
                     // of issuing a request nobody is waiting for anymore
                     release.run();
                     result.completeExceptionally(new IOException("Cancelled"));
                     return;
                 }
-                call = dialect.chat(request, cancelled);
+                call = dialect.chat(request, stopped);
             } catch (final RuntimeException e) {
                 release.run();
                 result.completeExceptionally(e);
@@ -360,6 +388,7 @@ public final class LlmClientResilienceWrapper {
                 try {
                     if (error != null) {
                         final var cause = unwrap(error);
+                        concurrencyLimitDetected(cause, listener);
                         boolean retry = false;
                         if (cause instanceof ContextWindowExceededException) {
                             retry = !skipRetries
@@ -369,8 +398,7 @@ public final class LlmClientResilienceWrapper {
                             retry = !skipRetries && attempt < config.retriesMaxAttempts() && retryable(cause);
                         }
                         if (retry) {
-                            concurrencyLimitDetected(cause, listener);
-                            retryAfter(attempt, cause, dialect, request, cancelled, listener)
+                            retryAfter(attempt, cause, dialect, request, stopped, listener)
                                     .whenComplete((r, e) -> completeInto(result, r, e));
                         } else {
                             result.completeExceptionally(cause);
@@ -399,6 +427,9 @@ public final class LlmClientResilienceWrapper {
      * the configured threshold is treated as non-retryable (see {@link #quotaExhaustedForLongWindow}).
      */
     private boolean retryable(final Throwable error) {
+        if (error instanceof ConcurrencySlotTimeoutException) {
+            return false;
+        }
         if (error instanceof LlmHttpFailureException http) {
             return http.retryableStatus() && !quotaExhaustedForLongWindow(http);
         }
@@ -510,19 +541,20 @@ public final class LlmClientResilienceWrapper {
             final int attempt,
             final Consumer<PauseEvent> listener) {
         final var result = new CompletableFuture<Flow.Publisher<LlmStreamEvent>>();
-        acquire(listener, cancelled).whenComplete((release, acquireError) -> {
+        final BooleanSupplier stopped = () -> result.isCancelled() || (cancelled != null && cancelled.getAsBoolean());
+        acquire(listener, stopped).whenComplete((release, acquireError) -> {
             if (acquireError != null) {
                 result.completeExceptionally(unwrap(acquireError));
                 return;
             }
             final CompletionStage<Flow.Publisher<LlmStreamEvent>> setup;
             try {
-                if (cancelled != null && cancelled.getAsBoolean()) {
+                if (stopped.getAsBoolean()) {
                     release.run();
                     result.completeExceptionally(new IOException("Cancelled"));
                     return;
                 }
-                setup = dialect.stream(request, cancelled);
+                setup = dialect.stream(request, stopped);
             } catch (final RuntimeException e) {
                 release.run();
                 result.completeExceptionally(e);
@@ -533,6 +565,7 @@ public final class LlmClientResilienceWrapper {
                     if (error != null) {
                         release.run(); // failed setup: the slot goes back before the backoff wait
                         final var cause = unwrap(error);
+                        concurrencyLimitDetected(cause, listener);
                         boolean retry = false;
                         if (cause instanceof ContextWindowExceededException) {
                             retry = config.retryOnContextOverflow() && attempt < config.retriesMaxAttempts();
@@ -540,8 +573,7 @@ public final class LlmClientResilienceWrapper {
                             retry = attempt < config.retriesMaxAttempts() && retryable(cause);
                         }
                         if (retry) {
-                            concurrencyLimitDetected(cause, listener);
-                            retryStreamAfter(attempt, cause, dialect, request, cancelled, listener)
+                            retryStreamAfter(attempt, cause, dialect, request, stopped, listener)
                                     .whenComplete((r, e) -> completeInto(result, r, e));
                         } else {
                             result.completeExceptionally(cause);
@@ -552,7 +584,33 @@ public final class LlmClientResilienceWrapper {
                     } else {
                         // a stream keeps its slot for its whole consumption: the caller owns the
                         // grant from now on and gets it back when the publisher terminates
-                        result.complete(new ReleaseOnCompletePublisher<>(publisher, release));
+                        if (!result.complete(new ReleaseOnCompletePublisher<>(publisher, release))) {
+                            // A cancelled setup has no subscriber to return the slot. Tear down the
+                            // upstream publisher before admitting another request.
+                            publisher.subscribe(new Flow.Subscriber<>() {
+                                @Override
+                                public void onSubscribe(final Flow.Subscription subscription) {
+                                    try {
+                                        subscription.cancel();
+                                    } finally {
+                                        release.run();
+                                    }
+                                }
+
+                                @Override
+                                public void onNext(final LlmStreamEvent event) {}
+
+                                @Override
+                                public void onError(final Throwable failure) {
+                                    release.run();
+                                }
+
+                                @Override
+                                public void onComplete() {
+                                    release.run();
+                                }
+                            });
+                        }
                     }
                 } catch (final RuntimeException e) {
                     release.run();
@@ -790,23 +848,16 @@ public final class LlmClientResilienceWrapper {
         final var now = clock == null ? System.currentTimeMillis() : clock.millis();
         concurrencyLock.lock();
         try {
-            // with an unlimited configured cap the gate is null: lazily create it bounded
-            // by the provider-announced limit so the adaptation applies even then
-            if (gate == null && config.maxConcurrent() <= 0) {
+            if (gate == null) {
                 gate = newGate(limit);
-            } else if (gate != null && limit < Math.max(1, config.maxConcurrent())) {
-                // a provider announcing a smaller budget than the configured ceiling caps the gate
-                // down; a larger announcement cannot widen that ceiling and is ignored
-                gate.setCapacity(limit);
             }
-            // already adapted to this exact limit and the window has not relaxed yet:
-            // a repeated 429 while the cap is active is absorbed silently - only the
-            // initial adaptation (or a *changed* limit) is worth surfacing once.
-            alreadyAdapted = adaptedConcurrency == Math.max(1, limit) && now < adaptedUntilMs;
-            if (!alreadyAdapted) {
-                adaptedConcurrency = Math.max(1, limit);
-                adaptedUntilMs = now + config.concurrencyAdaptationMs();
-            }
+            alreadyAdapted = adaptedConcurrency == limit && now < adaptedUntilMs;
+            adaptedConcurrency = adaptedConcurrency > 0 ? Math.min(adaptedConcurrency, limit) : limit;
+            adaptedUntilMs = now + config.concurrencyAdaptationMs();
+            gate.learnCapacity(
+                    config.maxConcurrent() > 0
+                            ? Math.min(config.maxConcurrent(), adaptedConcurrency)
+                            : adaptedConcurrency);
         } finally {
             concurrencyLock.unlock();
         }
@@ -826,15 +877,13 @@ public final class LlmClientResilienceWrapper {
             if (adaptedConcurrency <= 0 || now < adaptedUntilMs) {
                 return;
             }
-            if (gate != null) {
-                if (config.maxConcurrent() > 0) {
-                    gate.setCapacity(config.maxConcurrent()); // restore the configured cap
-                } else {
-                    gate = null; // the cap was provider-adapted only: back to unlimited
-                }
-            }
             adaptedConcurrency = -1;
             adaptedUntilMs = 0;
+            // Shared gates own their learned budget: a wrapper must not widen another client's cap.
+            // Private gates can safely return to this wrapper's configured policy.
+            if (gateFactory == null && gate != null) {
+                gate.setCapacity(config.maxConcurrent());
+            }
         } finally {
             concurrencyLock.unlock();
         }
@@ -860,128 +909,100 @@ public final class LlmClientResilienceWrapper {
     /**
      * Throttles (token bucket) then waits for a concurrency slot.
      *
+     * <p>Both waits park their thread, which is why they run on a <em>virtual</em> thread rather than on
+     * the caller's: the API stays non-blocking for the caller (an async caller must not be parked), the
+     * thread hop is free (a virtual thread per request, exactly the cost of the request itself), and the
+     * upstream call is never started from a gate-internal thread - a slow request can therefore not
+     * stall the other callers of the budget.</p>
+     *
      * @param listener pause listener notified of the throttle and of a non-immediate wait.
-     * @param cancelled cancellation probe, so an abandoned turn does not queue for nothing.
+     * @param cancelled cancellation probe, so an abandoned turn does not wait for nothing.
      * @return the idempotent slot release action, a no-op when no gate is active - nothing was taken
      *     then, and releasing anyway would inflate a gate the 429 adaptation creates mid-flight.
      */
     private CompletionStage<Runnable> acquire(final Consumer<PauseEvent> listener, final BooleanSupplier cancelled) {
+        return acquire(listener, cancelled, config.concurrencyAcquireTimeoutMs());
+    }
+
+    private CompletionStage<Runnable> acquire(
+            final Consumer<PauseEvent> listener, final BooleanSupplier cancelled, final long timeoutMs) {
+        if (config.rateLimitRequestsPerMinute() > 0) {
+            final var result = new CompletableFuture<Runnable>();
+            ADMISSION_EXECUTOR.execute(() -> {
+                try {
+                    throttle(cancelled, listener);
+                    acquireSlot(listener, cancelled, timeoutMs).whenComplete((release, error) -> {
+                        if (error != null) {
+                            result.completeExceptionally(unwrap(error));
+                        } else if (!result.complete(release)) {
+                            release.run();
+                        }
+                    });
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    result.completeExceptionally(new IOException(e));
+                } catch (final RuntimeException e) {
+                    result.completeExceptionally(e);
+                }
+            });
+            return result;
+        }
         try {
-            throttle(cancelled, listener);
-        } catch (final InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return failed(new IOException(e));
+            return acquireSlot(listener, cancelled, timeoutMs);
+        } catch (final RuntimeException e) {
+            return failed(e);
+        }
+    }
+
+    private CompletionStage<Runnable> acquireSlot(
+            final Consumer<PauseEvent> listener, final BooleanSupplier cancelled, final long timeoutMs) {
+        if (cancelled != null && cancelled.getAsBoolean()) {
+            return failed(new IOException("Cancelled"));
         }
         relaxAdaptedConcurrency();
+        // no long-lived mirror of the gate: relaxing may widen it back to UNBOUNDED, so read the shared
+        // instance once per admission
         final var current = gate;
         if (current == null) {
             return completedFuture(NOOP);
         }
-        final var granted = current.acquire().toCompletableFuture();
-        if (!granted.isDone() && listener != null) {
+        final var fast = current.tryAcquire();
+        if (fast != null) {
+            return completedFuture(fast); // uncontended: no thread hop, the request starts right here
+        }
+        if (listener != null) {
             // a concurrency wait is invisible to the UI otherwise: surface it once per blocked
             // attempt through the same pause listener as the throttling and backoff ones
             listener.accept(new PauseEvent(0, "concurrency limit reached, waiting for a free slot", 0));
         }
-        return boundedAcquire(granted, cancelled);
-    }
-
-    /**
-     * Bounds the wait for a slot. An unbounded wait turns a permanently saturated budget (a peer
-     * process holding every lease, a {@code kill -STOP}'d one) into a silent hang, whereas a
-     * retryable timeout lets the caller surface it; the message carries a transient marker so the
-     * retry loop treats it like any other transport timeout.
-     */
-    private CompletionStage<Runnable> boundedAcquire(
-            final CompletableFuture<Runnable> granted, final BooleanSupplier cancelled) {
-        final var timeoutMs = config.concurrencyAcquireTimeoutMs();
-        final var bounded = timeoutMs > 0 || cancelled != null;
-        if (!bounded || granted.isDone()) {
-            return granted;
-        }
-        // the result is completed by this method (never by the gate directly) so the timeout - which
-        // is a retryable IOException - cannot be masked by the CancellationException a cancelled
-        // grant stage raises. The gate keeps granting attendants even after the timeout/cancel probe
-        // won: the late grant must hand its slot back to the caller instead of leaking it.
+        // only a contended admission blocks, and it blocks a virtual thread: the API stays
+        // non-blocking for the caller and the upstream call is never started from a gate thread
         final var result = new CompletableFuture<Runnable>();
-        granted.whenComplete((release, error) -> {
-            if (error == null) {
-                // a timeout or cancel may have won the race a microsecond before this grant landed:
-                // the waiter's slot is real, so give it back instead of dropping it
-                if (!result.complete(release)) {
-                    release.run();
-                }
-            } else {
-                // the grant itself failed (gate closed): nothing was leased, surface the failure
-                result.completeExceptionally(unwrap(error));
-            }
-        });
-        final Runnable[] tasks = new Runnable[2];
-        if (timeoutMs > 0) {
-            final Runnable expire = () -> {
-                final var error = new IOException("Timed out waiting for a concurrency slot after " + timeoutMs + "ms");
-                if (result.completeExceptionally(error)) {
-                    granted.cancel(false); // leave the queue: no slot must be granted to a dead caller
-                }
-            };
-            if (scheduler == null) {
-                // one-shot: it only fires once and a late fire sees the completed result; the
-                // scheduler variant below is cancellable through the cleanup
-                CompletableFuture.delayedExecutor(timeoutMs, TimeUnit.MILLISECONDS)
-                        .execute(expire);
-            } else {
-                final var task = scheduler.schedule(expire, timeoutMs, TimeUnit.MILLISECONDS);
-                tasks[0] = () -> task.cancel(false);
-            }
+        try {
+            ADMISSION_EXECUTOR.execute(() -> admit(result, current, cancelled, timeoutMs));
+        } catch (final RuntimeException e) {
+            result.completeExceptionally(e);
         }
-        if (cancelled != null) {
-            // a queued caller must be able to give up: the gate returns nothing until released, so
-            // the probe is polled (same cadence as the retry waits) and the wait ends on abort.
-            // Either way it self-terminates: the fixed-rate probe is cancelled by the cleanup below,
-            // the JDK fallback re-arms only while the wait is still pending (a trailing no-op fire
-            // sees the completed result and exits).
-            final Runnable poll = () -> {
-                if (cancelled.getAsBoolean()) {
-                    cancelWait(result, granted); // completion runs the cleanup, which stops the probe
-                }
-            };
-            if (scheduler == null) {
-                final Runnable reArm = new Runnable() {
-                    @Override
-                    public void run() {
-                        if (!result.isDone() && !(cancelled.getAsBoolean() && cancelWait(result, granted))) {
-                            CompletableFuture.delayedExecutor(CANCEL_POLL_MS, TimeUnit.MILLISECONDS)
-                                    .execute(this);
-                        }
-                    }
-                };
-                CompletableFuture.delayedExecutor(CANCEL_POLL_MS, TimeUnit.MILLISECONDS)
-                        .execute(reArm);
-            } else {
-                final var probe = scheduler.scheduleAtFixedRate(poll, 0, CANCEL_POLL_MS, TimeUnit.MILLISECONDS);
-                tasks[1] = () -> probe.cancel(false);
-            }
-        }
-        // registered last: when the grant completes synchronously between the isDone() fast path and
-        // this registration, the tasks above were already assigned, so no scheduled task leaks
-        result.whenComplete((release, error) -> {
-            for (final var task : tasks) {
-                if (task != null) {
-                    task.run();
-                }
-            }
-        });
         return result;
     }
 
-    /** Ends a queued wait with the cancelled marker, unless a grant already won the race. */
-    private static boolean cancelWait(
-            final CompletableFuture<Runnable> result, final CompletableFuture<Runnable> granted) {
-        if (!result.completeExceptionally(new IOException("Cancelled"))) {
-            return false;
+    private void admit(
+            final CompletableFuture<Runnable> result,
+            final ConcurrencyGate gate,
+            final BooleanSupplier cancelled,
+            final long timeoutMs) {
+        try {
+            final var release = gate.acquire(
+                            timeoutMs, () -> result.isCancelled() || (cancelled != null && cancelled.getAsBoolean()))
+                    .join();
+            if (!result.complete(release)) {
+                release.run();
+            }
+        } catch (final Throwable e) {
+            // a slot-wait timeout or a cancellation is its own outcome: retrying it would multiply
+            // the configured admission deadline by the retry count while the budget is saturated
+            result.completeExceptionally(unwrap(e));
         }
-        granted.cancel(false);
-        return true;
     }
 
     private void throttle(final BooleanSupplier cancelled, final Consumer<PauseEvent> listener)
@@ -1077,8 +1098,11 @@ public final class LlmClientResilienceWrapper {
 
                         @Override
                         public void cancel() {
-                            subscription.cancel();
-                            releaseOnce.run();
+                            try {
+                                subscription.cancel();
+                            } finally {
+                                releaseOnce.run();
+                            }
                         }
                     });
                 }

@@ -118,10 +118,12 @@ public class ChatClient implements AutoCloseable {
     private final List<CustomDynamicHeaderTemplateHelper> customDynamicHeaderTemplateHelpers;
     /**
      * Concurrency gates shared by every client of a provider - the {@code /btw} dedicated client and
-     * this one must not each get their own copy of the limit. Never {@code null}: a client built
-     * without a registry (tests) owns a private one.
+     * this one must not each get their own copy of the limit. {@code null} only for the legacy
+     * no-arg subclass constructor, which builds the lazily-created gates in memory.
      */
     private final ProviderConcurrencyGates concurrencyGates;
+    /** Whether {@link #concurrencyGates} was created here and must therefore be closed here. */
+    private final boolean ownsConcurrencyGates;
 
     private final Map<ClientKey, DialectLlmClient> dialectClients = new ConcurrentHashMap<>();
     private final Map<ClientKey, LlmClientResilienceWrapper> resiliences = new ConcurrentHashMap<>();
@@ -176,6 +178,9 @@ public class ChatClient implements AutoCloseable {
                 : List.copyOf(customDynamicHeaderTemplateHelpers);
         this.concurrencyGates =
                 concurrencyGates == null ? new ProviderConcurrencyGates(configuration) : concurrencyGates;
+        // a registry created here is ours: it holds the file-lease gates of this client and has to be
+        // closed with it, otherwise a recycled client leaves its gates (and their leases) behind
+        this.ownsConcurrencyGates = concurrencyGates == null;
         // context overflow is handled by the agent loop (context compaction), retries after are
         // honored by the library resilience layer; per-provider clients get their own resilience
         // wrapper so the concurrency budget is scoped to one provider base URL
@@ -261,8 +266,10 @@ public class ChatClient implements AutoCloseable {
                 clock,
                 mapper,
                 // one gate per provider, shared by every client of the process (and, when the
-                // provider opts in, by the other yca processes of the machine)
-                capacity -> concurrencyGates.gate(provider, capacity));
+                // provider opts in, by the other yca processes of the machine); the registry is null
+                // only for the legacy no-arg subclass constructor, where the wrapper keeps its own
+                // in-memory gate
+                concurrencyGates == null ? null : capacity -> concurrencyGates.gate(provider, capacity));
     }
 
     protected ChatClient() {
@@ -279,6 +286,7 @@ public class ChatClient implements AutoCloseable {
         this.codexAuthTemplateHelper = null;
         this.customDynamicHeaderTemplateHelpers = List.of();
         this.concurrencyGates = null;
+        this.ownsConcurrencyGates = false;
     }
 
     /** Cache key: a resilient dialect client is built per (flavor, provider) pair. */
@@ -2751,8 +2759,15 @@ public class ChatClient implements AutoCloseable {
             LOGGER.fine("[yca-shutdown] ChatClient.close: closing dialect clients");
         }
         final var start = System.nanoTime();
-        if (dialectClients != null) {
-            dialectClients.values().forEach(DialectLlmClient::close);
+        try {
+            if (dialectClients != null) {
+                dialectClients.values().forEach(DialectLlmClient::close);
+            }
+        } finally {
+            if (ownsConcurrencyGates && concurrencyGates != null) {
+                // release the leases even when closing a dialect client fails
+                concurrencyGates.close();
+            }
         }
         if (LOGGER.isLoggable(Level.FINE)) {
             LOGGER.fine(() ->

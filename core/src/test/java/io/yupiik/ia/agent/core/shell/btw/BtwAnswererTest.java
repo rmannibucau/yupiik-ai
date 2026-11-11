@@ -17,6 +17,9 @@ package io.yupiik.ia.agent.core.shell.btw;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
@@ -27,9 +30,12 @@ import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.MarkupToolCallScanner;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ProviderConcurrencyGates;
+import io.yupiik.ia.agent.core.llm.ToolCallArgumentsRepairer;
 import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.session.TestSessionStores;
@@ -42,6 +48,7 @@ import io.yupiik.ia.agent.core.tools.builtin.BashTool;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.llm.client.spi.ConcurrencySlotTimeoutException;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -94,6 +101,7 @@ class BtwAnswererTest {
     private final List<ChatClient> clients = new ArrayList<>();
     private final List<ExtendedHttpClient> httpClients = new ArrayList<>();
     private final List<BtwAnswerer> answerers = new ArrayList<>();
+    private final List<ProviderConcurrencyGates> gateRegistries = new ArrayList<>();
     private final CopyOnWriteArrayList<String> bodies = new CopyOnWriteArrayList<>();
 
     @BeforeEach
@@ -118,6 +126,7 @@ class BtwAnswererTest {
     void stop() {
         answerers.forEach(BtwAnswerer::release);
         clients.forEach(ChatClient::close);
+        gateRegistries.forEach(ProviderConcurrencyGates::close);
         httpClients.forEach(ExtendedHttpClient::close);
         if (server != null) {
             server.stop(0);
@@ -135,7 +144,16 @@ class BtwAnswererTest {
         final var providerManager = new ProviderManager(configuration, mapper);
         final var httpClient = new HttpClientProducer().httpClient(configuration);
         httpClients.add(httpClient);
-        final var client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC(), httpClient);
+        final var gates = new ProviderConcurrencyGates(configuration);
+        gateRegistries.add(gates);
+        final var client = new ChatClient(
+                configuration,
+                mapper,
+                providerManager,
+                Clock.systemUTC(),
+                httpClient,
+                new ToolCallArgumentsRepairer(mapper),
+                gates);
         clients.add(client);
         btwExecutor = Executors.newVirtualThreadPerTaskExecutor();
         final var created = new BtwAnswerer(
@@ -153,7 +171,7 @@ class BtwAnswererTest {
                 null,
                 new ToolCallPairingRepair(sessionStore, Clock.systemUTC()),
                 httpClient,
-                null);
+                gates);
         answerers.add(created);
         return created;
     }
@@ -343,6 +361,53 @@ class BtwAnswererTest {
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    @Test
+    void mainAndDedicatedBtwClientUseTheSameBudget() throws Exception {
+        final var bounded = answerer(Map.of(
+                "yca.llm.maxConcurrent", "1",
+                "yca.llm.concurrencyAcquireTimeoutMs", "50"));
+        sessionStore.replace("s1", List.of(Message.user("hi")));
+        final var main = clients.getLast();
+        final var registry = gateRegistries.getLast();
+        final var gate = registry.gate(null, 1);
+        final var held = gate.tryAcquire();
+        assertNotNull(held);
+        try {
+            assertThrows(
+                    Exception.class,
+                    () -> main.chat(new ChatCompletionRequest(
+                            "test-model",
+                            List.of(Message.user("hi")),
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null)));
+            final var failure = assertThrows(
+                    java.util.concurrent.ExecutionException.class,
+                    () -> bounded.ask("what did I say?", "s1", usageTracker, () -> false, null)
+                            .toCompletableFuture()
+                            .get(5, TimeUnit.SECONDS));
+            assertInstanceOf(ConcurrencySlotTimeoutException.class, failure.getCause());
+            assertTrue(bodies.isEmpty(), "neither client may reach the provider without a slot");
+        } finally {
+            held.run();
+        }
+        assertEquals(
+                "hello there",
+                bounded.ask("what did I say?", "s1", usageTracker, () -> false, null)
+                        .toCompletableFuture()
+                        .get(5, TimeUnit.SECONDS)
+                        .text());
+        main.close();
+        final var next = gate.tryAcquire();
+        assertNotNull(next, "closing a client must not close its injected registry");
+        next.run();
     }
 
     @Test

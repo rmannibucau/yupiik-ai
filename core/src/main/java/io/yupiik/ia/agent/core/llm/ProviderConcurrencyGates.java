@@ -21,91 +21,226 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.llm.client.spi.ConcurrencyGate;
 import io.yupiik.llm.client.spi.InMemoryGate;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Owns one concurrency gate per provider for the whole process.
+ * Owns one concurrency budget per provider id across clients, until application shutdown.
  *
- * <p>Two independent client instances (the main {@link ChatClient} and the dedicated one the
- * {@code /btw} side questions build) must share the budget of a provider, otherwise each of them gets
- * its own copy of the limit and the provider sees twice the configured concurrency. The gate also has
- * to outlive the clients: a stream leased by a client which is being recycled still releases its slot
- * into the gate it captured, and a fresh gate would immediately try to re-lease the same slot files.
- * Hence this registry owns them and disposes of them once, at shutdown.</p>
+ * <p>File leases require both an opt-in capability and a configured positive provider or global
+ * maximum. A learned limit alone never activates filesystem access. The first lookup selects the
+ * implementation: replacing a live gate would split the budget and strand outstanding leases.
+ * Conflicting modes and requested capacities are each warned about once per id.
  *
- * <p>The gate is a per-process in-memory budget unless the provider opts into
- * {@code capabilities.concurrency.useFileLock} <em>and</em> a strictly positive bound is configured
- * (the provider's own {@code maxConcurrent}, or the global {@code yca.llm.maxConcurrent} when the
- * provider defers to it): only then are file leases worth their cost (and their directory), since a
- * learned limit (a {@code 429} adaptation) is not a licence to create files for a provider the user
- * did not opt in. It also means {@code useFileLock} must be paired with a configured positive
- * {@code maxConcurrent} somewhere - provider or global.</p>
+ * <p>Lookups reconcile to the minimum positive bound requested so far (nonpositive means unbounded),
+ * without widening a learned narrowing. Explicit capacity changes still support adaptation recovery,
+ * but cannot exceed the reconciled ceiling. Registry shutdown closes its gates and rejects lookups.
  */
 @ApplicationScoped
-public class ProviderConcurrencyGates {
+public class ProviderConcurrencyGates implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(ProviderConcurrencyGates.class.getName());
+    private static final String HASH_PREFIX = "~sha256-";
 
     private final CodingAgentConfiguration configuration;
-    private final Map<String, ConcurrencyGate> gates = new ConcurrentHashMap<>();
+    private final Map<String, SharedGate> gates = new HashMap<>();
+    private final ReentrantLock lifecycle = new ReentrantLock();
+    private boolean closed;
 
     public ProviderConcurrencyGates(final CodingAgentConfiguration configuration) {
         this.configuration = configuration;
     }
 
     /**
-     * The gate of a provider, created on first use.
-     *
      * @param provider the provider, may be {@code null} (falls back to the default id).
-     * @param bound the effective capacity to use when the gate is created.
+     * @param bound requested capacity; nonpositive means unbounded.
      * @return the shared gate, never {@code null}.
+     * @throws IllegalStateException when the registry has been closed.
      */
     public ConcurrencyGate gate(final ProviderConfiguration provider, final int bound) {
-        final var id =
-                provider == null || provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
-        final var capacity = Math.max(1, bound);
-        return gates.computeIfAbsent(id, key -> create(provider, key, capacity));
+        lifecycle.lock();
+        try {
+            if (closed) {
+                throw new IllegalStateException("provider concurrency gates are closed");
+            }
+            final var id =
+                    provider == null || provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
+            final var capacity = normalize(bound);
+            final var fileLock = useFileLock(provider);
+            final var existing = gates.get(id);
+            if (existing != null) {
+                existing.reconcile(id, capacity, fileLock);
+                return existing;
+            }
+            final ConcurrencyGate delegate = fileLock
+                    ? new FileLeaseConcurrencyGate(
+                            Path.of(configuration.resolveStorageHome(), "llm-concurrency", directoryKey(id)), capacity)
+                    : new InMemoryGate(capacity);
+            final var gate = new SharedGate(delegate, capacity, fileLock);
+            gates.put(id, gate);
+            return gate;
+        } finally {
+            lifecycle.unlock();
+        }
     }
 
+    @Override
     @Destroy
     public void close() {
-        gates.values().forEach(gate -> {
-            if (gate instanceof AutoCloseable closeable) {
+        lifecycle.lock();
+        try {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            gates.values().forEach(gate -> {
                 try {
-                    closeable.close();
+                    gate.close();
                 } catch (final Exception e) {
                     LOGGER.log(Level.FINE, e, () -> "cannot close a provider concurrency gate");
                 }
-            }
-        });
-        gates.clear();
+            });
+            gates.clear();
+        } finally {
+            lifecycle.unlock();
+        }
     }
 
-    private ConcurrencyGate create(final ProviderConfiguration provider, final String id, final int capacity) {
-        // the provider defers to the global yca.llm.maxConcurrent for 0/negative values: use the
-        // same effective bound here, so a global cap + useFileLock activates the cross-process gate
+    private boolean useFileLock(final ProviderConfiguration provider) {
         final var effectiveMax = provider == null || provider.maxConcurrent() <= 0
                 ? configuration.llm().maxConcurrent()
                 : provider.maxConcurrent();
-        if (provider != null
+        return provider != null
                 && effectiveMax > 0
                 && provider.capabilities() != null
                 && provider.capabilities().concurrency() != null
-                && provider.capabilities().concurrency().useFileLock()) {
-            return new FileLeaseConcurrencyGate(
-                    Path.of(configuration.resolveStorageHome(), "llm-concurrency", sanitize(id)), capacity);
-        }
-        return new InMemoryGate(capacity);
+                && provider.capabilities().concurrency().useFileLock();
     }
 
-    private static String sanitize(final String id) {
-        final var sb = new StringBuilder(id.length());
-        for (final var c : id.toCharArray()) {
-            sb.append(Character.isLetterOrDigit(c) || c == '.' || c == '_' || c == '-' ? c : '_');
+    /** Safe ids retain their directory; all other ids use a disjoint, bounded SHA-256 namespace. */
+    private static String directoryKey(final String id) {
+        if (id.length() <= 120 && id.matches("[a-zA-Z0-9_.-]+") && !id.equals(".") && !id.equals("..")) {
+            return id;
         }
-        return sb.toString();
+        try {
+            return HASH_PREFIX
+                    + HexFormat.of()
+                            .formatHex(
+                                    MessageDigest.getInstance("SHA-256").digest(id.getBytes(StandardCharsets.UTF_8)));
+        } catch (final NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required for provider directory keys", e);
+        }
+    }
+
+    private static int normalize(final int capacity) {
+        return capacity <= 0 ? ConcurrencyGate.UNBOUNDED : capacity;
+    }
+
+    private static int minimum(final int left, final int right) {
+        return left == ConcurrencyGate.UNBOUNDED
+                ? right
+                : right == ConcurrencyGate.UNBOUNDED ? left : Math.min(left, right);
+    }
+
+    /** Serializes policy changes, including learning, so lookups never undo an adaptation. */
+    private static final class SharedGate implements ConcurrencyGate {
+        private final ConcurrencyGate delegate;
+        private final boolean fileLock;
+        private final int initialCapacity;
+        private final ReentrantLock policy = new ReentrantLock();
+        private int ceiling;
+        private int current;
+        private boolean modeWarned;
+        private boolean capacityWarned;
+
+        private SharedGate(final ConcurrencyGate delegate, final int capacity, final boolean fileLock) {
+            this.delegate = delegate;
+            this.fileLock = fileLock;
+            this.initialCapacity = capacity;
+            this.ceiling = capacity;
+            // A file gate can already have loaded a persisted learned narrowing.
+            this.current = delegate instanceof FileLeaseConcurrencyGate file ? file.capacity() : capacity;
+        }
+
+        private void reconcile(final String id, final int capacity, final boolean requestedFileLock) {
+            policy.lock();
+            try {
+                if (fileLock != requestedFileLock && !modeWarned) {
+                    modeWarned = true;
+                    LOGGER.warning(() -> "Concurrency gate mode mismatch for provider '" + id
+                            + "': retaining " + (fileLock ? "file leases" : "in-memory")
+                            + "; use consistent useFileLock and configured bounds for this id");
+                }
+                if (initialCapacity != capacity && !capacityWarned) {
+                    capacityWarned = true;
+                    LOGGER.warning(() -> "Concurrency gate capacity mismatch for provider '" + id
+                            + "': initial=" + initialCapacity + ", requested=" + capacity
+                            + "; retaining the minimum positive requested bound without widening learned limits");
+                }
+                ceiling = minimum(ceiling, capacity);
+                final var narrowed = minimum(current, ceiling);
+                if (narrowed != current) {
+                    delegate.setCapacity(narrowed);
+                    current = narrowed;
+                }
+            } finally {
+                policy.unlock();
+            }
+        }
+
+        @Override
+        public CompletableFuture<Runnable> acquire(final long timeoutMs, final BooleanSupplier cancelled) {
+            return delegate.acquire(timeoutMs, cancelled);
+        }
+
+        @Override
+        public Runnable tryAcquire() {
+            return delegate.tryAcquire();
+        }
+
+        @Override
+        public boolean isSaturated() {
+            return delegate.isSaturated();
+        }
+
+        @Override
+        public void setCapacity(final int capacity) {
+            update(capacity, false);
+        }
+
+        @Override
+        public void learnCapacity(final int capacity) {
+            update(capacity, true);
+        }
+
+        private void update(final int capacity, final boolean learned) {
+            policy.lock();
+            try {
+                final var requested = minimum(normalize(capacity), ceiling);
+                final var bounded = learned ? minimum(current, requested) : requested;
+                if (learned) {
+                    delegate.learnCapacity(bounded);
+                } else {
+                    delegate.setCapacity(bounded);
+                }
+                current = bounded;
+            } finally {
+                policy.unlock();
+            }
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
+        }
     }
 }

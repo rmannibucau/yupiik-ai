@@ -18,6 +18,7 @@ package io.yupiik.llm.client;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -27,6 +28,7 @@ import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.spi.ConcurrencyGate;
+import io.yupiik.llm.client.spi.ConcurrencySlotTimeoutException;
 import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.InMemoryGate;
 import io.yupiik.llm.client.spi.StreamAttempt;
@@ -35,6 +37,7 @@ import java.net.http.HttpResponse;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
@@ -50,6 +53,161 @@ import org.junit.jupiter.api.Timeout;
  */
 @Timeout(20)
 class LlmClientResilienceWrapperCancellationTest {
+    @Test
+    void cancellationRacingGrantedAdmissionReturnsExactlyOneSlot() throws Exception {
+        final var granted = new CountDownLatch(1);
+        final var returnGrant = new CountDownLatch(1);
+        final var released = new CountDownLatch(1);
+        final var releases = new AtomicInteger();
+        final ConcurrencyGate gate = new ConcurrencyGate() {
+            @Override
+            public CompletableFuture<Runnable> acquire(final long timeoutMs, final BooleanSupplier cancelled) {
+                granted.countDown();
+                try {
+                    if (!returnGrant.await(5, TimeUnit.SECONDS)) {
+                        return CompletableFuture.failedFuture(new AssertionError("test did not allow grant return"));
+                    }
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return CompletableFuture.failedFuture(e);
+                }
+                // Cancellation can race the last probe and the caller receiving the grant.
+                return CompletableFuture.completedFuture(() -> {
+                    releases.incrementAndGet();
+                    released.countDown();
+                });
+            }
+
+            @Override
+            public void setCapacity(final int capacity) {}
+        };
+        final var dial = new FailingOnceDialect(null);
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 1), null, null, null, null, cap -> gate);
+        final var result = wrapper.chat(dial, null, null).toCompletableFuture();
+        assertTrue(granted.await(5, TimeUnit.SECONDS));
+        assertTrue(result.cancel(false));
+        returnGrant.countDown();
+        assertTrue(released.await(5, TimeUnit.SECONDS));
+        assertEquals(1, releases.get());
+        assertEquals(0, dial.calls.get());
+    }
+
+    @Test
+    void cancellingReturnedFutureAbandonsBlockingAdmission() throws Exception {
+        final var delegate = new InMemoryGate(1);
+        final var held = delegate.acquire().join();
+        final var entered = new CountDownLatch(1);
+        final var abandoned = new CountDownLatch(1);
+        final ConcurrencyGate gate = new ConcurrencyGate() {
+            @Override
+            public CompletableFuture<Runnable> acquire(final long timeoutMs, final BooleanSupplier cancelled) {
+                entered.countDown();
+                try {
+                    return delegate.acquire(timeoutMs, cancelled);
+                } finally {
+                    abandoned.countDown();
+                }
+            }
+
+            @Override
+            public void setCapacity(final int capacity) {
+                delegate.setCapacity(capacity);
+            }
+        };
+        final var dial = new FailingOnceDialect(null);
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 1), null, null, null, null, cap -> gate);
+        final var queued = wrapper.chat(dial, null, null).toCompletableFuture();
+        assertTrue(entered.await(5, TimeUnit.SECONDS));
+        assertTrue(queued.cancel(false));
+        assertTrue(abandoned.await(5, TimeUnit.SECONDS), "cancellation must reach the blocking SPI");
+        held.run();
+        delegate.acquire(1000, null).join().run();
+        assertEquals(0, dial.calls.get());
+    }
+
+    @Test
+    void modelsAdmissionIsAsyncBoundedAndSynchronousFailureReleases() throws Exception {
+        final var gate = new InMemoryGate(1);
+        final var held = gate.acquire().join();
+        final var calls = new AtomicInteger();
+        final var dial = new FailingOnceDialect(null) {
+            @Override
+            public CompletionStage<LlmModels> models() {
+                calls.incrementAndGet();
+                throw new IllegalStateException("catalog failure");
+            }
+        };
+        final var wrapper = new LlmClientResilienceWrapper(
+                new LlmResilienceConfig(5, 0, 0, 1, false, false, 300_000, 1, 900_000, 3_600_000, 100),
+                null,
+                null,
+                null,
+                null,
+                cap -> gate);
+        final var queued = wrapper.models(dial).toCompletableFuture();
+        assertFalse(queued.isDone(), "models must return before blocking admission finishes");
+        assertInstanceOf(
+                ConcurrencySlotTimeoutException.class,
+                assertThrows(ExecutionException.class, () -> queued.get(5, TimeUnit.SECONDS))
+                        .getCause());
+        assertEquals(0, calls.get());
+        held.run();
+        final var failed = wrapper.models(dial).toCompletableFuture();
+        assertInstanceOf(
+                IllegalStateException.class,
+                assertThrows(ExecutionException.class, () -> failed.get(5, TimeUnit.SECONDS))
+                        .getCause());
+        gate.acquire(1000, null).join().run();
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void rateThrottleDoesNotParkCallerAndCanBeCancelled() throws Exception {
+        final var dial = new FailingOnceDialect(null);
+        final var wrapper = new LlmClientResilienceWrapper(
+                new LlmResilienceConfig(3, 0, 1, 1, false, false, 300_000, 1, 900_000, 3_600_000, 100), null);
+        wrapper.chat(dial, null, null).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var cancelled = new AtomicBoolean();
+        final var queued = wrapper.chat(dial, null, cancelled::get).toCompletableFuture();
+        assertFalse(queued.isDone());
+        cancelled.set(true);
+        assertInstanceOf(
+                IOException.class,
+                assertThrows(ExecutionException.class, () -> queued.get(5, TimeUnit.SECONDS))
+                        .getCause());
+        assertEquals(1, dial.calls.get());
+    }
+
+    @Test
+    void cancelledStreamSetupCancelsLatePublisherBeforeReturningSlot() throws Exception {
+        final var gate = new InMemoryGate(1);
+        final var setup = new CompletableFuture<Flow.Publisher<LlmStreamEvent>>();
+        final var upstreamCancelled = new AtomicBoolean();
+        final var dial = new FailingOnceDialect(null) {
+            @Override
+            public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
+                    final LlmRequest request, final BooleanSupplier cancelled) {
+                return setup;
+            }
+        };
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 1), null, null, null, null, cap -> gate);
+        final var result = wrapper.stream(dial, null, null).toCompletableFuture();
+        assertTrue(result.cancel(false));
+        assertNull(gate.tryAcquire(), "setup still owns the slot until upstream is torn down");
+        setup.complete(subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+            @Override
+            public void request(final long n) {}
+
+            @Override
+            public void cancel() {
+                assertNull(gate.tryAcquire(), "cancel upstream before returning its slot");
+                upstreamCancelled.set(true);
+            }
+        }));
+        assertTrue(upstreamCancelled.get());
+        gate.acquire(1000, null).join().run();
+    }
+
     private static LlmResilienceConfig config(final int attempts, final long baseDelayMs, final int maxConcurrent) {
         return new LlmResilienceConfig(
                 attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, 0.0001d, 900_000L, 3_600_000L, 60_000L);
@@ -107,21 +265,23 @@ class LlmClientResilienceWrapperCancellationTest {
     }
 
     @Test
-    void timeoutFailsWithoutLeakingTheSlot() throws Exception {
+    void timeoutFailsWithItsOwnTypeAndLeavesNoSlot() throws Exception {
         final var dial = new BlockingDialect(new CompletableFuture<>(), new AtomicBoolean());
         final var wrapper = new LlmClientResilienceWrapper(
-                new LlmResilienceConfig(1, 0, 0, 1, false, false, 300_000L, 1.0d, 900_000L, 3_600_000L, 100L), null);
+                new LlmResilienceConfig(5, 0, 0, 1, false, false, 300_000L, 1.0d, 900_000L, 3_600_000L, 100L), null);
 
-        wrapper.chat(dial, null, () -> false); // holds the only slot
+        wrapper.chat(dial, null, () -> false); // holds the only slot, forever
 
         final var queued = wrapper.chat(
                         new BlockingDialect(new CompletableFuture<>(), new AtomicBoolean()), null, () -> false)
                 .toCompletableFuture();
         final var failure = assertThrows(ExecutionException.class, () -> queued.get(10, TimeUnit.SECONDS));
-        assertTrue(
-                failure.getCause() instanceof IOException
-                        && failure.getCause().getMessage().contains("Timed out"),
-                "got: " + failure.getCause());
+        // a saturated budget is not a transport timeout: it has its own type, so the retry loop does
+        // not multiply the admission deadline by the attempt count
+        assertInstanceOf(ConcurrencySlotTimeoutException.class, failure.getCause(), "got: " + failure.getCause());
+        assertFalse(
+                failure.getCause().getMessage().toLowerCase().contains("timed out"),
+                "the message must not look like a transient transport timeout");
     }
 
     @Test
@@ -140,92 +300,32 @@ class LlmClientResilienceWrapperCancellationTest {
                         .join()
                         .text());
 
-        // the lazily-created gate still has exactly one slot: take it twice, the second must block
-        final var first = gate.acquire().toCompletableFuture().join();
-        final var second = gate.acquire().toCompletableFuture();
-        assertFalse(second.isDone(), "a phantom release would have inflated the gate");
+        // the lazily-created gate still has exactly one slot: a phantom release would have made room
+        // for a second concurrent admission
+        final var first = gate.tryAcquire();
+        assertTrue(first != null, "the only slot must be free");
+        assertNull(gate.tryAcquire(), "a phantom release would have inflated the gate");
         first.run();
-        assertTrue(second.isDone());
-        second.join().run();
+        final var second = gate.tryAcquire();
+        assertTrue(second != null, "the released slot is available again");
+        second.run();
     }
 
     @Test
-    void lateGrantAfterTimeoutReturnsTheSlot() throws Exception {
-        // regression for the late-grant race: the timeout wins a microsecond before the gate's grant
-        // lands - the grant must be handed back, not dropped (a lost slot stalls the budget forever)
-        final var gate = new LateGrantGate();
-        final var wrapper = new LlmClientResilienceWrapper(
-                new LlmResilienceConfig(1, 0, 0, 1, false, false, 300_000L, 1.0d, 900_000L, 3_600_000L, 50L),
-                null,
-                null,
-                null,
-                null,
-                capacity -> gate);
+    void acquireHonoursTheConfiguredDeadlineAndLeavesTheGateUsable() {
+        // the SPI contract: acquire(timeout) never blocks forever, and a timed-out caller leaves no
+        // trace behind - the slot it never got is still available to the next caller
+        final var gate = new InMemoryGate(1);
+        final var held = gate.acquire().join();
 
-        // the first request takes and holds the only slot forever
-        final var holder = new BlockingDialect(new CompletableFuture<>(), new AtomicBoolean());
-        wrapper.chat(holder, null, () -> false);
+        final var failure = assertThrows(
+                ExecutionException.class, () -> gate.acquire(50L, null).get(10, TimeUnit.SECONDS));
+        assertInstanceOf(ConcurrencySlotTimeoutException.class, failure.getCause());
 
-        // the second one queues and gives up when the acquire timeout wins
-        final var queued = wrapper.chat(
-                        new BlockingDialect(new CompletableFuture<>(), new AtomicBoolean()), null, () -> false)
-                .toCompletableFuture();
-        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (!queued.isDone() && System.nanoTime() < deadline) {
-            Thread.onSpinWait();
-        }
-        assertTrue(queued.isDone(), "the queued request must have timed out");
-        final var failure = assertThrows(ExecutionException.class, () -> queued.get(1, TimeUnit.SECONDS));
-        assertTrue(
-                failure.getCause() instanceof IOException
-                        && failure.getCause().getMessage().contains("Timed out"),
-                "got: " + failure.getCause());
-
-        // the gate keeps granting attendants even after the timeout won: the grant must be returned,
-        // so the slot is free again
-        gate.grantLate();
-        assertTrue(gate.slotFree(), "the late grant must have been returned, not leaked");
-    }
-
-    /**
-     * A gate whose queued grant survives the wrapper's {@code cancel(false)} (it overrides {@link
-     * CompletableFuture#cancel(boolean)} to do nothing), so the test can complete it after the
-     * timeout won - the deterministic replay of the late-grant race.
-     */
-    private static class LateGrantGate implements ConcurrencyGate {
-        private final AtomicInteger inFlight = new AtomicInteger();
-        private volatile CompletableFuture<Runnable> queued;
-
-        @Override
-        public CompletionStage<Runnable> acquire() {
-            if (inFlight.getAndIncrement() == 0) { // the first caller gets the only slot
-                return CompletableFuture.completedFuture(() -> inFlight.decrementAndGet());
-            }
-            inFlight.decrementAndGet(); // no slot: only queue, like a real contended gate
-            final var future = new CompletableFuture<Runnable>() {
-                @Override
-                public boolean cancel(final boolean mayInterruptIfRunning) {
-                    return false; // the grant must still be completable after the wrapper's cancel
-                }
-            };
-            queued = future;
-            return future;
-        }
-
-        @Override
-        public void setCapacity(final int capacity) {}
-
-        /** Hands the queued waiter its slot, as the real gate would after the timeout won. */
-        void grantLate() {
-            final var future = queued;
-            if (future != null) {
-                future.complete(() -> inFlight.decrementAndGet());
-            }
-        }
-
-        boolean slotFree() {
-            return inFlight.get() == 0;
-        }
+        held.run();
+        final var next = gate.acquire(1000L, null);
+        assertTrue(next.isDone(), "the timed-out waiter must not have consumed a slot");
+        next.join().run();
     }
 
     private static LlmResponse response(final String text) {

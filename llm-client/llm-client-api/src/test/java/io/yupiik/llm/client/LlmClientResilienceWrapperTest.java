@@ -281,11 +281,15 @@ class LlmClientResilienceWrapperTest {
                         .join()
                         .text());
 
+        // the floor is deliberately jittered (75%..150% of the default) so several processes do not
+        // retry in lockstep: the assertion must follow the documented range, not the nominal value
+        final var nominal = LlmClientResilienceWrapper.CONCURRENCY_LIMIT_DEFAULT_WAIT_MS;
         assertTrue(
                 pauses.stream()
                         .anyMatch(p -> p.reason().contains("concurrency-limit")
-                                && p.waitMs() >= LlmClientResilienceWrapper.CONCURRENCY_LIMIT_DEFAULT_WAIT_MS),
-                "the retry notice must surface a default-or-larger jittered wait and why it waits, got: " + pauses);
+                                && p.waitMs() >= nominal * 3 / 4
+                                && p.waitMs() <= nominal * 3 / 2),
+                "the retry notice must surface a jittered wait and why it waits, got: " + pauses);
         assertTrue(
                 pauses.stream()
                         .anyMatch(p -> p.reason() != null && p.reason().startsWith("concurrency limit 2 detected")),
