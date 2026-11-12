@@ -91,6 +91,8 @@ public class AgentLoop {
     /** Exploration-plateau markers used in the per-round coverage set (see {@link #appendToolResult}). */
     static final String WRITE_MARKER = "\u0000write";
 
+    static final String INELIGIBLE_EXPLORATION_MARKER = "\u0000ineligible-exploration";
+
     static final String REDUNDANT_MARKER = "\u0000seen:";
 
     /**
@@ -412,6 +414,8 @@ public class AgentLoop {
      * of burning the iteration window (see the plateauRounds cascade).
      */
     final Set<String> seenFiles = ConcurrentHashMap.newKeySet();
+
+    final ReadCoverage readCoverage = new ReadCoverage();
 
     /** Consecutive read-only rounds re-covering only already-seen files (reset on any informative round or write). */
     int plateauRounds;
@@ -1448,8 +1452,7 @@ public class AgentLoop {
     }
 
     <T, X extends Throwable> T withContextCapture(
-            final java.util.function.Consumer<ContextMeasurement.Payload> consumer,
-            final ScopedValue.CallableOp<T, X> operation)
+            final Consumer<ContextMeasurement.Payload> consumer, final ScopedValue.CallableOp<T, X> operation)
             throws X {
         return chatClient.withContextCapture(consumer, operation);
     }

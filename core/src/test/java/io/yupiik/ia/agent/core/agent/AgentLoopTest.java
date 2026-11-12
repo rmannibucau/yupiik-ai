@@ -28,12 +28,15 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.CompactionResult;
+import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.TokenEstimator;
@@ -47,6 +50,7 @@ import io.yupiik.ia.agent.core.llm.MidStreamFailureException;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
+import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -62,6 +66,9 @@ import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.tools.builtin.ManageContextTool;
+import io.yupiik.ia.agent.core.tools.builtin.MemoryWriteTool;
+import io.yupiik.ia.agent.core.usage.QuotaSnapshotStore;
+import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.LlmHttpFailureException;
@@ -84,7 +91,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -654,8 +663,8 @@ class AgentLoopTest {
                 Files.write(
                         tokenFile,
                         mapper.toBytes(new CodexTokenStore("access", "refresh", "acc", Long.MAX_VALUE / 1000L, "id")));
-                final var quotaStore = new io.yupiik.ia.agent.core.usage.QuotaSnapshotStore(
-                        mapper, httpClient, auth, providerManagerOverride, Clock.systemUTC());
+                final var quotaStore =
+                        new QuotaSnapshotStore(mapper, httpClient, auth, providerManagerOverride, Clock.systemUTC());
 
                 final var client = new ChatClient() {
                     @Override
@@ -782,8 +791,8 @@ class AgentLoopTest {
                 Files.write(
                         tokenFile,
                         mapper.toBytes(new CodexTokenStore("access", "refresh", "acc", Long.MAX_VALUE / 1000L, "id")));
-                final var quotaStore = new io.yupiik.ia.agent.core.usage.QuotaSnapshotStore(
-                        mapper, httpClient, auth, providerManagerOverride, Clock.systemUTC());
+                final var quotaStore =
+                        new QuotaSnapshotStore(mapper, httpClient, auth, providerManagerOverride, Clock.systemUTC());
 
                 final var client = new ChatClient() {
                     @Override
@@ -888,8 +897,8 @@ class AgentLoopTest {
                 Files.write(
                         tokenFile,
                         mapper.toBytes(new CodexTokenStore("access", "refresh", "acc", Long.MAX_VALUE / 1000L, "id")));
-                final var quotaStore = new io.yupiik.ia.agent.core.usage.QuotaSnapshotStore(
-                        mapper, httpClient, auth, providerManagerOverride, Clock.systemUTC());
+                final var quotaStore =
+                        new QuotaSnapshotStore(mapper, httpClient, auth, providerManagerOverride, Clock.systemUTC());
 
                 final var client = new ChatClient() {
                     @Override
@@ -2716,9 +2725,9 @@ class AgentLoopTest {
     @Test
     void explorationPlateauStopsTheTurn() {
         final var replies = new ArrayDeque<ScriptedReply>();
-        // 9 read rounds on the SAME file, same 2k bucket, distinct limits: signatures are novel
-        // (ToolRepeats stays silent), coverage is redundant -> plateau after 8
-        final int[] offsets = {0, 100, 700, 1500, 100, 700, 1500, 0, 100};
+        // The first read delivers all 30 fixture lines; eight contained reads have distinct
+        // signatures and outputs (ToolRepeats stays silent), but redundant line coverage.
+        final int[] offsets = {1, 2, 3, 4, 5, 6, 7, 8, 9};
         for (var i = 0; i < offsets.length; i++) {
             replies.add(toolCallReply(
                     "t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":" + offsets[i] + ",\"limit\":" + (30 + i) + "}"));
@@ -2759,8 +2768,8 @@ class AgentLoopTest {
     @Test
     void behaviorPlateauRoundsOverridesGlobal() {
         final var replies = new ArrayDeque<ScriptedReply>();
-        // 3 redundant rounds: behavior.plateauRounds=2 stops after the 3rd
-        final int[] offsets = {0, 100, 700};
+        // One full read followed by two contained reads: plateauRounds=2 stops after the 3rd.
+        final int[] offsets = {1, 2, 3};
         for (var i = 0; i < offsets.length; i++) {
             replies.add(toolCallReply(
                     "t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":" + offsets[i] + ",\"limit\":" + (30 + i) + "}"));
@@ -2809,8 +2818,9 @@ class AgentLoopTest {
     @Test
     void negativePlateauRoundsIsNudgeOnlyNeverStops() {
         final var replies = new ArrayDeque<ScriptedReply>();
-        // 9 redundant read rounds on the same file (would hard-stop with a positive plateau), then an answer
-        final int[] offsets = {0, 100, 700, 1500, 100, 700, 1500, 0, 100};
+        // One full read followed by eight contained reads (would hard-stop with a positive
+        // plateau), then an answer.
+        final int[] offsets = {1, 2, 3, 4, 5, 6, 7, 8, 9};
         for (var i = 0; i < offsets.length; i++) {
             replies.add(toolCallReply(
                     "t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":" + offsets[i] + ",\"limit\":" + (30 + i) + "}"));
@@ -2865,10 +2875,10 @@ class AgentLoopTest {
     void plateauResetByWrite() {
         final var replies = new ArrayDeque<ScriptedReply>();
         replies.add(toolCallReply("r1", "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
-        replies.add(toolCallReply("r2", "read", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
+        replies.add(toolCallReply("r2", "read", "{\"path\":\"/a.txt\",\"offset\":2,\"limit\":10}"));
         replies.add(toolCallReply("w1", "write_file", "{\"path\":\"/a.txt\",\"content\":\"new\"}"));
         replies.add(toolCallReply("r3", "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
-        replies.add(toolCallReply("r4", "read", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
+        replies.add(toolCallReply("r4", "read", "{\"path\":\"/a.txt\",\"offset\":2,\"limit\":10}"));
         replies.add(new ScriptedReply("done", "stop", false));
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -3136,8 +3146,8 @@ class AgentLoopTest {
         final var replies = new ArrayDeque<ScriptedReply>();
         // behavior plateauRounds=3, nudge_2: nudge at streak 1 (3-2), hard stop at streak 3
         for (var i = 0; i < 4; i++) {
-            replies.add(
-                    toolCallReply("t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+            replies.add(toolCallReply(
+                    "t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":" + (i + 1) + ",\"limit\":" + (30 + i) + "}"));
         }
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -3188,8 +3198,8 @@ class AgentLoopTest {
         final var replies = new ArrayDeque<ScriptedReply>();
         // behavior plateauRounds=4, nudge_1: nudge at streak 3 (4-1), hard stop at streak 4
         for (var i = 0; i < 5; i++) {
-            replies.add(
-                    toolCallReply("t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+            replies.add(toolCallReply(
+                    "t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":" + (i + 1) + ",\"limit\":" + (30 + i) + "}"));
         }
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -3233,9 +3243,9 @@ class AgentLoopTest {
     @Test
     void plateauNudgeLetsModelRecover() {
         final var replies = new ArrayDeque<ScriptedReply>();
-        // plateauRounds=3, nudge_2: rounds 1 (a) -> nudge; then a NEW file (b) resets; then more new files
+        // plateauRounds=3, nudge_2: the contained second read nudges; then a NEW file (b) resets.
         replies.add(toolCallReply("r1", "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
-        replies.add(toolCallReply("r2", "read", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
+        replies.add(toolCallReply("r2", "read", "{\"path\":\"/a.txt\",\"offset\":2,\"limit\":10}"));
         replies.add(toolCallReply("r3", "read", "{\"path\":\"/b.txt\",\"offset\":0,\"limit\":50}"));
         replies.add(toolCallReply("r4", "read", "{\"path\":\"/c.txt\",\"offset\":0,\"limit\":60}"));
         replies.add(new ScriptedReply("done", "stop", false));
@@ -3278,8 +3288,8 @@ class AgentLoopTest {
     void plateauFeedbackNoneKeepsHardStopWithoutNudge() {
         final var replies = new ArrayDeque<ScriptedReply>();
         for (var i = 0; i < 4; i++) {
-            replies.add(
-                    toolCallReply("t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+            replies.add(toolCallReply(
+                    "t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":" + (i + 1) + ",\"limit\":" + (30 + i) + "}"));
         }
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -3659,7 +3669,7 @@ class AgentLoopTest {
      * the request ("tool_use ids were found without tool_result blocks immediately after").
      */
     private static void assertAllToolCallsAreAnsweredByContiguousResults(final List<Message> messages) {
-        final var pendingIds = new java.util.HashSet<String>();
+        final var pendingIds = new HashSet<String>();
         for (final var message : messages) {
             if ("assistant".equals(message.role())) {
                 pendingIds.clear();
@@ -3698,7 +3708,7 @@ class AgentLoopTest {
         return -1;
     }
 
-    /** A registry exposing a read-only {@code read} tool (coverage-keyed for the plateau guard). */
+    /** A registry exposing a numbered, paged {@code read} tool for the plateau guard. */
     private ToolRegistry readFileRegistry() {
         return registryOf(new EmbeddedTool() {
             @Override
@@ -3726,15 +3736,23 @@ class AgentLoopTest {
                 return true;
             }
 
-            private int call;
-
             @Override
             public ToolResult execute(final Map<String, Object> args) {
-                final var path = args.get("path") instanceof final String p ? p : "?";
-                final var offset = args.get("offset") instanceof final Number n ? n.intValue() : 0;
-                return ToolResult.ok("content of " + path + " @" + offset + " #" + (call++));
+                return fixtureRead(args);
             }
         });
+    }
+
+    /** A small finite file with the same line-numbered paging contract as the built-in read tool. */
+    private ToolResult fixtureRead(final Map<String, Object> args) {
+        final var path = args.get("path") instanceof final String p ? p : "?";
+        final var offset = args.get("offset") instanceof final Number n ? Math.max(1, n.intValue()) : 1;
+        final var limit = args.get("limit") instanceof final Number n ? n.intValue() : 2000;
+        final var output = new StringBuilder();
+        for (var line = offset; line <= Math.min(30L, (long) offset + limit - 1); line++) {
+            output.append(String.format("%6d\tcontent of %s, line %d%n", line, path, line));
+        }
+        return ToolResult.ok(output.toString());
     }
 
     /** A registry exposing read + write_file (writes reset the plateau streak). */
@@ -3766,13 +3784,9 @@ class AgentLoopTest {
                         return true;
                     }
 
-                    private int call;
-
                     @Override
                     public ToolResult execute(final Map<String, Object> args) {
-                        final var path = args.get("path") instanceof final String p ? p : "?";
-                        final var offset = args.get("offset") instanceof final Number n ? n.intValue() : 0;
-                        return ToolResult.ok("content of " + path + " @" + offset + " #" + (call++));
+                        return fixtureRead(args);
                     }
                 },
                 new EmbeddedTool() {
@@ -4836,7 +4850,7 @@ class AgentLoopTest {
                 requests.stream().map(AgentLoopTest::hasHardCompressionNudge).toList();
         assertEquals(1, contextView.compression().blocks().size(), "the dispatched compress call must create a block");
         assertEquals(
-                io.yupiik.ia.agent.core.context.ContextCompression.Status.ACTIVE,
+                ContextCompression.Status.ACTIVE,
                 contextView.compression().blocks().getFirst().status());
         assertTrue(hardNudges.getFirst(), "the initial request is above the configured target");
         assertEquals(
@@ -4848,7 +4862,7 @@ class AgentLoopTest {
 
     private static boolean hasHardCompressionNudge(final List<Message> request) {
         final var tail = request.getLast();
-        return String.valueOf(tail.content()).toLowerCase(java.util.Locale.ROOT).contains("working context reached");
+        return String.valueOf(tail.content()).toLowerCase(Locale.ROOT).contains("working context reached");
     }
 
     @Test
@@ -6505,7 +6519,7 @@ class AgentLoopTest {
     @Test
     void memoryIsNotResentInEveryRoundTail() {
         final var cfg = configuration(true);
-        final var memory = new io.yupiik.ia.agent.core.memory.MemoryStore(cfg);
+        final var memory = new MemoryStore(cfg);
         memory.append(true, List.of("a durable fact"));
         final var requests = new ArrayList<List<Message>>();
         final var client = scriptedToolClient(
@@ -6572,7 +6586,7 @@ class AgentLoopTest {
     @Test
     void memoryWriteMidTurnPersistsToDiskButDoesNotRefreshTheTail() {
         final var cfg = configuration(true);
-        final var memory = new io.yupiik.ia.agent.core.memory.MemoryStore(cfg);
+        final var memory = new MemoryStore(cfg);
         memory.append(true, List.of("fact before"));
         final var requests = new ArrayList<List<Message>>();
         final var client = scriptedToolClient(
@@ -6582,7 +6596,7 @@ class AgentLoopTest {
                         "function",
                         new ToolCall.FunctionCall("memory_write", "{\"fact\":\"fact after\",\"scope\":\"global\"}"),
                         0)));
-        final var registry = registryOf(new io.yupiik.ia.agent.core.tools.builtin.MemoryWriteTool(memory));
+        final var registry = registryOf(new MemoryWriteTool(memory));
         final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null, null) {
             @Override
             public String build(final String prompt, final AgentConfiguration agent) {
@@ -6638,7 +6652,7 @@ class AgentLoopTest {
             }
 
             @Override
-            public io.yupiik.ia.agent.core.tools.EmbeddedTool tool(final String name) {
+            public EmbeddedTool tool(final String name) {
                 return null;
             }
         };
@@ -7247,7 +7261,7 @@ class AgentLoopTest {
             final ToolExecutionService executions,
             final ExecutorService executor,
             final SystemPromptBuilder promptBuilder,
-            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore) {
+            final QuotaSnapshotStore quotaStore) {
         return loop(
                 client,
                 todoStore,
@@ -7274,7 +7288,7 @@ class AgentLoopTest {
             final ToolExecutionService executions,
             final ExecutorService executor,
             final SystemPromptBuilder promptBuilder,
-            final io.yupiik.ia.agent.core.usage.QuotaSnapshotStore quotaStore,
+            final QuotaSnapshotStore quotaStore,
             final String sessionId) {
         events.clear();
         final var resolvedRegistry = registry == null
@@ -7285,7 +7299,7 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public io.yupiik.ia.agent.core.tools.EmbeddedTool tool(final String name) {
+                    public EmbeddedTool tool(final String name) {
                         return null;
                     }
                 }
@@ -7358,7 +7372,7 @@ class AgentLoopTest {
                     }
                 },
                 mapper,
-                new io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph() {
+                new StructuralCodeGraph() {
                     @Override
                     public void ensureReadyAsync() {}
                 },
@@ -7389,32 +7403,28 @@ class AgentLoopTest {
                     }
 
                     @Override
-                    public boolean memoryUsesMainModel(final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
+                    public boolean memoryUsesMainModel(final ChatSettings settings) {
                         // the bare fixture has no configuration: only a test-provided override can
                         // resolve the models; a null override conservatively reads as same-model (LAZY)
                         return providerManagerOverride == null || providerManagerOverride.memoryUsesMainModel(settings);
                     }
 
                     @Override
-                    public io.yupiik.ia.agent.core.configuration.ProviderConfiguration provider(final String id) {
+                    public ProviderConfiguration provider(final String id) {
                         // the bare fixture has no configuration: only a test-provided override can
                         // answer a per-tab provider lookup (null keeps the default-provider path)
                         return providerManagerOverride == null ? null : providerManagerOverride.provider(id);
                     }
 
                     @Override
-                    public int plateauRounds(
-                            final io.yupiik.ia.agent.core.configuration.ProviderConfiguration provider,
-                            final String model) {
+                    public int plateauRounds(final ProviderConfiguration provider, final String model) {
                         return providerManagerOverride == null
                                 ? super.plateauRounds(provider, model)
                                 : providerManagerOverride.plateauRounds(provider, model);
                     }
 
                     @Override
-                    public int maxIterationsOverride(
-                            final io.yupiik.ia.agent.core.configuration.ProviderConfiguration provider,
-                            final String model) {
+                    public int maxIterationsOverride(final ProviderConfiguration provider, final String model) {
                         return providerManagerOverride == null
                                 ? super.maxIterationsOverride(provider, model)
                                 : providerManagerOverride.maxIterationsOverride(provider, model);
@@ -7429,7 +7439,7 @@ class AgentLoopTest {
                 null,
                 null,
                 null,
-                new io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider(),
+                new PrecisionDurationMarkerProvider(),
                 null,
                 null,
                 null,

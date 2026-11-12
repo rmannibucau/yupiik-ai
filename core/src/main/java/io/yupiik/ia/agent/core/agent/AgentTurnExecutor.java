@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
+import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextCompression;
@@ -51,6 +52,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.logging.Level;
@@ -129,6 +131,9 @@ public class AgentTurnExecutor {
         // tool errored, retry it" and feeds the very loop we are stopping): it only nudges the model at
         // the round boundary and surfaces a UI event. So skip the conversation/session mutation entirely.
         if (outcome.refused()) {
+            if (roundCoverage != null) {
+                roundCoverage.add(AgentLoop.INELIGIBLE_EXPLORATION_MARKER);
+            }
             if (roundRefused != null) {
                 roundRefused[0] = true;
             }
@@ -157,15 +162,27 @@ public class AgentTurnExecutor {
                 roundInformative[0] = novel;
             }
         }
-        // exploration-plateau tracking: successful read-only calls contribute their coverage keys
-        // (already-seen files flagged as such); a write is a hard reset signal for the round.
+        // Only fully classified, successful exploration batches are eligible. An error, pending
+        // result or unclassified operation must not disappear beside a redundant read.
+        if (roundCoverage != null
+                && (!outcome.success()
+                        || outcome.pending()
+                        || outcome.coverage().isEmpty())) {
+            roundCoverage.add(AgentLoop.INELIGIBLE_EXPLORATION_MARKER);
+        }
+        // Successful read-only calls contribute coverage; writes reset the round.
         if (outcome.success() && roundCoverage != null) {
             if (AgentLoop.FILE_WRITE_TOOLS.contains(outcome.name())) {
                 roundCoverage.add(AgentLoop.WRITE_MARKER);
+                // Patch tools can touch several paths (including rename/delete targets). Start
+                // fresh conservatively rather than retaining coverage of potentially changed data.
+                host.readCoverage.clear();
             } else {
                 for (final var key : outcome.coverage()) {
-                    final var seen = host.seenFiles.add(key);
-                    roundCoverage.add(seen ? key : AgentLoop.REDUNDANT_MARKER + key);
+                    final var novel = host.readCoverage.supports(key)
+                            ? host.readCoverage.record(key, output)
+                            : host.seenFiles.add(key);
+                    roundCoverage.add(novel ? key : AgentLoop.REDUNDANT_MARKER + key);
                 }
             }
         }
@@ -432,6 +449,7 @@ public class AgentTurnExecutor {
         host.repeats = new AgentLoop.ToolRepeats(host.resolvedRepeatSuccessThreshold(host.resolvedModel(runSettings)));
         host.noProgressRounds = 0;
         host.seenFiles.clear();
+        host.readCoverage.clear();
         host.plateauRounds = 0;
         host.plateauNudged = false;
         host.explorationRounds = 0;
@@ -634,7 +652,7 @@ public class AgentTurnExecutor {
                         roundMutatingBash),
                 host::awaitTool,
                 () -> checkRoundBudget(sessionId, messages, toolsTokens, settings, cancelled),
-                host.precisionDurationMarker::now,
+                () -> host.precisionDurationMarker.now(),
                 elapsedMs -> host.turnState.toolWallMs += elapsedMs,
                 () -> roundInformative[0]);
     }
@@ -847,6 +865,7 @@ public class AgentTurnExecutor {
             // An unbounded window (maxIterations < 0) has no iteration budget: it runs until the turn
             // genuinely ends. A positive maxIterations bounds this window; every todo auto-continuation
             // starts a fresh window with a new maxIterations budget.
+            roundLoop:
             for (var iteration = 0;
                     (maxIterations < 0 || iteration < maxIterations) && !cancelled.getAsBoolean();
                     iteration++) {
@@ -1148,7 +1167,7 @@ public class AgentTurnExecutor {
                         .withSettings(requestSettings)
                         .withTuning(runTuning);
                 final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
-                final var sentPayload = new java.util.concurrent.atomic.AtomicReference<>(host.contextPayload(request));
+                final var sentPayload = new AtomicReference<>(host.contextPayload(request));
                 final var finishReason = new String[] {null};
                 Message assistant;
                 final long llmStartNanos = host.precisionDurationMarker.now();
@@ -1477,7 +1496,7 @@ public class AgentTurnExecutor {
                                                 + '/' + pending.total()
                                                 + " todos still unfinished; continuing the round automatically (behavior.turnContinuesOnTextEnd)."));
                         messages.add(Message.user(host.unfinishedTodoContinuePrompt(1)));
-                        continue windowLoop;
+                        continue roundLoop;
                     }
                     if (pending != null) {
                         host.emit(host.unfinishedTodosNotice(pending, reason));
@@ -1518,7 +1537,9 @@ public class AgentTurnExecutor {
                             AgentEvent.Notice.Level.INFO,
                             "doom-loop refusal sent to the model: a repeated state-changing/bash call was withheld."));
                     messages.add(Message.user(AgentLoop.DOOM_LOOP_NUDGE_PROMPT));
-                    continue windowLoop;
+                    host.plateauRounds = 0;
+                    host.explorationRounds = 0;
+                    continue roundLoop;
                 }
                 // a tool round is progress too: a later empty/truncated reply starts its retry budget fresh
                 emptyCompletionRetries = 0;
@@ -1557,9 +1578,11 @@ public class AgentTurnExecutor {
                         // hard stop the model gets a chance to adapt instead of losing the whole turn.
                         // In nudge-only mode (plateauLimit < 0) the guard never hard-stops, so the nudge
                         // fires when the streak reaches the cap (abs value) to remind without killing the turn.
-                        final int nudgeAt = plateauStops
-                                ? AgentLoop.plateauFeedbackNudgeAt(plateauFeedback, plateauCap)
-                                : plateauCap;
+                        final int nudgeAt = plateauFeedback == PlateauFeedbackMode.NONE
+                                ? 0
+                                : plateauStops
+                                        ? AgentLoop.plateauFeedbackNudgeAt(plateauFeedback, plateauCap)
+                                        : plateauCap;
                         if (nudgeAt > 0 && !host.plateauNudged && host.plateauRounds >= nudgeAt) {
                             host.plateauNudged = true;
                             host.emit(host.notice(
@@ -1567,7 +1590,7 @@ public class AgentTurnExecutor {
                                     "exploration-plateau nudge sent to the model (round " + host.plateauRounds + '/'
                                             + plateauCap + (plateauStops ? "" : ",nudge-only") + ")"));
                             messages.add(Message.user(AgentLoop.PLATEAU_NUDGE_PROMPT));
-                            continue windowLoop;
+                            continue roundLoop;
                         }
                         if (plateauStops && host.plateauRounds >= plateauCap) {
                             host.persistStopNotice(
@@ -1590,6 +1613,7 @@ public class AgentTurnExecutor {
                 // an answer, inject a one-shot wrap-up directive (no hard stop: a genuinely deep task
                 // can still continue gathering - the model decides).
                 final var readOnlyRound = !roundCoverage.contains(AgentLoop.WRITE_MARKER)
+                        && !roundCoverage.contains(AgentLoop.INELIGIBLE_EXPLORATION_MARKER)
                         && !roundCoverage.isEmpty()
                         && !roundMutatingBash[0];
                 if (readOnlyRound && roundInformative[0]) {
@@ -1602,7 +1626,7 @@ public class AgentTurnExecutor {
                                 AgentEvent.Notice.Level.INFO,
                                 "exploration nudge sent to the model (round " + host.explorationRounds + ')'));
                         messages.add(Message.user(AgentLoop.EXPLORATION_NUDGE_PROMPT));
-                        continue windowLoop;
+                        continue roundLoop;
                     }
                 } else {
                     host.explorationRounds = 0;

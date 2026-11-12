@@ -297,10 +297,10 @@ public class ToolCallExecution {
             return new ToolOutcome(call.id(), name, gateDenial, false, false);
         }
         final var toolStartNanos = precisionDurationMarker.now();
+        final var context = toolContext(cancelled, callCancel::get, ordinal, settings);
         ToolResult result;
         try {
-            result = toolExecutionService.execute(
-                    tool, args, toolContext(cancelled, callCancel::get, ordinal, settings));
+            result = toolExecutionService.execute(tool, args, context);
         } catch (final RuntimeException | Error exception) {
             // a crashing tool (or a throwing post-execution event observer, e.g. a ToolUsePost hook) must never
             // leave the transcript holding an open "running" tool card: normalize it into a failed result so the
@@ -337,7 +337,7 @@ public class ToolCallExecution {
                 // a pending result is not "new informative work" nor a failure: the model must not
                 // count a still-growing subagent wait as an exploration round or a signal to retry
                 !result.pending(),
-                coverageKeys(name, args));
+                coverageKeys(name, args, context));
     }
 
     private ToolContext toolContext(
@@ -418,13 +418,20 @@ public class ToolCallExecution {
 
     /**
      * Coverage keys of a successful read-only tool call, used by the exploration-plateau detector:
-     * a normalized absolute path for file tools (page-aware for read, pattern-aware for grep),
+     * a normalized absolute path for file tools (delivered-output marker for read, pattern-aware for grep),
      * and for bash the configured bash-rules prefix + target from {@code PermissionService} - so the
      * recognized read-only families come from the config, never from a hardcoded command list.
      * Returns an empty list when the call does not map to a recognisable coverage target (writes,
      * todo updates, unrecognized commands): such calls are never plateau signals.
      */
-    private List<String> coverageKeys(final String name, final Map<String, Object> args) {
+    private List<String> coverageKeys(final String name, final Map<String, Object> args, final ToolContext context) {
+        if ("read".equals(name)) {
+            if (!(args.get("path") instanceof final String path) || path.isBlank()) {
+                return List.of();
+            }
+            return List.of(ReadCoverage.key(
+                    context.resolvePath(path, configuration == null ? null : configuration.resolveProjectDir())));
+        }
         if (FILE_READ_TOOLS.contains(name)) {
             final var path = args.get("path") instanceof final String p && !p.isBlank() ? p : "";
             if (path.isBlank()) {
