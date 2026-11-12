@@ -382,6 +382,50 @@ pre.yca-tool-code.whitespace-pre-wrap code {
   overflow-wrap: anywhere;
 }
 
+/* Keep all three tool visibility states accessible from the compact session toolbar. */
+.yca-tool-visibility {
+  position: relative;
+  white-space: nowrap;
+}
+.yca-tool-visibility-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  width: 185px;
+  padding: 4px;
+  border: 1px solid var(--yca-border);
+  border-radius: var(--yca-radius-sm);
+  background: var(--yca-panel);
+  box-shadow: var(--yca-shadow-md);
+}
+.yca-tool-visibility-menu > button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 4px;
+  text-align: left;
+  color: var(--yca-text);
+  cursor: pointer;
+}
+.yca-tool-visibility-menu > button:hover,
+.yca-tool-visibility-menu > button:focus-visible {
+  background: var(--yca-panel-2);
+}
+.yca-tool-visibility-menu > button[aria-checked='true'] {
+  color: var(--yca-accent);
+}
+.yca-tool-visibility-check {
+  width: 16px;
+  flex-shrink: 0;
+}
+.yca-tool-visibility button:focus-visible {
+  outline: 2px solid var(--yca-accent);
+  outline-offset: 3px;
+}
+
 /* Tool requests and results share the theme, but never share an implied applied state. */
 .yca-tool-card {
   min-width: 0;
