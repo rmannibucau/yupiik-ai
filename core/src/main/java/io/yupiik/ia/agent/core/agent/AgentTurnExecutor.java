@@ -1359,6 +1359,20 @@ public class AgentTurnExecutor {
                 // anchor the hybrid usage on the real prompt tokens of the request we just sent: the
                 // estimate at the same moment calibrates later deltas until the next observation
                 host.usageTracker.anchor(usage[0].contextInputTokens(), sentPayload.get());
+                // Keep the live tool-round history aligned with the persisted/resumed transcript.
+                final var retained =
+                        new LinkedHashMap<String, Object>(assistant.others() == null ? Map.of() : assistant.others());
+                final var identityAndThinking = identityAndThinking(host.currentAgentName);
+                if (identityAndThinking != null) {
+                    retained.putAll(identityAndThinking);
+                }
+                assistant = new Message(
+                        assistant.role(),
+                        assistant.content(),
+                        assistant.name(),
+                        assistant.toolCalls(),
+                        assistant.toolCallId(),
+                        retained);
                 messages.add(assistant);
                 host.sessionStore.append(
                         sessionId,
@@ -1369,7 +1383,7 @@ public class AgentTurnExecutor {
                                 assistant.toolCalls(),
                                 null,
                                 null,
-                                identityAndThinking(host.currentAgentName)));
+                                retained));
                 emitUsage(messages, toolsTokens);
 
                 // When the reply carries tool calls, do NOT absorb a queued prompt here (before the

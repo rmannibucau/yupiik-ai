@@ -85,13 +85,21 @@ public record WireMessage(
         if (wire == null) {
             return null;
         }
+        final var reasoning = new LinkedHashMap<String, Object>();
+        if ("assistant".equals(wire.role()) && wire.others() != null) {
+            for (final var key : List.of("reasoning_content", "reasoning")) {
+                if (wire.others().get(key) instanceof String text && !text.isBlank()) {
+                    reasoning.put(key, text);
+                }
+            }
+        }
         return new LlmMessage(
                 wire.role(),
                 wire.content(),
                 wire.name(),
                 toNeutralToolCalls(wire.toolCalls()),
                 wire.toolCallId(),
-                null);
+                reasoning.isEmpty() ? null : reasoning);
     }
 
     private static List<WireToolCall> toToolCalls(final List<LlmToolCall> calls) {

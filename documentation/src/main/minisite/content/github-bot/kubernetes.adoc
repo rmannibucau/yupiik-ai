@@ -110,7 +110,7 @@ The first default scan starts at `now`; run it before posting the test mention, 
 Post `@YOUR_BOT_LOGIN help` from the configured numeric user ID, repeat the smoke poll, and verify a new task was enqueued without credentials in the log.
 A second unchanged poll must not enqueue the same mention.
 An unauthorized account must not enqueue work.
-Discussion polling is disabled by default; enable `POLL_POLLDISCUSSIONS=true` only after provisioning host GraphQL Discussions read/write permissions and enabling Discussions on the selected repositories.
+Discussion polling is disabled by default; enable `POLL_DISCUSSIONS_ENABLED=true` only after provisioning host GraphQL Discussions read/write permissions and enabling Discussions on the selected repositories.
 Validate bodies, comments and replies independently with `help` before a solve, including exact-thread responses and duplicate suppression; Discussion review is unsupported.
 The per-connection cursor budget does not bound total GraphQL calls per poll, and retained Discussion/thread history grows over time.
 Use a trusted maintenance dispatcher with the same state mount and `github bot list` or `show --task TASK_ID` to inspect repository, actor ID and reference.

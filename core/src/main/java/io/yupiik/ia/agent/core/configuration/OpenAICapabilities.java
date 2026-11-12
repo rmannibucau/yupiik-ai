@@ -20,8 +20,8 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import java.util.List;
 
 /**
- * OpenAI-flavored capability knobs of a provider (shared by the {@code responses} and {@code codex}
- * flavors, which both speak the OpenAI Responses wire). These are typed internal consumer options
+ * OpenAI-flavored capability knobs of a provider (Completions, Responses and Codex, as applicable).
+ * These are typed internal consumer options
  * that are never merged into the wire request payload (unlike
  * {@link ProviderConfiguration#providerSpecificOptions()}).
  */
@@ -45,7 +45,18 @@ public record OpenAICapabilities(
                         "Whether to emit a fresh per-request `x-client-request-id` header (a new UUID per request, not the "
                                 + "stable session value). Mirrors the Codex CLI's per-thread request marker. Internal only (never sent "
                                 + "as a body field).")
-        boolean xClientRequestIdEnabled) {
+        boolean xClientRequestIdEnabled,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Replay retained assistant thinking as reasoning_content for Chat Completions only. "
+                                + "Opt in only for compatible reasoning servers; disabled by default and ignored by other API flavors.")
+        boolean replayReasoning) {
+
+    public OpenAICapabilities(final SessionIdCapabilities sessionId, final boolean xClientRequestIdEnabled) {
+        this(sessionId, xClientRequestIdEnabled, false);
+    }
 
     /** The OpenAPI session-affinity knobs: the ordered list of keys under which the session UUID is emitted. */
     @JsonModel

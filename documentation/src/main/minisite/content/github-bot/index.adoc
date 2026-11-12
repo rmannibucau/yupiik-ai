@@ -22,6 +22,7 @@ Start here if you want that simple case; use the references below for other back
 
 * xref:installation.adoc[Bare-metal Docker and Nono walkthrough]
 * xref:configuration.adoc[Configuration and CLI]
+* xref:architecture.adoc[Architecture and component sequences]
 * xref:security.adoc[Security and recovery]
 * xref:kubernetes.adoc[Kubernetes dispatcher and agent Job walkthrough]
 
@@ -34,7 +35,7 @@ Task-marked bot output is never parsed as an invocation, including native review
 Help examples use inline code so copying the example text alone does not invoke the bot.
 Successful reviews finish with the native review itself; no additional comment announces that a review was published.
 Solve responses link the verified new pull request back to the originating issue or enabled Discussion thread.
-Discussion polling is opt-in with `poll.pollDiscussions=false` by default; bodies, top-level comments and replies support `help` and `solve`, not `review`.
+Discussion polling is opt-in with `poll.discussions.enabled=false` by default; bodies, top-level comments and replies support `help` and `solve`, not `review`.
 Discussion access uses GraphQL and requires host Discussions read permission for polling and write permission for responses.
 Invocation receipts survive task deletion, so overlapping scans do not recreate deleted tasks.
 A scan hitting its page budget does not advance its completed watermark.

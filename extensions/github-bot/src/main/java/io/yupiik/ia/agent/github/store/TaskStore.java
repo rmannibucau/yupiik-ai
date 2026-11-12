@@ -15,14 +15,13 @@
  */
 package io.yupiik.ia.agent.github.store;
 
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.parser.BufferProvider;
-import io.yupiik.fusion.json.internal.parser.JsonParser;
-import io.yupiik.fusion.json.spi.Parser;
+import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
+import io.yupiik.ia.agent.github.model.TaskDocument;
+import io.yupiik.ia.agent.github.model.TaskState;
 import java.io.IOException;
-import java.io.StringReader;
 import java.io.UncheckedIOException;
-import java.math.BigDecimal;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -39,29 +38,41 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
 /** Short transactions on a stable sidecar inode; invocation receipts outlive tasks. */
-public final class TaskStore {
+@ApplicationScoped
+public class TaskStore {
     private static final ConcurrentHashMap<Path, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
-    private final Path home;
+    private final GithubBotConfiguration configuration;
     private final JsonMapper json;
 
-    public TaskStore(final Path home, final JsonMapper json) {
-        this.home = home.toAbsolutePath().normalize();
+    public TaskStore(final GithubBotConfiguration configuration, final JsonMapper json) {
+        this.configuration = configuration;
         this.json = json;
+    }
+
+    private Path home() {
+        final var home = Path.of(configuration.home()).toAbsolutePath().normalize();
         try {
-            Path current = this.home.getRoot();
-            for (final var segment : this.home) {
+            Path current = home.getRoot();
+            for (final var segment : home) {
                 current = current.resolve(segment);
                 if (Files.isSymbolicLink(current)) {
                     throw new IllegalArgumentException("State directory must not contain symlinks");
                 }
             }
-            Files.createDirectories(this.home);
+            Files.createDirectories(home);
+            return home;
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
     }
 
+    /** Creates and validates the private directory without initializing authentication. */
+    public void initialize() {
+        home();
+    }
+
     public <T> T transaction(final Function<State, T> operation) {
+        final var home = home();
         final var local = LOCKS.computeIfAbsent(home, ignored -> new ReentrantLock());
         local.lock();
         try {
@@ -76,22 +87,12 @@ public final class TaskStore {
                 if (Files.isSymbolicLink(path)) {
                     throw new IllegalStateException("Symbolic state file");
                 }
-                final Map<String, Object> data = Files.exists(path) ? read(path) : new LinkedHashMap<>();
-                if (data.containsKey("schemaVersion")
-                        && (!(data.get("schemaVersion") instanceof Number version) || version.doubleValue() != 1)) {
-                    throw new IllegalStateException("Unsupported state schema; preserve file for operator recovery");
-                }
-                for (final var section : List.of("tasks", "cursors", "receipts")) {
-                    if (data.containsKey(section) && !(data.get(section) instanceof Map<?, ?>)) {
-                        throw new IllegalStateException("Invalid state section; preserve file for operator recovery");
-                    }
-                }
-                data.put("schemaVersion", 1);
+                final var data = Files.exists(path) ? read(path) : new StateDocument(1, null, null, null);
                 final var state = new State(data);
                 final var result = operation.apply(state);
                 final var temp = Files.createTempFile(home, ".state-", ".tmp");
                 try {
-                    Files.writeString(temp, json.toString(StateDocument.from(data)));
+                    Files.writeString(temp, json.toString(state.document()));
                     try (final var output = FileChannel.open(temp, StandardOpenOption.WRITE)) {
                         output.force(true);
                     }
@@ -111,38 +112,20 @@ public final class TaskStore {
         }
     }
 
-    private Map<String, Object> read(final Path path) throws IOException {
+    private StateDocument read(final Path path) throws IOException {
         final var content = Files.readString(path);
-        // Generated record codecs intentionally treat absent and null fields alike. State recovery
-        // must distinguish them, so validate top-level section tokens before binding the model.
-        try (final var parser = new JsonParser(new StringReader(content), 8192, new BufferProvider(8192, 2), true)) {
-            parser.enforceNext(Parser.Event.START_OBJECT);
-            while (parser.hasNext()) {
-                final var event = parser.next();
-                if (event == Parser.Event.END_OBJECT) {
-                    break;
-                }
-                if (event != Parser.Event.KEY_NAME) {
-                    throw new IllegalStateException("Invalid state object");
-                }
-                final var key = parser.getString();
-                final var value = parser.next();
-                if (List.of("tasks", "cursors", "receipts").contains(key) && value != Parser.Event.START_OBJECT) {
-                    throw new IllegalStateException("Invalid state section; preserve file for operator recovery");
-                }
-                if ("schemaVersion".equals(key)
-                        && (value != Parser.Event.VALUE_NUMBER
-                                || parser.getBigDecimal().compareTo(BigDecimal.ONE) != 0)) {
-                    throw new IllegalStateException("Unsupported state schema; preserve file for operator recovery");
-                }
-                if (value == Parser.Event.START_OBJECT) {
-                    parser.skipObject();
-                } else if (value == Parser.Event.START_ARRAY) {
-                    parser.skipArray();
-                }
+        // Shape checks protect retained evidence from permissive collection codecs, not schema migrations.
+        final var shape = map(json.fromString(Object.class, content));
+        for (final var section : List.of("tasks", "cursors", "receipts")) {
+            if (!(shape.get(section) instanceof Map<?, ?>)) {
+                throw new IllegalStateException("Expected queue object section: " + section);
             }
         }
-        return json.fromString(StateDocument.class, content).toMap();
+        final var document = json.fromString(StateDocument.class, content);
+        if (document == null) {
+            throw new IllegalStateException("Expected queue document");
+        }
+        return document;
     }
 
     @SuppressWarnings("unchecked")
@@ -154,56 +137,62 @@ public final class TaskStore {
     }
 
     public static final class State {
-        private final Map<String, Object> data;
+        private final Map<String, MutableTask> tasks;
+        private final Map<String, String> cursors;
+        private final Map<String, String> receipts;
 
-        private State(final Map<String, Object> data) {
-            this.data = data;
+        private State(final StateDocument data) {
+            tasks = new LinkedHashMap<>();
+            if (data.tasks() != null) {
+                data.tasks().forEach((id, task) -> tasks.put(id, new MutableTask(task)));
+            }
+            cursors = data.cursors() == null ? new LinkedHashMap<>() : new LinkedHashMap<>(data.cursors());
+            receipts = data.receipts() == null ? new LinkedHashMap<>() : new LinkedHashMap<>(data.receipts());
         }
 
-        @SuppressWarnings("unchecked")
-        public Map<String, Object> tasks() {
-            return (Map<String, Object>) data.computeIfAbsent("tasks", ignored -> new LinkedHashMap<>());
+        public Map<String, MutableTask> tasks() {
+            return tasks;
         }
 
-        @SuppressWarnings("unchecked")
-        public Map<String, Object> cursors() {
-            return (Map<String, Object>) data.computeIfAbsent("cursors", ignored -> new LinkedHashMap<>());
+        public Map<String, String> cursors() {
+            return cursors;
         }
 
-        @SuppressWarnings("unchecked")
-        public Map<String, Object> receipts() {
-            return (Map<String, Object>) data.computeIfAbsent("receipts", ignored -> new LinkedHashMap<>());
+        public Map<String, String> receipts() {
+            return receipts;
         }
 
-        public String enqueue(final String invocation, final Map<String, Object> task) {
+        private StateDocument document() {
+            final var documents = new LinkedHashMap<String, TaskDocument>();
+            tasks.forEach((id, task) -> documents.put(id, task.document()));
+            return new StateDocument(1, documents, cursors, receipts);
+        }
+
+        public String enqueue(final String invocation, final TaskDocument task) {
             if (receipts().containsKey(invocation)) {
                 return String.valueOf(receipts().get(invocation));
             }
             final var id = UUID.randomUUID().toString();
-            final var copy = new LinkedHashMap<>(task);
-            copy.put("id", id);
-            copy.put("state", "pending");
-            copy.put("attempts", 0);
-            copy.put("runs", new ArrayList<>());
+            final var copy = new MutableTask(task);
+            copy.id(id);
+            copy.state(TaskState.pending);
+            copy.attempts(0);
+            copy.runs(new ArrayList<>());
             tasks().put(id, copy);
             receipts().put(invocation, id);
             return id;
         }
 
-        public Map<String, Object> task(final String id) {
+        public MutableTask task(final String id) {
             final var value = tasks().get(id);
             if (value == null) {
                 throw new IllegalArgumentException("Unknown task: " + id);
             }
-            return map(value);
+            return value;
         }
 
-        public List<Map<String, Object>> list() {
-            return tasks().values().stream()
-                    .map(TaskStore::map)
-                    .map(LinkedHashMap::new)
-                    .map(it -> (Map<String, Object>) it)
-                    .toList();
+        public List<TaskDocument> list() {
+            return tasks().values().stream().map(MutableTask::document).toList();
         }
     }
 }

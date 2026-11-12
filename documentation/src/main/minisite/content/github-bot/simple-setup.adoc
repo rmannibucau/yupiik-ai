@@ -255,7 +255,7 @@ WORKER_PROVISIONFORK=false
 POLL_SINCE=now
 POLL_PAGEBUDGET=20
 POLL_POLLREVIEWS=true
-POLL_POLLDISCUSSIONS=true
+POLL_DISCUSSIONS_ENABLED=true
 YCA_CONFIGURATION_PROJECT_ENABLED=false
 YCA_CONFIGURATION_JSON=/etc/yca/dispatcher.json
 EOF
@@ -268,7 +268,7 @@ sudo chown root:yca /etc/yca/dispatcher.json
 sudo chmod 0640 /etc/yca/dispatcher.json
 ----
 
-Set `POLL_POLLDISCUSSIONS=false` when Discussions is disabled or its permissions are unavailable.
+Set `POLL_DISCUSSIONS_ENABLED=false` when Discussions is disabled or its permissions are unavailable.
 `POLL_SINCE=now` is persisted on the first poll, so establish the initial cursor before posting acceptance mentions.
 Changing `POLL_SINCE` later does not reset existing persisted cursors.
 `WORKER_MAXRETRIES=2` allows an initial execution plus two execution retries; a worker invocation processes at most one task.

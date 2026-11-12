@@ -85,7 +85,16 @@ the wire and the leanness that gave, see <<benchmark-parity>>. Set
 `reasoningEffort` explicitly (e.g. `medium`) when a task genuinely benefits
 from chain-of-thought.
 
+== Opt-in reasoning replay
+
+For compatible Chat Completions servers such as Qwen, set `capabilities.openai.replayReasoning: true` on the provider entry to replay retained assistant thinking as `reasoning_content` alongside its visible content and tool calls.
+The default is `false`; Responses, Codex and Anthropic ignore this option.
+The destination provider controls replay, including for resumed history; selecting a provider without the opt-in stops replay.
+Only retained reasoning is available: discarded or compacted thinking cannot be reconstructed.
+Replayed reasoning increases the input context and is included in the projected wire-payload estimate.
+This does not configure the server's chat template or `preserve_thinking` setting.
 == Output budget
+
 
 `max_tokens` (or `max_completion_tokens` for OpenAI-compatible wire) is
 resolved from:

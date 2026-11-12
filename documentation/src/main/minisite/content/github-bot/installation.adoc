@@ -134,8 +134,8 @@ Help does not launch an agent and is not an isolation test.
 === Optional Discussions smoke test
 
 Leave Discussion polling disabled until the disposable repository has Discussions enabled and the host credential has GraphQL Discussions read/write permissions.
-Run `java -jar "$BOT_JAR" github bot poll --poll-pollDiscussions true` before posting a new test mention, or deliberately choose an initial backfill instant.
-The equivalent poller environment setting is `POLL_POLLDISCUSSIONS=true`; this does not enable native-review polling.
+Run `java -jar "$BOT_JAR" github bot poll --poll-discussions-enabled true` before posting a new test mention, or deliberately choose an initial backfill instant.
+The equivalent poller environment setting is `POLL_DISCUSSIONS_ENABLED=true`; this does not enable native-review polling.
 Test authorized `help` mentions separately in a Discussion body, a top-level comment and a reply, then repeat polling and worker invocation to verify one task and one correctly threaded response per invocation.
 Check that self, unauthorized-user and task-marked mentions enqueue nothing, and that Discussion `review` requests enqueue nothing because reviews are unsupported there.
 Polling must not invoke an LLM or executor, and help must not launch one either.

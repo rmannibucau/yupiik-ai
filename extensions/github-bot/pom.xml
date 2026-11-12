@@ -162,7 +162,7 @@
                 <image>${github-bot.egress.image}</image>
               </to>
               <container>
-                <mainClass>io.yupiik.ia.agent.github.EgressGateway</mainClass>
+                <mainClass>io.yupiik.ia.agent.github.execution.EgressGateway</mainClass>
                 <user>65532:65532</user>
                 <jvmFlags>
                   <jvmFlag>-Xmx128m</jvmFlag>

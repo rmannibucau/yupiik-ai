@@ -15,6 +15,11 @@ See the xref:../cli/github-bot-poll.adoc[poll], xref:../cli/github-bot-list.adoc
 
 == Bot configuration reference
 
+Trusted agent configuration retains `provider`, `model`, `llm`, `compaction`, `pruning`, `compression`, and `todos` for both flat and `yca`-wrapped JSON.
+For example, `todos: {"continueOnUnfinished":true,"maxContinues":5}` enables bounded continuation of unfinished todos in build mode.
+Omitting it preserves core defaults; explicit `false` and custom guidance/continuation values are retained.
+Host integrations remain disabled and attempt paths, permissions and build mode remain forced by the executor.
+
 The following settings, defaults and environment variable names are generated from the bot configuration metadata.
 
 include::content/_partials/generated/documentation.github-bot.adoc[]
@@ -36,7 +41,8 @@ java -jar github-bot.jar github bot purge
 ----
 
 Manual creation is a trusted operator action; it does not pretend to be an authenticated GitHub commenter.
-List filters are exact matches and combine with AND; an empty filter is unrestricted.
+List filters are exact matches and combine with AND; omit a filter to leave it unrestricted.
+Task kinds use the lowercase enum values `solve`, `review`, and `help`; lifecycle states use `pending`, `running`, `publishing`, `done`, and `failed`.
 List output uses a domain JSON object with a `tasks` array; show and mutation previews use task documents.
 `--dryRun true` validates and previews create, retry, delete and purge without changing tasks or receipts or emitting audit events.
 It can still create queue directories/lock files and rewrite an unchanged state file; it is not a filesystem-read-only mode.
@@ -55,6 +61,8 @@ The shared headless `run` command is also available directly from the core depen
 Polling supports explicit repositories and typed organization/user discovery.
 Exact includes add candidates; wildcard includes filter discovered repositories; excludes and visibility restrictions apply last.
 Host authentication supports a PAT or a GitHub App installation with a PEM PKCS#8 RSA private-key file.
+`github.auth.type` retains the lowercase enum values `pat` and `app`.
+`github.repositories.visibility` is now an enum list using `PUBLIC`, `PRIVATE`, and `INTERNAL`; migrate older lowercase visibility configuration values to uppercase (comma-separated in CLI and environment sources).
 With `github.auth.installationId=0`, App authentication discovers an installation only for one exact explicit repository or one organization discovery source; ambiguous selections require an explicit installation ID.
 An App-authenticated GET receiving 401 refreshes its installation token once; POSTs are never replayed, including after authentication failures.
 Optional `github.requestIntervalMillis` spaces host REST request starts within a process, including retries and writes, up to one minute; it is not a shared quota across worker processes or App token issuance requests.
@@ -66,7 +74,7 @@ Optional `github.authorization.teams` adds an active-team-membership restriction
 User logins are resolved from their immutable IDs; team API failures fail closed.
 Optional `worker.provisionFork` allows organization fork creation with the host credential; personal-account destinations must still be provisioned manually.
 A durable intent precedes the single creation request, and later attempts only verify the resulting fork; ambiguous creation requires operator reconciliation, never a repeated POST.
-Optional `poll.pollReviews` scans submitted native review summaries as well as the usual issue and inline-comment feeds.
+Optional `poll.reviews.enabled` scans submitted native review summaries as well as the usual issue and inline-comment feeds.
 Review discovery retains per-PR continuations and conservatively replays completed scans, so its retained state and request cost grow with repository history.
 Worker failure notifications use the existing opt-in shared `yca.notifications` integration and contain task/repository identifiers only.
 Delivery is best effort, not a durable external notification guarantee.
@@ -81,8 +89,9 @@ Cache disk retention is operator-managed, and enterprise API endpoints are not s
 
 == Optional Discussion polling
 
-`poll.pollDiscussions` defaults to `false`; enable it explicitly on the poller with `--poll-pollDiscussions true` or `POLL_POLLDISCUSSIONS=true`.
-This is independent of `poll.pollReviews` and applies to the selected repositories, which must have Discussions enabled and permit host GraphQL access.
+`poll.discussions.enabled` defaults to `false`; enable it explicitly on the poller with `--poll-discussions-enabled true` or `POLL_DISCUSSIONS_ENABLED=true`.
+This is independent of `poll.reviews.enabled` and applies to the selected repositories with host GraphQL access.
+Repositories with Discussions disabled are logged at INFO and skipped; other selected repositories and feeds still run.
 Provision host Discussions read permission to discover and read threads, and Discussions write permission to publish responses; issue and pull-request permissions alone are insufficient.
 The poller recognizes `help` and `solve` mentions in Discussion bodies, top-level comments and replies; Discussion `review` requests are unsupported and do not enqueue work.
 Only `User` actors with an allowed immutable numeric user ID are eligible, with the optional team restriction applied as well.
@@ -147,3 +156,14 @@ The relay rejects excess concurrent requests, bounds request/response sizes and 
 Only response status, bounded body and an allowlisted content type are forwarded; provider response bodies are not content-redacted.
 Random ports require an appropriate private-network firewall range, and dispatcher crashes invalidate the token rather than restarting a relay for an existing attempt.
 Nono and Kubernetes connectivity must be explicitly arranged and tested by the operator; no automatic gateway or cluster Service is created.
+
+== Polling feature model
+
+[source,json]
+----
+{"poll":{"reviews":{"enabled":true},"discussions":{"enabled":true}}}
+----
+
+Review and Discussion scans run concurrently on virtual threads after the issue/comment scan, sharing one paced GitHub client and rate-limit cooldown.
+A repository with Discussions disabled is logged at INFO and skipped without failing other repositories or feeds.
+Permission, authentication and transport errors are not silently ignored.

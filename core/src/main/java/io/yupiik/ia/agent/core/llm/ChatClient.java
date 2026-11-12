@@ -1006,7 +1006,10 @@ public class ChatClient implements AutoCloseable {
 
     private ContextMeasurement.Payload contextPayloadEffective(
             final ChatCompletionRequest effective, final ProviderConfiguration provider, final ApiFlavor flavor) {
-        final var wire = LlmWire.toLlmRequest(effective, openaiSessionIdEnabledKeys(provider, flavor));
+        final var wire = LlmWire.toLlmRequest(
+                effective,
+                openaiSessionIdEnabledKeys(provider, flavor),
+                flavor == ApiFlavor.COMPLETIONS && provider.openaiCapabilities().replayReasoning());
         final var bytes = dialectClient(flavor, provider).requestPayload(wire);
         final var body = mapper.fromString(Map.class, new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
         final var input = body.containsKey("input") ? body.get("input") : body.get("messages");
@@ -2446,7 +2449,11 @@ public class ChatClient implements AutoCloseable {
             if (stream) {
                 final var publisher = LlmWire.join(
                         dialect.stream(
-                                LlmWire.toLlmRequest(effective, openaiSessionIdEnabledKeys(provider, flavor)),
+                                LlmWire.toLlmRequest(
+                                        effective,
+                                        openaiSessionIdEnabledKeys(provider, flavor),
+                                        flavor == ApiFlavor.COMPLETIONS
+                                                && provider.openaiCapabilities().replayReasoning()),
                                 cancelled,
                                 libraryListener),
                         cancelled,
@@ -2456,7 +2463,11 @@ public class ChatClient implements AutoCloseable {
             }
             return (A) repairToolCalls(
                     LlmWire.toChatResult(LlmWire.join(dialect.chat(
-                            LlmWire.toLlmRequest(effective, openaiSessionIdEnabledKeys(provider, flavor)),
+                            LlmWire.toLlmRequest(
+                                    effective,
+                                    openaiSessionIdEnabledKeys(provider, flavor),
+                                    flavor == ApiFlavor.COMPLETIONS
+                                            && provider.openaiCapabilities().replayReasoning()),
                             cancelled,
                             libraryListener,
                             cooperative))),

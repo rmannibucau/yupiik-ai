@@ -17,7 +17,11 @@ package io.yupiik.ia.agent.github.store;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.ia.agent.github.BotJsonMapper;
+import io.yupiik.ia.agent.github.model.TaskKind;
+import io.yupiik.ia.agent.github.model.TaskState;
+import io.yupiik.ia.agent.github.support.BotJsonMapper;
+import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -33,17 +37,54 @@ class TaskStoreTest {
     Path home;
 
     @Test
+    void typedTaskTransitionsPersistAndFailedMutationsRollBack() {
+        try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
+            final var store = new TaskStore(BotTestConfiguration.home(home), json);
+            final var id = store.transaction(state -> state.enqueue(
+                    "typed",
+                    TaskFixtures.task(Map.of("kind", "review", "repository", "acme/repo", "future", "preserved"))));
+            store.transaction(state -> {
+                final var task = state.task(id);
+                task.state(TaskState.running);
+                task.attempts(1);
+                task.runtimeId("runtime-1");
+                return null;
+            });
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> store.transaction(state -> {
+                        state.task(id).state(TaskState.done);
+                        state.task(id).runtimeId(null);
+                        throw new IllegalStateException("abort");
+                    }));
+            final var restored = new TaskStore(BotTestConfiguration.home(home), json)
+                    .transaction(state -> state.task(id).document());
+            assertEquals(TaskState.running, restored.state());
+            assertEquals(TaskKind.review, restored.kind());
+            assertEquals(1, restored.attempts());
+            assertEquals("runtime-1", restored.runtimeId());
+            assertEquals("preserved", restored.recovery().get("future"));
+        }
+    }
+
+    @Test
     void receiptSurvivesTaskDeletionAndRestart() {
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
-            final var store = new TaskStore(home, json);
-            final var id = store.transaction(state -> state.enqueue("comment:123", Map.of("kind", "solve")));
+            final var store = new TaskStore(BotTestConfiguration.home(home), json);
+            final var id = store.transaction(
+                    state -> state.enqueue("comment:123", TaskFixtures.task(Map.of("kind", "solve"))));
             store.transaction(state -> {
                 state.tasks().remove(id);
                 return null;
             });
-            final var reopened = new TaskStore(home, json);
-            assertEquals(id, reopened.transaction(state -> state.enqueue("comment:123", Map.of("kind", "solve"))));
-            assertTrue(reopened.transaction(TaskStore.State::list).isEmpty());
+            final var reopened = new TaskStore(BotTestConfiguration.home(home), json);
+            assertEquals(
+                    id,
+                    reopened.transaction(
+                            state -> state.enqueue("comment:123", TaskFixtures.task(Map.of("kind", "solve")))));
+            assertTrue(reopened.transaction(state ->
+                            state.list().stream().map(TaskFixtures::map).toList())
+                    .isEmpty());
         }
     }
 
@@ -51,15 +92,20 @@ class TaskStoreTest {
     void concurrentTransactionsDoNotLoseTasks() throws Exception {
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty());
                 final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var store = new TaskStore(home, json);
+            final var store = new TaskStore(BotTestConfiguration.home(home), json);
             final var futures = IntStream.range(0, 40)
-                    .mapToObj(index -> executor.submit(() -> new TaskStore(home, json)
-                            .transaction(state -> state.enqueue("invocation:" + index, Map.of("kind", "review")))))
+                    .mapToObj(index -> executor.submit(() -> new TaskStore(BotTestConfiguration.home(home), json)
+                            .transaction(state ->
+                                    state.enqueue("invocation:" + index, TaskFixtures.task(Map.of("kind", "review"))))))
                     .toList();
             for (final var future : futures) {
                 future.get();
             }
-            assertEquals(40, store.transaction(TaskStore.State::list).size());
+            assertEquals(
+                    40,
+                    store.transaction(state ->
+                                    state.list().stream().map(TaskFixtures::map).toList())
+                            .size());
         }
     }
 
@@ -71,7 +117,10 @@ class TaskStoreTest {
                 Files.createSymbolicLink(home.resolve("state.json"), target);
                 assertThrows(
                         IllegalStateException.class,
-                        () -> new TaskStore(home, json).transaction(TaskStore.State::list));
+                        () -> new TaskStore(BotTestConfiguration.home(home), json)
+                                .transaction(state -> state.list().stream()
+                                        .map(TaskFixtures::map)
+                                        .toList()));
             } finally {
                 Files.deleteIfExists(target);
             }
@@ -79,22 +128,16 @@ class TaskStoreTest {
     }
 
     @Test
-    void malformedOrFutureStateIsPreservedForOperatorRecovery() throws Exception {
+    void malformedStateIsPreservedForOperatorRecovery() throws Exception {
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
             final var file = home.resolve("state.json");
-            final var store = new TaskStore(home, json);
-            for (final var content : List.of(
-                    "{broken",
-                    "[]",
-                    "null",
-                    "{\"schemaVersion\":2,\"tasks\":{}}",
-                    "{\"schemaVersion\":1.5}",
-                    "{\"schemaVersion\":null}",
-                    "{\"tasks\":[]}",
-                    "{\"receipts\":null}",
-                    "{\"cursors\":false}")) {
+            final var store = new TaskStore(BotTestConfiguration.home(home), json);
+            for (final var content : List.of("{broken", "[]", "null", "{\"tasks\":[]}", "{\"cursors\":false}")) {
                 Files.writeString(file, content);
-                assertThrows(RuntimeException.class, () -> store.transaction(TaskStore.State::list));
+                assertThrows(
+                        RuntimeException.class,
+                        () -> store.transaction(state ->
+                                state.list().stream().map(TaskFixtures::map).toList()));
                 assertEquals(content, Files.readString(file));
             }
         }
@@ -106,7 +149,10 @@ class TaskStoreTest {
             final var content = "{\"schemaVersion\":1,\"tasks\":{},\"receipts\":[]}";
             Files.writeString(home.resolve("state.json"), content);
             assertThrows(
-                    IllegalStateException.class, () -> new TaskStore(home, json).transaction(TaskStore.State::list));
+                    IllegalStateException.class,
+                    () -> new TaskStore(BotTestConfiguration.home(home), json)
+                            .transaction(state ->
+                                    state.list().stream().map(TaskFixtures::map).toList()));
             assertEquals(content, Files.readString(home.resolve("state.json")));
         }
     }
@@ -118,7 +164,10 @@ class TaskStoreTest {
         Files.createSymbolicLink(home.resolve("state.lock"), target);
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
             assertThrows(
-                    IllegalStateException.class, () -> new TaskStore(home, json).transaction(TaskStore.State::list));
+                    IllegalStateException.class,
+                    () -> new TaskStore(BotTestConfiguration.home(home), json)
+                            .transaction(state ->
+                                    state.list().stream().map(TaskFixtures::map).toList()));
             assertEquals("unchanged", Files.readString(target));
         }
     }
@@ -126,14 +175,16 @@ class TaskStoreTest {
     @Test
     void failedTransactionDoesNotCommit() {
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
-            final var store = new TaskStore(home, json);
+            final var store = new TaskStore(BotTestConfiguration.home(home), json);
             assertThrows(
                     IllegalStateException.class,
                     () -> store.transaction(state -> {
-                        state.enqueue("x", Map.of());
+                        state.enqueue("x", TaskFixtures.task(Map.of()));
                         throw new IllegalStateException();
                     }));
-            assertTrue(store.transaction(TaskStore.State::list).isEmpty());
+            assertTrue(store.transaction(state ->
+                            state.list().stream().map(TaskFixtures::map).toList())
+                    .isEmpty());
         }
     }
 }

@@ -42,8 +42,8 @@ class ConfigurationJsonSchemaGeneratorTest {
                                 "output", "schema.json",
                                 "partialOutput", "copy.json",
                                 "excludedRoots",
-                                        "io.yupiik.ia.agent.github.GithubBotConfiguration,"
-                                                + "io.yupiik.ia.agent.github.ExecutorConfiguration"))
+                                        "io.yupiik.ia.agent.github.configuration.GithubBotConfiguration,"
+                                                + "io.yupiik.ia.agent.github.configuration.ExecutorConfiguration"))
                 .run();
         try (final var container = ConfiguringContainer.of()
                         .register(new FusionModule() {

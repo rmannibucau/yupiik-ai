@@ -23,7 +23,7 @@ Use `jib:build` instead to publish directly to a registry without a Docker daemo
 No image goal is bound to ordinary test/package lifecycles.
 The base defaults to `eclipse-temurin:25-jre` and the target to `yca-egress:local`; override both properties as shown and pin the base and configured gateway image by digest for production.
 For a registry build, record `extensions/github-bot/target/jib-image.digest` and configure `REGISTRY/IMAGE@sha256:DIGEST`, not a mutable tag.
-Jib generates the runtime classpath and Java entrypoint for `io.yupiik.ia.agent.github.EgressGateway` with `-Xmx128m` and UID/GID 65532, not the worker launcher, so no dispatcher credentials or services are initialized.
+Jib generates the runtime classpath and Java entrypoint for `io.yupiik.ia.agent.github.execution.EgressGateway` with `-Xmx128m` and UID/GID 65532, not the worker launcher, so no dispatcher credentials or services are initialized.
 It layers module classes and dependencies directly; no fixed in-image fat JAR path or launcher script is required.
 Configure the trusted gateway image and an explicit list such as `api.github.com`, `github.com`, and the exact public hostname of the model provider.
 There is deliberately no built-in list or wildcard support.
@@ -56,7 +56,7 @@ Do not combine this mode with the private credential relay; worker validation re
 Each execution creates a private internal bridge in `isolated` gateway mode, a separate external bridge, and a trusted unprivileged gateway connected to both.
 Isolated gateway mode is important: an ordinary internal bridge still exposes host services on its bridge address.
 The agent joins only the internal bridge, drops all capabilities, and has no Docker socket, published ports or external network attachment.
-Agent DNS forwarding is disabled with `--dns 127.0.0.1`; Docker's local service discovery still resolves the gateway alias `egress`.
+Agent DNS forwarding is disabled with `--dns 127.0.0.1` by default (`github.executor.docker.egress.dns` also accepts the IPv6 loopback `::1`, never an external resolver); Docker's local service discovery still resolves the gateway alias `egress`.
 Only the gateway resolves destination names externally, which avoids arbitrary agent DNS queries becoming an exfiltration channel.
 The gateway has IP forwarding disabled, no attempt mounts, no credential environment, no published ports, and bounded CPU, memory and process resources.
 

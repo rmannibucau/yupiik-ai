@@ -1903,6 +1903,14 @@ class AgentLoopTest {
 
         assertEquals("done after reasoning nudge", result);
         assertEquals(2, requests.size(), "one reasoning-aware retry then the answer");
+        final var retainedAssistant = requests.get(1).stream()
+                .filter(message -> "assistant".equals(message.role()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(
+                "let me think about this",
+                retainedAssistant.others().get("thinking"),
+                "live follow-up requests must retain the same thinking as resumed history");
         // the retry request must carry the direct-answer nudge (not a blind identical retry)
         final var retryNudge = requests.get(1).getLast();
         assertEquals("user", retryNudge.role());

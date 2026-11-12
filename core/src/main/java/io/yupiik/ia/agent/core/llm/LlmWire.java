@@ -40,6 +40,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -79,7 +80,12 @@ public final class LlmWire {
      * @return the wire request, with {@code prompt_cache_key} injected when enabled.
      */
     static LlmRequest toLlmRequest(final ChatCompletionRequest request, final List<String> enabledKeys) {
-        final var wire = toLlmRequest(request);
+        return toLlmRequest(request, enabledKeys, false);
+    }
+
+    static LlmRequest toLlmRequest(
+            final ChatCompletionRequest request, final List<String> enabledKeys, final boolean replayReasoning) {
+        final var wire = toLlmRequest(request, replayReasoning);
         if (enabledKeys == null
                 || !enabledKeys.contains("prompt_cache_key")
                 || request.sessionId() == null
@@ -91,20 +97,24 @@ public final class LlmWire {
         final var extensions = new LinkedHashMap<>(wire.extensions());
         extensions.putIfAbsent(
                 "prompt_cache_key",
-                java.util
-                        .UUID
-                        .nameUUIDFromBytes(request.sessionId().getBytes(StandardCharsets.UTF_8))
+                UUID.nameUUIDFromBytes(request.sessionId().getBytes(StandardCharsets.UTF_8))
                         .toString());
         return wire.with(extensions);
     }
 
     static LlmRequest toLlmRequest(final ChatCompletionRequest request) {
+        return toLlmRequest(request, false);
+    }
+
+    private static LlmRequest toLlmRequest(final ChatCompletionRequest request, final boolean replayReasoning) {
         final Map<String, Object> extensions = request.others() == null ? Map.of() : stripRetryMode(request.others());
         return new LlmRequest(
                 request.model(),
                 request.messages() == null
                         ? null
-                        : request.messages().stream().map(LlmWire::toLlmMessage).toList(),
+                        : request.messages().stream()
+                                .map(message -> toLlmMessage(message, replayReasoning))
+                                .toList(),
                 request.temperature(),
                 request.topP(),
                 request.maxTokens(),
@@ -136,6 +146,21 @@ public final class LlmWire {
      * agent loop can reuse the single-source {@link LlmMessage#unmatchedToolCallIds} contiguity matcher
      * while repairing persisted history. */
     public static LlmMessage toLlmMessage(final Message message) {
+        return toLlmMessage(message, false);
+    }
+
+    private static LlmMessage toLlmMessage(final Message message, final boolean replayReasoning) {
+        final var extensions = new LinkedHashMap<>(stripIdentity(message.others()));
+        // Raw response aliases must not bypass the destination provider's opt-in.
+        extensions.remove("reasoning_content");
+        extensions.remove("reasoning");
+        if (replayReasoning
+                && "assistant".equals(message.role())
+                && message.others() != null
+                && message.others().get(THINKING_KEY) instanceof String thinking
+                && !thinking.isBlank()) {
+            extensions.put("reasoning_content", thinking);
+        }
         return new LlmMessage(
                 message.role(),
                 message.content(),
@@ -146,7 +171,7 @@ public final class LlmWire {
                                 .map(LlmWire::toLlmToolCall)
                                 .toList(),
                 message.toolCallId(),
-                stripIdentity(message.others()));
+                extensions);
     }
 
     /** The {@code others} map without the reserved UI metadata keys (speaker identity + persisted thinking)
@@ -201,6 +226,16 @@ public final class LlmWire {
         final var content = "assistant".equals(message.role()) && message.content() instanceof final String s
                 ? ReasoningStripper.strip(s, ReasoningFormat.thinkTags())
                 : message.content();
+        final var extensions =
+                new LinkedHashMap<String, Object>(message.extensions() == null ? Map.of() : message.extensions());
+        final var reasoning = extensions.remove("reasoning_content");
+        final var alias = extensions.remove("reasoning");
+        if ("assistant".equals(message.role())) {
+            final var thinking = reasoning instanceof String s && !s.isBlank() ? reasoning : alias;
+            if (thinking instanceof String s && !s.isBlank()) {
+                extensions.put(THINKING_KEY, thinking);
+            }
+        }
         return new Message(
                 message.role(),
                 content,
@@ -211,7 +246,7 @@ public final class LlmWire {
                                 .map(LlmWire::fromLlmToolCall)
                                 .toList(),
                 message.toolCallId(),
-                message.extensions() == null ? Map.of() : message.extensions());
+                extensions);
     }
 
     static ToolCall fromLlmToolCall(final LlmToolCall call) {

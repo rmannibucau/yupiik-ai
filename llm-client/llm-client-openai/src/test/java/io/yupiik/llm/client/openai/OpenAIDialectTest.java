@@ -34,6 +34,7 @@ import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmToolCall;
 import io.yupiik.llm.client.model.Usage;
+import io.yupiik.llm.client.openai.model.WireMessage;
 import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.test.TestJsonMapper;
@@ -66,6 +67,20 @@ import org.junit.jupiter.api.extension.ExtendWith;
 
 @ExtendWith(TestJsonMapper.class)
 class OpenAIDialectTest {
+    @Test
+    void bufferedMessageRetainsOnlyRecognizedTextReasoning() {
+        final var wire = new WireMessage(
+                "assistant",
+                "answer",
+                null,
+                null,
+                null,
+                Map.of("reasoning_content", "thought", "reasoning", "alias", "unknown", "do not forward"));
+        final var neutral = WireMessage.toNeutral(wire);
+        assertEquals(Map.of("reasoning_content", "thought", "reasoning", "alias"), neutral.extensions());
+        assertEquals("answer", neutral.content());
+    }
+
     private HttpServer server;
     private HttpClient delegate;
     private ExtendedHttpClient client;
@@ -975,7 +990,7 @@ class OpenAIDialectTest {
                 client,
                 ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
 
-        final var messages = new java.util.ArrayList<LlmMessage>(4010);
+        final var messages = new ArrayList<LlmMessage>(4010);
         messages.add(LlmMessage.user("start"));
         messages.add(LlmMessage.assistant("", List.of(LlmToolCall.of("old_dangling", "grep", "{}"))));
         messages.add(LlmMessage.user("broken interposed"));

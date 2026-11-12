@@ -22,7 +22,10 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
+import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmStreamEvent;
+import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
@@ -32,9 +35,71 @@ import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 class LlmWireTest {
+    @Test
+    void reasoningReplayIsOptInAndKeepsToolPairingAndVisibleContent() {
+        final var assistant = new Message(
+                "assistant",
+                "Checking",
+                null,
+                List.of(new ToolCall("call-1", "function", new ToolCall.FunctionCall("read", "{}"), 0)),
+                null,
+                Map.of("thinking", "Inspect the file", Message.IDENTITY_KEY, Map.of("provider", "qwen")));
+        final var request = new ChatCompletionRequest(
+                "qwen",
+                List.of(assistant, new Message("tool", "file contents", null, null, "call-1", null)),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                Map.of());
+        assertTrue(
+                LlmWire.toLlmRequest(request).messages().getFirst().extensions().isEmpty());
+        final var replayed = LlmWire.toLlmRequest(request, List.of(), true).messages();
+        assertEquals(
+                Map.of("reasoning_content", "Inspect the file"),
+                replayed.getFirst().extensions());
+        assertEquals("Checking", replayed.getFirst().content());
+        assertEquals("call-1", replayed.getFirst().toolCalls().getFirst().id());
+        assertEquals("call-1", replayed.getLast().toolCallId());
+        assertTrue(LlmWire.toLlmRequest(request, List.of(), false)
+                .messages()
+                .getFirst()
+                .extensions()
+                .isEmpty());
+        assertEquals("Inspect the file", assistant.others().get("thinking"));
+    }
+
+    @Test
+    void bufferedReasoningBecomesInternalThinkingNotAnUnconditionalWireExtension() {
+        for (final var alias : List.of("reasoning_content", "reasoning")) {
+            final var message = LlmWire.toMessage(
+                    new LlmMessage("assistant", "answer", null, null, null, Map.of(alias, "thought")));
+            assertEquals(Map.of("thinking", "thought"), message.others());
+            assertTrue(LlmWire.toLlmMessage(message).extensions().isEmpty());
+        }
+        assertTrue(LlmWire.toLlmMessage(new Message(
+                        "assistant",
+                        "answer",
+                        null,
+                        null,
+                        null,
+                        Map.of("reasoning_content", "raw", "reasoning", "raw")))
+                .extensions()
+                .isEmpty());
+    }
+
     @Test
     void publisherWaitPollsCancellationAndDiscardsLatePublisher() throws Exception {
         final var transport = new CompletableFuture<Flow.Publisher<LlmStreamEvent>>();
@@ -183,10 +248,10 @@ class LlmWireTest {
         final var first = LlmWire.toLlmRequest(request.withSessionId("first"), enabledKeys);
         final var repeated = LlmWire.toLlmRequest(request.withSessionId("first"), enabledKeys);
         final var other = LlmWire.toLlmRequest(request.withSessionId("other"), enabledKeys);
-        org.junit.jupiter.api.Assertions.assertEquals(first.extensions(), repeated.extensions());
-        org.junit.jupiter.api.Assertions.assertNotEquals(first.extensions(), other.extensions());
+        Assertions.assertEquals(first.extensions(), repeated.extensions());
+        Assertions.assertNotEquals(first.extensions(), other.extensions());
         assertNotEquals("first", first.extensions().get("prompt_cache_key"));
-        org.junit.jupiter.api.Assertions.assertEquals(
+        Assertions.assertEquals(
                 "prompt_cache_key", first.extensions().keySet().iterator().next());
         // no session id, or a key list without prompt_cache_key, leaves the extensions untouched
         assertTrue(LlmWire.toLlmRequest(request, enabledKeys).extensions().isEmpty());
@@ -226,14 +291,14 @@ class LlmWireTest {
                 "model", List.of(Message.user("hello")), null, null, null, null, null, null, null, Map.of("user", 1));
         final var cooperative = request.withRetryMode(RetryMode.COOPERATIVE);
         // the marker rides the request until the wire boundary
-        org.junit.jupiter.api.Assertions.assertEquals(
+        Assertions.assertEquals(
                 RetryMode.COOPERATIVE,
                 cooperative.others().get(ChatClient.RETRY_MODE_OTHERS_KEY),
                 "withRetryMode must record the mode on the request");
         // ... and is stripped on the wire, co-existing keys preserved
         final var wire = LlmWire.toLlmRequest(cooperative, null);
         assertFalse(wire.extensions().containsKey(ChatClient.RETRY_MODE_OTHERS_KEY), "marker must not reach the wire");
-        org.junit.jupiter.api.Assertions.assertEquals(1, wire.extensions().get("user"), "unrelated keys are preserved");
+        Assertions.assertEquals(1, wire.extensions().get("user"), "unrelated keys are preserved");
         // absent marker (delegated default) leaves the extensions untouched
         assertFalse(LlmWire.toLlmRequest(request, null).extensions().containsKey(ChatClient.RETRY_MODE_OTHERS_KEY));
     }
@@ -249,10 +314,9 @@ class LlmWireTest {
         final var raw = new StringBuilder(
                 "let me check the pom\n think the build fails because of the plugin\n think\nso I edit it");
         final var stripped = LlmWire.visibleText(raw);
-        org.junit.jupiter.api.Assertions.assertFalse(
-                stripped.contains("think"), "inline thinking must be removed: " + stripped);
-        org.junit.jupiter.api.Assertions.assertTrue(stripped.contains("let me check the pom"), stripped);
-        org.junit.jupiter.api.Assertions.assertTrue(stripped.contains("so I edit it"), stripped);
+        Assertions.assertFalse(stripped.contains("think"), "inline thinking must be removed: " + stripped);
+        Assertions.assertTrue(stripped.contains("let me check the pom"), stripped);
+        Assertions.assertTrue(stripped.contains("so I edit it"), stripped);
     }
 
     /**
@@ -261,10 +325,10 @@ class LlmWireTest {
      */
     @Test
     void toMessageStripsInlineReasoningOnTheNonStreamPath() {
-        final var wire = new io.yupiik.llm.client.model.LlmMessage(
-                "assistant", "head\n think reasoning here\n response tail", null, null, null, Map.of());
+        final var wire =
+                new LlmMessage("assistant", "head\n think reasoning here\n response tail", null, null, null, Map.of());
         final var message = LlmWire.toMessage(wire);
-        org.junit.jupiter.api.Assertions.assertEquals("head\n response tail", message.content());
+        Assertions.assertEquals("head\n response tail", message.content());
     }
 
     /**
@@ -277,18 +341,17 @@ class LlmWireTest {
     void pumpAbortsAndCancelsSubscriptionOnNoFrameInterrupt() throws Exception {
         final var cancelled = new AtomicBoolean(false);
         final var subscriptionCancelled = new AtomicBoolean(false);
-        final Flow.Publisher<io.yupiik.llm.client.model.LlmStreamEvent> silent =
-                subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
-                    @Override
-                    public void request(final long n) {
-                        // never emit a frame, never complete: only the bounded-wait abort path ends it
-                    }
+        final Flow.Publisher<LlmStreamEvent> silent = subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+            @Override
+            public void request(final long n) {
+                // never emit a frame, never complete: only the bounded-wait abort path ends it
+            }
 
-                    @Override
-                    public void cancel() {
-                        subscriptionCancelled.set(true);
-                    }
-                });
+            @Override
+            public void cancel() {
+                subscriptionCancelled.set(true);
+            }
+        });
 
         final var result = CompletableFuture.supplyAsync(() -> {
             try {
@@ -316,21 +379,20 @@ class LlmWireTest {
      */
     @Test
     void midStreamFailureMessageNamesTheCauseClass() {
-        final Flow.Publisher<io.yupiik.llm.client.model.LlmStreamEvent> failing =
-                subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
-                    @Override
-                    public void request(final long n) {
-                        subscriber.onNext(new io.yupiik.llm.client.model.LlmStreamEvent.TextDelta("partial answer"));
-                        subscriber.onError(new NullPointerException("boom"));
-                    }
+        final Flow.Publisher<LlmStreamEvent> failing = subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+            @Override
+            public void request(final long n) {
+                subscriber.onNext(new TextDelta("partial answer"));
+                subscriber.onError(new NullPointerException("boom"));
+            }
 
-                    @Override
-                    public void cancel() {
-                        // nothing to release
-                    }
-                });
+            @Override
+            public void cancel() {
+                // nothing to release
+            }
+        });
 
-        final var ex = org.junit.jupiter.api.Assertions.assertThrows(
+        final var ex = Assertions.assertThrows(
                 MidStreamFailureException.class, () -> LlmWire.pump(failing, event -> {}, () -> false));
         assertTrue(ex.getMessage().contains("stream interrupted after"), ex.getMessage());
         assertTrue(ex.getMessage().contains("NullPointerException"), ex.getMessage());
@@ -343,21 +405,20 @@ class LlmWireTest {
      */
     @Test
     void midStreamFailureWithoutCauseMessageHasNoTrailingColon() {
-        final Flow.Publisher<io.yupiik.llm.client.model.LlmStreamEvent> failing =
-                subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
-                    @Override
-                    public void request(final long n) {
-                        subscriber.onNext(new io.yupiik.llm.client.model.LlmStreamEvent.TextDelta("partial answer"));
-                        subscriber.onError(new NullPointerException());
-                    }
+        final Flow.Publisher<LlmStreamEvent> failing = subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+            @Override
+            public void request(final long n) {
+                subscriber.onNext(new TextDelta("partial answer"));
+                subscriber.onError(new NullPointerException());
+            }
 
-                    @Override
-                    public void cancel() {
-                        // nothing to release
-                    }
-                });
+            @Override
+            public void cancel() {
+                // nothing to release
+            }
+        });
 
-        final var ex = org.junit.jupiter.api.Assertions.assertThrows(
+        final var ex = Assertions.assertThrows(
                 MidStreamFailureException.class, () -> LlmWire.pump(failing, event -> {}, () -> false));
         assertTrue(ex.getMessage().contains("NullPointerException"), ex.getMessage());
         assertFalse(
@@ -371,24 +432,23 @@ class LlmWireTest {
      */
     @Test
     void textDeltaWithNullTextDoesNotNpeAndIsForwarded() {
-        final var seen = new java.util.concurrent.atomic.AtomicInteger();
-        final Flow.Publisher<io.yupiik.llm.client.model.LlmStreamEvent> publisher =
-                subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
-                    @Override
-                    public void request(final long n) {
-                        subscriber.onNext(new io.yupiik.llm.client.model.LlmStreamEvent.TextDelta(null));
-                        subscriber.onComplete();
-                    }
+        final var seen = new AtomicInteger();
+        final Flow.Publisher<LlmStreamEvent> publisher = subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+            @Override
+            public void request(final long n) {
+                subscriber.onNext(new TextDelta(null));
+                subscriber.onComplete();
+            }
 
-                    @Override
-                    public void cancel() {
-                        // nothing to release
-                    }
-                });
+            @Override
+            public void cancel() {
+                // nothing to release
+            }
+        });
 
-        final var message = org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+        final var message = Assertions.assertDoesNotThrow(
                 () -> LlmWire.pump(publisher, event -> seen.incrementAndGet(), () -> false));
-        org.junit.jupiter.api.Assertions.assertEquals(1, seen.get(), "the null-text delta must still be forwarded");
+        Assertions.assertEquals(1, seen.get(), "the null-text delta must still be forwarded");
     }
 
     /**
@@ -400,29 +460,28 @@ class LlmWireTest {
      */
     @Test
     void midStreamFailureLogsWithTheSessionAttribution() {
-        final Flow.Publisher<io.yupiik.llm.client.model.LlmStreamEvent> failing =
-                subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
-                    @Override
-                    public void request(final long n) {
-                        subscriber.onNext(new io.yupiik.llm.client.model.LlmStreamEvent.TextDelta("partial answer"));
-                        subscriber.onError(new NullPointerException("boom"));
-                    }
-
-                    @Override
-                    public void cancel() {
-                        // nothing to release
-                    }
-                });
-        final var logger = java.util.logging.Logger.getLogger("io.yupiik.ia.agent.core.llm.LlmWire");
-        final var captured = new java.util.concurrent.atomic.AtomicReference<java.util.logging.LogRecord>();
-        final var previousUseParentHandlers = logger.getUseParentHandlers();
-        final var handler = new java.util.logging.Handler() {
-            {
-                setLevel(java.util.logging.Level.ALL);
+        final Flow.Publisher<LlmStreamEvent> failing = subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+            @Override
+            public void request(final long n) {
+                subscriber.onNext(new TextDelta("partial answer"));
+                subscriber.onError(new NullPointerException("boom"));
             }
 
             @Override
-            public void publish(final java.util.logging.LogRecord record) {
+            public void cancel() {
+                // nothing to release
+            }
+        });
+        final var logger = Logger.getLogger("io.yupiik.ia.agent.core.llm.LlmWire");
+        final var captured = new AtomicReference<LogRecord>();
+        final var previousUseParentHandlers = logger.getUseParentHandlers();
+        final var handler = new Handler() {
+            {
+                setLevel(Level.ALL);
+            }
+
+            @Override
+            public void publish(final LogRecord record) {
                 captured.set(record);
             }
 
@@ -435,7 +494,7 @@ class LlmWireTest {
         logger.setUseParentHandlers(false);
         logger.addHandler(handler);
         try {
-            org.junit.jupiter.api.Assertions.assertThrows(
+            Assertions.assertThrows(
                     MidStreamFailureException.class,
                     () -> LlmWire.pump(failing, event -> {}, () -> false, "session-42"));
         } finally {
@@ -443,13 +502,10 @@ class LlmWireTest {
             logger.setUseParentHandlers(previousUseParentHandlers);
         }
         final var record = captured.get();
-        org.junit.jupiter.api.Assertions.assertNotNull(record, "the streaming failure must be logged");
-        org.junit.jupiter.api.Assertions.assertInstanceOf(
-                io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord.class,
-                record,
-                "the record must carry the session attribution");
-        org.junit.jupiter.api.Assertions.assertEquals(
-                "session-42", ((io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord) record).sessionId());
+        Assertions.assertNotNull(record, "the streaming failure must be logged");
+        Assertions.assertInstanceOf(
+                SessionAwareLogRecord.class, record, "the record must carry the session attribution");
+        Assertions.assertEquals("session-42", ((SessionAwareLogRecord) record).sessionId());
     }
 
     /**
@@ -466,6 +522,6 @@ class LlmWireTest {
         // there is no sessionId field on the wire type at all - the mapping is field-by-field,
         // so the only risk is it leaking through others(); nothing else to assert here besides
         // that the call above builds a request (no NPE on the null-to-null mapping).
-        org.junit.jupiter.api.Assertions.assertEquals("m", wire.model());
+        Assertions.assertEquals("m", wire.model());
     }
 }

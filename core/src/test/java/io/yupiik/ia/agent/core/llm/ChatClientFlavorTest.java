@@ -196,6 +196,47 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void reasoningReplayUsesDestinationCapabilityAndPayloadEstimates() throws Exception {
+        final var history = new ChatCompletionRequest(
+                "test-model",
+                List.of(
+                        Message.user("hi"),
+                        new Message("assistant", "answer", null, null, null, Map.of("thinking", "retained thought"))),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
+        for (final var enabled : List.of(false, true)) {
+            client.close();
+            final var config = configuration(Map.of(
+                    "yca.provider.providers.0.api",
+                    "completions",
+                    "yca.provider.providers.0.capabilities.openai.replayReasoning",
+                    Boolean.toString(enabled)));
+            client = new ChatClient(config, mapper, new ProviderManager(config, mapper), Clock.systemUTC(), http);
+            final var payload = client.contextPayload(history, null);
+            assertEquals(enabled, payload.messages().stream().anyMatch(m -> m.contains("retained thought")));
+            client.chat(history);
+            assertEquals(enabled, bodies.getLast().contains("\"reasoning_content\":\"retained thought\""));
+            client.stream(history, _ -> {}, () -> false);
+            assertEquals(enabled, bodies.getLast().contains("\"reasoning_content\":\"retained thought\""));
+        }
+        client.close();
+        final var config = configuration(Map.of(
+                "yca.provider.providers.0.api",
+                "responses",
+                "yca.provider.providers.0.capabilities.openai.replayReasoning",
+                "true"));
+        client = new ChatClient(config, mapper, new ProviderManager(config, mapper), Clock.systemUTC(), http);
+        assertFalse(
+                client.contextPayload(history, null).messages().stream().anyMatch(m -> m.contains("retained thought")));
+    }
+
+    @Test
     void localProjectionIncludesInstructionsToolsAndCapturesFallbackRoute() throws Exception {
         final var tracker =
                 new io.yupiik.ia.agent.core.context.UsageTracker(providerManager(), client, null, Clock.systemUTC());
