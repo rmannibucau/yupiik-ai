@@ -44,6 +44,7 @@ import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import java.io.IOException;
@@ -226,7 +227,6 @@ class CompactionGateTest {
                 // reclaim ~2% of the CURRENT effective base, keeping it above the trigger
                 final var before = tracker.effective;
                 tracker.setEffective(before - Math.max(1, (int) (before * 0.02)));
-                System.err.println("weak-pass recovery: before=" + before + " after=" + tracker.effective);
                 return new CompactionResult(List.copyOf(messages), CompactionResult.Mode.SUMMARY, "");
             }
         };
@@ -236,7 +236,6 @@ class CompactionGateTest {
             final var loop = newLoop(mapper, newClient(requests), tracker, manager, events, executor, null);
             loop.run("work", null, "s1", List.of(), () -> false);
         }
-        System.err.println("twoWeakPasses final effective=" + tracker.effective);
         final var errors = errorNotices(events);
         assertEquals(1, errors.size(), "second weak pass escalates: " + events);
         assertEquals(2, manager.recoveryCalls, "exactly two recovery passes before escalation");
@@ -468,7 +467,7 @@ class CompactionGateTest {
                 }
             }
         };
-        final var providers = new io.yupiik.ia.agent.core.wiring.ProviderManager(config, mapper);
+        final var providers = new ProviderManager(config, mapper);
         final var loop = new AgentLoop(
                 client,
                 new ToolRegistry(null) {

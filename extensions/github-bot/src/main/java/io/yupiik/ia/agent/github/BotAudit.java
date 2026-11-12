@@ -1,0 +1,124 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.ia.agent.github;
+
+import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.fusion.json.JsonMapper;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.logging.Logger;
+import java.util.regex.Pattern;
+
+/** Append-only local audit trail. Only identifiers and fixed event codes are accepted, never task text or tokens. */
+public final class BotAudit {
+    private static final Pattern EVENT_NAME = Pattern.compile("[a-z-]+");
+
+    private static final Logger LOGGER = Logger.getLogger(BotAudit.class.getName());
+    private static final ConcurrentHashMap<Path, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
+    private final Path home;
+    private final JsonMapper json;
+
+    public BotAudit(final Path home, final JsonMapper json) {
+        this.home = home.toAbsolutePath().normalize();
+        this.json = json;
+    }
+
+    public void record(final String event, final Map<String, Object> task) {
+        if (!EVENT_NAME.matcher(event).matches()) {
+            throw new IllegalArgumentException("Invalid audit event");
+        }
+        final var entry = new LinkedHashMap<String, Object>();
+        entry.put("at", Instant.now().toString());
+        entry.put("event", event);
+        for (final var key : new String[] {"id", "actorId", "repository", "number", "state", "attempts"}) {
+            if (task.containsKey(key)) {
+                entry.put(key, task.get(key));
+            }
+        }
+        final var local = LOCKS.computeIfAbsent(home, key -> new ReentrantLock());
+        local.lock();
+        try (final var lockChannel = FileChannel.open(
+                        home.resolve("audit.lock"),
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.WRITE,
+                        LinkOption.NOFOLLOW_LINKS);
+                final var lock = lockChannel.lock();
+                final var output = FileChannel.open(
+                        home.resolve("audit.jsonl"),
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.WRITE,
+                        StandardOpenOption.APPEND,
+                        LinkOption.NOFOLLOW_LINKS)) {
+            final var audit = new AuditEntry(
+                    (String) entry.get("at"),
+                    event,
+                    entry.get("id"),
+                    entry.get("actorId"),
+                    entry.get("repository"),
+                    entry.get("number"),
+                    entry.get("state"),
+                    entry.get("attempts"));
+            final var bytes = ByteBuffer.wrap((json.toString(audit) + "\n").getBytes(StandardCharsets.UTF_8));
+            while (bytes.hasRemaining()) {
+                output.write(bytes);
+            }
+            output.force(true);
+            LOGGER.fine(() -> "GitHub bot event=" + event + " task=" + entry.getOrDefault("id", ""));
+        } catch (final IOException e) {
+            throw new UncheckedIOException("Audit append failed", e);
+        } finally {
+            local.unlock();
+        }
+    }
+
+    @JsonModel
+    public record AuditEntry(
+            @Property(documentation = "UTC event timestamp.")
+            String at,
+
+            @Property(documentation = "Fixed audit event code.")
+            String event,
+
+            @Property(documentation = "Task identifier when known.")
+            Object id,
+
+            @Property(documentation = "Immutable actor identifier when known.")
+            Object actorId,
+
+            @Property(documentation = "Repository full name when known.")
+            Object repository,
+
+            @Property(documentation = "Issue or PR number when known.")
+            Object number,
+
+            @Property(documentation = "Durable task state when known.")
+            Object state,
+
+            @Property(documentation = "Consumed execution attempts when known.")
+            Object attempts) {}
+}

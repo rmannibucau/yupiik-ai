@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.documentation;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.ConfiguringContainer;
@@ -35,7 +36,15 @@ import org.junit.jupiter.api.io.TempDir;
 class ConfigurationJsonSchemaGeneratorTest {
     @Test
     void tuiSchemaKeepsExistingPropertiesAndNestedTheme(@TempDir final Path temp) throws Exception {
-        new ConfigurationJsonSchemaGenerator(temp, Map.of("output", "schema.json", "partialOutput", "copy.json")).run();
+        new ConfigurationJsonSchemaGenerator(
+                        temp,
+                        Map.of(
+                                "output", "schema.json",
+                                "partialOutput", "copy.json",
+                                "excludedRoots",
+                                        "io.yupiik.ia.agent.github.GithubBotConfiguration,"
+                                                + "io.yupiik.ia.agent.github.ExecutorConfiguration"))
+                .run();
         try (final var container = ConfiguringContainer.of()
                         .register(new FusionModule() {
                             @Override
@@ -53,6 +62,8 @@ class ConfigurationJsonSchemaGeneratorTest {
                 final var mapper = container.lookup(JsonMapper.class)) {
             final var schema = mapper.instance().fromString(Map.class, Files.readString(temp.resolve("schema.json")));
             final var defs = map(schema.get("$defs"));
+            assertFalse(map(schema.get("properties")).containsKey("github"));
+            assertFalse(defs.keySet().stream().anyMatch(key -> key.toString().contains("GithubBot")));
             final var yca = map(map(map(schema.get("properties")).get("yca")).get("properties"));
             final var tui = resolve(defs, map(yca.get("tui")));
             final var properties = map(tui.get("properties"));

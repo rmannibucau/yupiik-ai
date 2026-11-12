@@ -1021,7 +1021,7 @@ public class CliCommand implements Runnable {
      * prompts are dropped and the JVM exits with the SIGINT status (130), the
      * registered shutdown hook running the usual cleanup. Used when the turn outlives
      * the post-quit grace period and when Ctrl-C is pressed after a quit request -
-     * mirroring the TUI {@code RunCommand} exit so quitting is always deterministic.
+     * mirroring the headless {@code RunCommand} exit so quitting is always deterministic.
      */
     private void forceQuit(final String reason) {
         requestQuit();

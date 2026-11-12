@@ -33,6 +33,12 @@
       <optional>true</optional>
     </dependency>
     <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>github-bot</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
       <scope>test</scope>
@@ -145,12 +151,23 @@ if uppercased, dot/hyphens replaced by underscores and leading hyphens/dots remo
               <configuration>
                 <includeEnvironmentNames>true</includeEnvironmentNames>
                 <formatter>definitionlist</formatter>
+                <namePrefix>!github.,!poll.,!worker.,!filterKind,!filterRepository,!filterState,!task,!repository,!number,!kind,!request,!dryRun,!retentionDays</namePrefix>
+              </configuration>
+            </preAction>
+            <preAction>
+              <type>io.yupiik.fusion.documentation.DocumentationGenerator</type>
+              <configuration>
+                <urls>${project.basedir}/../extensions/github-bot/target/classes/META-INF/fusion/configuration/documentation.json</urls>
+                <module>github-bot</module>
+                <includeEnvironmentNames>true</includeEnvironmentNames>
+                <formatter>definitionlist</formatter>
+                <namePrefix>github.</namePrefix>
               </configuration>
             </preAction>
             <preAction>
               <type>io.yupiik.ia.agent.documentation.ConfigurationJsonSchemaGenerator</type>
               <configuration>
-                <excludedRoots>io.yupiik.ia.agent.core.cli.CliCommand$CliConf,io.yupiik.ia.agent.core.cli.CodeGraphIndexCommand$CodeGraphIndexConf,io.yupiik.ia.agent.tui.RunCommand$RunConf,io.yupiik.ia.agent.tui.TuiCommand$TuiConf</excludedRoots>
+                <excludedRoots>io.yupiik.ia.agent.core.cli.CliCommand$CliConf,io.yupiik.ia.agent.core.cli.CodeGraphIndexCommand$CodeGraphIndexConf,io.yupiik.ia.agent.core.cli.RunCommand$RunConf,io.yupiik.ia.agent.tui.TuiCommand$TuiConf,io.yupiik.ia.agent.github.GithubBotConfiguration,io.yupiik.ia.agent.github.PollCommand$Options,io.yupiik.ia.agent.github.WorkerCommand$Options,io.yupiik.ia.agent.github.ListCommand$Options,io.yupiik.ia.agent.github.ShowCommand$Options,io.yupiik.ia.agent.github.CreateCommand$Options,io.yupiik.ia.agent.github.RetryCommand$Options,io.yupiik.ia.agent.github.DeleteCommand$Options,io.yupiik.ia.agent.github.PurgeCommand$Options,io.yupiik.ia.agent.github.CleanupCommand$Options,io.yupiik.ia.agent.github.ExecutorConfiguration</excludedRoots>
               </configuration>
             </preAction>
             <preAction>

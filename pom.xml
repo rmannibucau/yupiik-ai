@@ -273,6 +273,7 @@
             <palantirJavaFormat>
               <version>2.96.0</version>
             </palantirJavaFormat>
+            <shortenFullyQualifiedTypes />
             <removeUnusedImports />
             <licenseHeader>
               <content><![CDATA[/*

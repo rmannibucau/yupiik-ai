@@ -42,6 +42,7 @@ import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
 import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
+import io.yupiik.ia.agent.core.cli.RunCommand;
 import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.MarkupToolCallScanner;
 import io.yupiik.ia.agent.core.question.Question;
@@ -54,6 +55,7 @@ import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.ia.agent.tui.prompt.SlashCommandCompleter;
 import java.io.IOException;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
@@ -63,6 +65,7 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -219,8 +222,8 @@ class TuiCommandHeadlessTest {
     void wiresTheFullBeanGraph() {
         try (final var cmd = container.lookup(TuiCommand.class);
                 final var run = container.lookup(RunCommand.class);
-                final var runtimeFactory = container.lookup(io.yupiik.ia.agent.core.shell.SessionRuntimeFactory.class);
-                final var completer = container.lookup(io.yupiik.ia.agent.tui.prompt.SlashCommandCompleter.class);
+                final var runtimeFactory = container.lookup(SessionRuntimeFactory.class);
+                final var completer = container.lookup(SlashCommandCompleter.class);
                 final var factory = container.lookup(TuiRunnerFactory.class)) {
             assertNotNull(cmd.instance());
             assertNotNull(run.instance());
@@ -361,8 +364,7 @@ class TuiCommandHeadlessTest {
         // An empty transcript cell, away from panels and text, exposes the viewport background.
         final var expectedColor = expected.isEmpty() ? null : Color.hex(expected);
         final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
-        while (!java.util.Objects.equals(expectedColor, backend.bg(50, 20).orElse(null))
-                && System.nanoTime() < deadline) {
+        while (!Objects.equals(expectedColor, backend.bg(50, 20).orElse(null)) && System.nanoTime() < deadline) {
             backend.awaitFrame(50);
         }
         assertEquals(" ", backend.symbol(50, 20), message);

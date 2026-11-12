@@ -32,9 +32,16 @@ class BashExitStatusTest {
             assertFalse(BashExitStatus.failed("read", output), output);
         }
         for (final var output : List.of(
-                "", "Exit code: 0", "Exit code: 1\nExit code: 0", "Exit code: 1\nmore stdout",
-                "prefix Exit code: 1", "Exit code: nope", "Exit code: 1 extra", "Exit code: 999999999999",
-                "Exit code: 1 ", "Exit code: 1\n\n")) {
+                "",
+                "Exit code: 0",
+                "Exit code: 1\nExit code: 0",
+                "Exit code: 1\nmore stdout",
+                "prefix Exit code: 1",
+                "Exit code: nope",
+                "Exit code: 1 extra",
+                "Exit code: 999999999999",
+                "Exit code: 1 ",
+                "Exit code: 1\n\n")) {
             assertFalse(BashExitStatus.failed("bash", output), output);
         }
         assertFalse(BashExitStatus.failed("bash", null));

@@ -13,12 +13,13 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package io.yupiik.ia.agent.tui;
+package io.yupiik.ia.agent.core.cli;
 
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
@@ -63,6 +64,7 @@ public class RunCommand implements Runnable {
     private final AgentProvider agentProvider;
 
     private final McpManager mcpManager;
+    private final JsonMapper jsonMapper;
 
     public RunCommand(
             final RunConf conf,
@@ -70,7 +72,9 @@ public class RunCommand implements Runnable {
             final SessionRuntimeFactory sessionRuntimeFactory,
             final SessionStore sessionStore,
             final AgentProvider agentProvider,
-            final McpManager mcpManager) {
+            final McpManager mcpManager,
+            final JsonMapper jsonMapper) {
+        this.jsonMapper = jsonMapper;
         this.mcpManager = mcpManager;
         this.conf = conf;
         this.shellRegistry = shellRegistry;
@@ -133,10 +137,34 @@ public class RunCommand implements Runnable {
                                     + "call, with context tokens/percent), toolStart/toolEnd (with tool duration), "
                                     + "compact and answer (final answer length); enables LLM-latency and context-curve "
                                     + "drill-down for benchmarks.")
-            String metricsDetailFile) {}
+            String metricsDetailFile,
+
+            @Property(
+                    value = "result-file",
+                    defaultValue = "\"\"",
+                    documentation = "Optional JSON object artifact required for completion; blank disables validation.")
+            String resultFile,
+
+            @Property(
+                    value = "result-required-fields",
+                    defaultValue = "\"\"",
+                    documentation =
+                            "Comma-separated required nonblank string fields; | separates alternatives (summary|failure).")
+            String resultRequiredFields,
+
+            @Property(
+                    value = "result-max-bytes",
+                    defaultValue = "1000000",
+                    documentation = "Maximum result artifact size in bytes (positive).")
+            int resultMaxBytes) {}
 
     @Override
     public void run() {
+        final var resultContract = conf.resultFile() == null
+                        || conf.resultFile().isBlank()
+                ? null
+                : new RunResultContract(
+                        jsonMapper, Paths.get(conf.resultFile()), conf.resultRequiredFields(), conf.resultMaxBytes());
         mcpManager.start();
         final var sessionId =
                 conf.session() == null || conf.session().isBlank() ? sessionStore.create() : conf.session();
@@ -214,7 +242,27 @@ public class RunCommand implements Runnable {
                 "yca-run-memory-extract");
         Runtime.getRuntime().addShutdownHook(memoryShutdownHook);
         try {
-            runtime.loop().run(conf.prompt(), agentName, sessionId, null, installCancelHandler(userCancelled));
+            final var cancelled = installCancelHandler(userCancelled);
+            runtime.loop().run(conf.prompt(), agentName, sessionId, null, cancelled);
+            if (resultContract != null && !failed.get() && !cancelled.getAsBoolean()) {
+                final var validationError = resultContract.validationError();
+                if (validationError != null) {
+                    runtime.loop().maxIterationsCap(3);
+                    runtime.loop()
+                            .run(
+                                    resultContract.correctionPrompt(validationError),
+                                    agentName,
+                                    sessionId,
+                                    sessionStore.load(sessionId),
+                                    cancelled);
+                    if (!failed.get() && !cancelled.getAsBoolean()) {
+                        final var remainingError = resultContract.validationError();
+                        if (remainingError != null) {
+                            throw new IllegalStateException("run result invalid after correction: " + remainingError);
+                        }
+                    }
+                }
+            }
         } finally {
             System.out.flush();
             shellRegistry.unregister(shellEnv);

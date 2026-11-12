@@ -33,6 +33,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -125,6 +126,47 @@ class YcaConfigurationProducerTest {
         assertEquals("project", config(baseArgs()).provider().model());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"true", "false"})
+    void disabledProjectConfigurationUsesOnlyGlobal(final String inherit) throws IOException {
+        write(Path.of(globalConfigPath()), "{\"yca\":{\"provider\":{\"model\":\"global\"}}}");
+        write(
+                temp.resolve(".yca/configuration.json"),
+                "{\"$inherit\":" + inherit + ",\"yca\":{\"configuration\":{\"project\":{\"enabled\":true}},"
+                        + "\"provider\":{\"model\":\"project\",\"baseUrl\":\"http://untrusted\"}}}");
+        final var args = new ArrayList<>(baseArgs());
+        args.addAll(List.of("--yca.configuration.project.enabled", "false"));
+        final var cfg = config(args);
+        assertEquals("global", cfg.provider().model());
+        assertEquals("https://api.openai.com/v1", cfg.provider().baseUrl());
+    }
+
+    @Test
+    void disabledProjectConfigurationDoesNotParseProjectFile() throws IOException {
+        write(Path.of(globalConfigPath()), "{\"yca\":{\"provider\":{\"model\":\"global\"}}}");
+        write(temp.resolve(".yca/configuration.json"), "not valid JSON");
+        final var args = new ArrayList<>(baseArgs());
+        args.addAll(List.of("--yca.configuration.project.enabled", "false"));
+        assertEquals("global", config(args).provider().model());
+    }
+
+    @Test
+    void disabledProjectConfigurationWithoutGlobalUsesDefaults() throws IOException {
+        write(temp.resolve(".yca/configuration.json"), "{\"yca\":{\"provider\":{\"baseUrl\":\"http://untrusted\"}}}");
+        final var args = new ArrayList<>(baseArgs());
+        args.addAll(List.of("--yca.configuration.project.enabled", "false"));
+        assertEquals("https://api.openai.com/v1", config(args).provider().baseUrl());
+    }
+
+    @Test
+    void explicitlyEnabledProjectConfigurationStillOverridesGlobal() throws IOException {
+        write(Path.of(globalConfigPath()), "{\"yca\":{\"provider\":{\"model\":\"global\"}}}");
+        write(temp.resolve(".yca/configuration.json"), "{\"yca\":{\"provider\":{\"model\":\"project\"}}}");
+        final var args = new ArrayList<>(baseArgs());
+        args.addAll(List.of("--yca.configuration.project.enabled", "true"));
+        assertEquals("project", config(args).provider().model());
+    }
+
     @Test
     void scalarsOverrideAndOmittedKeysInherit() throws IOException {
         write(
@@ -214,8 +256,8 @@ class YcaConfigurationProducerTest {
 
     @Test
     void combinedSourceIsSingleLevel() {
-        final var first = new MapConfigSource(java.util.Map.of("a", "1"));
-        final var second = new MapConfigSource(java.util.Map.of("b", "2", "a", "shadowed"));
+        final var first = new MapConfigSource(Map.of("a", "1"));
+        final var second = new MapConfigSource(Map.of("b", "2", "a", "shadowed"));
         final var combined = new CombinedConfigurationSource(first, second);
         assertEquals("1", combined.get("a"), "first wins on present key");
         assertEquals("2", combined.get("b"), "second provides absent keys");

@@ -31,6 +31,8 @@ import java.util.function.Function;
  * Lazily-built {@link ConfigurationSource} that backs the global {@code ~/.yupiik/coding-agent/
  * configuration.json} and the project-local {@code .yca/configuration.json}, honoring the project
  * file's {@code "$inherit": true} merge semantics.
+ * Set {@code yca.configuration.project.enabled=false} in trusted CLI/environment/system configuration
+ * to ignore the project-local file entirely and load only the global configuration.
  *
  * <p>Everything is deferred to the first {@link #get(String)} call because that is the earliest point
  * at which the captured {@link Configuration} - the live one every bean reads from - is fully settled
@@ -51,6 +53,7 @@ public class LazyJsonConfigurationSource implements ConfigurationSource {
     private static final String PREFIX = "yca.";
     private static final String INHERIT = "$inherit";
     private static final String GLOBAL_CONFIG_KEY = PREFIX + "configuration.json";
+    private static final String PROJECT_ENABLED_KEY = PREFIX + "configuration.project.enabled";
     private static final String STORAGE_HOME_KEY = PREFIX + "storage.home";
     private static final String WORKING_DIR_KEY = PREFIX + "workingDir";
     private static final String USER_HOME_KEY = "user.home";
@@ -103,6 +106,9 @@ public class LazyJsonConfigurationSource implements ConfigurationSource {
 
     private static ConfigurationSource createSource(final Configuration configuration) {
         final var globalPath = resolveGlobalConfigurationFile(configuration);
+        if (!Boolean.parseBoolean(configuration.get(PROJECT_ENABLED_KEY).orElse("true"))) {
+            return loadJson(globalPath);
+        }
         final var child = loadJson(projectConfigurationFile(configuration));
         if (child != null && "true".equals(child.get(INHERIT))) {
             final var parent = loadJson(globalPath);

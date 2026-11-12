@@ -1,0 +1,149 @@
+= Configuration and CLI
+
+The bot uses Fusion configuration, with ordinary command-line and environment sources.
+YCA's global JSON configuration source remains available; trusted agent execution disables project-local JSON loading using `yca.configuration.project.enabled=false`.
+Bot settings use the `github` prefix and trusted launcher settings use `github.executor`.
+Operation options use `@RootConfiguration("-")`, which means no configuration prefix; the dash is a marker, not part of a key.
+Shared policy is grouped under `github.auth`, `github.authorization` and `github.repositories`.
+Backend-specific settings are disjoint subgraphs: `github.executor.docker`, `github.executor.nono` and `github.executor.kubernetes`; the relay uses `github.executor.relay`.
+Poll controls retain the `poll` subgraph and worker controls retain the `worker` subgraph; other operation options are flat, including `retentionDays` for purge.
+Previous flat keys are not aliases; migrate deployments to the generated names below.
+Environment names uppercase the metadata key and replace dots with underscores, without inserting underscores into camel-case names (for example, `github.executor.attemptRoot` becomes `GITHUB_EXECUTOR_ATTEMPTROOT`, `poll.pageBudget` becomes `POLL_PAGEBUDGET`, and `worker.forkOwner` becomes `WORKER_FORKOWNER`).
+CLI names replace dots with hyphens and add `--`: use `--poll-pageBudget`, `--worker-forkOwner`, `--task`, `--dryRun` and `--retentionDays`, not `--bot-*` options.
+The walkthroughs are deployment examples, not a separate handwritten option reference; use the generated metadata below for supported options and defaults.
+See the xref:../cli/github-bot-poll.adoc[poll], xref:../cli/github-bot-list.adoc[list], xref:../cli/github-bot-show.adoc[show], xref:../cli/github-bot-create.adoc[create], xref:../cli/github-bot-retry.adoc[retry], xref:../cli/github-bot-delete.adoc[delete], xref:../cli/github-bot-purge.adoc[purge], xref:../cli/github-bot-worker.adoc[worker] for command-line options and the xref:../configuration.adoc[shared YCA configuration reference] for agent settings.
+
+== Bot configuration reference
+
+The following settings, defaults and environment variable names are generated from the bot configuration metadata.
+
+include::content/_partials/generated/documentation.github-bot.adoc[]
+
+== Operations
+
+[source,bash]
+----
+java -jar github-bot.jar github bot poll
+java -jar github-bot.jar github bot list
+java -jar github-bot.jar github bot list --filterState failed --filterRepository owner/repo --filterKind review
+java -jar github-bot.jar github bot purge --dryRun true
+java -jar github-bot.jar github bot show --task TASK_ID
+java -jar github-bot.jar github bot create --repository owner/repo --number 12 --kind solve --request 'Fix the reported failure'
+java -jar github-bot.jar github bot worker --task TASK_ID
+java -jar github-bot.jar github bot retry --task TASK_ID
+java -jar github-bot.jar github bot delete --task TASK_ID
+java -jar github-bot.jar github bot purge
+----
+
+Manual creation is a trusted operator action; it does not pretend to be an authenticated GitHub commenter.
+List filters are exact matches and combine with AND; an empty filter is unrestricted.
+List output uses a domain JSON object with a `tasks` array; show and mutation previews use task documents.
+`--dryRun true` validates and previews create, retry, delete and purge without changing tasks or receipts or emitting audit events.
+It can still create queue directories/lock files and rewrite an unchanged state file; it is not a filesystem-read-only mode.
+Poll and worker do not expose a dry-run option.
+Deletion preserves invocation receipts.
+The explicit `purge` operation removes clean terminal tasks older than `retentionDays`, never invocation receipts or tasks with retained attempt files.
+`audit.jsonl` records polling enqueues and authorization denials, worker selection/launch/failure/publication/completion, and manual create/retry/delete operations using identifiers only, not request text or credentials.
+Audit appends occur outside queue transactions; a crash can therefore leave a committed transition without its audit event, so this is not an atomic transition ledger.
+The same fixed event code and task ID are emitted through JUL at `FINE` for operator-configured logging.
+Retry only accepts unpublished failed tasks without retained attempt data and preserves attempt counters; create a new manual task after an already-published failure.
+Publishing tasks require reconciliation first, and deletion refuses tasks with retained attempts.
+The shared headless `run` command is also available directly from the core dependency.
+
+== Repository selection and authentication
+
+Polling supports explicit repositories and typed organization/user discovery.
+Exact includes add candidates; wildcard includes filter discovered repositories; excludes and visibility restrictions apply last.
+Host authentication supports a PAT or a GitHub App installation with a PEM PKCS#8 RSA private-key file.
+With `github.auth.installationId=0`, App authentication discovers an installation only for one exact explicit repository or one organization discovery source; ambiguous selections require an explicit installation ID.
+An App-authenticated GET receiving 401 refreshes its installation token once; POSTs are never replayed, including after authentication failures.
+Optional `github.requestIntervalMillis` spaces host REST request starts within a process, including retries and writes, up to one minute; it is not a shared quota across worker processes or App token issuance requests.
+Remote API credential transport requires HTTPS; numeric loopback HTTP is reserved for local tests.
+The host credential is never passed to the agent.
+Use a distinct agent credential for upstream reads, pull requests and reviews, and a separate fork-write credential when required by the resource-owner permission boundary.
+Optional archived and fork exclusions apply after inclusion, even for explicitly included repositories.
+Optional `github.authorization.teams` adds an active-team-membership restriction to the immutable-ID allowlist, at enqueue and again before execution.
+User logins are resolved from their immutable IDs; team API failures fail closed.
+Optional `worker.provisionFork` allows organization fork creation with the host credential; personal-account destinations must still be provisioned manually.
+A durable intent precedes the single creation request, and later attempts only verify the resulting fork; ambiguous creation requires operator reconciliation, never a repeated POST.
+Optional `poll.pollReviews` scans submitted native review summaries as well as the usual issue and inline-comment feeds.
+Review discovery retains per-PR continuations and conservatively replays completed scans, so its retained state and request cost grow with repository history.
+Worker failure notifications use the existing opt-in shared `yca.notifications` integration and contain task/repository identifiers only.
+Delivery is best effort, not a durable external notification guarantee.
+`worker.parallelism` bounds concurrent worker processes sharing the queue through fixed slot locks and per-task leases.
+Stop all workers before changing that value, and use the same value in every dispatcher process.
+The default remains one worker; increasing it requires an external scheduler to invoke multiple workers.
+Version 0 processes at most one task per invocation; group size is one.
+The shared worker-slot throttle applies before backend execution, so Docker, Nono and Kubernetes use the same per-queue concurrency bound.
+`worker.cacheRoot` optionally stages an independent public GitHub clone at `/attempt/workspace/repository` using anonymous host Git.
+Keep the cache outside queue and attempt roots; it is never mounted in the agent, and private repositories fail rather than using host credentials.
+Cache disk retention is operator-managed, and enterprise API endpoints are not supported by this optional cache.
+
+== Optional Discussion polling
+
+`poll.pollDiscussions` defaults to `false`; enable it explicitly on the poller with `--poll-pollDiscussions true` or `POLL_POLLDISCUSSIONS=true`.
+This is independent of `poll.pollReviews` and applies to the selected repositories, which must have Discussions enabled and permit host GraphQL access.
+Provision host Discussions read permission to discover and read threads, and Discussions write permission to publish responses; issue and pull-request permissions alone are insufficient.
+The poller recognizes `help` and `solve` mentions in Discussion bodies, top-level comments and replies; Discussion `review` requests are unsupported and do not enqueue work.
+Only `User` actors with an allowed immutable numeric user ID are eligible, with the optional team restriction applied as well.
+Deleted authors, non-user actors, the configured self login, task-marked output and quoted/code invocation examples do not grant authority to enqueue work.
+Authorization is checked again by the worker; a mention alias is not a separately authenticated bot identity.
+Polling only discovers and enqueues tasks: it makes no LLM call and launches no executor.
+Help is published without model execution, while solve follows the existing worker/fork workflow and links the independently verified PR back into the originating Discussion thread.
+
+Discussion discovery, each Discussion's comments and each top-level comment's replies have independent persistent cursors.
+Each connection reads at most `min(poll.pageBudget, 20)` pages of 50 nodes per poll; this is not a global request or runtime bound.
+Every retained Discussion and thread is revisited, so a discovery backlog does not by itself starve known reply connections.
+Completed connections restart from the beginning, and the initial `poll.since` lower bound remains fixed with a five-minute overlap rather than advancing with completed traversals.
+Receipts are keyed by the invocation node, survive task deletion and prevent edits or repeated traversals of that same node from creating another task.
+Retained discovery/thread graph state and receipts grow with repository history and have no automatic history compaction; plan disk, API quota and polling time accordingly.
+Malformed connections, non-progressing cursors and GraphQL errors, including partial data accompanied by errors, fail closed rather than authorizing publication from incomplete responses.
+The client performs no local GraphQL transport retry.
+
+Discussion publication revalidates the persisted repository, Discussion, invocation reference and exact parent thread against GitHub nodes and canonical URLs.
+A body invocation receives a top-level comment; comment and reply invocations receive a reply in their originating top-level thread, not an unrelated issue comment.
+Reconciliation checks the configured publishing author and task marker in that exact destination connection, scanning at most 20 pages or 1,000 comments.
+If no matching response is found and that bound does not establish a complete scan, publication stops even before a first write.
+The marked response must be nonblank and at most 30,000 characters including markers.
+A durable `discussionPublishIntent` precedes the single mutation; an existing intent without a verified matching response stops for operator reconciliation and is never automatically replayed.
+This is fail-closed deduplication, not an exactly-once delivery guarantee.
+
+== Structured completion guard
+
+Core headless `run` supports an opt-in `--result-file` completion artifact, `--result-required-fields` and positive `--result-max-bytes` (default `1000000`).
+A blank result-file disables this guard for ordinary runs.
+The guard checks a readable, bounded regular file without symbolic path components, containing exactly one valid UTF-8 JSON object and the configured required fields.
+Comma-separated field groups are conjunctive and `|` supplies alternatives, for example `summary|failure`.
+After an otherwise successful, non-cancelled run with an invalid artifact, it permits one repair continuation in the same session using existing context and tools, capped at three agent-loop iterations.
+The artifact is revalidated after that continuation; a chat answer cannot replace the file, and the guard never fabricates missing results.
+This adds neither a worker retry nor a new execution attempt; the existing worker retry policy remains separate.
+
+Docker, Nono and Kubernetes launchers opt in for their attempt's `output/result.json` with `taskId,summary|failure` and a 6 MiB (`6291456` byte) guard ceiling.
+The generic required-fields guard checks nonblank strings, so numeric `schemaVersion` is deliberately left to the host rather than included in that string-field list.
+The host remains authoritative: it requires numeric schema version `1`, the exact task ID and a nonblank summary or failure, plus independently validated task-specific publication evidence.
+The host accepts up to 6 MiB only for strict-solve results and retains its narrower `1000000` byte limit for other results.
+Passing the agent-side structural guard is therefore not proof of host acceptance, correct code, valid review locations or permission to publish.
+The completion guard and Discussion implementation are actively changing; successful tests or live exchanges must be recorded for the deployed revision rather than inferred from this contract.
+
+== Conservative orphan cleanup
+
+Use `github bot cleanup --minimumAgeHours 24` to preview old, unreferenced prepared-only attempts under an explicitly configured dedicated `github.executor.attemptRoot`.
+Pass `--dryRun false` to delete the previewed attempts.
+The collector fences the default worker lock and all 64 parallel slots before reading queue references; active workers cause it to fail without deleting anything.
+It only removes directories carrying the host-created prepared-only marker, which is removed before the durable launch transition.
+Attempts that could have launched, unknown directories, symbolic directory links, recent attempts and all retained task references are preserved.
+This intentionally refuses to infer termination from a missing task reference; launchable orphan attempts still require runtime reconciliation by an operator.
+Nono task cleanup now removes private session/configuration state after the registry confirms a real non-negative exit; missing state is restart-idempotent, and unknown/reconciled sessions remain evidence rather than being deleted.
+
+== Optional per-attempt LLM relay
+
+Set `github.executor.relay.bind` to a numeric private dispatcher address and `github.executor.relay.advertised` to its sandbox-reachable HTTP origin without port or path (for example, `http://172.30.0.1`).
+The dispatcher creates a random-port relay for each attempt and closes it when execution returns.
+Trusted configuration must contain one OpenAI-compatible `provider.baseUrl` and `provider.apiKey`; the relay maps only `POST /chat/completions` to that fixed upstream chat-completions URL (appending `/chat/completions` only if the base has no route).
+The attempt receives only an ephemeral relay token, with alternative model definitions and custom provider headers removed.
+Non-loopback upstreams require HTTPS; inbound relay HTTP requires an isolated operator-controlled private network and firewall, since its access token grants billable model access.
+Allow sandbox-to-dispatcher relay traffic and deny direct external traffic using independently verified network controls; the relay itself does not enforce those controls.
+The relay rejects excess concurrent requests, bounds request/response sizes and enforces a 120-second request lifetime, including streaming.
+Only response status, bounded body and an allowlisted content type are forwarded; provider response bodies are not content-redacted.
+Random ports require an appropriate private-network firewall range, and dispatcher crashes invalidate the token rather than restarting a relay for an existing attempt.
+Nono and Kubernetes connectivity must be explicitly arranged and tested by the operator; no automatic gateway or cluster Service is created.

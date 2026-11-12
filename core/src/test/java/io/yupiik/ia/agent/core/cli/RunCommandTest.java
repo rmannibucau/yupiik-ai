@@ -13,7 +13,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package io.yupiik.ia.agent.tui;
+package io.yupiik.ia.agent.core.cli;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
@@ -44,8 +45,11 @@ import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.todo.InMemoryTodoStore;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -57,6 +61,7 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
@@ -66,6 +71,7 @@ import java.util.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.Isolated;
 import org.junit.jupiter.api.parallel.ResourceLock;
@@ -77,10 +83,18 @@ import org.junit.jupiter.api.parallel.Resources;
  * no {@code @ResourceLock} can guard against classes that merely <em>write</em> to those streams.
  */
 @Isolated
+@ExtendWith(TestJsonMapper.class)
 @ResourceLock(Resources.SYSTEM_OUT)
 @ResourceLock(Resources.SYSTEM_ERR)
 @ResourceLock("java.util.logging")
 class RunCommandTest {
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
+
     @TempDir
     Path temp;
 
@@ -182,12 +196,13 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", "", "", "", "", 1000000),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
                 null,
-                mcpManager());
+                mcpManager(),
+                mapper);
 
         assertFalse(mcpStarted.get(), "Constructing a command must not start MCP servers");
         command.run();
@@ -197,6 +212,195 @@ class RunCommandTest {
         assertNull(calls.get(0)[1]);
         assertEquals("s-run", calls.get(0)[2]);
         assertTrue(out.toString(StandardCharsets.UTF_8).contains("hello"));
+    }
+
+    @Test
+    void resultCorrectionUsesSameSessionHistoryAndCancellation() throws Exception {
+        final var result = Files.writeString(temp.resolve("result.json"), "{}");
+        final var history = List.of(Message.system("saved task context"));
+        final var prompts = new ArrayList<String>();
+        final var cancellation = new AtomicReference<BooleanSupplier>();
+        final var cap = new AtomicInteger();
+        final var loop = new AgentLoop() {
+            @Override
+            public void maxIterationsCap(final int value) {
+                cap.set(value);
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> messages,
+                    final BooleanSupplier cancelled) {
+                prompts.add(prompt);
+                assertEquals("s-run", sessionId);
+                if (prompts.size() == 1) {
+                    assertNull(messages);
+                    cancellation.set(cancelled);
+                } else {
+                    assertEquals(2, prompts.size());
+                    assertEquals(history, messages);
+                    assertTrue(cancelled == cancellation.get());
+                    assertEquals(3, cap.get());
+                    assertTrue(prompt.contains("summary|failure"));
+                    try {
+                        Files.writeString(result, "{\"summary\":\"corrected using task evidence\"}");
+                    } catch (final IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                }
+                return "done";
+            }
+        };
+        final var store = new SessionStore() {
+            @Override
+            public String create() {
+                return "s-run";
+            }
+
+            @Override
+            public List<Message> load(final String id) {
+                assertEquals("s-run", id);
+                return history;
+            }
+        };
+        new RunCommand(
+                        new RunCommand.RunConf(
+                                "task",
+                                "",
+                                "",
+                                false,
+                                "",
+                                "hidden",
+                                "",
+                                "",
+                                result.toString(),
+                                "summary|failure",
+                                1000000),
+                        testRegistry(),
+                        runtimeFactory(loop, new PermissionService(null)),
+                        store,
+                        null,
+                        mcpManager(),
+                        mapper)
+                .run();
+        assertEquals(2, prompts.size());
+        assertEquals("{\"summary\":\"corrected using task evidence\"}", Files.readString(result));
+    }
+
+    @Test
+    void invalidResultFailsAfterExactlyOneCorrection() throws Exception {
+        final var result = Files.writeString(temp.resolve("invalid.json"), "{}");
+        final var calls = new AtomicInteger();
+        final var loop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                calls.incrementAndGet();
+                return "claimed success without artifact";
+            }
+        };
+        final var command = new RunCommand(
+                new RunCommand.RunConf(
+                        "task", "", "", false, "", "hidden", "", "", result.toString(), "summary|failure", 1000000),
+                testRegistry(),
+                runtimeFactory(loop, new PermissionService(null)),
+                sessionStore(),
+                null,
+                mcpManager(),
+                mapper);
+        assertTrue(assertThrows(IllegalStateException.class, command::run)
+                .getMessage()
+                .contains("invalid after correction"));
+        assertEquals(2, calls.get());
+        assertEquals("{}", Files.readString(result), "the command must not fabricate result fields");
+    }
+
+    @Test
+    void validResultDoesNotTriggerCorrection() throws Exception {
+        final var result = Files.writeString(temp.resolve("valid.json"), "{\"failure\":\"blocked\"}");
+        final var calls = new AtomicInteger();
+        final var loop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                calls.incrementAndGet();
+                return "done";
+            }
+        };
+        new RunCommand(
+                        new RunCommand.RunConf(
+                                "task",
+                                "",
+                                "",
+                                false,
+                                "",
+                                "hidden",
+                                "",
+                                "",
+                                result.toString(),
+                                "summary|failure",
+                                1000000),
+                        testRegistry(),
+                        runtimeFactory(loop, new PermissionService(null)),
+                        sessionStore(),
+                        null,
+                        mcpManager(),
+                        mapper)
+                .run();
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void failedTurnDoesNotTriggerResultCorrection() {
+        final var registry = testRegistry();
+        final var calls = new AtomicInteger();
+        final var loop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                calls.incrementAndGet();
+                registry.onEvent(new AgentEvent.Error("provider failed", sessionId));
+                return "";
+            }
+        };
+        final var command = new RunCommand(
+                new RunCommand.RunConf(
+                        "task",
+                        "",
+                        "",
+                        false,
+                        "",
+                        "hidden",
+                        "",
+                        "",
+                        temp.resolve("missing.json").toString(),
+                        "summary|failure",
+                        1000000),
+                registry,
+                runtimeFactory(loop, new PermissionService(null)),
+                sessionStore(),
+                null,
+                mcpManager(),
+                mapper);
+        assertTrue(assertThrows(IllegalStateException.class, command::run)
+                .getMessage()
+                .contains("provider failed"));
+        assertEquals(1, calls.get());
     }
 
     @Test
@@ -216,12 +420,13 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "s-2", "", false, "", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "s-2", "", false, "", "collapsed", "", "", "", "", 1000000),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
                 null,
-                mcpManager());
+                mcpManager(),
+                mapper);
 
         final var error = assertThrows(IllegalStateException.class, command::run);
 
@@ -259,12 +464,13 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "build", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "build", "collapsed", "", "", "", "", 1000000),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
                 new AgentProvider(configuration),
-                mcpManager());
+                mcpManager(),
+                mapper);
 
         command.run();
 
@@ -302,12 +508,13 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", "", "", "", "", 1000000),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
                 new AgentProvider(configuration),
-                mcpManager());
+                mcpManager(),
+                mapper);
 
         command.run();
 
@@ -336,12 +543,13 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "plan", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "plan", "collapsed", "", "", "", "", 1000000),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
                 new AgentProvider(configuration),
-                mcpManager());
+                mcpManager(),
+                mapper);
 
         command.run();
 
@@ -376,12 +584,13 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "plan", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "plan", "collapsed", "", "", "", "", 1000000),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
                 new AgentProvider(configuration),
-                mcpManager());
+                mcpManager(),
+                mapper);
 
         command.run();
 
@@ -411,12 +620,13 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "", "shown", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "", "shown", "", "", "", "", 1000000),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
                 null,
-                mcpManager());
+                mcpManager(),
+                mapper);
 
         command.run();
 
@@ -443,12 +653,13 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "", "shown", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "", "shown", "", "", "", "", 1000000),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
                 null,
-                mcpManager());
+                mcpManager(),
+                mapper);
 
         command.run();
 
@@ -465,12 +676,13 @@ class RunCommandTest {
                 .build();
         final var shellRegistry = testRegistry();
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "nope", false, "", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "nope", false, "", "collapsed", "", "", "", "", 1000000),
                 shellRegistry,
                 runtimeFactory(stubAgentLoop(), new PermissionService(null)),
                 sessionStore(),
                 new AgentProvider(configuration),
-                mcpManager());
+                mcpManager(),
+                mapper);
 
         final var error = assertThrows(IllegalArgumentException.class, command::run);
         assertTrue(error.getMessage().contains("Unknown agent"));
@@ -547,12 +759,14 @@ class RunCommandTest {
         };
         final var metricsFile = temp.resolve("metrics1.txt");
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", metricsFile.toString(), ""),
+                new RunCommand.RunConf(
+                        "say hi", "", "", false, "", "collapsed", metricsFile.toString(), "", "", "", 1000000),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
                 null,
-                mcpManager());
+                mcpManager(),
+                mapper);
         command.run();
         final var line = Files.readString(metricsFile, StandardCharsets.UTF_8);
         assertTrue(line.contains("llmCalls=1"), "display refresh must not count as a request: " + line);
@@ -586,12 +800,14 @@ class RunCommandTest {
         };
         final var metricsFile = temp.resolve("metrics2.txt");
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", metricsFile.toString(), ""),
+                new RunCommand.RunConf(
+                        "say hi", "", "", false, "", "collapsed", metricsFile.toString(), "", "", "", 1000000),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
                 null,
-                mcpManager());
+                mcpManager(),
+                mapper);
         command.run();
         final var line = Files.readString(metricsFile, StandardCharsets.UTF_8);
         assertTrue(line.contains("llmCalls=2"), "only the real requests count, refresh excluded: " + line);
