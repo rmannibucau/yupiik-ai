@@ -208,6 +208,8 @@ export function App() {
                 key={activeSession}
                 activeSession={activeSession}
                 openSession={openSession}
+                tabs={tabs}
+                closeSession={closeTab}
                 onModeChange={setTabMode}
                 onTitleChange={setTabTitle}
                 windowBlocks={windowBlocks}

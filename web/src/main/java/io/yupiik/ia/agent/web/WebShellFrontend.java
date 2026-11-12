@@ -20,6 +20,7 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.ShellFrontend;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -167,6 +168,25 @@ public class WebShellFrontend implements ShellFrontend {
                                                 ? "collapsed"
                                                 : value.name().toLowerCase())))
                         + AGENT_END);
+    }
+
+    public void settings(final Map<String, Object> values) {
+        broker.broadcast(
+                sessionId,
+                AGENT_EVENT + json(new WebEventDto("settings", sessionId, null, null, null, values)) + AGENT_END);
+    }
+
+    public void command(final String name, final Map<String, Object> values) {
+        final var data = new LinkedHashMap<String, Object>(values);
+        data.put("command", name);
+        broker.broadcast(
+                sessionId,
+                AGENT_EVENT + json(new WebEventDto("web-command", sessionId, null, null, null, data)) + AGENT_END);
+    }
+
+    @Override
+    public void clear() {
+        command("clear", Map.of());
     }
 
     private String json(final WebEventDto dto) {

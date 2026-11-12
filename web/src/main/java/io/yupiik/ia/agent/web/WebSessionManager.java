@@ -33,7 +33,6 @@ import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
-import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -52,6 +51,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -69,6 +69,7 @@ import java.util.stream.Collectors;
 public class WebSessionManager implements AutoCloseable {
 
     private static final Logger LOGGER = Logger.getLogger(WebSessionManager.class.getName());
+    private static final Pattern BTW_COMMAND = Pattern.compile("(?is)^/btw(?:\\s.*)?$");
 
     /**
      * Upper bound on how long an interactive request (approval/question) waits for the browser
@@ -80,7 +81,7 @@ public class WebSessionManager implements AutoCloseable {
 
     private final SessionRuntimeFactory sessionRuntimeFactory;
     private final ShellRegistry shellRegistry;
-    private final SlashRegistry slashRegistry;
+    private final WebSlashCommands slashRegistry;
     private final TurnRunner turnRunner;
     private final SessionStore sessionStore;
     private final SseBroker broker;
@@ -94,7 +95,7 @@ public class WebSessionManager implements AutoCloseable {
     public WebSessionManager(
             final SessionRuntimeFactory sessionRuntimeFactory,
             final ShellRegistry shellRegistry,
-            final SlashRegistry slashRegistry,
+            final WebSlashCommands slashRegistry,
             final TurnRunner turnRunner,
             final SessionStore sessionStore,
             final SessionLifecycle sessionLifecycle,
@@ -238,7 +239,7 @@ public class WebSessionManager implements AutoCloseable {
         // a "transcript" SSE event the browser never folds into blocks. Mirrors the TUI intercepting
         // /btw before the generic registry.
         final var trimmed = text.strip();
-        if (trimmed.startsWith("/btw")) {
+        if (BTW_COMMAND.matcher(trimmed).matches()) {
             return btw(session, trimmed.substring(4).strip());
         }
         return CompletableFuture.supplyAsync(() -> {
@@ -499,6 +500,13 @@ public class WebSessionManager implements AutoCloseable {
             // re-seed any live /btw (pending or answered) so a reload/reconnect keeps the pill + modal,
             // exactly like the synthetic busy status above carries the live turn state.
             if (webSession != null) {
+                replay.add(new WebEventDto(
+                        "settings",
+                        sessionId,
+                        null,
+                        null,
+                        null,
+                        WebSlashCommands.displaySettings(webSession.env.session())));
                 final var btw = webSession.btw;
                 if (btw != null) {
                     replay.add(btwEvent(sessionId, btw));
@@ -710,7 +718,18 @@ public class WebSessionManager implements AutoCloseable {
 
         @Override
         public CompletableFuture<Optional<String>> readLine(final String prompt) {
-            return CompletableFuture.completedFuture(Optional.empty());
+            return askRpc(Map.of(
+                            "questions",
+                            List.of(Map.of(
+                                    "id",
+                                    "input",
+                                    "prompt",
+                                    prompt == null ? "" : prompt,
+                                    "options",
+                                    List.of(),
+                                    "multiple",
+                                    false))))
+                    .thenApply(value -> value instanceof String text ? Optional.of(text) : Optional.empty());
         }
 
         @Override

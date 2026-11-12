@@ -26,7 +26,9 @@ import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
+import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
+import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
@@ -99,7 +101,7 @@ class WebSessionManagerPromptTest {
         this.manager = new WebSessionManager(
                 runtimeFactory,
                 new NoopShellRegistry(),
-                new SlashRegistry() {},
+                new WebSlashCommands(new SlashRegistry() {}, null, sessionStore),
                 turnRunner,
                 sessionStore,
                 new SessionLifecycle(sessionStore),
@@ -155,9 +157,26 @@ class WebSessionManagerPromptTest {
     @Test
     void slashCommandIsNotBroadcastAsAUserEvent() {
         manager.attach("s1");
-        manager.submit("s1", "/model", null);
+        manager.submit("s1", "/model", null).join();
         // slash commands route to the lifecycle/slash path, never as a user turn
-        assertEquals(0, broker.frames.size(), "slash commands must not broadcast a user event");
+        assertTrue(
+                broker.frames.stream().noneMatch(frame -> frame.contains("\"type\":\"user\"")),
+                "slash commands must not broadcast a user event");
+    }
+
+    @Test
+    void reconnectSnapshotRestoresDisplaySettings() {
+        final var session = manager.attach("s1").env().session();
+        session.showThinking(false).showToolOutput(ToolOutputVisibility.HIDDEN);
+        final var settings = manager.snapshotFor("s1").stream()
+                .filter(event -> "settings".equals(event.type()))
+                .findFirst()
+                .orElseThrow()
+                .data();
+        assertEquals(false, settings.get("showThinking"));
+        assertEquals("hidden", settings.get("showToolOutput"));
+        assertEquals(true, settings.get("metricsPerTurn"));
+        assertEquals("compact", settings.get("metricsMode"));
     }
 
     private static final class NoopShellRegistry extends ShellRegistry {
@@ -166,12 +185,12 @@ class WebSessionManagerPromptTest {
         }
 
         @Override
-        public void register(final String sessionId, final io.yupiik.ia.agent.core.shell.ShellEnv env) {
+        public void register(final String sessionId, final ShellEnv env) {
             // no-op
         }
 
         @Override
-        public void unregister(final String sessionId, final io.yupiik.ia.agent.core.shell.ShellEnv env) {
+        public void unregister(final String sessionId, final ShellEnv env) {
             // no-op
         }
     }

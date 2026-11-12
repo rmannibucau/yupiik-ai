@@ -76,7 +76,7 @@ public class WebJsonRpc {
             final StructuralCodeGraph codeGraph,
             final McpManager mcpManager,
             final CodingAgentConfiguration configuration,
-            final SlashRegistry slashRegistry,
+            final WebSlashCommands slashRegistry,
             final ChatClient chatClient,
             final ProviderManager providerManager,
             final AgentProvider agentProvider,
@@ -88,11 +88,11 @@ public class WebJsonRpc {
         this.codeGraph = codeGraph;
         this.mcpManager = mcpManager;
         this.configuration = configuration;
-        this.slashRegistry = slashRegistry;
+        this.slashRegistry = slashRegistry == null ? null : slashRegistry.registry();
         this.chatClient = chatClient;
         this.providerManager = providerManager;
         this.webConf = webConf;
-        this.completionEngine = new CompletionEngine(slashRegistry, new ArgCompletion.Env() {
+        this.completionEngine = new CompletionEngine(this.slashRegistry, new ArgCompletion.Env() {
             @Override
             public List<String> models() {
                 return modelsOf(chatClient);

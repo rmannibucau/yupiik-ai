@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
+import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
@@ -97,7 +98,7 @@ class WebSessionManagerCloseTest {
         this.manager = new WebSessionManager(
                 runtimeFactory,
                 new NoopShellRegistry(),
-                new SlashRegistry() {},
+                new WebSlashCommands(new SlashRegistry() {}, null, sessionStore),
                 turnRunner,
                 sessionStore,
                 new SessionLifecycle(sessionStore),
@@ -167,12 +168,12 @@ class WebSessionManagerCloseTest {
         }
 
         @Override
-        public void register(final String sessionId, final io.yupiik.ia.agent.core.shell.ShellEnv env) {
+        public void register(final String sessionId, final ShellEnv env) {
             // no-op: routing is not exercised by these units
         }
 
         @Override
-        public void unregister(final String sessionId, final io.yupiik.ia.agent.core.shell.ShellEnv env) {
+        public void unregister(final String sessionId, final ShellEnv env) {
             // no-op
         }
     }

@@ -19,24 +19,32 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
+import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
+import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -102,7 +110,7 @@ class WebSessionManagerFeedbackGateTest {
         this.manager = new WebSessionManager(
                 runtimeFactory,
                 new NoopShellRegistry(),
-                new SlashRegistry() {},
+                new WebSlashCommands(new SlashRegistry() {}, null, sessionStore),
                 new TurnRunner() {},
                 sessionStore,
                 new SessionLifecycle(sessionStore),
@@ -115,8 +123,8 @@ class WebSessionManagerFeedbackGateTest {
     void aCancelledAskIsReportedAsCleanCancelledAnswer() throws Exception {
         manager.attach("s1");
         // register a subscription so pushRpc delivers the session.ask frame to a capturable sink
-        final var frames = new java.util.concurrent.ConcurrentLinkedQueue<String>();
-        broker.subscribe("s1", bytes -> frames.add(new String(bytes, java.nio.charset.StandardCharsets.UTF_8)));
+        final var frames = new ConcurrentLinkedQueue<String>();
+        broker.subscribe("s1", bytes -> frames.add(new String(bytes, StandardCharsets.UTF_8)));
 
         // the feedback gate blocks the asking thread on awaitRpc until the request is resolved;
         // drive it from a background thread so the main thread can perform the cancel.
@@ -158,12 +166,12 @@ class WebSessionManagerFeedbackGateTest {
         }
 
         @Override
-        public void register(final String sessionId, final io.yupiik.ia.agent.core.shell.ShellEnv env) {
+        public void register(final String sessionId, final ShellEnv env) {
             // no-op: routing is not exercised by these units
         }
 
         @Override
-        public void unregister(final String sessionId, final io.yupiik.ia.agent.core.shell.ShellEnv env) {
+        public void unregister(final String sessionId, final ShellEnv env) {
             // no-op
         }
     }
@@ -185,10 +193,10 @@ class WebSessionManagerFeedbackGateTest {
         public CompletionStage<BtwAnswerer.BtwAnswer> ask(
                 final String question,
                 final String sessionId,
-                final io.yupiik.ia.agent.core.context.UsageTracker usage,
-                final java.util.function.BooleanSupplier cancelled,
-                final io.yupiik.ia.agent.core.permissions.ApprovalGate sessionGate,
-                final io.yupiik.ia.agent.core.llm.ChatSettings sessionSettings) {
+                final UsageTracker usage,
+                final BooleanSupplier cancelled,
+                final ApprovalGate sessionGate,
+                final ChatSettings sessionSettings) {
             return CompletableFuture.completedFuture(new BtwAnswerer.BtwAnswer("unused", false));
         }
 
@@ -196,11 +204,11 @@ class WebSessionManagerFeedbackGateTest {
         public CompletionStage<BtwAnswerer.BtwAnswer> ask(
                 final String question,
                 final String sessionId,
-                final io.yupiik.ia.agent.core.context.UsageTracker usage,
-                final java.util.function.BooleanSupplier cancelled,
-                final io.yupiik.ia.agent.core.permissions.ApprovalGate sessionGate,
-                final io.yupiik.ia.agent.core.llm.ChatSettings sessionSettings,
-                final io.yupiik.ia.agent.core.agent.SystemPromptBuilder systemPromptBuilder) {
+                final UsageTracker usage,
+                final BooleanSupplier cancelled,
+                final ApprovalGate sessionGate,
+                final ChatSettings sessionSettings,
+                final SystemPromptBuilder systemPromptBuilder) {
             return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings);
         }
     }

@@ -31,6 +31,7 @@ import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
+import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
@@ -38,9 +39,11 @@ import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.BeforeEach;
@@ -105,7 +108,7 @@ class WebSessionManagerBtwTest {
         this.manager = new WebSessionManager(
                 runtimeFactory,
                 new NoopShellRegistry(),
-                new SlashRegistry() {},
+                new WebSlashCommands(new SlashRegistry() {}, null, sessionStore),
                 new TurnRunner() {},
                 sessionStore,
                 new SessionLifecycle(sessionStore),
@@ -148,6 +151,18 @@ class WebSessionManagerBtwTest {
         assertEquals(Boolean.FALSE, future.join());
         assertEquals(0, broker.frames.size());
         assertNull(manager.btwState("s1"));
+    }
+
+    @Test
+    void btwRequiresAnExactCommandNameAndIsCaseInsensitive() {
+        manager.attach("s1");
+        manager.slash("s1", "/btw-other not a side question").join();
+        assertNull(manager.btwState("s1"));
+        assertTrue(answerer.pending.isEmpty());
+        assertTrue(broker.frames.stream().noneMatch(frame -> frame.contains("\"type\":\"btw\"")));
+        manager.slash("s1", "/BTW a side question").join();
+        assertEquals("a side question", manager.btwState("s1").question());
+        answerer.complete("a side question", "answer");
     }
 
     @Test
@@ -257,12 +272,12 @@ class WebSessionManagerBtwTest {
         }
 
         @Override
-        public void register(final String sessionId, final io.yupiik.ia.agent.core.shell.ShellEnv env) {
+        public void register(final String sessionId, final ShellEnv env) {
             // no-op: routing is not exercised by these units
         }
 
         @Override
-        public void unregister(final String sessionId, final io.yupiik.ia.agent.core.shell.ShellEnv env) {
+        public void unregister(final String sessionId, final ShellEnv env) {
             // no-op
         }
     }
@@ -299,11 +314,10 @@ class WebSessionManagerBtwTest {
 
     /** Controllable {@code BtwAnswerer}: overrides the 6-arg ask to return per-question futures. */
     private static final class FakeBtwAnswerer extends BtwAnswerer {
-        private final java.util.Map<String, CompletableFuture<BtwAnswerer.BtwAnswer>> pending =
-                new java.util.concurrent.ConcurrentHashMap<>();
+        private final Map<String, CompletableFuture<BtwAnswerer.BtwAnswer>> pending = new ConcurrentHashMap<>();
         // the real cancellation supplier the manager passed in, keyed by question - so a canceled test
         // reflects the actual override/clear the production code performs on the BtwState it owns.
-        private final java.util.Map<String, BooleanSupplier> cancelled = new java.util.concurrent.ConcurrentHashMap<>();
+        private final Map<String, BooleanSupplier> cancelled = new ConcurrentHashMap<>();
 
         private FakeBtwAnswerer() {
             super(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);

@@ -2,6 +2,7 @@ import { ContextBar, formatQuotaReset, quotaWindowLabel } from '../components/Us
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router';
 import { ToolCard } from '../components/ToolCard';
+import { ToolVisibilityMenu } from '../components/ToolVisibilityMenu';
 import { MarkdownContent } from '../components/MarkdownContent';
 import { SessionMetadata } from '../components/SessionMetadata';
 import { call, onServerRequest, type ServerRequest } from '../api/rpc';
@@ -13,6 +14,7 @@ import {
   LOAD_EARLIER_CHUNK,
   type Block,
 } from '../api/eventLog';
+import { applyWebCommand } from '../api/webCommands';
 import { useSlashCompletion, applySuggestion, type SlashSuggestion } from '../api/useSlashCompletion';
 import { normalizeMarkdown, hasOpenInlineSpan, stripEchoedRefs } from '../lib/markdown';
 
@@ -63,12 +65,16 @@ type SidebarMeta = {
 export function ChatPage({
   activeSession,
   openSession,
+  tabs = [],
+  closeSession,
   onModeChange,
   onTitleChange,
   windowBlocks = 1024,
 }: {
   activeSession?: string;
   openSession: (id: string, title: string) => void;
+  tabs?: { id: string; title: string }[];
+  closeSession?: (id: string) => void;
   onModeChange?: (id: string, mode: 'plan' | 'build') => void;
   onTitleChange?: (id: string, title: string) => void;
   windowBlocks?: number;
@@ -154,10 +160,50 @@ export function ChatPage({
     [sessionId, queuedPrompts, refreshQueued],
   );
   // global tool visibility: 'shown' | 'collapsed' | 'hidden' (mirrors TUI /tool-output states)
-  const [toolVisibility, setToolVisibility] = useState<'shown' | 'collapsed'>('collapsed');
+  const [toolVisibility, setToolVisibility] = useState<'shown' | 'collapsed' | 'hidden'>('collapsed');
   // global thinking visibility: hide buffered thought blocks at render time (they are never dropped
   // from the log, so re-showing restores them instantly - mirrors the TUI /thinking toggle).
   const [thinkingVisible, setThinkingVisible] = useState(true);
+  const [metrics, setMetrics] = useState({ perTurn: true, session: true, full: false });
+  const [subagentsContent, setSubagentsContent] = useState<string | null>(null);
+  const [subagentReference, setSubagentReference] = useState('');
+  const [tabsOpen, setTabsOpen] = useState(false);
+  const handledCommands = useRef(new WeakSet<WebEvent>());
+  useEffect(() => {
+    for (const event of events) {
+      if (handledCommands.current.has(event)) {
+        continue;
+      }
+      handledCommands.current.add(event);
+      const data = event.data ?? {};
+      if (event.type === 'settings') {
+        if (typeof data.showThinking === 'boolean') {
+          setThinkingVisible(data.showThinking);
+        }
+        if (data.showToolOutput === 'shown' || data.showToolOutput === 'collapsed' || data.showToolOutput === 'hidden') {
+          setToolVisibility(data.showToolOutput);
+        }
+        if (typeof data.metricsPerTurn === 'boolean' && typeof data.metricsSession === 'boolean') {
+          setMetrics({ perTurn: data.metricsPerTurn, session: data.metricsSession, full: data.metricsMode === 'full' });
+        }
+      } else if (event.type === 'web-command') {
+        applyWebCommand(data, {
+          openSession: (id) => openSession(id, id),
+          closeSession: () => {
+            if (sessionId) {
+              closeSession?.(sessionId);
+            }
+          },
+          showTabs: () => setTabsOpen(true),
+          setTheme: (theme) => {
+            document.documentElement.setAttribute('data-theme', theme);
+            localStorage.setItem('yca-theme', theme);
+          },
+          showSubagents: setSubagentsContent,
+        });
+      }
+    }
+  }, [events, openSession, closeSession, sessionId]);
   // per-session todo list collapsed flag
   const [todosCollapsed, setTodosCollapsed] = useState(false);
   // per-session mcp servers section collapsed flag (collapsed by default)
@@ -804,24 +850,20 @@ export function ChatPage({
         >
           {follow ? '● Follow' : '○ Follow'}
         </button>
-        {/* global tool visibility: collapse all / open all (mirrors TUI /tool-output) */}
-        <button
-          onClick={() => setToolVisibility((v) => (v === 'collapsed' ? 'shown' : 'collapsed'))}
-          className="rounded px-1.5 hover:bg-white/5"
-          title={toolVisibility === 'collapsed' ? 'Open all tool outputs' : 'Collapse all tool outputs'}
-        >
-          {toolVisibility === 'collapsed' ? '▸ tools' : '▾ tools'}
-        </button>
+        <ToolVisibilityMenu key={sessionId} value={toolVisibility} onChange={value => {
+          const command = { hidden: 'hide', collapsed: 'collapse', shown: 'show' }[value];
+          void call('session.slash', { id: sessionId, text: `/tool-output ${command}` }).catch(() => undefined);
+        }} />
         {/* global thinking visibility: hide/show buffered thought blocks (mirrors TUI /thinking) */}
         <button
-          onClick={() => setThinkingVisible((v) => !v)}
+          onClick={() => call('session.slash', { id: sessionId, text: `/thinking ${thinkingVisible ? 'hide' : 'show'}` }).catch(() => undefined)}
           className="rounded px-1.5 hover:bg-white/5"
           title={thinkingVisible ? 'Hide thinking blocks' : 'Show thinking blocks'}
         >
           {thinkingVisible ? '▾ thoughts' : '▸ thoughts'}
         </button>
         <div className="mx-1 h-3 w-px" style={{ background: 'var(--yca-border)' }} />
-        <TurnMetrics status={status} />
+        <TurnMetrics status={status} settings={metrics} />
         <button
           onClick={() => setSidebarOpen((o) => !o)}
           className="ml-auto rounded px-2 py-0.5 hover:bg-white/5"
@@ -937,6 +979,30 @@ export function ChatPage({
       <RequestModal request={pending} onAnswer={answer as (id: number, value: unknown) => void} />
       {btwOpen && <BtwModal btw={btw} onClose={() => setBtwOpen(false)} onRetry={retryBtw} />}
       {helpOpen && <HelpModal content={helpContent} onClose={() => setHelpOpen(false)} />}
+      {subagentsContent !== null && (
+        <HelpModal title="Subagents" content={subagentsContent} onClose={() => setSubagentsContent(null)}>
+          <form className="flex gap-2 p-3" onSubmit={(event) => {
+            event.preventDefault();
+            void call('session.slash', { id: sessionId, text: `/subagents ${subagentReference}` })
+              .catch((error) => setSubagentsContent(`Unable to load subagent: ${String(error)}`));
+          }}>
+            <input aria-label="Subagent id or name" placeholder="Subagent id or name (blank lists all)"
+              className="min-w-0 flex-1 rounded border p-2" style={{ background: 'var(--yca-panel)', color: 'var(--yca-text)' }}
+              value={subagentReference} onChange={(event) => setSubagentReference(event.target.value)} />
+            <button type="submit" className="rounded border px-3">View / refresh</button>
+          </form>
+        </HelpModal>
+      )}
+      {tabsOpen && (
+        <HelpModal title="Session tabs" content="Select an open session or close a tab." onClose={() => setTabsOpen(false)}>
+          <div className="overflow-y-auto p-3">
+            {tabs.map((tab) => <div key={tab.id} className="flex gap-3 p-2">
+              <button className="flex-1 text-left" onClick={() => { setTabsOpen(false); openSession(tab.id, tab.title); }}>{tab.title}</button>
+              <button onClick={() => closeSession?.(tab.id)}>Close tab</button>
+            </div>)}
+          </div>
+        </HelpModal>
+      )}
       {executingToolsOpen && (
         <ExecutingToolsModal content={executingToolsContent} onClose={() => setExecutingToolsOpen(false)} />
       )}
@@ -1124,47 +1190,55 @@ function currentReasoningTokens(status: SessionStatus): number {
 }
 
 /** TUI-format per-turn metrics (compact): N LLM (think) · tok/s · M tools (sum/wall) · duration. */
-function TurnMetrics({ status }: { status: SessionStatus }) {
+export function TurnMetrics({ status, settings = { perTurn: true, session: true, full: false } }: {
+  status: SessionStatus;
+  settings?: { perTurn: boolean; session: boolean; full: boolean };
+}) {
   const parts: string[] = [];
-  if (status.turnLlmCalls != null && status.turnLlmCalls > 0) {
-    const think = status.turnThinkingMs != null ? ` (${humanize(status.turnThinkingMs)})` : '';
-    const tok = status.turnThroughputTokPerSec != null && status.turnThroughputTokPerSec > 0
-      ? ` · ${status.turnThroughputTokPerSec.toFixed(1)} tok/s`
-      : '';
-    const tools = status.turnToolsRun != null ? `${status.turnToolsRun} tools` : '';
-    const toolDur =
-      status.turnToolSumMs != null || status.turnToolWallMs != null
+  if (settings.perTurn) {
+    if (status.turnLlmCalls != null && status.turnLlmCalls > 0) {
+      const think = status.turnThinkingMs != null ? ` (${humanize(status.turnThinkingMs)})` : '';
+      const tok = status.turnThroughputTokPerSec != null && status.turnThroughputTokPerSec > 0
+        ? ` · ${status.turnThroughputTokPerSec.toFixed(1)} tok/s`
+        : '';
+      const tools = status.turnToolsRun != null ? `${status.turnToolsRun} tools` : '';
+      const toolDur = status.turnToolSumMs != null || status.turnToolWallMs != null
         ? ` (${humanize(status.turnToolSumMs)}/${humanize(status.turnToolWallMs)})`
         : '';
-    const dur = status.turnDurationMs != null ? ` · ${humanize(status.turnDurationMs)}` : '';
-    parts.push(`${status.turnLlmCalls} LLM${think}${tok} · ${tools}${toolDur}${dur}`);
-  }
-  if (
-    status.promptTokens != null ||
-    status.completionTokens != null ||
-    status.outputTokens != null ||
-    status.reasoningTokens != null ||
-    status.liveOutTokens != null ||
-    status.liveReasoningTokens != null ||
-    status.liveOutChars != null
-  ) {
-    // realtime "out": prefer the exact turn tokens; while a turn streams, use the live per-turn
-    // provider count (usage-updated) or, lacking usage, the chars≈tokens proxy of the streamed text
-    // so the counter ticks up instead of staying frozen until the request completes. It snaps to the
-    // authoritative value as soon as turn-metrics records it.
-    const out = currentOutTokens(status);
-    const reas = currentReasoningTokens(status);
-    const outTxt = reas > 0 ? `${formatTokens(out)} out + ${formatTokens(reas)} reasoning` : `${formatTokens(out)} out`;
-    let inTxt = status.promptTokens != null ? `in ${formatTokens(status.promptTokens)}` : '';
-    if (status.cacheReadTokens != null && status.cacheReadTokens > 0 && status.promptTokens != null && status.promptTokens > 0) {
-      inTxt += ` (cached ${formatTokens(status.cacheReadTokens)} (${Math.round((status.cacheReadTokens * 100) / status.promptTokens)}%))`;
+      const dur = status.turnDurationMs != null ? ` · ${humanize(status.turnDurationMs)}` : '';
+      parts.push(`${status.turnLlmCalls} LLM${think}${tok} · ${tools}${toolDur}${dur}`);
     }
-    parts.push(`${inTxt && inTxt + ' · '}${outTxt}`.trim());
+    if (
+      status.promptTokens != null ||
+      status.completionTokens != null ||
+      status.outputTokens != null ||
+      status.reasoningTokens != null ||
+      status.liveOutTokens != null ||
+      status.liveReasoningTokens != null ||
+      status.liveOutChars != null
+    ) {
+      // Prefer exact per-turn tokens, then live provider usage, then the streamed-character estimate.
+      const out = currentOutTokens(status);
+      const reas = currentReasoningTokens(status);
+      const outTxt = reas > 0 ? `${formatTokens(out)} out + ${formatTokens(reas)} reasoning` : `${formatTokens(out)} out`;
+      let inTxt = status.promptTokens != null ? `in ${formatTokens(status.promptTokens)}` : '';
+      if (status.cacheReadTokens != null && status.cacheReadTokens > 0 && status.promptTokens != null && status.promptTokens > 0) {
+        inTxt += ` (cached ${formatTokens(status.cacheReadTokens)} (${Math.round((status.cacheReadTokens * 100) / status.promptTokens)}%))`;
+      }
+      parts.push(`${inTxt && inTxt + ' · '}${outTxt}`.trim());
+    }
+    if (status.contextPercent != null) {
+      parts.push(`ctx ${Math.min(100, Math.round(status.contextPercent))}%`);
+    }
+    if (settings.full && status.turnLlmCalls != null) {
+      parts.push(`thinking ${humanize(status.turnThinkingMs)}; tools sum ${humanize(status.turnToolSumMs)}, wall ${humanize(status.turnToolWallMs)}`);
+    }
   }
-  if (status.contextPercent != null)
-    parts.push(`ctx ${Math.min(100, Math.round(status.contextPercent))}%`);
-  if (status.sessionLlmCalls != null && status.sessionLlmCalls > 0) {
+  if (settings.session && status.sessionLlmCalls != null && status.sessionLlmCalls > 0) {
     parts.push(`session: ${status.sessionLlmCalls} LLM calls`);
+  }
+  if (!settings.perTurn && !settings.session) {
+    return null;
   }
   return (
     <span className="truncate">
@@ -1573,7 +1647,7 @@ const EventLog = memo(
     EventLogHandle,
     {
       events: WebEvent[];
-      toolVisibility: 'shown' | 'collapsed';
+      toolVisibility: 'shown' | 'collapsed' | 'hidden';
       thinkingVisible: boolean;
       windowBlocks: number;
       hasServerHistory: boolean;
@@ -1618,9 +1692,8 @@ const EventLog = memo(
       // thinking blocks are filtered at render time (never dropped from the log) so toggling back
       // restores them instantly - mirrors the TUI /thinking toggle. The log-driven pagination/keys
       // stay unchanged so tool-card atomicity and the "load earlier" window are untouched.
-      const visibleBlocks = thinkingVisible
-        ? blocks.slice(start)
-        : blocks.slice(start).filter((b) => b.kind !== 'thought');
+      const visibleBlocks = blocks.slice(start).filter((b) =>
+        (thinkingVisible || b.kind !== 'thought') && (toolVisibility !== 'hidden' || b.kind !== 'tool'));
       return (
         <div className="space-y-2">
           {(extended || hasServerHistory) && (
@@ -2196,7 +2269,9 @@ function BtwModal({
  * Sized with margins instead of a small centered card so the whole command list is readable, with
  * an internal scroll for long content. Closable via the Close button, Esc, or clicking the backdrop.
  */
-function HelpModal({ content, onClose }: { content: string | null; onClose: () => void }) {
+function HelpModal({ content, onClose, title = 'Slash commands', children }: {
+  content: string | null; onClose: () => void; title?: string; children?: React.ReactNode;
+}) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -2213,7 +2288,7 @@ function HelpModal({ content, onClose }: { content: string | null; onClose: () =
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Help"
+        aria-label={title}
         className="flex h-[88vh] w-[min(960px,94vw)] flex-col overflow-hidden rounded-lg"
         style={{ border: '1px solid var(--yca-border)', background: 'var(--yca-panel-2)' }}
         onClick={(e) => e.stopPropagation()}
@@ -2226,10 +2301,10 @@ function HelpModal({ content, onClose }: { content: string | null; onClose: () =
             className="shrink-0 rounded px-1.5 py-0.5 text-xs font-bold uppercase"
             style={{ background: 'var(--yca-accent-soft)', color: 'var(--yca-accent)' }}
           >
-            help
+            {title === 'Slash commands' ? 'help' : 'info'}
           </span>
           <div className="min-w-0 flex-1 truncate text-sm font-semibold" style={{ color: 'var(--yca-text)' }}>
-            Slash commands
+            {title}
           </div>
           <button
             onClick={onClose}
@@ -2240,6 +2315,7 @@ function HelpModal({ content, onClose }: { content: string | null; onClose: () =
             ✕
           </button>
         </div>
+        {children}
         <div className="flex-1 overflow-y-auto p-5">
           {content == null ? (
             <div className="py-6 text-sm" style={{ color: 'var(--yca-muted)' }}>

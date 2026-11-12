@@ -166,6 +166,11 @@ function collapseReplayDuplicate(blocks: Block[], runningTools: Map<string, numb
  * previously left cards stuck in the 'running' state).
  */
 export function eventsToBlocks(events: WebEvent[]): Block[] {
+  // /clear clears the visible conversation, not the persisted session or its usage counters.
+  const cleared = events.findLastIndex((event) => event.type === 'web-command' && event.data?.command === 'clear');
+  if (cleared >= 0) {
+    events = events.slice(cleared + 1);
+  }
   const blocks: Block[] = [];
   const runningTools = new Map<string, number[]>();
   // Any event that is not a streaming delta marks the end of the current stream burst, so the trailing

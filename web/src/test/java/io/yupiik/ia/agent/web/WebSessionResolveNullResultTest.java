@@ -20,25 +20,36 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.jsonrpc.impl.JsonRpcMethod;
+import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
+import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
+import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
+import java.io.StringReader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -108,7 +119,7 @@ class WebSessionResolveNullResultTest {
         this.manager = new WebSessionManager(
                 runtimeFactory,
                 new NoopShellRegistry(),
-                new SlashRegistry() {},
+                new WebSlashCommands(new SlashRegistry() {}, null, sessionStore),
                 new TurnRunner() {},
                 sessionStore,
                 new SessionLifecycle(sessionStore),
@@ -121,7 +132,7 @@ class WebSessionResolveNullResultTest {
     void aNullResultCancelResolvesThroughTheGeneratedSessionResolveMapping() throws Exception {
         manager.attach("s1");
         final var frames = new ConcurrentLinkedQueue<String>();
-        broker.subscribe("s1", bytes -> frames.add(new String(bytes, java.nio.charset.StandardCharsets.UTF_8)));
+        broker.subscribe("s1", bytes -> frames.add(new String(bytes, StandardCharsets.UTF_8)));
 
         // a pending ask blocked on awaitRpc, driven from a background thread (mirrors a tool round
         // awaiting the browser's answer).
@@ -150,10 +161,10 @@ class WebSessionResolveNullResultTest {
         // capture the request id the frame carries so the resolve targets the actual pending request
         final long requestId = frames.stream()
                 .filter(f -> f.contains("session.ask"))
-                .flatMap(f -> java.util.Arrays.stream(f.split("\\R")))
+                .flatMap(f -> Arrays.stream(f.split("\\R")))
                 .filter(l -> l.startsWith("data:") && l.contains("\"id\""))
                 .map(l -> l.substring("data:".length()))
-                .map(l -> (Map<?, ?>) mapper.read(Map.class, new java.io.StringReader(l)))
+                .map(l -> (Map<?, ?>) mapper.read(Map.class, new StringReader(l)))
                 .map(m -> ((Number) m.get("id")).longValue())
                 .findFirst()
                 .orElseThrow();
@@ -164,7 +175,7 @@ class WebSessionResolveNullResultTest {
         final var webJsonRpc =
                 new WebJsonRpc(null, null, manager, null, null, null, null, null, null, null, null, null);
         final var generated = new WebJsonRpc$resolveRequest$FusionJsonRpcMethod(webJsonRpc, mapper);
-        final java.util.Map<String, Object> params = new java.util.HashMap<>();
+        final Map<String, Object> params = new HashMap<>();
         params.put("id", "s1");
         params.put("requestId", String.valueOf(requestId));
         params.put("result", null); // the browser cancel - null is a valid resolution
@@ -181,18 +192,53 @@ class WebSessionResolveNullResultTest {
         assertEquals(Map.of("cancelled", true), result.get());
     }
 
+    @Test
+    void readLineUsesAnInteractiveRequestAndSupportsEmptyInputAndCancel() {
+        final var session = manager.attach("s1");
+        final var requests = new ConcurrentLinkedQueue<Map<?, ?>>();
+        final SseBroker.SseSubscription subscription = bytes -> {
+            final var frame = new String(bytes, StandardCharsets.UTF_8);
+            if (frame.contains("session.question")) {
+                requests.add(mapper.read(
+                        Map.class,
+                        new StringReader(
+                                frame.substring(frame.indexOf("data: ") + 6).strip())));
+            }
+        };
+        broker.subscribe("s1", subscription);
+        try {
+            final var line = session.env()
+                    .io()
+                    .readLine("Edit plan, then submit to reload")
+                    .toCompletableFuture();
+            final var request = requests.remove();
+            assertEquals("session.question", request.get("method"));
+            final var params = (Map<?, ?>) request.get("params");
+            assertNotNull(params.get("questions"));
+            assertEquals(false, line.isDone());
+            manager.resolve("s1", String.valueOf(request.get("id")), "");
+            assertEquals(Optional.of(""), line.join());
+
+            final var cancelled = session.env().io().readLine("Cancel").toCompletableFuture();
+            manager.resolve("s1", String.valueOf(requests.remove().get("id")), null);
+            assertEquals(Optional.empty(), cancelled.join());
+        } finally {
+            broker.unsubscribe("s1", subscription);
+        }
+    }
+
     private static final class NoopShellRegistry extends ShellRegistry {
         private NoopShellRegistry() {
             super(null);
         }
 
         @Override
-        public void register(final String sessionId, final io.yupiik.ia.agent.core.shell.ShellEnv env) {
+        public void register(final String sessionId, final ShellEnv env) {
             // no-op: routing is not exercised by these units
         }
 
         @Override
-        public void unregister(final String sessionId, final io.yupiik.ia.agent.core.shell.ShellEnv env) {
+        public void unregister(final String sessionId, final ShellEnv env) {
             // no-op
         }
     }
@@ -214,10 +260,10 @@ class WebSessionResolveNullResultTest {
         public CompletionStage<BtwAnswerer.BtwAnswer> ask(
                 final String question,
                 final String sessionId,
-                final io.yupiik.ia.agent.core.context.UsageTracker usage,
-                final java.util.function.BooleanSupplier cancelled,
-                final io.yupiik.ia.agent.core.permissions.ApprovalGate sessionGate,
-                final io.yupiik.ia.agent.core.llm.ChatSettings sessionSettings) {
+                final UsageTracker usage,
+                final BooleanSupplier cancelled,
+                final ApprovalGate sessionGate,
+                final ChatSettings sessionSettings) {
             return CompletableFuture.completedFuture(new BtwAnswerer.BtwAnswer("unused", false));
         }
 
@@ -225,11 +271,11 @@ class WebSessionResolveNullResultTest {
         public CompletionStage<BtwAnswerer.BtwAnswer> ask(
                 final String question,
                 final String sessionId,
-                final io.yupiik.ia.agent.core.context.UsageTracker usage,
-                final java.util.function.BooleanSupplier cancelled,
-                final io.yupiik.ia.agent.core.permissions.ApprovalGate sessionGate,
-                final io.yupiik.ia.agent.core.llm.ChatSettings sessionSettings,
-                final io.yupiik.ia.agent.core.agent.SystemPromptBuilder systemPromptBuilder) {
+                final UsageTracker usage,
+                final BooleanSupplier cancelled,
+                final ApprovalGate sessionGate,
+                final ChatSettings sessionSettings,
+                final SystemPromptBuilder systemPromptBuilder) {
             return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings);
         }
     }

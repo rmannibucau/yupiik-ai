@@ -203,24 +203,27 @@ public class MaintainCommands implements SlashCommandSet {
         }
         final var exported = ShellOutcome.status("plan exported to " + export.path()
                 + " - edit it, save, then press Enter to reload (type 'c' to cancel)");
-        return env.io().readLine("").thenApply(input -> {
-            if (input.isEmpty()) {
-                return ShellOutcome.status("plan edit cancelled");
-            }
-            final var decision = input.get().strip();
-            if (decision.equalsIgnoreCase("c") || decision.equalsIgnoreCase("cancel")) {
-                return ShellOutcome.status("plan edit cancelled");
-            }
-            final var reload = agentSessionService.reloadPlan(
-                    env.session().sessionId(),
-                    export.path(),
-                    export.original(),
-                    env.session().runtime());
-            if (reload.error() != null) {
-                return ShellOutcome.error(reload.error());
-            }
-            return ShellOutcome.status(reload.message());
-        });
+        exported.applyTo(env.frontend());
+        return env.io()
+                .readLine("Edit " + export.path() + ", save, then submit to reload (type 'c' to cancel)")
+                .thenApply(input -> {
+                    if (input.isEmpty()) {
+                        return ShellOutcome.status("plan edit cancelled");
+                    }
+                    final var decision = input.get().strip();
+                    if (decision.equalsIgnoreCase("c") || decision.equalsIgnoreCase("cancel")) {
+                        return ShellOutcome.status("plan edit cancelled");
+                    }
+                    final var reload = agentSessionService.reloadPlan(
+                            env.session().sessionId(),
+                            export.path(),
+                            export.original(),
+                            env.session().runtime());
+                    if (reload.error() != null) {
+                        return ShellOutcome.error(reload.error());
+                    }
+                    return ShellOutcome.status(reload.message());
+                });
     }
 
     private ShellOutcome resyncGraph(final String arg, final ShellEnv env) {
