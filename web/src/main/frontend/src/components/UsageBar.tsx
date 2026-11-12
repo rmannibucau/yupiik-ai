@@ -17,8 +17,8 @@ export function quotaWindowLabel(seconds: number | null, label: string): string 
 export function ContextBar({ percent, remaining = false }: { percent: number; remaining?: boolean }) {
   const clamped = Math.min(100, Math.max(0, percent));
   const color = remaining
-    ? clamped <= 10 ? '#ff5555' : clamped <= 25 ? 'var(--yca-warning)' : 'var(--yca-accent)'
-    : clamped >= 90 ? '#ff5555' : clamped >= 70 ? 'var(--yca-warning)' : 'var(--yca-accent)';
+    ? clamped <= 10 ? 'var(--yca-error)' : clamped <= 25 ? 'var(--yca-warning)' : 'var(--yca-success)'
+    : clamped >= 90 ? 'var(--yca-error)' : clamped >= 70 ? 'var(--yca-warning)' : 'var(--yca-success)';
   return (
     <div className="mt-1 h-1 w-full overflow-hidden rounded-full" style={{ background: 'var(--yca-panel-2)' }}>
       <div className="h-full rounded-full transition-all" style={{ width: `${clamped}%`, background: color }} />

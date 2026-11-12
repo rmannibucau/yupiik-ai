@@ -1,21 +1,9 @@
 import { ContextBar, formatQuotaReset, quotaWindowLabel } from '../components/UsageBar';
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter';
-import java from 'react-syntax-highlighter/dist/esm/languages/prism/java';
-import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript';
-import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript';
-import python from 'react-syntax-highlighter/dist/esm/languages/prism/python';
-import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash';
-import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql';
-import markup from 'react-syntax-highlighter/dist/esm/languages/prism/markup';
-import json from 'react-syntax-highlighter/dist/esm/languages/prism/json';
-import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml';
-import asciidoc from 'react-syntax-highlighter/dist/esm/languages/prism/asciidoc';
-import markdownGrammar from 'react-syntax-highlighter/dist/esm/languages/prism/markdown';
-import oneDark from 'react-syntax-highlighter/dist/esm/styles/prism/one-dark';
+import { CodeBlock } from '../components/CodeBlock';
+import { MarkdownContent } from '../components/MarkdownContent';
+import { SessionMetadata } from '../components/SessionMetadata';
 import { call, onServerRequest, type ServerRequest } from '../api/rpc';
 import { useSessionStream, type WebEvent, type SessionStatus } from '../api/useSessionStream';
 import {
@@ -29,29 +17,6 @@ import { useSlashCompletion, applySuggestion, type SlashSuggestion } from '../ap
 import { normalizeMarkdown, hasOpenInlineSpan, stripEchoedRefs } from '../lib/markdown';
 import { guessToolLanguage, summarizeArgs } from '../lib/toolOutput';
 import { isToolVisuallyFailed } from '../lib/toolPresentation';
-
-// register the language grammars the TUI highlights (java, ts/js, python, shell, sql, xml/json,
-// markdown/asciidoc) plus a generic fallback, so fenced code blocks get syntax highlighting
-SyntaxHighlighter.registerLanguage('java', java);
-SyntaxHighlighter.registerLanguage('typescript', typescript);
-SyntaxHighlighter.registerLanguage('ts', typescript);
-SyntaxHighlighter.registerLanguage('javascript', javascript);
-SyntaxHighlighter.registerLanguage('js', javascript);
-SyntaxHighlighter.registerLanguage('python', python);
-SyntaxHighlighter.registerLanguage('py', python);
-SyntaxHighlighter.registerLanguage('bash', bash);
-SyntaxHighlighter.registerLanguage('sh', bash);
-SyntaxHighlighter.registerLanguage('shell', bash);
-SyntaxHighlighter.registerLanguage('sql', sql);
-SyntaxHighlighter.registerLanguage('xml', markup);
-SyntaxHighlighter.registerLanguage('html', markup);
-SyntaxHighlighter.registerLanguage('svg', markup);
-SyntaxHighlighter.registerLanguage('json', json);
-SyntaxHighlighter.registerLanguage('yaml', yaml);
-SyntaxHighlighter.registerLanguage('asciidoc', asciidoc);
-SyntaxHighlighter.registerLanguage('adoc', asciidoc);
-SyntaxHighlighter.registerLanguage('markdown', markdownGrammar);
-SyntaxHighlighter.registerLanguage('md', markdownGrammar);
 
 // resizable sidebar width bounds and default (px), persisted in localStorage like the theme
 const SIDEBAR_DEFAULT_WIDTH = 256; // matches the historical w-64
@@ -815,7 +780,7 @@ export function ChatPage({
       <div className="flex items-center gap-2 border-b px-3 py-1 text-sm" style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}>
         <span
           title={reconnecting ? 'connection lost - reconnecting' : connected ? 'connected' : 'disconnected'}
-          style={{ color: connected ? (reconnecting ? 'var(--yca-warning)' : 'var(--yca-accent)') : '#ff6b6b' }}
+          style={{ color: connected ? (reconnecting ? 'var(--yca-warning)' : 'var(--yca-success)') : 'var(--yca-error)' }}
         >
           {connected ? (reconnecting ? '⟳ reconnecting' : '● connected') : '○ disconnected'}
         </span>
@@ -871,11 +836,11 @@ export function ChatPage({
       {!connected && (
         <div
           className="flex items-center gap-2 border-b px-3 py-1 text-xs"
-          style={{ borderColor: 'var(--yca-border)', background: 'rgba(255,85,85,0.12)', color: '#ff8484' }}
+          style={{ borderColor: 'var(--yca-error)', background: 'var(--yca-error-soft)', color: 'var(--yca-error)' }}
         >
           <span>⚠ {reconnecting ? 'Connection lost - reconnecting…' : 'Disconnected from the agent server'}</span>
           {!reconnecting && (
-            <button onClick={() => window.location.reload()} className="ml-auto underline hover:text-red-200">
+            <button onClick={() => window.location.reload()} className="ml-auto underline hover:opacity-80">
               Retry
             </button>
           )}
@@ -1013,7 +978,7 @@ export function ChatPage({
           {queuedCount > 0 && (
             <div
               className="mb-1 space-y-1 rounded border px-2 py-1 text-xs"
-              style={{ borderColor: 'var(--yca-accent)', color: 'var(--yca-accent)', background: 'rgba(70,247,47,0.08)' }}
+              style={{ borderColor: 'var(--yca-warning)', color: 'var(--yca-warning)', background: 'var(--yca-warning-soft)' }}
             >
               <div className="flex items-center gap-1">
                 <span>⏱</span>
@@ -1272,7 +1237,7 @@ function StatusBar({
       )}
       <span
         className="min-w-0 truncate"
-        style={isError ? { color: '#ff8484' } : (notice && !live && !initializing) || compacting ? { color: 'var(--yca-text)' } : undefined}
+        style={isError ? { color: 'var(--yca-error)' } : (notice && !live && !initializing) || compacting ? { color: 'var(--yca-text)' } : undefined}
       >
         {initializing
           ? 'Loading conversation…'
@@ -1284,7 +1249,7 @@ function StatusBar({
       {status.notice?.level && status.notice.level !== 'INFO' && (
         <span
           className="shrink-0 rounded px-1 text-xs"
-          style={{ background: isError ? 'rgba(255,85,85,0.15)' : 'var(--yca-warning-soft)', color: isError ? '#ff8484' : 'var(--yca-warning)' }}
+          style={{ background: isError ? 'var(--yca-error-soft)' : 'var(--yca-warning-soft)', color: isError ? 'var(--yca-error)' : 'var(--yca-warning)' }}
         >
           {status.notice.level}
         </span>
@@ -1293,7 +1258,7 @@ function StatusBar({
         // the /btw pill: click (outside the x) opens the modal; the x clears the btw server-side.
         <span
           className="ml-auto flex shrink-0 items-center gap-1 rounded border px-2 py-0.5 text-xs"
-          style={{ borderColor: 'var(--yca-accent)', color: 'var(--yca-accent)', background: 'rgba(70,247,47,0.06)' }}
+          style={{ borderColor: 'var(--yca-accent)', color: 'var(--yca-accent)', background: 'var(--yca-accent-soft)' }}
           title={btw.running ? `btw: "${btw.question}" - answering…` : `btw: "${btw.question}" - click to view the answer`}
         >
           <button onClick={onOpenBtw} className="flex items-center gap-1.5 outline-none hover:brightness-125">
@@ -1348,16 +1313,23 @@ function Sidebar({
   onSetProvider: (provider: string) => void;
   onSetPermissions: (mode: string) => void;
 }) {
-  const [dirDraft, setDirDraft] = useState(sidebar.project ?? '');
-  useEffect(() => {
-    setDirDraft(sidebar.project ?? '');
-  }, [sidebar.project]);
   return (
-    <div className="space-y-4">
-      <div>
-        <div className="mb-1 text-xs font-bold uppercase" style={{ color: 'var(--yca-muted)' }}>Session</div>
-        <div className="break-all text-sm" style={{ color: 'var(--yca-text)' }}>{sessionId}</div>
-      </div>
+    <div className="space-y-3">
+      <SessionMetadata
+        sessionId={sessionId}
+        project={sidebar.project}
+        gitBranch={sidebar.gitBranch}
+        model={sidebar.model}
+        flavor={sidebar.flavor}
+        provider={sidebar.provider}
+        permissionMode={sidebar.permissionMode}
+        modelCandidates={sidebar.modelCandidates}
+        providerCandidates={sidebar.providerCandidates}
+        onSetProject={onSetProject}
+        onSetModel={onSetModel}
+        onSetProvider={onSetProvider}
+        onSetPermissions={onSetPermissions}
+      />
       {/* tokens in/out + context size/% (previously only on the status bar) */}
       <div>
         <div className="mb-1 text-xs font-bold uppercase" style={{ color: 'var(--yca-muted)' }}>Context</div>
@@ -1428,117 +1400,6 @@ function Sidebar({
           </div>
         </div>
       )}
-      <div>
-        <div className="mb-1 text-xs font-bold uppercase" style={{ color: 'var(--yca-muted)' }}>Working dir</div>
-        <div className="flex gap-1">
-          <input
-            value={dirDraft}
-            onChange={(e) => setDirDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') onSetProject(dirDraft);
-            }}
-            className="w-full rounded border px-2 py-1 font-mono text-sm outline-none"
-            style={{ borderColor: 'var(--yca-border)', background: 'var(--yca-panel)', color: 'var(--yca-text)' }}
-            title="Absolute directory the session works on (Enter to apply)"
-          />
-          <button
-            onClick={() => onSetProject(dirDraft)}
-            className="rounded border px-2 py-1 text-xs"
-            style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-primary)' }}
-          >
-            Set
-          </button>
-        </div>
-      </div>
-      {sidebar.gitBranch && (
-        <div>
-          <div className="mb-1 text-xs font-bold uppercase" style={{ color: 'var(--yca-muted)' }}>Branch</div>
-          <div className="text-sm" style={{ color: 'var(--yca-text)' }}>{sidebar.gitBranch}</div>
-        </div>
-      )}
-      <div>
-        <div className="mb-1 text-xs font-bold uppercase" style={{ color: 'var(--yca-muted)' }}>Model</div>
-        <div className="flex flex-col gap-1 text-sm" style={{ color: 'var(--yca-text)' }}>
-          <select
-            value={sidebar.model || ''}
-            onChange={(e) => {
-              if (e.target.value) onSetModel(e.target.value);
-            }}
-            className="w-full rounded border bg-transparent px-2 py-1 text-sm outline-none"
-            style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-text)' }}
-            title="Current model; change it per-session"
-          >
-            {sidebar.model && <option value={sidebar.model}>{sidebar.model}</option>}
-            {(sidebar.modelCandidates ?? [])
-              .filter((m) => m !== sidebar.model)
-              .map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-          </select>
-          {sidebar.flavor && (
-            <div className="text-xs" style={{ color: 'var(--yca-muted)' }}>
-              flavor: {sidebar.flavor}
-            </div>
-          )}
-        </div>
-      </div>
-      <div>
-        <div className="mb-1 text-xs font-bold uppercase" style={{ color: 'var(--yca-muted)' }}>Provider</div>
-        <div className="flex flex-col gap-1 text-sm" style={{ color: 'var(--yca-text)' }}>
-          <select
-            value={sidebar.provider || ''}
-            onChange={(e) => {
-              if (e.target.value) onSetProvider(e.target.value);
-            }}
-            className="w-full rounded border bg-transparent px-2 py-1 text-sm outline-none"
-            style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-text)' }}
-            title="Configured provider; switch per-session"
-          >
-            {sidebar.provider && <option value={sidebar.provider}>{sidebar.provider}</option>}
-            {(sidebar.providerCandidates ?? [])
-              .filter((p) => p !== sidebar.provider)
-              .map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-          </select>
-        </div>
-      </div>
-      <div>
-        <div className="mb-1 text-xs font-bold uppercase" style={{ color: 'var(--yca-muted)' }}>Permissions</div>
-        {/* Issue #6: change the session permission level from a dropdown (ask/auto_edit/yolo). */}
-        <div className="flex items-center gap-1.5 text-sm" style={{ color: 'var(--yca-text)' }}>
-          <span
-            className="inline-block h-2 w-2 shrink-0 rounded-full"
-            style={{
-              background:
-                sidebar.permissionMode === 'yolo'
-                  ? '#ff5555'
-                  : sidebar.permissionMode === 'auto_edit'
-                  ? 'var(--yca-accent)'
-                  : sidebar.permissionMode === 'ask'
-                  ? 'var(--yca-plan)'
-                  : '#888',
-            }}
-          />
-          <select
-            value={sidebar.permissionMode || 'ask'}
-            onChange={(e) => {
-              if (e.target.value) onSetPermissions(e.target.value);
-            }}
-            className="w-full rounded border bg-transparent px-2 py-1 text-sm outline-none"
-            style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-text)' }}
-            title="Tool permission level for this session"
-          >
-            <option value="ask">ask</option>
-            <option value="auto_edit">auto_edit</option>
-            <option value="yolo">yolo</option>
-          </select>
-        </div>
-      </div>
       {sidebar.mcpServers && sidebar.mcpServers.length > 0 && (
         <div>
           <button
@@ -1561,7 +1422,7 @@ function Sidebar({
                     className="inline-block h-1.5 w-1.5 rounded-full"
                     style={{
                       background:
-                        s.state === 'FAILED' ? '#ff5555' : s.state === 'ENABLED' ? 'var(--yca-accent)' : '#888',
+                        s.state === 'FAILED' ? 'var(--yca-error)' : s.state === 'ENABLED' ? 'var(--yca-success)' : 'var(--yca-muted)',
                     }}
                   />
                   <span className="truncate">{s.name}</span>
@@ -1686,7 +1547,7 @@ function TodoRow({ todo }: { todo: TodoItem }) {
     status === 'in_progress'
       ? 'var(--yca-warning)'
       : status === 'completed'
-      ? 'var(--yca-accent)'
+      ? 'var(--yca-success)'
       : status === 'cancelled'
       ? 'var(--yca-muted)'
       : 'var(--yca-text)';
@@ -1804,7 +1665,7 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
     const borderColor = running
       ? 'var(--yca-accent)'
       : failed
-      ? 'rgba(255, 85, 85, 0.5)'
+      ? 'var(--yca-error)'
       : cancelled
       ? 'var(--yca-muted)'
       : 'var(--yca-border)';
@@ -1819,7 +1680,7 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
           <span
             className="rounded px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wide"
             style={{
-              color: running ? 'var(--yca-accent)' : failed ? '#ff5555' : cancelled ? 'var(--yca-muted)' : '#46F72F',
+              color: running ? 'var(--yca-accent)' : failed ? 'var(--yca-error)' : cancelled ? 'var(--yca-muted)' : 'var(--yca-success)',
               background: 'var(--yca-panel)',
             }}
           >
@@ -1842,20 +1703,19 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
   if (block.kind === 'thought') {
     return (
       <div className="rounded border-l-2 px-3 py-1 text-[15px] opacity-60" style={{ borderColor: 'var(--yca-muted)', borderRadius: 'var(--yca-radius-sm)' }}>
-        <Markdown content={block.content} writing={block.writing} />
+        <Markdown content={block.content} writing={block.writing} variant="thought" />
       </div>
     );
   }
   if (block.kind === 'user') {
     return (
       <div
-        className="rounded-lg border-l-2 px-3 py-1.5 text-[15px]"
-        style={{ borderColor: 'var(--yca-primary)', background: 'var(--yca-user-bg)', borderRadius: 'var(--yca-radius)' }}
+        className="yca-turn yca-turn-user px-3 py-1.5 text-[15px]"
       >
         <span className="mb-0.5 block text-xs font-bold uppercase tracking-wide" style={{ color: 'var(--yca-primary)' }}>
           You
         </span>
-        <Markdown content={block.content} writing={block.writing} />
+        <Markdown content={block.content} writing={block.writing} variant="user" />
       </div>
     );
   }
@@ -1871,7 +1731,6 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
     // best-effort language detection for tool output syntax coloring (read_file path, bash command...).
     // A wrong guess only costs colors, never layout; unknown languages fall back to the plain <pre>.
     const shownOutputLang = guessToolLanguage(shownOutput, 'args' in block ? block.args : undefined);
-    const shownOutputIsCode = shownOutputLang != null;
     // condensed tool input for the card header (bash command, read_file path/lines...) so the user always
     // sees WHAT the tool was asked to do, not just its name - mirrors the TUI's condensed tool line.
     // Visible in both the collapsed and expanded states (the header row is always rendered).
@@ -1883,7 +1742,7 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
           borderColor: pending
             ? 'var(--yca-warning)'
             : failed
-            ? 'rgba(255, 85, 85, 0.5)'
+            ? 'var(--yca-error)'
             : running
             ? 'var(--yca-accent)'
             : interrupted
@@ -1906,9 +1765,9 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
           ) : pending ? (
             <span className="shrink-0" style={{ color: 'var(--yca-warning)' }}>◷ pending</span>
           ) : failed ? (
-            <span className="shrink-0" style={{ color: '#ff6b6b' }}>✗</span>
+            <span className="shrink-0" style={{ color: 'var(--yca-error)' }}>✗</span>
           ) : (
-            <span className="shrink-0">✓</span>
+            <span className="shrink-0" style={{ color: 'var(--yca-success)' }}>✓</span>
           )}
           <span className="truncate">{block.name}</span>
           {argsSummary && (
@@ -1921,50 +1780,24 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
             </span>
           )}
           {failed && (
-            <span className="rounded px-1 text-xs" style={{ background: 'rgba(255,85,85,0.15)', color: '#ff6b6b' }}>
+            <span className="rounded px-1 text-xs" style={{ background: 'var(--yca-error-soft)', color: 'var(--yca-error)' }}>
               failed
             </span>
           )}
           {shownOutput && !collapsed && <span className="ml-1 shrink-0 text-xs opacity-60">{shownOutput.length} chars</span>}
         </button>
         {!collapsed && shownOutput && (
-          shownOutputIsCode ? (
-            <SyntaxHighlighter
-              language={shownOutputLang}
-              style={oneDark}
-              PreTag="div"
-              codeTagProps={{ style: { background: 'transparent' } }}
-              customStyle={{
-                margin: 0,
-                borderRadius: 0,
-                background: 'transparent',
-                padding: 0,
-                fontSize: '0.85em',
-                lineHeight: 1.5,
-                maxHeight: '18rem',
-                overflowY: 'auto',
-                overflowX: 'auto',
-                color: failed ? '#e88' : undefined,
-              }}
-            >
-              {shownOutput.slice(0, 4000)}
-              {shownOutput.length > 4000 ? '\n…' : ''}
-            </SyntaxHighlighter>
-          ) : (
-            <pre
-              className="mt-1 max-h-72 overflow-y-auto overflow-x-auto whitespace-pre-wrap text-sm"
-              style={{ color: failed ? '#e88' : 'var(--yca-muted)' }}
-            >
-              {shownOutput.slice(0, 4000)}
-              {shownOutput.length > 4000 ? '…' : ''}
-            </pre>
-          )
+          <CodeBlock
+            language={shownOutputLang ?? undefined}
+            className={`yca-tool-code${shownOutputLang ? '' : ' whitespace-pre-wrap'}`}
+            code={shownOutput.slice(0, 4000) + (shownOutput.length > 4000 ? (shownOutputLang ? '\n…' : '…') : '')}
+          />
         )}
       </div>
     );
   }
   if (block.kind === 'error') {
-    return <div className="rounded border border-red-500/40 px-3 py-1 text-[15px] text-red-400">{block.content}</div>;
+    return <div className="rounded border px-3 py-1 text-[15px]" style={{ borderColor: 'var(--yca-error)', color: 'var(--yca-error)' }}>{block.content}</div>;
   }
   if (block.kind === 'notice') {
     // Server-emitted standalone fragment (e.g. the Codex authorize URL): a distinct callout card so a
@@ -1979,13 +1812,10 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
       </div>
     );
   }
-  // Issue #10: assistant text renders markdown (bold, italics, lists, code, ...) in a subtle panel
-  // card so the main thread stands out from thought/tool rows and the new .aui-md heading/code
-  // prose styles have a clear surface to draw on - Issue #12.
+  // Speaker identity stays on the rail, leaving prose on the neutral transcript surface.
   return (
     <div
-      className="rounded-lg border px-4 py-2.5 text-[15px]"
-      style={{ borderColor: 'var(--yca-border)', background: 'var(--yca-panel)', borderRadius: 'var(--yca-radius)' }}
+      className="yca-turn yca-turn-assistant px-4 py-2.5 text-[15px]"
     >
       <Markdown content={block.content} writing={block.writing} />
     </div>
@@ -2064,70 +1894,16 @@ function useDebouncedMarkdown(content: string, writing: boolean): string {
  *    (see {@link normalizeMarkdown} from {@code ../lib/markdown}) - Issue #6;
  *  - fenced/inline code blocks get syntax highlighting via Prism - Issue #7.
  */
-function Markdown({ content, writing = false }: { content: string; writing?: boolean }) {
+function Markdown({ content, writing = false, variant = 'assistant' }: {
+  content: string;
+  writing?: boolean;
+  variant?: 'user' | 'assistant' | 'document' | 'thought';
+}) {
   // strip echoed compact-seam ref tags ("@N@", "@bN@", "@blocked@") from the ACCUMULATED block
   // content before rendering: a seam split across streamed deltas has already re-formed in the
   // block, so the strip catches it exactly like the core ConversationTranscript.markdown scrub.
   const src = normalizeMarkdown(stripEchoedRefs(useDebouncedMarkdown(content, writing) || ''));
-  return (
-    <div className="aui-md">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          // Links (incl. the Codex login authorize URL) open in a new tab so the terminal/chat keeps
-          // its place while the user authorizes in the browser. The override key must be the HTML
-          // intrinsic element name `a` - react-markdown v9+ dropped the old `link` key (v7/8-era), so
-          // a `link`-keyed override was never invoked and the default <a> lost target=_blank.
-          a({ href, children }) {
-            return (
-              <a href={href} target="_blank" rel="noopener noreferrer">
-                {children}
-              </a>
-            );
-          },
-          // Fenced code block: SyntaxHighlighter handles the language-specific grammar + aui-md pre
-          // styling. The outer `.aui-md pre` (ReactMarkdown's container) provides the themed dark
-          // background (--yca-pre-bg), radius and padding; the inner SyntaxHighlighter pre stays
-          // transparent so that surface shows through, and only sizes the tokens - Issue #12.
-          code({ className, children }) {
-            const match = /language-(\w+)/.exec(className || '');
-            const raw = String(children ?? '').replace(/\n$/, '');
-            if (!match) {
-              return <code className={className}>{children}</code>;
-            }
-            const lang = match[1];
-            // --yca-pre-bg is a dark code surface in BOTH themes, so the syntax theme must be the
-            // dark one regardless of the page theme: a light syntax theme would paint dark token text
-            // on a dark block (unreadable). The <pre>/<code> backgrounds are forced transparent so the
-            // outer .aui-md pre's block background shows across the full block instead of stopping at
-            // the text width (the theme's code/pre background is only as wide as its content).
-            return (
-              <SyntaxHighlighter
-                language={lang}
-                style={oneDark}
-                codeTagProps={{
-                  className: `language-${lang}`,
-                  style: { background: 'transparent' },
-                }}
-                customStyle={{
-                  margin: 0,
-                  borderRadius: 0,
-                  background: 'transparent',
-                  padding: 0,
-                  fontSize: '0.85em',
-                  lineHeight: 1.55,
-                }}
-              >
-                {raw}
-              </SyntaxHighlighter>
-            );
-          },
-        }}
-      >
-        {src}
-      </ReactMarkdown>
-    </div>
-  );
+  return <MarkdownContent content={src} variant={variant} />;
 }
 
 type RequestState = {
@@ -2430,7 +2206,7 @@ function BtwModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-2 flex items-start gap-2">
-          <span className="shrink-0 rounded px-1.5 py-0.5 text-xs font-bold uppercase" style={{ background: 'rgba(70,247,47,0.12)', color: 'var(--yca-accent)' }}>
+          <span className="shrink-0 rounded px-1.5 py-0.5 text-xs font-bold uppercase" style={{ background: 'var(--yca-accent-soft)', color: 'var(--yca-accent)' }}>
             btw
           </span>
           <div className="min-w-0 flex-1 truncate text-sm font-semibold" style={{ color: 'var(--yca-text)' }} title={btw.question}>
@@ -2452,7 +2228,7 @@ function BtwModal({
               <span>answering…</span>
             </div>
           ) : btw.error ? (
-            <div className="whitespace-pre-wrap text-sm" style={{ color: '#ff8484' }}>
+            <div className="whitespace-pre-wrap text-sm" style={{ color: 'var(--yca-error)' }}>
               {btw.error}
             </div>
           ) : btw.retryable ? (
@@ -2462,9 +2238,7 @@ function BtwModal({
             </div>
           ) : (
             <div className="prose prose-sm max-w-none text-sm leading-relaxed" style={{ color: 'var(--yca-text)' }}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer" className="underline">{children}</a> }}>
-                {btw.answer ?? '(no answer)'}
-              </ReactMarkdown>
+              <MarkdownContent content={btw.answer ?? '(no answer)'} variant="assistant" />
             </div>
           )}
         </div>
@@ -2526,7 +2300,7 @@ function HelpModal({ content, onClose }: { content: string | null; onClose: () =
         >
           <span
             className="shrink-0 rounded px-1.5 py-0.5 text-xs font-bold uppercase"
-            style={{ background: 'rgba(70,247,47,0.12)', color: 'var(--yca-accent)' }}
+            style={{ background: 'var(--yca-accent-soft)', color: 'var(--yca-accent)' }}
           >
             help
           </span>
@@ -2552,16 +2326,7 @@ function HelpModal({ content, onClose }: { content: string | null; onClose: () =
               className="prose prose-sm max-w-none text-sm leading-relaxed"
               style={{ color: 'var(--yca-text)' }}
             >
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{ a: ({ children, ...props }) => (
-                  <a {...props} target="_blank" rel="noreferrer" className="underline">
-                    {children}
-                  </a>
-                ) }}
-              >
-                {content}
-              </ReactMarkdown>
+              <MarkdownContent content={content} variant="document" />
             </div>
           )}
         </div>
@@ -2604,7 +2369,7 @@ function ExecutingToolsModal({ content, onClose }: { content: string | null; onC
         >
           <span
             className="shrink-0 rounded px-1.5 py-0.5 text-xs font-bold uppercase"
-            style={{ background: 'rgba(70,247,47,0.12)', color: 'var(--yca-accent)' }}
+            style={{ background: 'var(--yca-accent-soft)', color: 'var(--yca-accent)' }}
           >
             executing-tools
           </span>
@@ -2630,7 +2395,7 @@ function ExecutingToolsModal({ content, onClose }: { content: string | null; onC
               className="prose prose-sm max-w-none text-sm leading-relaxed"
               style={{ color: 'var(--yca-text)' }}
             >
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+              <MarkdownContent content={content} variant="document" />
             </div>
           )}
         </div>

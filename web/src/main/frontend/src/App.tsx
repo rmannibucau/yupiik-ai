@@ -338,7 +338,7 @@ function TabBar({
           <span className="max-w-40 truncate">{tab.title}</span>
           {active === tab.id && (
             <button
-              className="ml-1 text-muted hover:text-red-400"
+              className="ml-1 text-muted hover:text-[var(--yca-error)]"
               onClick={(e) => {
                 e.stopPropagation();
                 onClose(tab.id);

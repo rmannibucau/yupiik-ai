@@ -64,7 +64,7 @@ export function MemoryPage() {
   return (
     <PageShell title="Memory">
       {state?.error ? (
-        <div className="rounded border p-3 text-sm" style={{ borderColor: 'var(--yca-border)', color: '#ff5555' }}>
+        <div className="rounded border p-3 text-sm" style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-error)' }}>
           <strong>memory.get failed:</strong> {state.error}
         </div>
       ) : !state ? (

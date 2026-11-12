@@ -43,39 +43,47 @@
   --yca-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --yca-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
 
+  /* Exact Palette defaults from the TUI; page surfaces and layout remain web-specific. */
   --yca-bg: #0f1115;
-  --yca-panel: #161a21;
+  --yca-panel: #12141a;
   --yca-panel-2: #1c212b;
-  --yca-border: #2a3040;
-  --yca-text: #e6e9ef;
-  --yca-muted: #9aa3b2;
-  --yca-primary: #fab283;
-  --yca-accent: #46f72f;
-  /* plan mode + warning/pending status chips: the same amber as the TUI plan badge
-   * (palette.warning #fbbf24 on dark, #8a621f on light); --yca-warning-soft is the
-   * alpha wash for pill backgrounds. build mode reuses the web accent green so it
-   * reads as the active hue. */
+  --yca-border: #667587;
+  --yca-text: #eef0f3;
+  --yca-muted: #9aa4b2;
+  --yca-primary: #d858ff;
+  --yca-accent: #02abea;
+  --yca-success: #46f72f;
   --yca-warning: #fbbf24;
-  --yca-warning-soft: rgba(251, 191, 36, 0.15);
-  --yca-plan: #fbbf24;
-  --yca-build: var(--yca-accent);
-  /* prose/code typography tokens (dark, default) */
-  --yca-heading: #f2f5f9;
-  --yca-code-bg: #232a36;
-  --yca-code-text: #fab283;
-  --yca-code-border: rgba(250, 178, 131, 0.28);
-  --yca-pre-bg: #0b0e13;
-  --yca-pre-text: #d7dee8;
-  --yca-blockquote-bg: rgba(255, 255, 255, 0.03);
-  --yca-blockquote-border: #fab283;
-  --yca-user-bg: rgba(250, 178, 131, 0.08);
-  /* heading titles in the assistant markdown output: a themed accent so "# title" sections read as
-   * real titles (brighter than plain --yca-heading text) + a short brand-colored rule underneath.
-   * Level 2 takes the brand green and level 3 the brand purple (TUI-aligned heading ladder). */
-  --yca-heading-accent: #fab283;
-  --yca-heading-rule: #fab283;
-  --yca-heading-h2: #46f72f;
-  --yca-heading-h3: #d858ff;
+  --yca-error: #f87171;
+  --yca-info: #7ad2f7;
+  --yca-border-active: #7ad2f7;
+  --yca-yolo: #ff5555;
+  --yca-success-soft: color-mix(in srgb, var(--yca-success) 15%, transparent);
+  --yca-warning-soft: color-mix(in srgb, var(--yca-warning) 15%, transparent);
+  --yca-error-soft: color-mix(in srgb, var(--yca-error) 15%, transparent);
+  --yca-info-soft: color-mix(in srgb, var(--yca-info) 15%, transparent);
+  --yca-primary-soft: color-mix(in srgb, var(--yca-primary) 15%, transparent);
+  --yca-accent-soft: color-mix(in srgb, var(--yca-accent) 15%, transparent);
+  --yca-border-active-soft: color-mix(in srgb, var(--yca-border-active) 15%, transparent);
+  --yca-yolo-soft: color-mix(in srgb, var(--yca-yolo) 15%, transparent);
+  --yca-plan: var(--yca-warning);
+  --yca-build: var(--yca-success);
+  --yca-heading: var(--yca-text);
+  --yca-heading-accent: var(--yca-accent);
+  --yca-heading-rule: var(--yca-accent);
+  --yca-heading-h2: var(--yca-success);
+  --yca-heading-h3: var(--yca-primary);
+  --yca-pre-bg: var(--yca-panel);
+  --yca-pre-text: var(--yca-text);
+  /* Exact CodeTheme.ONE_DARK defaults, also used for inline code. */
+  --yca-code-string: #98c379;
+  --yca-code-comment: #7f848e;
+  --yca-code-number: #d19a66;
+  --yca-code-keyword: #c678dd;
+  --yca-code-type: #61afef;
+  --yca-code-tag: #e06c75;
+  --yca-code-attr: #56b6c2;
+  --yca-code-annotation: #c586c0;
 }
 
 :root[data-theme='light'] {
@@ -95,31 +103,26 @@
   --yca-bg: #f7f8fa;
   --yca-panel: #ffffff;
   --yca-panel-2: #eef1f6;
-  --yca-border: #d8dee9;
-  --yca-text: #1c212b;
-  --yca-muted: #5a6474;
-  --yca-primary: #b36a1f;
-  --yca-accent: #1f7a12;
-  /* plan mode + warning/pending status chips: TUI warning amber on light surfaces
-   * (#8a621f); build mode reuses the web accent green (#1f7a12). */
+  --yca-border: #8995a3;
+  --yca-text: #24262b;
+  --yca-muted: #626873;
+  --yca-primary: #a84fc9;
+  --yca-accent: #056ebb;
+  --yca-success: #2f7a43;
   --yca-warning: #8a621f;
-  --yca-warning-soft: rgba(138, 98, 31, 0.15);
-  --yca-plan: #8a621f;
-  --yca-build: var(--yca-accent);
-  /* prose/code typography tokens (light) */
-  --yca-heading: #1c212b;
-  --yca-code-bg: #fdf0e2;
-  --yca-code-text: #8a4d12;
-  --yca-code-border: rgba(179, 106, 31, 0.3);
-  --yca-pre-bg: #20242c;
-  --yca-pre-text: #e2e8f0;
-  --yca-blockquote-bg: #f6f3ee;
-  --yca-blockquote-border: #b36a1f;
-  --yca-user-bg: rgba(179, 106, 31, 0.07);
-  --yca-heading-accent: #b36a1f;
-  --yca-heading-rule: #b36a1f;
-  --yca-heading-h2: #2f7a43;
-  --yca-heading-h3: #a84fc9;
+  --yca-error: #d1383d;
+  --yca-info: #1f7a88;
+  --yca-border-active: #056ebb;
+  --yca-yolo: #ff5555;
+  /* Exact CodeTheme.ONE_LIGHT defaults (including its low-contrast comment tone). */
+  --yca-code-string: #2f7d33;
+  --yca-code-comment: #a0a1a7;
+  --yca-code-number: #986801;
+  --yca-code-keyword: #a626a4;
+  --yca-code-type: #4078f2;
+  --yca-code-tag: #e45649;
+  --yca-code-attr: #0184bc;
+  --yca-code-annotation: #008080;
 }
 
 html,
@@ -138,13 +141,96 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* markdown output in the transcript (Issue #10/#12): readable prose, first-class headings,
- * distinct inline-code chips, tinted blockquotes and a separate pre/block background.
- * The theme tokens (--yca-code-*, --yca-pre-*, --yca-blockquote-*, --yca-heading) switch with
- * the light/dark theme so both stay readable - inspired by the yupiik minisite theme. */
+/* Keep speaker identity on the rail rather than tinting the prose surface. */
+.yca-turn {
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  border-left: 3px solid var(--yca-turn-tone);
+  border-radius: 0;
+}
+.yca-turn-user {
+  --yca-turn-tone: var(--yca-primary);
+}
+.yca-turn-assistant {
+  --yca-turn-tone: var(--yca-accent);
+}
 
+/* A fixed label column keeps metadata dense without squeezing long values out of the sidebar. */
+.yca-session-metadata {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  min-width: 0;
+  font-size: 0.8125rem;
+  color: var(--yca-text);
+}
+.yca-metadata-row {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  align-items: start;
+  gap: 0.375rem;
+  min-width: 0;
+}
+.yca-metadata-row > dt {
+  padding-top: 0.25rem;
+  color: var(--yca-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.yca-metadata-row > dd {
+  margin: 0;
+  min-width: 0;
+}
+.yca-metadata-value {
+  overflow-wrap: anywhere;
+}
+.yca-metadata-edit {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.yca-metadata-control {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--yca-border);
+  border-radius: 4px;
+  background: var(--yca-panel);
+  color: var(--yca-text);
+  padding: 0.2rem 0.3rem;
+  font-size: inherit;
+}
+.yca-metadata-edit > .yca-metadata-control {
+  flex: 1 1 0%;
+}
+.yca-metadata-edit > button {
+  flex-shrink: 0;
+  padding: 0.2rem 0.3rem;
+  border: 1px solid var(--yca-border);
+  border-radius: 4px;
+  color: var(--yca-primary);
+  font-size: 0.75rem;
+}
+
+/* TUI-aligned Markdown; role tones are scoped to each Markdown root. */
 .aui-md {
+  --yca-strong-tone: currentColor;
+  --yca-inline-tone: var(--yca-code-string);
   font-family: var(--yca-font-sans);
+}
+.aui-md[data-variant='user'],
+.aui-md[data-variant='document'] {
+  --yca-strong-tone: var(--yca-primary);
+}
+.aui-md[data-variant='assistant'] {
+  --yca-strong-tone: var(--yca-accent);
+}
+.aui-md[data-variant='thought'] {
+  --yca-strong-tone: currentColor;
+  --yca-inline-tone: currentColor;
+  color: var(--yca-muted);
 }
 
 .aui-md code {
@@ -171,18 +257,18 @@ body {
 .aui-md li {
   margin: 0.15em 0;
 }
+.aui-md li::marker {
+  color: var(--yca-muted);
+}
 
-/* headings: first-class hierarchy - bigger sizes, tighter letter-spacing, prominent themed
- * tint + a short brand-colored rule under h1 so an assistant "# title" reads as a real section
- * header. The tints are per-theme tokens mirroring the TUI heading ladder: h1 the accent, h2 the
- * brand green, h3 the brand purple, h4+ neutral (--yca-heading) so depth stays readable on both
- * surfaces. */
+/* Preserve heading geometry with the TUI accent/success/primary/neutral ladder. */
 .aui-md h1,
 .aui-md h2,
 .aui-md h3,
 .aui-md h4,
 .aui-md h5,
 .aui-md h6 {
+  --yca-strong-tone: currentColor;
   color: var(--yca-heading);
   font-weight: 700;
   letter-spacing: -0.025em;
@@ -239,27 +325,27 @@ body {
 }
 
 .aui-md strong {
-  color: var(--yca-heading);
+  color: var(--yca-strong-tone);
   font-weight: 700;
 }
 
-/* inline code: a distinct tinted chip (colored text + subtle bg + border) rather than a flat
- * panel-2 fill, so it stands apart from both the prose and the pre block. box-decoration-break
- * clone keeps chips clean when a long span wraps across lines (minisite style). */
-.aui-md code {
-  background: var(--yca-code-bg);
-  color: var(--yca-code-text);
-  border: 1px solid var(--yca-code-border);
-  padding: 0.1em 0.4em;
-  border-radius: 5px;
+/* Inline code: bold string tone, no chip, border, or extra spacing. */
+.aui-md :not(pre) > code {
+  background: transparent;
+  color: var(--yca-inline-tone);
+  border: 0;
+  padding: 0;
+  border-radius: 0;
   font-size: 0.88em;
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
+  font-weight: 700;
 }
 
-/* fenced/code blocks: a separately dark-themed pre/background distinct from the prose panel,
- * with its own text color and a clear radius so it reads as a code surface. */
-.aui-md pre {
+/* Shared CodeBlock owns one full-width pre/code pair, also outside Markdown. */
+.aui-md pre,
+pre.yca-code-block {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
   overflow-x: auto;
   margin: 0.6em 0;
   padding: 0.75em 1em;
@@ -267,27 +353,93 @@ body {
   background: var(--yca-pre-bg);
   color: var(--yca-pre-text);
   border: 1px solid var(--yca-border);
+  font-family: var(--yca-font-mono);
   line-height: 1.55;
 }
-.aui-md pre code {
+.aui-md pre code,
+pre.yca-code-block code {
+  display: block;
   background: transparent;
   color: inherit;
   border: 0;
   padding: 0;
+  border-radius: 0;
+  font-family: var(--yca-font-mono);
   font-size: 0.85em;
+  font-weight: 400;
   white-space: pre;
   box-decoration-break: initial;
   -webkit-box-decoration-break: initial;
 }
 
-/* blockquote: 3px accent left border + tinted background + rounded right edge (minisite style) */
+.yca-tool-code {
+  max-height: 18rem;
+  overflow: auto;
+  font-size: 0.75rem;
+}
+pre.yca-tool-code.whitespace-pre-wrap code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Prism classes with useInlineStyles=false: all eight exact TUI CodeTheme slots. */
+.yca-code-block .token.comment,
+.yca-code-block .token.prolog,
+.yca-code-block .token.doctype,
+.yca-code-block .token.cdata { color: var(--yca-code-comment); }
+.yca-code-block .token.string,
+.yca-code-block .token.char,
+.yca-code-block .token.attr-value,
+.yca-code-block .token.regex { color: var(--yca-code-string); }
+.yca-code-block .token.number,
+.yca-code-block .token.boolean,
+.yca-code-block .token.constant { color: var(--yca-code-number); }
+.yca-code-block .token.keyword,
+.yca-code-block .token.atrule { color: var(--yca-code-keyword); }
+.yca-code-block .token.class-name,
+.yca-code-block .token.builtin,
+.yca-code-block .token.function { color: var(--yca-code-type); }
+.yca-code-block .token.tag,
+.yca-code-block .token.deleted { color: var(--yca-code-tag); }
+.yca-code-block .token.attr-name,
+.yca-code-block .token.property,
+.yca-code-block .token.symbol { color: var(--yca-code-attr); }
+.yca-code-block .token.annotation,
+.yca-code-block .token.decorator { color: var(--yca-code-annotation); }
+.yca-code-block .token.inserted { color: var(--yca-code-string); }
+.yca-code-block .token.operator,
+.yca-code-block .token.punctuation { color: var(--yca-pre-text); }
+.yca-code-block .token.bold { font-weight: 700; }
+.yca-code-block .token.italic { font-style: italic; }
+
+/* Every quote resets its own rail, including ordinary quotes nested inside callouts. */
 .aui-md blockquote {
+  --yca-quote-tone: var(--yca-muted);
   margin: 0.5em 0;
-  border-left: 3px solid var(--yca-blockquote-border);
-  background: var(--yca-blockquote-bg);
+  border-left: 3px solid var(--yca-quote-tone);
+  background: transparent;
   padding: 0.4em 1em;
   border-radius: 0 6px 6px 0;
-  color: var(--yca-muted);
+  color: var(--yca-text);
+}
+.aui-md blockquote[data-callout='note'] { --yca-quote-tone: var(--yca-info); }
+.aui-md blockquote[data-callout='tip'] { --yca-quote-tone: var(--yca-success); }
+.aui-md blockquote[data-callout='important'] { --yca-quote-tone: var(--yca-primary); }
+.aui-md blockquote[data-callout='warning'] { --yca-quote-tone: var(--yca-warning); }
+.aui-md blockquote[data-callout='caution'] { --yca-quote-tone: var(--yca-error); }
+.aui-md blockquote > p.yca-callout-title {
+  --yca-strong-tone: currentColor;
+  --yca-inline-tone: currentColor;
+  color: var(--yca-quote-tone);
+  font-weight: 700;
+}
+
+/* Thoughts remain subdued even when headings or quotes would add a body tone. */
+.aui-md[data-variant='thought'] :is(h1, h2, h3, h4, h5, h6, blockquote) {
+  color: inherit;
+}
+.aui-md[data-variant='thought'] h1::after {
+  background: var(--yca-muted);
 }
 .aui-md blockquote > :first-child {
   margin-top: 0.2em;
@@ -297,6 +449,9 @@ body {
 }
 
 .aui-md table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
   margin: 0.6em 0;
   font-size: 0.92em;

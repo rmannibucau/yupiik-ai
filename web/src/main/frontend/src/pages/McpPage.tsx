@@ -30,7 +30,7 @@ export function McpPage() {
             <span>
               <span
                 className="mr-2 inline-block h-2 w-2 rounded-full"
-                style={{ background: s.state === 'RUNNING' ? 'var(--yca-accent)' : '#888' }}
+                style={{ background: s.state === 'RUNNING' ? 'var(--yca-success)' : s.state === 'FAILED' ? 'var(--yca-error)' : 'var(--yca-muted)' }}
               />
               {s.name}
               <span className="ml-2 text-xs" style={{ color: 'var(--yca-muted)' }}>{s.state}</span>

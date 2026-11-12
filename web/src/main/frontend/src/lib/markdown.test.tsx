@@ -1,15 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { MarkdownContent } from '../components/MarkdownContent';
 import { normalizeMarkdown, hasOpenInlineSpan, stripEchoedRefs } from './markdown';
 
 // render the normalized source through the same markdown pipeline ChatPage uses and return the
 // static HTML, so the assertions cover the user-visible outcome (not just the normalizer).
 function renderMd(src: string): string {
   return renderToStaticMarkup(
-    <ReactMarkdown remarkPlugins={[remarkGfm]}>{normalizeMarkdown(src)}</ReactMarkdown>,
+    <MarkdownContent content={normalizeMarkdown(src)} variant="assistant" />,
   );
 }
 
@@ -107,8 +106,9 @@ describe('normalizeMarkdown', () => {
     const src = '```sql\nSELECT * FROM t WHERE c = \'part_*.csv.gz\';\n```';
     expect(normalizeMarkdown(src)).toBe(src);
     const html = renderMd(src);
-    expect(html).toContain('SELECT * FROM t');
-    expect(html).not.toContain('SELECT \\* FROM t');
+    const text = html.replace(/<[^>]*>/g, '');
+    expect(text).toContain('SELECT * FROM t');
+    expect(text).not.toContain('SELECT \\* FROM t');
   });
 
   it('does not escape inside an inline code span on a code-like line', () => {

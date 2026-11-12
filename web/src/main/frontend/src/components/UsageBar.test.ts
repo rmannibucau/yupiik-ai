@@ -1,5 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { quotaWindowLabel, formatQuotaReset } from './UsageBar';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { ContextBar, quotaWindowLabel, formatQuotaReset } from './UsageBar';
+
+describe('ContextBar semantic thresholds', () => {
+  it.each([
+    [0, false, 'success'], [69, false, 'success'], [70, false, 'warning'],
+    [89, false, 'warning'], [90, false, 'error'], [100, false, 'error'],
+    [100, true, 'success'], [26, true, 'success'], [25, true, 'warning'],
+    [11, true, 'warning'], [10, true, 'error'], [0, true, 'error'],
+  ] as const)('renders %s percent (remaining=%s) with the %s tone', (percent, remaining, tone) => {
+    const html = renderToStaticMarkup(createElement(ContextBar, { percent, remaining }));
+    expect(html).toContain(`background:var(--yca-${tone})`);
+    expect(html).toContain(`width:${percent}%`);
+  });
+
+  it.each([[-5, 0], [105, 100]])('clamps %s to %s', (percent, expected) => {
+    expect(renderToStaticMarkup(createElement(ContextBar, { percent }))).toContain(`width:${expected}%`);
+  });
+});
 
 describe('quotaWindowLabel - derived from window duration', () => {
   it('maps weekly window to a readable label', () => {
