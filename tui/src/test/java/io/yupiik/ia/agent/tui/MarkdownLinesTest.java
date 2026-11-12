@@ -33,6 +33,31 @@ class MarkdownLinesTest {
     private final MarkdownLines renderer = new MarkdownLines();
 
     @Test
+    void codePreviewMatchesFullWrappingIncludingStylesAndBlankLines() {
+        final var input = List.of(
+                Line.from(Span.styled("abcdefghijk", Style.EMPTY.bold()), Span.styled(" xyz", Style.EMPTY.italic())),
+                Line.empty(),
+                Line.from("last line"));
+        final var full = MarkdownLines.wrapCode(input, 4);
+        for (var limit = 0; limit <= full.size() + 1; limit++) {
+            final var preview = MarkdownLines.wrapCode(input, 4, limit);
+            assertEquals(full.subList(0, Math.min(limit, full.size())), preview);
+        }
+    }
+
+    @Test
+    void longCodeLinePreservesEveryCharacterAndContinuationKind() {
+        final var source = "0123456789".repeat(200);
+        final var result = MarkdownLines.wrapCodeWithKinds(List.of(Line.from(source)), 80);
+        assertEquals(source, String.join("", plain(result.lines())));
+        assertEquals(SelectionState.RowKind.HARD, result.kinds().getFirst());
+        assertTrue(result.kinds().subList(1, result.kinds().size()).stream()
+                .allMatch(kind -> kind == SelectionState.RowKind.CHAR_SPLIT));
+        assertEquals(
+                3, MarkdownLines.wrapCode(List.of(Line.from(source)), 80, 3).size());
+    }
+
+    @Test
     void plainParagraph() {
         assertEquals(
                 List.of("hello world"),

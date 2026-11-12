@@ -18,6 +18,8 @@ package io.yupiik.ia.agent.tui;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+import java.util.Random;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class ToolOutputLanguageTest {
@@ -102,6 +104,104 @@ class ToolOutputLanguageTest {
         assertEquals("asciidoc", ToolOutputLanguage.guess("a.adoc\nb.adoc\n", null));
         assertEquals("asciidoc", ToolOutputLanguage.guess("see README.adoc and CONTRIBUTING.asciidoc\n", null));
         assertEquals("markdown", ToolOutputLanguage.guess("see README.md\nand CHANGELOG.md\n", null));
+    }
+
+    @Test
+    void pathPunctuationAndBoundaries() {
+        for (final var separator : new String[] {":12:3", ",", ";", "'", "\"", ")", "]", "!", "\\", "\n", "\u00e9"}) {
+            assertEquals("python", ToolOutputLanguage.guess("~/a+b-c_1.py" + separator + " b.py", null), separator);
+        }
+        for (final var suffix : new String[] {"0", "_", "wxyz", "123456789"}) {
+            assertNull(ToolOutputLanguage.guess("a.py" + suffix + " b.py", null), suffix);
+        }
+        assertNull(ToolOutputLanguage.guess(".py .py", null));
+        assertEquals("python", ToolOutputLanguage.guess("..py /.py", null));
+        assertEquals("python", ToolOutputLanguage.guess("a.py/b b.py/tail", null));
+        assertNull(ToolOutputLanguage.guess("a.py\u0301 b.py", null));
+    }
+
+    @Test
+    void greedyPathsKeepUnknownAndAmbiguousExtensions() {
+        assertNull(ToolOutputLanguage.guess("a.py.json b.py", null));
+        assertNull(ToolOutputLanguage.guess("a.py.unknown b.py", null));
+        assertNull(ToolOutputLanguage.guess("a.py/b.json b.py", null));
+        assertEquals("python", ToolOutputLanguage.guess("a.json.py b.py", null));
+        assertEquals("python", ToolOutputLanguage.guess("a.py.abcdefghi b.py", null));
+        assertEquals("python", ToolOutputLanguage.guess("a.py b.py ignored.css unknown.xyz", null));
+        assertNull(ToolOutputLanguage.guess("a.py b.py c.json", null));
+    }
+
+    @Test
+    void extensionLengthLimits() {
+        assertNull(ToolOutputLanguage.guess("a.p b.p", null));
+        assertEquals("markdown", ToolOutputLanguage.guess("a.markdown b.markdown", null));
+        assertNull(ToolOutputLanguage.guess("a.markdownx b.markdownx", null));
+        assertNull(ToolOutputLanguage.guess("a.properties b.properties", null));
+        assertEquals("asciidoc", ToolOutputLanguage.guess("a.ASCIIDOC b.asciidoc", null));
+    }
+
+    @Test
+    void boundedAdversarialPathRuns() {
+        assertNull(ToolOutputLanguage.guess("x".repeat(8192), null));
+        assertNull(ToolOutputLanguage.guess("/".repeat(8192), null));
+        assertNull(ToolOutputLanguage.guess(".".repeat(8192), null));
+        assertNull(ToolOutputLanguage.guess("x." + "a".repeat(8190), null));
+        assertNull(ToolOutputLanguage.guess("x.abcdefghi/".repeat(680), null));
+        assertEquals("python", ToolOutputLanguage.guess("x".repeat(8179) + ".py b.py", null));
+        assertNull(ToolOutputLanguage.guess("x".repeat(8192) + " a.py b.py", null));
+    }
+
+    @Test
+    void scannerAgreesWithLegacyRegexOnDeterministicInputs() {
+        final var reference = Pattern.compile("[A-Za-z0-9_./~+-]+\\.[A-Za-z0-9_]{1,8}\\b");
+        final var random = new Random(731);
+        final var fragments = new String[] {
+            "a",
+            ".",
+            "/",
+            "~",
+            "+",
+            "-",
+            "_",
+            " ",
+            ":",
+            ",",
+            "\\",
+            "\u00e9",
+            "\u0301",
+            ".py",
+            ".json",
+            ".md",
+            ".markdown",
+            ".properties",
+            ".unknown",
+            ".css",
+            ".PY",
+            "123456789"
+        };
+        for (var sample = 0; sample < 1000; sample++) {
+            final var output = new StringBuilder();
+            for (var part = 0; part < 20; part++) {
+                output.append(fragments[random.nextInt(fragments.length)]);
+            }
+            final var text = output.toString();
+            final var matcher = reference.matcher(text);
+            String expected = null;
+            var hits = 0;
+            while (matcher.find()) {
+                final var candidate = SyntaxHighlighter.guessLanguage(matcher.group());
+                if (candidate == null || "css".equals(candidate)) {
+                    continue;
+                }
+                if (expected != null && !expected.equals(candidate)) {
+                    hits = 0;
+                    break;
+                }
+                expected = candidate;
+                hits++;
+            }
+            assertEquals(hits >= 2 ? expected : null, ToolOutputLanguage.guess(text, null), text);
+        }
     }
 
     @Test

@@ -24,12 +24,17 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.tamboui.style.Color;
+import dev.tamboui.text.Line;
+import dev.tamboui.text.Span;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 class SyntaxHighlighterTest {
     private final SyntaxHighlighter highlighter = new SyntaxHighlighter();
@@ -38,10 +43,10 @@ class SyntaxHighlighterTest {
 
     private final SyntaxHighlighter longHighlighter = new SyntaxHighlighter().maxLineLength(50_000);
 
-    private static String concat(final List<dev.tamboui.text.Line> lines) {
+    private static String concat(final List<Line> lines) {
         return lines.stream()
                 .flatMap(l -> l.spans().stream())
-                .map(dev.tamboui.text.Span::content)
+                .map(Span::content)
                 .reduce("", String::concat);
     }
 
@@ -125,7 +130,7 @@ class SyntaxHighlighterTest {
         assertEquals(
                 List.of("one", "", "two"),
                 highlighter.highlightLines("", "one\n\ntwo").stream()
-                        .map(dev.tamboui.text.Line::rawContent)
+                        .map(Line::rawContent)
                         .toList());
     }
 
@@ -145,7 +150,7 @@ class SyntaxHighlighterTest {
     @Test
     void highlightColorsJavaKeywords() {
         final var line = highlighter.highlight("java", "public class A").lines().get(0);
-        final Optional<dev.tamboui.style.Color> keyword = line.spans().stream()
+        final Optional<Color> keyword = line.spans().stream()
                 .filter(s -> s.content().equals("public"))
                 .findFirst()
                 .flatMap(s -> s.style().fg());
@@ -161,7 +166,7 @@ class SyntaxHighlighterTest {
                 .highlight("java", "@Override\n@Deprecated void run()")
                 .lines()
                 .get(0);
-        final Optional<dev.tamboui.style.Color> annotation = line.spans().stream()
+        final Optional<Color> annotation = line.spans().stream()
                 .filter(s -> s.content().equals("@Override"))
                 .findFirst()
                 .flatMap(s -> s.style().fg());
@@ -177,7 +182,7 @@ class SyntaxHighlighterTest {
                 .highlight("java", "CompletableFuture<String> f;")
                 .lines()
                 .get(0);
-        final Optional<dev.tamboui.style.Color> type = line.spans().stream()
+        final Optional<Color> type = line.spans().stream()
                 .filter(s -> s.content().equals("CompletableFuture"))
                 .findFirst()
                 .flatMap(s -> s.style().fg());
@@ -263,7 +268,7 @@ class SyntaxHighlighterTest {
                 "expected at least one styled span");
         final var text = lines.stream()
                 .flatMap(l -> l.spans().stream())
-                .map(dev.tamboui.text.Span::content)
+                .map(Span::content)
                 .reduce("", String::concat);
         assertTrue(text.contains("key: value"), text);
         assertTrue(text.contains("flag: true"), text);
@@ -284,6 +289,164 @@ class SyntaxHighlighterTest {
         final var first = highlighter.split("```java\nint a;\n```");
         final var second = highlighter.split("```java\nint a;\n```");
         assertSame(first, second, "identical markdown must reuse the cached segments");
+    }
+
+    @Test
+    @Timeout(1)
+    void splitWeightEvictsLeastRecentlyUsedBelowEntryLimit() {
+        final var a = "a".repeat(90_000);
+        final var b = "b".repeat(90_000);
+        final var c = "c".repeat(90_000);
+        final var first = highlighter.split(a);
+        final var second = highlighter.split(b);
+        assertSame(first, highlighter.split(a)); // refresh a, so b is oldest
+        highlighter.split(c);
+        assertSame(first, highlighter.split(a));
+        assertNotSame(second, highlighter.split(b));
+    }
+
+    @Test
+    @Timeout(1)
+    void splitOversizedSourceAndLayoutBypassWithoutEvictingSmallEntries() {
+        final var small = highlighter.split("small");
+        for (final var source : List.of("x".repeat(300_000), "```\nx\n```\n".repeat(18_000))) {
+            final var first = highlighter.split(source);
+            final var second = highlighter.split(source);
+            assertEquals(first, second);
+            assertNotSame(first, second);
+            assertSame(small, highlighter.split("small"));
+        }
+    }
+
+    @Test
+    @Timeout(1)
+    void blockWeightEvictsLeastRecentlyUsedBelowEntryLimit() {
+        // Over the tokenization cutoff: large plain blocks exercise retention, not regex speed.
+        final var a = "a".repeat(300_000);
+        final var b = "b".repeat(300_000);
+        final var c = "c".repeat(300_000);
+        final var first = highlighter.highlightLines("java", a);
+        final var second = highlighter.highlightLines("java", b);
+        highlighter.highlightLines("java", c);
+        assertSame(first, highlighter.highlightLines("java", a));
+        highlighter.highlightLines("java", "d".repeat(300_000));
+        assertSame(first, highlighter.highlightLines("java", a));
+        assertNotSame(second, highlighter.highlightLines("java", b));
+    }
+
+    @Test
+    @Timeout(1)
+    void blockOversizedSourceLanguageAndLayoutBypassWithoutEvictingSmallEntries() {
+        final var small = highlighter.highlightLines("java", "public class A");
+        for (final var source : List.of("x".repeat(1_100_000), "\n".repeat(20_000))) {
+            final var first = highlighter.highlightLines("java", source);
+            final var second = highlighter.highlightLines("java", source);
+            assertNotSame(first, second);
+            assertEquals(first.size(), second.size());
+            assertEquals(source, first.stream().map(this::lineText).collect(Collectors.joining("\n")));
+            assertSame(small, highlighter.highlightLines("java", "public class A"));
+        }
+        final var language = "java" + "x".repeat(2_100_000);
+        assertNotSame(highlighter.highlightLines(language, "x"), highlighter.highlightLines(language, "x"));
+        assertSame(small, highlighter.highlightLines("java", "public class A"));
+    }
+
+    @Test
+    @Timeout(1)
+    void lineWeightEvictsLeastRecentlyUsedBelowEntryLimit() {
+        highlighter.maxLineLength(100_000);
+        final var a = "// a" + "x".repeat(40_000);
+        final var b = "// b" + "x".repeat(40_000);
+        final var first =
+                highlighter.highlightLines("java", a).getFirst().spans().getFirst();
+        final var second =
+                highlighter.highlightLines("java", b).getFirst().spans().getFirst();
+        // Different block keys, same tokenizer: observe line cache hits independently of block hits.
+        assertSame(
+                first, highlighter.highlightLines("JAVA", a).getFirst().spans().getFirst());
+        for (var i = 0; i < 11; i++) {
+            highlighter.highlightLines("java", "// " + i + "x".repeat(40_000));
+        }
+        assertSame(
+                first,
+                highlighter.highlightLines("java-refresh", a).getFirst().spans().getFirst());
+        highlighter.highlightLines("java", "// last" + "x".repeat(40_000));
+        assertSame(
+                first,
+                highlighter.highlightLines("java-still", a).getFirst().spans().getFirst());
+        assertNotSame(
+                second,
+                highlighter.highlightLines("java-evicted", b).getFirst().spans().getFirst());
+    }
+
+    @Test
+    @Timeout(1)
+    void oversizedLineBypassesWithoutEvictingSmallEntries() {
+        highlighter.maxLineLength(600_000);
+        final var small =
+                highlighter.highlightLines("java", "public").getFirst().spans().getFirst();
+        final var source = "// " + "x".repeat(530_000);
+        final var first =
+                highlighter.highlightLines("java", source).getFirst().spans().getFirst();
+        final var second =
+                highlighter.highlightLines("JAVA", source).getFirst().spans().getFirst();
+        assertEquals(source, first.content());
+        assertEquals(first.content(), second.content());
+        assertNotSame(first, second);
+        assertSame(
+                small,
+                highlighter
+                        .highlightLines("java-other", "public")
+                        .getFirst()
+                        .spans()
+                        .getFirst());
+    }
+
+    @Test
+    @Timeout(1)
+    void oversizedLineLayoutBypassesEvenWithSmallSource() {
+        highlighter.maxLineLength(20_000);
+        final var small =
+                highlighter.highlightLines("java", "public").getFirst().spans().getFirst();
+        // Short source, but two spans per number: output layout alone exceeds the line budget.
+        final var source = "1 ".repeat(9_000);
+        final var first = highlighter.highlightLines("java", source).getFirst();
+        final var second = highlighter.highlightLines("JAVA", source).getFirst();
+        assertEquals(source, lineText(first));
+        assertEquals(source, lineText(second));
+        assertNotSame(first.spans().getFirst(), second.spans().getFirst());
+        assertSame(
+                small,
+                highlighter
+                        .highlightLines("java-other", "public")
+                        .getFirst()
+                        .spans()
+                        .getFirst());
+    }
+
+    @Test
+    @Timeout(1)
+    void publicClearReleasesAllCachesAndResetsWeightAccounting() {
+        final var source = "x".repeat(90_000);
+        final var split = highlighter.split(source);
+        final var block = highlighter.highlightLines("java", "public class A");
+        final var span = block.getFirst().spans().getFirst();
+        highlighter.clearCaches();
+        final var after = highlighter.split(source);
+        assertNotSame(split, after);
+        assertSame(after, highlighter.split(source));
+        final var highlighted = highlighter.highlightLines("java", "public class A");
+        assertNotSame(block, highlighted);
+        assertNotSame(span, highlighted.getFirst().spans().getFirst());
+        assertSame(highlighted, highlighter.highlightLines("java", "public class A"));
+        highlighter.theme(CodeTheme.ONE_LIGHT);
+        final var light = highlighter.highlightLines("java", "public class A");
+        assertNotSame(highlighted, light);
+        assertNotSame(
+                highlighted.getFirst().spans().getFirst().style(),
+                light.getFirst().spans().getFirst().style());
+        assertSame(light, highlighter.highlightLines("java", "public class A"));
+        assertNotSame(after, highlighter.split(source));
     }
 
     @Test
@@ -348,7 +511,7 @@ class SyntaxHighlighterTest {
         highlighter.theme(CodeTheme.ONE_LIGHT);
         final var oneLight = highlighter.highlightLines("java", "public class A");
         assertNotSame(oneDark, oneLight, "a theme change must re-tokenize cached blocks");
-        final Optional<dev.tamboui.style.Color> keyword = oneLight.get(0).spans().stream()
+        final Optional<Color> keyword = oneLight.get(0).spans().stream()
                 .filter(s -> s.content().equals("public"))
                 .findFirst()
                 .flatMap(s -> s.style().fg());
@@ -493,7 +656,7 @@ class SyntaxHighlighterTest {
         final var all = lines.stream().flatMap(l -> l.spans().stream()).toList();
         final var colored = all.stream()
                 .filter(s -> s.style().fg().isPresent())
-                .map(dev.tamboui.text.Span::content)
+                .map(Span::content)
                 .toList();
         assertTrue(colored.stream().anyMatch(c -> c.startsWith("#")), "heading must be colored");
         assertTrue(colored.stream().anyMatch(c -> c.startsWith("**")), "bold must be colored");
@@ -514,7 +677,7 @@ class SyntaxHighlighterTest {
         // the whole source must reconstruct verbatim (no token is ever swallowed)
         assertEquals(
                 "# Title\n\n**bold** and *em* and _em2_ text\n\n- item\n\n`code` span\n\n| a | b |\n\n---\n",
-                lines.stream().map(this::lineText).collect(java.util.stream.Collectors.joining("\n")));
+                lines.stream().map(this::lineText).collect(Collectors.joining("\n")));
     }
 
     @Test
@@ -525,7 +688,7 @@ class SyntaxHighlighterTest {
         final var all = lines.stream().flatMap(l -> l.spans().stream()).toList();
         final var colored = all.stream()
                 .filter(s -> s.style().fg().isPresent())
-                .map(dev.tamboui.text.Span::content)
+                .map(Span::content)
                 .toList();
         assertTrue(colored.stream().anyMatch(c -> c.startsWith("=")), "heading must be colored");
         assertTrue(colored.stream().anyMatch(c -> c.startsWith(":author")), "attribute must be colored");
@@ -537,7 +700,7 @@ class SyntaxHighlighterTest {
         assertTrue(colored.stream().anyMatch(c -> c.startsWith("// comment")), "comment must be colored");
         assertEquals(
                 "= Title\n\n:author: me\n\n*bold* and _italic_ text\n\n+code+ and `code2`\n\n[[anchor]]\n\n[source,java]\n----\nint a;\n----\n\n// comment\n",
-                lines.stream().map(this::lineText).collect(java.util.stream.Collectors.joining("\n")));
+                lines.stream().map(this::lineText).collect(Collectors.joining("\n")));
     }
 
     @Test
@@ -624,13 +787,12 @@ class SyntaxHighlighterTest {
                 () -> {
                     final var lines = longHighlighter.highlightLines("markdown", doc.toString());
                     assertEquals(
-                            doc.toString(),
-                            lines.stream().map(this::lineText).collect(java.util.stream.Collectors.joining("\n")));
+                            doc.toString(), lines.stream().map(this::lineText).collect(Collectors.joining("\n")));
                 },
                 "a large markdown document must render within the linear budget");
     }
 
-    private String lineText(final dev.tamboui.text.Line line) {
-        return line.spans().stream().map(dev.tamboui.text.Span::content).reduce("", String::concat);
+    private String lineText(final Line line) {
+        return line.spans().stream().map(Span::content).reduce("", String::concat);
     }
 }

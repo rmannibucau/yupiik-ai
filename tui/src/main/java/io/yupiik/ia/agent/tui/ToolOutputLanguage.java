@@ -141,7 +141,6 @@ public final class ToolOutputLanguage {
     private static final Pattern SQL_STATEMENT = Pattern.compile(
             "^(?:select|insert\\s+into|update|delete\\s+from|create\\s+(?:table|index|view)|alter\\s+table|with)\\s+[\\w(\"']",
             Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
-    private static final Pattern PATH_REFERENCE = Pattern.compile("[A-Za-z0-9_./~+-]+\\.[A-Za-z0-9_]{1,8}\\b");
     /** How much of the output is inspected: every signal lives in its header. */
     private static final int MAX_INSPECTED = 8192;
     /** Minimum keyword hits before a language wins, and how much it must beat the runner-up. */
@@ -293,9 +292,39 @@ public final class ToolOutputLanguage {
     private static String fromPaths(final String output) {
         var language = "";
         var hits = 0;
-        final var matcher = PATH_REFERENCE.matcher(output);
-        while (matcher.find()) {
-            final var candidate = SyntaxHighlighter.guessLanguage(matcher.group());
+        for (var index = 0; index < output.length(); ) {
+            if (!isPathCharacter(output.charAt(index))) {
+                index++;
+                continue;
+            }
+            final var start = index;
+            var matchEnd = -1;
+            // The old greedy path regex selected the rightmost valid dot in a run,
+            // even if its extension was unknown. Never retry the run from each offset:
+            // a dot-free run (or one with an overlong extension) made that quadratic.
+            while (index < output.length() && isPathCharacter(output.charAt(index))) {
+                if (output.charAt(index) == '.' && index > start) {
+                    var end = index + 1;
+                    while (end < output.length() && end - index <= 8 && isExtensionCharacter(output.charAt(end))) {
+                        end++;
+                    }
+                    if (end > index + 1
+                            && (end == output.length()
+                                    || (!isExtensionCharacter(output.charAt(end))
+                                            // Java's default \b treats a non-spacing mark after
+                                            // a letter/digit (but not underscore) as part of the word.
+                                            && (output.charAt(end - 1) == '_'
+                                                    || Character.getType(output.codePointAt(end))
+                                                            != Character.NON_SPACING_MARK)))) {
+                        matchEnd = end;
+                    }
+                }
+                index++;
+            }
+            if (matchEnd < 0) {
+                continue;
+            }
+            final var candidate = SyntaxHighlighter.guessLanguage(output.substring(start, matchEnd));
             if (candidate == null || !PATH_LANGUAGES.contains(candidate)) {
                 continue;
             }
@@ -307,6 +336,14 @@ public final class ToolOutputLanguage {
             hits++;
         }
         return hits >= 2 ? language : null;
+    }
+
+    private static boolean isPathCharacter(final char c) {
+        return isExtensionCharacter(c) || c == '.' || c == '/' || c == '~' || c == '+' || c == '-';
+    }
+
+    private static boolean isExtensionCharacter(final char c) {
+        return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_';
     }
 
     /** Language whose keywords clearly dominate the output. */

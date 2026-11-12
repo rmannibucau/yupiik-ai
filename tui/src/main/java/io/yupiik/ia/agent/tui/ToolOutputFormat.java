@@ -54,6 +54,9 @@ public class ToolOutputFormat {
     }
 
     private static final int MAX_PRETTY_LENGTH = 65536;
+    private static final int MAX_DETECT_SOURCE_LENGTH = 256 * 1024;
+    private static final int MAX_DETECT_CACHE_WEIGHT = 1024 * 1024;
+    private static final int MAX_PRETTY_CACHE_WEIGHT = 512 * 1024;
     private static final Pattern YAML_KEY =
             Pattern.compile("^[ \\t]*[A-Za-z_][A-Za-z0-9_. -]*:(\\s|$)", Pattern.MULTILINE);
     private static final Pattern MD_ATX = Pattern.compile("^#{1,6} ", Pattern.MULTILINE);
@@ -65,19 +68,12 @@ public class ToolOutputFormat {
     private static final Pattern MD_PROSE = Pattern.compile("\\b[a-z][a-z'-]{2,}\\b(?:\\s+\\b[a-z][a-z'-]{2,}\\b){4,}");
 
     /** Singleton bean: the caches are instance state, shared by every render tick. */
-    private final Map<String, Format> detectCache = new LinkedHashMap<>() {
-        @Override
-        protected boolean removeEldestEntry(final Map.Entry<String, Format> eldest) {
-            return size() > 128;
-        }
-    };
+    private final Map<String, Format> detectCache = new LinkedHashMap<>();
 
-    private final Map<String, String> prettyCache = new LinkedHashMap<>() {
-        @Override
-        protected boolean removeEldestEntry(final Map.Entry<String, String> eldest) {
-            return size() > 16;
-        }
-    };
+    private final Map<String, String> prettyCache = new LinkedHashMap<>();
+    // Character weights, guarded by the corresponding cache monitor.
+    private int detectCacheWeight;
+    private int prettyCacheWeight;
     private final PrettyJsonMapper pretty;
     private final JsonMapper mapper;
     private final DiffRenderer diffRenderer = new DiffRenderer();
@@ -100,6 +96,18 @@ public class ToolOutputFormat {
             return mapper.fromString(Map.class, json);
         } catch (final RuntimeException e) {
             return null;
+        }
+    }
+
+    /** Releases retained output on parent UI reset, theme change or disposal. */
+    public void clearCaches() {
+        synchronized (detectCache) {
+            detectCache.clear();
+            detectCacheWeight = 0;
+        }
+        synchronized (prettyCache) {
+            prettyCache.clear();
+            prettyCacheWeight = 0;
         }
     }
 
@@ -126,6 +134,9 @@ public class ToolOutputFormat {
         if (output == null || output.isBlank()) {
             return Format.TEXT;
         }
+        if ((long) output.length() + (language == null ? 0 : (long) language.length() + 1) > MAX_DETECT_SOURCE_LENGTH) {
+            return detectUncached(output, language);
+        }
         final var key = language == null ? output : language + '\n' + output;
         synchronized (detectCache) {
             final var cached = detectCache.get(key);
@@ -135,7 +146,14 @@ public class ToolOutputFormat {
         }
         final var format = detectUncached(output, language);
         synchronized (detectCache) {
-            detectCache.put(key, format);
+            if (detectCache.put(key, format) == null) {
+                detectCacheWeight += key.length();
+            }
+            final var entries = detectCache.entrySet().iterator();
+            while (detectCache.size() > 128 || detectCacheWeight > MAX_DETECT_CACHE_WEIGHT) {
+                detectCacheWeight -= entries.next().getKey().length();
+                entries.remove();
+            }
         }
         return format;
     }
@@ -279,8 +297,19 @@ public class ToolOutputFormat {
         if (result == null) {
             result = raw;
         }
-        synchronized (prettyCache) {
-            prettyCache.put(raw, result);
+        final long weight = (long) raw.length() + result.length();
+        if (weight <= MAX_PRETTY_CACHE_WEIGHT) {
+            synchronized (prettyCache) {
+                final var previous = prettyCache.put(raw, result);
+                prettyCacheWeight += (int) weight - (previous == null ? 0 : raw.length() + previous.length());
+                final var entries = prettyCache.entrySet().iterator();
+                while (prettyCache.size() > 16 || prettyCacheWeight > MAX_PRETTY_CACHE_WEIGHT) {
+                    final var eldest = entries.next();
+                    prettyCacheWeight -=
+                            eldest.getKey().length() + eldest.getValue().length();
+                    entries.remove();
+                }
+            }
         }
         return result;
     }

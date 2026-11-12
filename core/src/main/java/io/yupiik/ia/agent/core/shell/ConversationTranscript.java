@@ -181,7 +181,8 @@ public class ConversationTranscript {
     /**
      * Monotonic counter bumped on every mutation that can change what
      * {@link #markdown(String, String)} renders (the transcript, the pending
-     * answer tail, the thinking buffer or the running tools). {@code markdown()}
+     * answer tail or the running tools). Live thinking has its own version because it is
+     * not included in markdown until flushed. {@code markdown()}
      * caches its built string against this version, so render loops that call it
      * once per tick with unchanged content are O(1) instead of re-concatenating
      * the whole transcript every frame (one of the busy-frame CPU hot spots).
@@ -206,14 +207,28 @@ public class ConversationTranscript {
 
     private String scrubbedHeadCache;
 
+    private long thinkingVersion;
+    private long thinkingSnapshotVersion = -1;
+    private String thinkingSnapshot;
+    // The public builder can be retained and changed without going through our write paths.
+    private boolean thinkingExposed;
+
+    private void touchThinking() {
+        thinkingVersion++;
+        thinkingSnapshot = null;
+    }
+
     /** Marks the transcript-markdown inputs as changed so {@code markdown()} rebuilds its cache. */
     private synchronized void touch() {
         contentVersion++;
+        markdownCache = null;
     }
 
     /** Marks the durable {@link #transcript} as changed so {@code markdown()} rebuilds its scrubbed head. */
     private synchronized void touchTranscript() {
         transcriptVersion++;
+        scrubbedHeadCache = null;
+        markdownCache = null;
     }
 
     /** True while the last failure was a retryable LLM error; the status clears on the next progress event. */
@@ -361,11 +376,12 @@ public class ConversationTranscript {
             for (final var segment : inlineThink.feed(delta)) {
                 if (segment.channel() == ThinkTagSplitter.Channel.THINKING) {
                     thinking.append(segment.text());
+                    touchThinking();
                 } else {
                     pending.append(segment.text());
+                    touch();
                 }
             }
-            touch();
         } else if (event instanceof AgentEvent.TextReset(String sessionId, String subagentId, String subagentName)) {
             pending.setLength(0);
             inlineThink.reset();
@@ -377,7 +393,7 @@ public class ConversationTranscript {
                 instanceof
                 AgentEvent.ThinkingDelta(String delta, String sessionId, String subagentId, String subagentName)) {
             thinking.append(delta);
-            touch();
+            touchThinking();
         } else if (event
                 instanceof
                 AgentEvent.ToolStarted(
@@ -644,6 +660,7 @@ public class ConversationTranscript {
             // of gluing onto the **You** segment and inheriting the user rail colour
             answerHeaderWritten = false;
             thinking.setLength(0);
+            touchThinking();
             inlineThink.reset();
             transcript
                     .append("\n\n---\n\n" + userMarker() + "\n\n")
@@ -713,6 +730,7 @@ public class ConversationTranscript {
                 transcript.append(compression.withholdDanglingPrefix(visible)).append('\n');
             }
             thinking.setLength(0);
+            touchThinking();
             inlineThink.reset();
             answerHeaderWritten = false;
             busy = false;
@@ -824,8 +842,10 @@ public class ConversationTranscript {
         for (final var segment : inlineThink.flush()) {
             if (segment.channel() == ThinkTagSplitter.Channel.THINKING) {
                 thinking.append(segment.text());
+                touchThinking();
             } else {
                 pending.append(segment.text());
+                touch();
             }
         }
     }
@@ -841,6 +861,7 @@ public class ConversationTranscript {
         final var thought =
                 compression.withholdDanglingPrefix(thinking.toString()).strip();
         thinking.setLength(0);
+        touchThinking();
         if (thought.isBlank()) {
             return;
         }
@@ -946,6 +967,15 @@ public class ConversationTranscript {
             scrubbedHeadCache = compression.withholdDanglingPrefix(transcript.toString());
             scrubbedHeadVersion = transcriptVersion;
         }
+        // No assembly is needed when only the durable head is visible (including live thinking).
+        // Keep the outer cache and its historical fallback/spinner semantics intact.
+        if ((!busy || pending.isEmpty()) && runningTools.isEmpty()) {
+            final var md = scrubbedHeadCache.strip();
+            markdownVersion = contentVersion;
+            markdownSpinner = spinner;
+            markdownCache = md.isBlank() ? fallback : md;
+            return markdownCache;
+        }
         final var sb = new StringBuilder(scrubbedHeadCache);
         if (busy && !pending.isEmpty()) {
             // pending only carries visible text: inline <think> content is already
@@ -1014,17 +1044,24 @@ public class ConversationTranscript {
     public static List<Region> regions(final String md) {
         final var out = new ArrayList<Region>();
         int from = 0;
+        int cursor = 0;
         while (true) {
-            final var thought = md.indexOf(THOUGHT_BEGIN, from);
-            final var tool = md.indexOf(TOOL_BEGIN, from);
-            final var log = md.indexOf(LOG_BEGIN, from);
-            if (thought < 0 && tool < 0 && log < 0) {
+            // Search once, forward only. Searching separately for each marker from every
+            // region repeatedly scans the entire remaining suffix when a marker type is absent.
+            while (cursor < md.length()
+                    && !(md.charAt(cursor) == '<'
+                            && (md.startsWith(THOUGHT_BEGIN, cursor)
+                                    || md.startsWith(TOOL_BEGIN, cursor)
+                                    || md.startsWith(LOG_BEGIN, cursor)))) {
+                cursor++;
+            }
+            if (cursor == md.length()) {
                 out.add(new Region(md.substring(from), false, false, false));
                 return out;
             }
-            final var isThought = thought >= 0 && (tool < 0 || thought < tool) && (log < 0 || thought < log);
-            final var isLog = !isThought && log >= 0 && (tool < 0 || log < tool);
-            final var begin = isThought ? thought : isLog ? log : tool;
+            final var begin = cursor;
+            final var isThought = md.startsWith(THOUGHT_BEGIN, begin);
+            final var isLog = md.startsWith(LOG_BEGIN, begin);
             final var beginMarker = isThought ? THOUGHT_BEGIN : isLog ? LOG_BEGIN : TOOL_BEGIN;
             final var endMarker = isThought ? THOUGHT_END : isLog ? LOG_END : TOOL_END;
             out.add(new Region(md.substring(from, begin), false, false, false));
@@ -1037,6 +1074,7 @@ public class ConversationTranscript {
                 return out;
             }
             from = end + endMarker.length();
+            cursor = from;
         }
     }
 
@@ -1053,11 +1091,10 @@ public class ConversationTranscript {
         if (max <= 0 || transcript.length() <= max) {
             return;
         }
-        final var md = transcript.toString();
-        var cut = md.length() - (int) Math.min(max, md.length());
-        final var nl = md.indexOf('\n', cut);
-        cut = nl < 0 ? md.length() : nl + 1;
-        var kept = md.substring(cut);
+        var cut = transcript.length() - (int) Math.min(max, transcript.length());
+        final var nl = transcript.indexOf("\n", cut);
+        cut = nl < 0 ? transcript.length() : nl + 1;
+        var kept = transcript.substring(cut);
         kept = dropDanglingRegion(kept, THOUGHT_BEGIN, THOUGHT_END);
         kept = dropDanglingRegion(kept, TOOL_BEGIN, TOOL_END);
         kept = dropDanglingRegion(kept, LOG_BEGIN, LOG_END);
@@ -1134,6 +1171,7 @@ public class ConversationTranscript {
      *         without re-reading the transcript
      */
     public synchronized String replay(final List<Message> history) {
+        touchThinking();
         if (history == null) {
             return "";
         }
@@ -1194,6 +1232,7 @@ public class ConversationTranscript {
     public synchronized void clearConversation() {
         transcript.setLength(0);
         thinking.setLength(0);
+        touchThinking();
         inlineThink.reset();
         answerHeaderWritten = false;
         appliances.clear();
@@ -1205,6 +1244,7 @@ public class ConversationTranscript {
         transcript.append("\n\n---\n\n" + userMarker() + "\n\n").append(text).append('\n');
         pending.setLength(0);
         thinking.setLength(0);
+        touchThinking();
         inlineThink.reset();
         answerHeaderWritten = false;
         // NOTE: retryableErrorSeen is intentionally NOT cleared here: a stale
@@ -1220,6 +1260,7 @@ public class ConversationTranscript {
         transcript.setLength(0);
         pending.setLength(0);
         thinking.setLength(0);
+        touchThinking();
         inlineThink.reset();
         answerHeaderWritten = false;
         runningTools.clear();
@@ -1277,7 +1318,14 @@ public class ConversationTranscript {
         return pending;
     }
 
-    public StringBuilder thinking() {
+    /**
+     * Returns the live builder. Once exposed, snapshot memoization is disabled for this instance:
+     * callers can retain the builder and mutate it even after reset, without a version notification.
+     * Renderers should prefer {@link #thinkingText()}.
+     */
+    public synchronized StringBuilder thinking() {
+        thinkingExposed = true;
+        thinkingSnapshot = null;
         return thinking;
     }
 
@@ -1329,7 +1377,15 @@ public class ConversationTranscript {
      * render verbatim while the stored message stays clean.
      */
     public synchronized String thinkingText() {
-        return compression.withholdDanglingPrefix(thinking.toString());
+        if (thinkingExposed || thinking.length() > 64 * 1024) {
+            thinkingSnapshot = null;
+            return compression.withholdDanglingPrefix(thinking.toString());
+        }
+        if (thinkingSnapshot == null || thinkingSnapshotVersion != thinkingVersion) {
+            thinkingSnapshot = compression.withholdDanglingPrefix(thinking.toString());
+            thinkingSnapshotVersion = thinkingVersion;
+        }
+        return thinkingSnapshot;
     }
 
     /** The seam-scrub source used for live render surfaces (see {@link #compression}). */
@@ -1349,6 +1405,7 @@ public class ConversationTranscript {
         markdownCache = null;
         scrubbedHeadCache = null;
         scrubbedHeadVersion = -1;
+        touchThinking();
     }
 
     /**

@@ -17,13 +17,18 @@ package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTimeout;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Random;
 import org.junit.jupiter.api.Test;
 
 class TranscriptRendererTest {
@@ -52,6 +57,202 @@ class TranscriptRendererTest {
         assertEquals(0, renderer.lastSafeNewline("no newline yet"));
         assertEquals(5, renderer.lastSafeNewline("abcd\nstill growing"));
         assertEquals(0, renderer.lastSafeNewline("```\ninside fence, no close\n"));
+    }
+
+    @Test
+    void safeScannerPreservesLegacyHeuristicsForMixedAndPartialLines() {
+        final var random = new Random(18371);
+        final var rows = List.of(
+                "plain",
+                "",
+                " \r\t",
+                "\u2003",
+                "\u00a0",
+                "\u2003> quote",
+                "lazy continuation",
+                "```java",
+                "~~~",
+                " ```` |",
+                "~~~ |",
+                "| a |",
+                "b | c",
+                "---|---",
+                "> | quote",
+                "\ud83d\ude00",
+                "  >",
+                "`",
+                "~~",
+                "|",
+                "\r```",
+                "\u00a0> not stripped");
+        assertTimeout(Duration.ofSeconds(1), () -> {
+            for (var sample = 0; sample < 200; sample++) {
+                final var source = new StringBuilder();
+                for (var row = 0; row < 8; row++) {
+                    source.append(rows.get(random.nextInt(rows.size()))).append('\n');
+                }
+                final var text = source.toString();
+                // Each growing prefix includes incomplete fences and pipe rows.
+                for (var cut = 0; cut <= text.length(); cut++) {
+                    final var partial = text.substring(0, cut);
+                    final var expected = legacySafeNewline(partial);
+                    assertEquals(expected, renderer.lastSafeNewline(partial), partial);
+                    assertEquals(expected, renderer.lastSafeNewline(new String(partial)), partial);
+                }
+            }
+        });
+    }
+
+    @Test
+    void boundaryBlankScansMatchSplitIncludingWhitespaceAndTerminatorArtifacts() {
+        final var texts = List.of(
+                "",
+                "a",
+                "a\n",
+                "a\n\n",
+                "\n",
+                "\n\n",
+                " \t\r",
+                "\n \n",
+                " \na\n ",
+                "\u2003\n\u2002",
+                "\u00a0\n",
+                "\u001c\n",
+                "\ud83d\ude00\n",
+                "\ud800\n",
+                "\n\udc00",
+                "\n\r\n",
+                "x\n \t\r\n\u2003");
+        assertEquals(0, TranscriptRenderer.boundaryBlanks(null, null));
+        for (final var left : texts) {
+            for (final var right : texts) {
+                assertEquals(
+                        legacyBoundaryBlanks(left, right),
+                        TranscriptRenderer.boundaryBlanks(left, right),
+                        () -> "left=" + left + ", right=" + right);
+            }
+        }
+        final var large = "body\n".repeat(20_000);
+        assertTimeout(Duration.ofMillis(500), () -> {
+            for (var i = 0; i < 1_000; i++) {
+                assertEquals(0, TranscriptRenderer.boundaryBlanks(large, large));
+            }
+        });
+    }
+
+    @Test
+    void safeMemoIsExactBoundedAndClearedByTheme() throws Exception {
+        final var slot = TranscriptRenderer.class.getDeclaredField("lastSafeSource");
+        slot.setAccessible(true);
+        final var source = "lead\n| header\n";
+        assertEquals(source.length(), renderer.lastSafeNewline(source));
+        assertEquals(source, slot.get(renderer));
+        assertEquals(5, renderer.lastSafeNewline(source + "| partial"));
+        assertEquals(source.length(), renderer.lastSafeNewline(source));
+        // Same length and same prefix do not constitute a memo hit.
+        assertEquals(0, renderer.lastSafeNewline("```\ncode\n"));
+        assertEquals(9, renderer.lastSafeNewline("abc\ncode\n"));
+        final var large = "x\n".repeat(40_000);
+        assertTimeout(Duration.ofMillis(500), () -> assertEquals(large.length(), renderer.lastSafeNewline(large)));
+        assertNull(slot.get(renderer));
+        renderer.lastSafeNewline(source);
+        renderer.theme(null, null, false);
+        assertNull(slot.get(renderer));
+        assertEquals(source.length(), renderer.lastSafeNewline(source));
+    }
+
+    @Test
+    void prefixCacheEvictsByWeightAndDoesNotRetainOversizedSources() throws Exception {
+        final var cacheField = TranscriptRenderer.class.getDeclaredField("prefixCache");
+        cacheField.setAccessible(true);
+        final var weightField = TranscriptRenderer.class.getDeclaredField("prefixCacheWeight");
+        weightField.setAccessible(true);
+        final var lastField = TranscriptRenderer.class.getDeclaredField("lastPrefix");
+        lastField.setAccessible(true);
+        final var cache = (Map<?, ?>) cacheField.get(renderer);
+        final var padding = " ".repeat(12_000);
+        for (var i = 0; i < 30; i++) {
+            // No delta relationship; each is a different completed region.
+            final var source = "[ref" + i + "]: https://example.com" + padding + "\n";
+            final var rendered = renderer.renderRegionWithKinds(source, 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+            assertTrue(rendered.lines().isEmpty());
+            assertTrue(rendered.kinds().isEmpty());
+            assertTrue(weightField.getInt(renderer) <= 256 * 1024);
+        }
+        assertTrue(cache.size() < 30, "weight budget must evict before the 64-entry cap");
+        final var entries = cache.size();
+        final var oversized = " ".repeat(66_000) + "\n";
+        renderer.renderRegionWithKinds(oversized, 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        assertEquals(entries, cache.size());
+        assertNull(lastField.get(renderer));
+        renderer.theme(null, null, false);
+        assertTrue(cache.isEmpty());
+        assertEquals(0, weightField.getInt(renderer));
+    }
+
+    @Test
+    void cachedResultsKeepDefensiveLinesAndKindsThroughHitsAndEviction() {
+        final var source = "first\n\nsecond\n";
+        final var expected = renderer.renderRegionWithKinds(source, 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        final var changed = renderer.renderRegionWithKinds(source, 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        changed.lines().clear();
+        changed.kinds().clear();
+        final var same = renderer.renderRegionWithKinds(source, 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        assertEquals(plain(expected.lines()), plain(same.lines()));
+        assertEquals(expected.kinds(), same.kinds());
+        for (var i = 0; i < 70; i++) {
+            renderer.renderRegion("region " + i + "\n", 80, Style.EMPTY, MarkdownStyles.DEFAULTS)
+                    .clear();
+        }
+        final var after = renderer.renderRegionWithKinds(source, 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        assertEquals(plain(expected.lines()), plain(after.lines()));
+        assertEquals(expected.kinds(), after.kinds());
+    }
+
+    private static int legacyBoundaryBlanks(final String left, final String right) {
+        var count = 0;
+        if (!left.isEmpty()) {
+            final var lines = left.split("\n", -1);
+            final var end = left.endsWith("\n") ? lines.length - 1 : lines.length;
+            for (var i = end - 1; i >= 0 && lines[i].isBlank(); i--) {
+                count++;
+            }
+        }
+        if (!right.isEmpty()) {
+            for (final var line : right.split("\n", -1)) {
+                if (!line.isBlank()) {
+                    break;
+                }
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static int legacySafeNewline(final String source) {
+        final var lines = source.split("\n", -1);
+        var inFence = false;
+        var inQuote = false;
+        var safe = 0;
+        var offset = 0;
+        for (var i = 0; i < lines.length - 1; i++) {
+            final var trimmed = lines[i].strip();
+            if (trimmed.startsWith(">")) {
+                inQuote = true;
+            } else if (trimmed.isEmpty()) {
+                inQuote = false;
+            }
+            if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+                inFence = !inFence;
+            }
+            final var table =
+                    lines[i].contains("|") && ((i > 0 && lines[i - 1].contains("|")) || lines[i + 1].contains("|"));
+            offset += lines[i].length() + 1;
+            if (!inFence && !inQuote && !table) {
+                safe = offset;
+            }
+        }
+        return safe;
     }
 
     @Test

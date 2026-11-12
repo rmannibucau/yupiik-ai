@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTimeout;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -28,6 +29,9 @@ import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
+import io.yupiik.ia.agent.core.llm.Usage;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -242,15 +246,180 @@ class ConversationTranscriptTest {
     }
 
     @Test
-    void markdownCacheIsSpinnerSensitiveAndStreamEventsRebuild() {
+    void markdownCacheIsSpinnerSensitiveButNotThinkingSensitive() {
         final var t = new ConversationTranscript();
         t.appendTranscript("**Assistant**\n\nhi\n");
         final var a = t.markdown("|", "");
         final var b = t.markdown("*", "");
         assertNotSame(a, b, "a different spinner marker must rebuild the running-tool header");
         t.onEvent(new AgentEvent.ThinkingDelta("hm", "s1"));
-        final var c = t.markdown("|", "");
-        assertNotSame(a, c, "a thinking delta must invalidate the cache");
+        final var c = t.markdown("*", "");
+        assertSame(b, c, "live thinking is not part of markdown until it is flushed");
+        t.flushThinking();
+        assertTrue(t.markdown("*", "").contains("hm"), "flushing thinking invalidates markdown");
+    }
+
+    @Test
+    void thinkingSnapshotHasAnIndependentSingleSlot() {
+        final var compression = new ContextCompression(null);
+        final var t = new ConversationTranscript(new ThinkTagSplitter(), false, compression);
+        t.startUserTurn("go");
+        final var md = t.markdown("|", "welcome");
+        t.onEvent(new AgentEvent.ThinkingDelta("reason\n@123", "s1"));
+        final var thought = t.thinkingText();
+        assertEquals("reason", thought);
+        assertTimeout(Duration.ofMillis(500), () -> {
+            for (var i = 0; i < 1000; i++) {
+                assertSame(thought, t.thinkingText());
+                assertSame(md, t.markdown("|", "different fallback"));
+            }
+        });
+
+        t.onEvent(new AgentEvent.ThinkingDelta("@\nmore", "s1"));
+        assertEquals("reason\nmore", t.thinkingText());
+        final var beforeReplay = t.thinkingText();
+        t.replay(List.of());
+        assertEquals("reason\nmore", t.thinkingText());
+        assertNotSame(beforeReplay, t.thinkingText(), "replay invalidates the snapshot");
+        final var beforeRebind = t.thinkingText();
+        t.bindCompression(compression);
+        assertEquals("reason\nmore", t.thinkingText());
+        assertNotSame(beforeRebind, t.thinkingText());
+        t.flushThinking();
+        assertEquals("", t.thinkingText());
+        assertTrue(t.markdown("|", "").contains("reason\nmore"));
+        t.onEvent(new AgentEvent.ThinkingDelta("old", "s1"));
+        assertEquals("old", t.thinkingText());
+        t.startUserTurn("next");
+        assertEquals("", t.thinkingText());
+        t.onEvent(new AgentEvent.ThinkingDelta("clear me", "s1"));
+        assertEquals("clear me", t.thinkingText());
+        t.clearConversation();
+        assertEquals("", t.thinkingText());
+        t.onEvent(new AgentEvent.ThinkingDelta("reset me", "s1"));
+        assertEquals("reset me", t.thinkingText());
+        t.reset();
+        assertEquals("", t.thinkingText());
+    }
+
+    @Test
+    void exposedThinkingBuilderNeverLeavesAStaleSnapshot() {
+        final var t = new ConversationTranscript();
+        t.onEvent(new AgentEvent.ThinkingDelta("first", "s1"));
+        assertEquals("first", t.thinkingText());
+        final var builder = t.thinking();
+        builder.replace(0, builder.length(), "other");
+        assertEquals("other", t.thinkingText(), "same-length external edits must be observed");
+        t.reset();
+        assertEquals("", t.thinkingText());
+        builder.append("retained");
+        assertEquals("retained", t.thinkingText(), "a builder can remain exposed across reset");
+    }
+
+    @Test
+    void inlineThinkingAndDrainedVisibleCarryInvalidateOnlyTheirOwnSurfaces() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("go");
+        final var md = t.markdown("|", "");
+        t.onEvent(new AgentEvent.TextDelta("<think>reasoning", "s1"));
+        assertEquals("reasoning", t.thinkingText());
+        assertSame(md, t.markdown("|", ""), "inline thinking alone does not change markdown");
+        t.onEvent(new AgentEvent.TextReset("s1"));
+        assertEquals("", t.thinkingText());
+        assertTrue(t.markdown("|", "").contains("reasoning"));
+
+        t.onEvent(new AgentEvent.TextDelta("answer`", "s1"));
+        final var beforeDrain = t.markdown("|", "");
+        t.flushThinking();
+        assertNotSame(beforeDrain, t.markdown("|", ""), "draining visible splitter carry changes markdown");
+        assertTrue(t.markdown("|", "").endsWith("answer`"));
+    }
+
+    @Test
+    void markdownNoTailPathPreservesFallbackAndWhitespaceSemantics() {
+        final var t = new ConversationTranscript();
+        assertEquals("first", t.markdown("|", "first"));
+        assertEquals("first", t.markdown("|", "second"), "fallback is historically not a cache key");
+        assertEquals("second", t.markdown("*", "second"));
+        t.appendTranscript(" \n body \n ");
+        assertEquals("body", t.markdown("*", "second"));
+        t.onEvent(new AgentEvent.TextDelta("hidden", "s1"));
+        assertEquals("body", t.markdown("*", "second"), "pending is hidden when not busy");
+        t.busy(true);
+        assertEquals("body \n \n\n**Assistant**\n\nhidden", t.markdown("*", "second"));
+    }
+
+    @Test
+    void oversizedThinkingBypassesSnapshotRetention() {
+        final var transcript = new ConversationTranscript();
+        final var source = "x".repeat(64 * 1024 + 1);
+        transcript.onEvent(new AgentEvent.ThinkingDelta(source, "session"));
+        final var first = transcript.thinkingText();
+        assertEquals(source, first);
+        assertNotSame(first, transcript.thinkingText());
+        transcript.reset();
+        assertEquals("", transcript.thinkingText());
+    }
+
+    @Test
+    void regionsPreserveEmptyAdjacentNestedAndUnclosedBlocks() {
+        final var plain = new ConversationTranscript.Region("", false, false, false);
+        assertEquals(List.of(plain), ConversationTranscript.regions(""));
+        assertEquals(
+                List.of(
+                        plain,
+                        new ConversationTranscript.Region("", true, false, false),
+                        plain,
+                        new ConversationTranscript.Region("", false, true, false),
+                        plain,
+                        new ConversationTranscript.Region("", false, false, true),
+                        plain),
+                ConversationTranscript.regions(ConversationTranscript.THOUGHT_BEGIN
+                        + ConversationTranscript.THOUGHT_END
+                        + ConversationTranscript.TOOL_BEGIN
+                        + ConversationTranscript.TOOL_END
+                        + ConversationTranscript.LOG_BEGIN
+                        + ConversationTranscript.LOG_END));
+        assertEquals(
+                List.of(
+                        new ConversationTranscript.Region("before", false, false, false),
+                        new ConversationTranscript.Region(
+                                "nested" + ConversationTranscript.LOG_BEGIN + "tail", true, false, false)),
+                ConversationTranscript.regions("before" + ConversationTranscript.THOUGHT_BEGIN + "nested"
+                        + ConversationTranscript.LOG_BEGIN + "tail"));
+        assertEquals(
+                List.of(
+                        plain,
+                        new ConversationTranscript.Region(ConversationTranscript.TOOL_BEGIN, true, false, false),
+                        new ConversationTranscript.Region(ConversationTranscript.TOOL_END, false, false, false)),
+                ConversationTranscript.regions(ConversationTranscript.THOUGHT_BEGIN
+                        + ConversationTranscript.TOOL_BEGIN
+                        + ConversationTranscript.THOUGHT_END
+                        + ConversationTranscript.TOOL_END));
+    }
+
+    @Test
+    void regionsScanRepeatedSingleTypeAndMixedBlocksWithinABoundedBudget() {
+        assertTimeout(Duration.ofMillis(500), () -> {
+            for (final var types : List.of(List.of(0), List.of(1), List.of(2), List.of(0, 1, 2))) {
+                final var md = new StringBuilder();
+                final var expected = new ArrayList<ConversationTranscript.Region>();
+                for (var i = 0; i < 1500; i++) {
+                    final var type = types.get(i % types.size());
+                    final var begin = type == 0
+                            ? ConversationTranscript.THOUGHT_BEGIN
+                            : type == 1 ? ConversationTranscript.TOOL_BEGIN : ConversationTranscript.LOG_BEGIN;
+                    final var end = type == 0
+                            ? ConversationTranscript.THOUGHT_END
+                            : type == 1 ? ConversationTranscript.TOOL_END : ConversationTranscript.LOG_END;
+                    md.append("plain<").append(begin).append("inner<").append(end);
+                    expected.add(new ConversationTranscript.Region("plain<", false, false, false));
+                    expected.add(new ConversationTranscript.Region("inner<", type == 0, type == 1, type == 2));
+                }
+                expected.add(new ConversationTranscript.Region("", false, false, false));
+                assertEquals(expected, ConversationTranscript.regions(md.toString()));
+            }
+        });
     }
 
     @Test
@@ -588,7 +757,7 @@ class ConversationTranscriptTest {
         assertEquals(0, t.cacheReadTokens(), "null usage: cache-read must be 0");
 
         t.onEvent(new AgentEvent.UsageUpdated(
-                new io.yupiik.ia.agent.core.llm.Usage(4000, 1200, 5200, 1500, 0),
+                new Usage(4000, 1200, 5200, 1500, 0),
                 42,
                 12.4,
                 40,

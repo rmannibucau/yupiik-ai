@@ -25,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.ToLongBiFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -51,6 +52,9 @@ public class SyntaxHighlighter {
     private static final int MAX_SPLIT_CACHE = 32;
     private static final int MAX_BLOCK_CACHE = 64;
     private static final int MAX_LINE_CACHE = 4_096;
+    private static final long MAX_SPLIT_WEIGHT = 1L << 20;
+    private static final long MAX_BLOCK_WEIGHT = 4L << 20;
+    private static final long MAX_LINE_WEIGHT = 2L << 20;
 
     private volatile int maxLineLength = DEFAULT_MAX_LINE_LENGTH;
     private volatile CodeTheme theme = CodeTheme.ONE_DARK;
@@ -59,7 +63,9 @@ public class SyntaxHighlighter {
     // blocks every frame (live thinking grows append-only), so caching makes a
     // long session render in O(tail) instead of O(transcript). Keys are plain
     // strings/records, values are immutable lines/spans safe to share between
-    // frames and threads. Bound is coarse; entries are tiny.
+    // frames and threads. Both entry counts and estimated retained bytes are bounded.
+    // We conservatively charge UTF-16 source/output characters even when strings are shared,
+    // plus layout overhead (segments, lines, spans and their styles). This is not a heap census.
 
     private record LineKey(long generation, Highlighter highlighter, String line) {}
 
@@ -71,24 +77,13 @@ public class SyntaxHighlighter {
     // colors forever)
     private volatile long generation;
 
-    private final Map<String, List<Segment>> splitCache = new LinkedHashMap<>(16, 0.75f, true) {
-        @Override
-        protected boolean removeEldestEntry(final Map.Entry<String, List<Segment>> eldest) {
-            return size() > MAX_SPLIT_CACHE;
-        }
-    };
-    private final Map<BlockKey, List<Line>> blockCache = new LinkedHashMap<>(16, 0.75f, true) {
-        @Override
-        protected boolean removeEldestEntry(final Map.Entry<BlockKey, List<Line>> eldest) {
-            return size() > MAX_BLOCK_CACHE;
-        }
-    };
-    private final Map<LineKey, List<Span>> lineCache = new LinkedHashMap<>(16, 0.75f, true) {
-        @Override
-        protected boolean removeEldestEntry(final Map.Entry<LineKey, List<Span>> eldest) {
-            return size() > MAX_LINE_CACHE;
-        }
-    };
+    private final Map<String, List<Segment>> splitCache = new LinkedHashMap<>(16, 0.75f, true);
+    private final Map<BlockKey, List<Line>> blockCache = new LinkedHashMap<>(16, 0.75f, true);
+    private final Map<LineKey, List<Span>> lineCache = new LinkedHashMap<>(16, 0.75f, true);
+    // Guarded by the corresponding cache monitor, including resets and replacement/eviction.
+    private long splitWeight;
+    private long blockWeight;
+    private long lineWeight;
 
     private interface Highlighter {
         Pattern pattern();
@@ -118,17 +113,79 @@ public class SyntaxHighlighter {
         return this;
     }
 
-    private void clearCaches() {
+    /** Releases retained source and layout results; in-flight old generations are not cached. */
+    public synchronized void clearCaches() {
         this.generation++;
         synchronized (splitCache) {
             splitCache.clear();
+            splitWeight = 0;
         }
         synchronized (blockCache) {
             blockCache.clear();
+            blockWeight = 0;
         }
         synchronized (lineCache) {
             lineCache.clear();
+            lineWeight = 0;
         }
+    }
+
+    // Caller holds the cache monitor. Oversized results must not evict useful small entries.
+    private static <K, V> long weightedPut(
+            final Map<K, V> cache,
+            final K key,
+            final V value,
+            final long retained,
+            final int maxEntries,
+            final long maxWeight,
+            final ToLongBiFunction<K, V> weigh) {
+        final var weight = weigh.applyAsLong(key, value);
+        if (weight > maxWeight) {
+            return retained;
+        }
+        var total = retained + weight;
+        final var previous = cache.put(key, value);
+        if (previous != null) {
+            total -= weigh.applyAsLong(key, previous);
+        }
+        final var entries = cache.entrySet().iterator();
+        while (cache.size() > maxEntries || total > maxWeight) {
+            final var eldest = entries.next();
+            total -= weigh.applyAsLong(eldest.getKey(), eldest.getValue());
+            entries.remove();
+        }
+        return total;
+    }
+
+    private static long splitWeight(final String source, final List<Segment> segments) {
+        long weight = 64L + 2L * source.length();
+        for (final var segment : segments) {
+            weight += 64L + 2L * segment.text().length();
+            if (segment.language() != null) {
+                weight += 2L * segment.language().length();
+            }
+        }
+        return weight;
+    }
+
+    private static long spansWeight(final List<Span> spans) {
+        long weight = 32;
+        for (final var span : spans) {
+            weight += 128L + 2L * span.content().length();
+        }
+        return weight;
+    }
+
+    private static long blockWeight(final BlockKey key, final List<Line> lines) {
+        long weight = 64L + 2L * key.code().length() + 2L * key.language().length();
+        for (final var line : lines) {
+            weight += 64L + spansWeight(line.spans());
+        }
+        return weight;
+    }
+
+    private static long lineWeight(final LineKey key, final List<Span> spans) {
+        return 64L + 2L * key.line().length() + spansWeight(spans);
     }
 
     private Style token(final String hex) {
@@ -591,7 +648,14 @@ public class SyntaxHighlighter {
             scanned.committed.add(new Segment(Segment.Type.TEXT, null, scanned.pendingTail));
         }
         final var immutable = List.copyOf(scanned.committed);
-        splitCache.put(markdown, immutable);
+        splitWeight = weightedPut(
+                splitCache,
+                markdown,
+                immutable,
+                splitWeight,
+                MAX_SPLIT_CACHE,
+                MAX_SPLIT_WEIGHT,
+                SyntaxHighlighter::splitWeight);
         return immutable;
     }
 
@@ -772,7 +836,16 @@ public class SyntaxHighlighter {
         }
         final var immutable = List.copyOf(result);
         synchronized (blockCache) {
-            blockCache.put(key, immutable);
+            if (generation == this.generation) {
+                blockWeight = weightedPut(
+                        blockCache,
+                        key,
+                        immutable,
+                        blockWeight,
+                        MAX_BLOCK_CACHE,
+                        MAX_BLOCK_WEIGHT,
+                        SyntaxHighlighter::blockWeight);
+            }
         }
         return immutable;
     }
@@ -811,7 +884,16 @@ public class SyntaxHighlighter {
         }
         final var immutable = List.copyOf(out);
         synchronized (lineCache) {
-            lineCache.put(cacheKey, immutable);
+            if (generation == this.generation) {
+                lineWeight = weightedPut(
+                        lineCache,
+                        cacheKey,
+                        immutable,
+                        lineWeight,
+                        MAX_LINE_CACHE,
+                        MAX_LINE_WEIGHT,
+                        SyntaxHighlighter::lineWeight);
+            }
         }
         return immutable;
     }

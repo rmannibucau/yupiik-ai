@@ -47,18 +47,21 @@ import java.util.Map;
  */
 final class TranscriptRenderer {
     private static final int MAX_CACHED_PREFIXES = 64;
+    private static final int MAX_CACHED_SOURCE_LENGTH = 64 * 1024;
+    private static final int MAX_CACHE_WEIGHT = 256 * 1024;
 
     private final MarkdownLines markdownLines = new MarkdownLines();
     // key -> rendered lines of a stable (completed) source prefix; thread-safe and
     // bounded so a long session (a new key per region switch) never grows the
     // footprint. The append-only delta path deliberately skips this cache: growing
     // prefixes are moving targets that would churn (and blow up) the entries.
-    private final Map<Key, Rendered> prefixCache = Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
-        @Override
-        protected boolean removeEldestEntry(final Map.Entry<Key, Rendered> eldest) {
-            return size() > MAX_CACHED_PREFIXES;
-        }
-    });
+    private final Map<Key, CachedPrefix> prefixCache = new LinkedHashMap<>(16, 0.75f, true);
+    private int prefixCacheWeight;
+
+    // Render-thread-only, exact-input memo. No append-state assumptions: a newly
+    // arriving pipe can retroactively turn the preceding line into a table row.
+    private String lastSafeSource;
+    private int lastSafeOffset;
 
     // single slot remembering the last stable prefix rendered: an exact hit makes a
     // busy frame with unchanged content O(1), and the append-only path re-parses only
@@ -73,9 +76,17 @@ final class TranscriptRenderer {
 
     void theme(final Palette palette, final TuiConfiguration.MarkdownColors colors, final boolean ascii) {
         markdownLines.theme(palette, colors, ascii);
-        prefixCache.clear();
+        clear();
+    }
+
+    void clear() {
+        synchronized (prefixCache) {
+            prefixCache.clear();
+            prefixCacheWeight = 0;
+        }
         lastPrefix = null;
         lastPrefixLines = null;
+        lastSafeSource = null;
     }
 
     /** A rendered line list plus the per-row copy kind of each line (same size). */
@@ -206,14 +217,22 @@ final class TranscriptRenderer {
         if (text == null || text.isEmpty()) {
             return 0;
         }
-        final var lines = text.split("\n", -1);
-        // a trailing "" is the artifact of the last terminator, not a blank line
-        final var end = text.endsWith("\n") ? lines.length - 1 : lines.length;
+        // Ignore only the artifact after the last terminator, not the blank line
+        // before it. Scan from the edge and stop at the first content character.
+        var end = text.endsWith("\n") ? text.length() - 1 : text.length();
         var count = 0;
-        for (var i = end - 1; i >= 0 && lines[i].isBlank(); i--) {
-            count++;
+        while (true) {
+            if (end == 0) {
+                return count + 1;
+            }
+            final var cp = text.codePointBefore(end);
+            if (cp == '\n') {
+                count++;
+            } else if (!Character.isWhitespace(cp)) {
+                return count;
+            }
+            end -= Character.charCount(cp);
         }
-        return count;
     }
 
     /** Blank lines at the start of {@code text} ({@code "\n\na"} has two). */
@@ -221,12 +240,18 @@ final class TranscriptRenderer {
         if (text == null || text.isEmpty()) {
             return 0;
         }
-        final var lines = text.split("\n", -1);
         var count = 0;
-        for (var i = 0; i < lines.length && lines[i].isBlank(); i++) {
-            count++;
+        for (var i = 0; i < text.length(); ) {
+            final var cp = text.codePointAt(i);
+            if (cp == '\n') {
+                count++;
+            } else if (!Character.isWhitespace(cp)) {
+                return count;
+            }
+            i += Character.charCount(cp);
         }
-        return count;
+        // Like split("\n", -1), count the unterminated (possibly empty) final line.
+        return count + 1;
     }
 
     private Rendered prefixLines(final String prefix, final int width, final Style base, final MarkdownStyles styles) {
@@ -259,13 +284,43 @@ final class TranscriptRenderer {
         }
         // region switch or width/base/styles change: full render through the bounded cache
         final var key = new Key(prefix, width, base, styles);
-        var rendered = prefixCache.get(key);
+        Rendered rendered;
+        synchronized (prefixCache) {
+            final var cached = prefixCache.get(key);
+            rendered = cached == null ? null : cached.rendered();
+        }
         if (rendered == null) {
             rendered = renderToList(prefix, width, base, styles);
-            prefixCache.put(key, rendered);
+            cachePrefix(key, rendered);
         }
         remember(prefix, rendered, width, base, styles);
         return rendered;
+    }
+
+    private void cachePrefix(final Key key, final Rendered rendered) {
+        if (key.source().length() > MAX_CACHED_SOURCE_LENGTH) {
+            return;
+        }
+        // Approximate retained weight in character/row units, including rendered
+        // output (a narrow width can produce many rows from a small source).
+        long weight = key.source().length() + 32L * rendered.lines().size();
+        for (final var line : rendered.lines()) {
+            for (final var span : line.spans()) {
+                weight += 16L + (span.content() == null ? 0 : span.content().length());
+            }
+            if (weight > MAX_CACHE_WEIGHT) {
+                return;
+            }
+        }
+        synchronized (prefixCache) {
+            final var previous = prefixCache.put(key, new CachedPrefix(rendered, (int) weight));
+            prefixCacheWeight += (int) weight - (previous == null ? 0 : previous.weight());
+            final var entries = prefixCache.entrySet().iterator();
+            while (prefixCache.size() > MAX_CACHED_PREFIXES || prefixCacheWeight > MAX_CACHE_WEIGHT) {
+                prefixCacheWeight -= entries.next().getValue().weight();
+                entries.remove();
+            }
+        }
     }
 
     private void remember(
@@ -274,8 +329,10 @@ final class TranscriptRenderer {
             final int width,
             final Style base,
             final MarkdownStyles styles) {
-        lastPrefix = prefix;
-        lastPrefixLines = rendered;
+        final var retain =
+                prefix.length() <= MAX_CACHED_SOURCE_LENGTH && rendered.lines().size() <= MAX_CACHE_WEIGHT / 32;
+        lastPrefix = retain ? prefix : null;
+        lastPrefixLines = retain ? rendered : null;
         lastWidth = width;
         lastBase = base;
         lastStyles = styles;
@@ -312,54 +369,57 @@ final class TranscriptRenderer {
         if (source == null || source.isEmpty()) {
             return 0;
         }
-        final var lines = source.split("\n", -1);
-        final var tableCandidate = new boolean[lines.length];
-        for (var i = 0; i < lines.length; i++) {
-            // GFM table rows may omit their optional leading pipe.
-            tableCandidate[i] = lines[i].contains("|");
-        }
-        // a line belongs to a table when it is part of a maximal contiguous run of two
-        // or more pipe-containing lines; a single such line is a paragraph and stays safe
-        final var tableLine = new boolean[lines.length];
-        for (var i = 0; i < lines.length; i++) {
-            if (!tableCandidate[i]) {
-                continue;
-            }
-            var j = i;
-            while (j < lines.length && tableCandidate[j]) {
-                j++;
-            }
-            final var isTable = (j - i) >= 2;
-            for (var k = i; k < j; k++) {
-                tableLine[k] = isTable;
-            }
-            i = j - 1;
+        if (source.equals(lastSafeSource)) {
+            return lastSafeOffset;
         }
         var inFence = false;
         var inQuote = false;
         var safe = 0;
-        var start = 0;
-        for (var i = 0; i < lines.length; i++) {
-            final var trimmed = lines[i].strip();
-            if (trimmed.startsWith(">")) {
+        var previousPipe = false;
+        var safeBeforePipeRun = 0;
+        for (var start = 0; start < source.length(); ) {
+            var end = start;
+            var first = -1;
+            var pipe = false;
+            while (end < source.length() && source.charAt(end) != '\n') {
+                final var cp = source.codePointAt(end);
+                pipe |= cp == '|';
+                if (first < 0 && !Character.isWhitespace(cp)) {
+                    first = end;
+                }
+                end += Character.charCount(cp);
+            }
+            // A second pipe line, even an unterminated one, invalidates the safe
+            // cut after the first. Fence/quote state still advances on every row.
+            if (pipe && previousPipe) {
+                safe = safeBeforePipeRun;
+            } else if (pipe) {
+                safeBeforePipeRun = safe;
+            }
+            if (first >= 0 && source.charAt(first) == '>') {
                 inQuote = true;
-            } else if (trimmed.isEmpty()) {
+            } else if (first < 0) {
                 inQuote = false;
             }
-            if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+            if (first >= 0 && (source.startsWith("```", first) || source.startsWith("~~~", first))) {
                 inFence = !inFence;
             }
-            final var nl = source.indexOf('\n', start);
-            if (nl < 0) {
+            if (end == source.length()) {
                 break;
             }
-            if (!inFence && !inQuote && !tableLine[i]) {
-                safe = nl + 1;
+            if (!inFence && !inQuote && !(pipe && previousPipe)) {
+                safe = end + 1;
             }
-            start = nl + 1;
+            previousPipe = pipe;
+            start = end + 1;
         }
+        // Oversized inputs are scanned but never retained, and release the old slot.
+        lastSafeSource = source.length() <= MAX_CACHED_SOURCE_LENGTH ? source : null;
+        lastSafeOffset = safe;
         return safe;
     }
+
+    private record CachedPrefix(Rendered rendered, int weight) {}
 
     private record Key(String source, int width, Style base, MarkdownStyles styles) {}
 }

@@ -21,6 +21,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -134,5 +139,146 @@ class ToolOutputFormatTest {
     void provenDocumentLanguagesRenderAsColoredSource() {
         assertSame(ToolOutputFormat.Format.CODE, service.detect("# Title\n\n```java\nint a;\n```\n", "markdown"));
         assertSame(ToolOutputFormat.Format.CODE, service.detect("= Doc\n\n:key: value\n", "asciidoc"));
+    }
+
+    @Test
+    void detectionEvictsByWeightIncludingLanguage() throws Exception {
+        final var language = "x".repeat(200 * 1024);
+        for (var i = 0; i < 6; i++) {
+            assertSame(ToolOutputFormat.Format.CODE, service.detect("output" + i, language));
+        }
+        final var cached = cache("detectCache");
+        assertEquals(5, cached.size());
+        assertTrue(!cached.containsKey(language + "\noutput0"));
+        assertTrue(cached.containsKey(language + "\noutput5"));
+        assertWeight("detectCache", 1024 * 1024);
+    }
+
+    @Test
+    void detectionEvictsByEntryCount() throws Exception {
+        for (var i = 0; i < 129; i++) {
+            service.detect("output" + i, "java");
+        }
+        assertEquals(128, cache("detectCache").size());
+        assertTrue(!cache("detectCache").containsKey("java\noutput0"));
+        assertWeight("detectCache", 1024 * 1024);
+    }
+
+    @Test
+    void detectionBypassesOversizedSources() throws Exception {
+        final var exact = "x".repeat(256 * 1024);
+        assertSame(ToolOutputFormat.Format.CODE, service.detect(exact, ""));
+        assertTrue(cache("detectCache").isEmpty());
+        assertSame(ToolOutputFormat.Format.CODE, service.detect("output", exact));
+        assertTrue(cache("detectCache").isEmpty());
+        assertTrue(cache("detectCache").isEmpty());
+        assertWeight("detectCache", 1024 * 1024);
+    }
+
+    @Test
+    void prettyEvictsByCombinedSourceAndValueWeight() throws Exception {
+        for (var i = 0; i < 6; i++) {
+            final var raw = "\"" + i + "x".repeat(50_000) + "\"";
+            final var pretty = service.prettyJson(raw);
+            assertEquals(pretty, service.prettyJson(raw));
+        }
+        final var cached = cache("prettyCache");
+        assertEquals(5, cached.size());
+        assertTrue(cached.keySet().stream().noneMatch(key -> key.startsWith("\"0")));
+        assertWeight("prettyCache", 512 * 1024);
+    }
+
+    @Test
+    void prettyEvictsByEntryCountAndBypassesOversizedSourcesAndValues() throws Exception {
+        for (var i = 0; i < 17; i++) {
+            service.prettyJson("[" + i + "]");
+        }
+        assertEquals(16, cache("prettyCache").size());
+        assertTrue(!cache("prettyCache").containsKey("[0]"));
+        service.clearCaches();
+        final var oversized = "\"" + "x".repeat(65536) + "\"";
+        assertSame(oversized, service.prettyJson(oversized));
+        assertSame(oversized, service.prettyXml(oversized));
+        assertTrue(cache("prettyCache").isEmpty());
+        final var expanding = "<r>".repeat(80) + "<a/>".repeat(4000) + "</r>".repeat(80);
+        final var result = service.prettyXml(expanding);
+        assertTrue(result.length() > 512 * 1024);
+        assertEquals(result, service.prettyXml(expanding));
+        assertTrue(cache("prettyCache").isEmpty());
+        assertWeight("prettyCache", 512 * 1024);
+    }
+
+    @Test
+    void cachedAndClearedResultsHaveParity() throws Exception {
+        for (final var raw : new String[] {"{\"a\":1}", "<r><a>1</a></r>", "invalid", "", "a: 1\nb: 2"}) {
+            final var detected = service.detect(raw);
+            final var json = service.prettyJson(raw);
+            assertSame(detected, service.detect(raw));
+            assertEquals(json, service.prettyJson(raw));
+            service.clearCaches();
+            final var xml = service.prettyXml(raw);
+            assertEquals(xml, service.prettyXml(raw));
+            service.clearCaches();
+            assertSame(detected, service.detect(raw));
+            assertEquals(json, service.prettyJson(raw));
+            service.clearCaches();
+            assertEquals(xml, service.prettyXml(raw));
+        }
+        service.clearCaches();
+        service.clearCaches();
+        assertTrue(cache("detectCache").isEmpty());
+        assertTrue(cache("prettyCache").isEmpty());
+        assertWeight("detectCache", 1024 * 1024);
+        assertWeight("prettyCache", 512 * 1024);
+    }
+
+    @Test
+    void concurrentReplacementAndClearingKeepWeightsConsistent() throws Exception {
+        try (final var executor = Executors.newFixedThreadPool(4)) {
+            final var tasks = IntStream.range(0, 4)
+                    .<Callable<Void>>mapToObj(worker -> () -> {
+                        for (var i = 0; i < 100; i++) {
+                            if (worker == 0) {
+                                service.clearCaches();
+                            } else {
+                                assertSame(ToolOutputFormat.Format.JSON, service.detect("[1,2,3]", "java"));
+                                assertTrue(service.prettyJson("[1,2,3]").contains("\n"));
+                            }
+                        }
+                        return null;
+                    })
+                    .toList();
+            for (final var future : executor.invokeAll(tasks, 1, TimeUnit.SECONDS)) {
+                future.get();
+            }
+        }
+        assertWeight("detectCache", 1024 * 1024);
+        assertWeight("prettyCache", 512 * 1024);
+        service.clearCaches();
+        assertWeight("detectCache", 1024 * 1024);
+        assertWeight("prettyCache", 512 * 1024);
+    }
+
+    // Retention limits are observable only through retained entries; keep inspection out of the production API.
+    @SuppressWarnings("unchecked")
+    private Map<String, ?> cache(final String name) throws Exception {
+        final var field = ToolOutputFormat.class.getDeclaredField(name);
+        field.setAccessible(true);
+        final var cache = (Map<String, ?>) field.get(service);
+        synchronized (cache) {
+            return Map.copyOf(cache);
+        }
+    }
+
+    private void assertWeight(final String name, final int maximum) throws Exception {
+        final var entries = cache(name);
+        final var weight = entries.entrySet().stream()
+                .mapToInt(entry ->
+                        entry.getKey().length() + (entry.getValue() instanceof String value ? value.length() : 0))
+                .sum();
+        assertTrue(weight <= maximum);
+        final var field = ToolOutputFormat.class.getDeclaredField(name + "Weight");
+        field.setAccessible(true);
+        assertEquals(weight, field.getInt(service));
     }
 }

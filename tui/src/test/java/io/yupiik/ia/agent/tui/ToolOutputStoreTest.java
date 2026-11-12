@@ -19,11 +19,214 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
 class ToolOutputStoreTest {
+    private static final String TRUNCATED = "\n... older output truncated";
+
+    @Test
+    void mixedFragmentsMatchBoundedTailAcrossChunkBoundaries() {
+        final int cap = 4097;
+        final var store = new ToolOutputStore(1, cap);
+        store.record(1, new ToolOutputStore.Entry("bash", "", "seed", false, -1));
+        var expected = "seed";
+        boolean truncated = false;
+        for (int i = 0; i < 300; i++) {
+            final var fragment = ("part-" + i + ":").repeat((i * 31) % 900) + (i % 2 == 0 ? "\r" : "");
+            expected += fragment.endsWith("\r") ? fragment : fragment + "\n";
+            if (expected.length() > cap) {
+                expected = expected.substring(expected.length() - cap);
+                truncated = true;
+            }
+            store.append(1, fragment);
+            final var output = expected + (truncated ? TRUNCATED : "");
+            assertEquals(output, store.get(1).output(), "fragment " + i);
+            assertEquals(output.length(), store.totalChars());
+        }
+    }
+
+    @Test
+    void exactCapOnlyTruncatesOnNextCharacter() {
+        final var store = new ToolOutputStore(1, 4);
+        store.record(1, new ToolOutputStore.Entry("bash", "", "", false, -1));
+        store.append(1, "abc");
+        assertEquals("abc\n", store.get(1).output());
+        assertEquals(4, store.totalChars());
+        store.append(1, "\r");
+        assertEquals("bc\n\r" + TRUNCATED, store.get(1).output());
+    }
+
+    @Test
+    void appendNormalizesLinesAndSnapshotsAreImmutableAndCached() {
+        final var store = new ToolOutputStore();
+        store.record(1, new ToolOutputStore.Entry("bash", "args", "", false, true, -1));
+        final var empty = store.get(1);
+        store.append(1, "first");
+        final var first = store.get(1);
+        assertSame(first, store.get(1));
+        store.append(1, "second\n");
+        store.append(1, "third\r");
+        store.append(1, "fourth\r\n");
+        store.append(1, "");
+        final var snapshot = store.get(1);
+        assertEquals("", empty.output());
+        assertEquals("first\n", first.output());
+        assertEquals("first\nsecond\nthird\rfourth\r\n\n", snapshot.output());
+        assertEquals(snapshot.output().length(), store.totalChars());
+        assertEquals("bash", snapshot.name());
+        assertEquals("args", snapshot.args());
+        assertTrue(snapshot.pending());
+        assertTrue(snapshot.running());
+        assertFalse(snapshot.failed());
+        assertSame(snapshot, store.get(1));
+    }
+
+    @Test
+    void appendIgnoresMissingFinishedAndNullFragments() {
+        final var store = new ToolOutputStore();
+        store.append(-1, "ignored");
+        store.append(1, "ignored");
+        assertEquals(0, store.size());
+        assertEquals(-1, store.maxOrdinalSeen());
+        store.record(1, new ToolOutputStore.Entry("bash", "", "exit code: 1", true, 42));
+        final var finished = store.get(1);
+        store.append(1, "ignored");
+        assertSame(finished, store.get(1));
+        assertTrue(finished.failed());
+        assertEquals(42, finished.elapsedMs());
+        store.record(2, new ToolOutputStore.Entry("bash", "", "", false, -1));
+        final var running = store.get(2);
+        store.append(2, null);
+        assertSame(running, store.get(2));
+    }
+
+    @Test
+    void manySmallAppendsKeepBoundedTailWithoutReadingSnapshots() {
+        final var store = new ToolOutputStore(2, 2050);
+        store.record(1, new ToolOutputStore.Entry("bash", "", "", false, -1));
+        for (int i = 0; i < 20_000; i++) {
+            store.append(1, "x");
+            assertTrue(store.totalChars() <= 2050 + TRUNCATED.length());
+        }
+        assertEquals("x\n".repeat(1025) + TRUNCATED, store.get(1).output());
+        store.append(1, "last");
+        assertEquals(
+                ("x\n".repeat(1025) + "last\n").substring(5) + TRUNCATED,
+                store.get(1).output());
+        assertEquals(2050 + TRUNCATED.length(), store.totalChars());
+    }
+
+    @Test
+    void oversizedFragmentsAndTinyCapsKeepNewestNormalizedTail() {
+        final var store = new ToolOutputStore(2, 7);
+        store.record(1, new ToolOutputStore.Entry("bash", "", "old", false, -1));
+        store.append(1, "x".repeat(100_000) + "abcdefg");
+        assertEquals("bcdefg\n" + TRUNCATED, store.get(1).output());
+        store.append(1, "123456\r");
+        assertEquals("123456\r" + TRUNCATED, store.get(1).output());
+        assertEquals(7 + TRUNCATED.length(), store.totalChars());
+
+        final var tiny = new ToolOutputStore(1, 1);
+        tiny.record(1, new ToolOutputStore.Entry("bash", "", "", false, -1));
+        tiny.append(1, "abc");
+        assertEquals("\n" + TRUNCATED, tiny.get(1).output());
+        tiny.append(1, "z\r");
+        assertEquals("\r" + TRUNCATED, tiny.get(1).output());
+    }
+
+    @Test
+    void appendPreservesFifoSlotAndEvictedOrdinalsDoNotReappear() {
+        final var store = new ToolOutputStore(2, 32);
+        store.record(4, new ToolOutputStore.Entry("bash", "", "", false, -1));
+        store.record(2, new ToolOutputStore.Entry("bash", "", "", false, -1));
+        for (int i = 0; i < 100; i++) {
+            store.append(4, "a");
+        }
+        assertEquals(2, store.size());
+        assertNotNull(store.get(2));
+        store.record(3, new ToolOutputStore.Entry("bash", "", "", false, -1));
+        assertNull(store.get(4));
+        store.append(4, "late");
+        assertNull(store.get(4));
+        assertNotNull(store.get(2));
+        assertEquals(4, store.maxOrdinalSeen());
+        assertEquals(0, store.totalChars());
+    }
+
+    @Test
+    void appendTotalBudgetEvictsOldestIncludingGrowingSelfAndMarker() {
+        final var store = new ToolOutputStore(8, 8, 12);
+        store.record(1, new ToolOutputStore.Entry("bash", "", "1234", false, -1));
+        store.record(2, new ToolOutputStore.Entry("bash", "", "5678", false, -1));
+        store.append(2, "abc");
+        assertEquals(12, store.totalChars());
+        store.append(1, "z");
+        assertNull(store.get(1));
+        assertEquals("5678abc\n", store.get(2).output());
+        assertEquals(8, store.totalChars());
+        // The marker participates in the total budget, even when it alone exceeds it.
+        store.append(2, "overflow");
+        assertNull(store.get(2));
+        assertEquals(0, store.totalChars());
+        assertEquals(0, store.size());
+    }
+
+    @Test
+    void recordReleasesMutableTailAndResetsTruncation() {
+        final var store = new ToolOutputStore(2, 8);
+        store.record(1, new ToolOutputStore.Entry("bash", "", "", false, -1));
+        store.append(1, "old output overflowing");
+        final var old = store.get(1);
+        store.record(1, new ToolOutputStore.Entry("bash", "new", "new", false, -1));
+        store.append(1, "line");
+        assertEquals("newline\n", store.get(1).output());
+        assertEquals(8, store.totalChars());
+        store.record(1, new ToolOutputStore.Entry("bash", "done", "result", true, true, 19));
+        store.append(1, "ignored");
+        final var done = store.get(1);
+        assertEquals("result", done.output());
+        assertTrue(done.failed());
+        assertTrue(done.pending());
+        assertEquals(19, done.elapsedMs());
+        assertEquals(6, store.totalChars());
+        assertEquals("flowing\n" + TRUNCATED, old.output());
+    }
+
+    @Test
+    void appendAfterOversizedRecordDoesNotAccumulateMarkers() {
+        final var store = new ToolOutputStore(1, 4);
+        store.record(1, new ToolOutputStore.Entry("bash", "", "0123456789", false, -1));
+        store.append(1, "a");
+        assertEquals("89a\n" + TRUNCATED, store.get(1).output());
+        assertEquals(4 + TRUNCATED.length(), store.totalChars());
+    }
+
+    @Test
+    void clearReleasesOutputsAndResetsFifoBudgetsAndOrdinals() {
+        final var store = new ToolOutputStore(1, 8, 40);
+        store.record(9, new ToolOutputStore.Entry("bash", "", "", false, -1));
+        store.append(9, "old output");
+        final var old = store.get(9);
+        store.clear();
+        store.clear();
+        assertNull(store.get(9));
+        assertEquals(0, store.size());
+        assertEquals(0, store.totalChars());
+        assertEquals(-1, store.latestOrdinal());
+        assertEquals(-1, store.maxOrdinalSeen());
+        store.append(9, "ignored");
+        store.record(1, new ToolOutputStore.Entry("bash", "", "", false, -1));
+        store.append(1, "fresh");
+        assertEquals("fresh\n", store.get(1).output());
+        assertEquals(6, store.totalChars());
+        assertEquals(1, store.latestOrdinal());
+        assertEquals(1, store.maxOrdinalSeen());
+        assertEquals(" output\n" + TRUNCATED, old.output());
+    }
+
     @Test
     void recordsAndRetrievesByOrdinal() {
         final var store = new ToolOutputStore();

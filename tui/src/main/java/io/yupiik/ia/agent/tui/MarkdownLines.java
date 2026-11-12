@@ -392,6 +392,19 @@ public final class MarkdownLines {
         return wrapCodeWithKinds(lines, width).lines();
     }
 
+    /** Wraps only the requested preview rows, without visiting the rest of a long logical line. */
+    public static List<Line> wrapCode(final List<Line> lines, final int width, final int limit) {
+        final var out = new ArrayList<Line>();
+        final var kinds = new ArrayList<SelectionState.RowKind>();
+        for (final var line : lines) {
+            if (out.size() >= limit) {
+                break;
+            }
+            appendCodeLine(line.spans(), Math.max(1, width), out, kinds, limit);
+        }
+        return List.copyOf(out);
+    }
+
     /**
      * Same as {@link #wrapCode(List, int)} but also returns the per-row copy kind: the first
      * row of a logical code line is {@link SelectionState.RowKind#HARD}, each wrap continuation
@@ -414,25 +427,38 @@ public final class MarkdownLines {
      */
     private static void appendCodeLine(
             final List<Span> spans, final int width, final List<Line> out, final List<SelectionState.RowKind> kinds) {
+        appendCodeLine(spans, width, out, kinds, Integer.MAX_VALUE);
+    }
+
+    private static void appendCodeLine(
+            final List<Span> spans,
+            final int width,
+            final List<Line> out,
+            final List<SelectionState.RowKind> kinds,
+            final int limit) {
         var cur = new ArrayList<Span>();
         var curWidth = 0;
         var first = true;
         for (final var span : spans) {
-            var text = span.content() == null ? "" : span.content();
-            while (!text.isEmpty()) {
+            final var text = span.content() == null ? "" : span.content();
+            var offset = 0;
+            while (offset < text.length()) {
                 final var room = width - curWidth;
                 if (room <= 0) {
                     out.add(Line.from(cur));
                     kinds.add(first ? SelectionState.RowKind.HARD : SelectionState.RowKind.CHAR_SPLIT);
+                    if (out.size() >= limit) {
+                        return;
+                    }
                     first = false;
                     cur = new ArrayList<>();
                     curWidth = 0;
                     continue;
                 }
-                final var take = Math.min(text.length(), room);
-                cur.add(Span.styled(text.substring(0, take), span.style()));
+                final var take = Math.min(text.length() - offset, room);
+                cur.add(Span.styled(text.substring(offset, offset + take), span.style()));
                 curWidth += take;
-                text = text.substring(take);
+                offset += take;
             }
         }
         out.add(Line.from(cur));

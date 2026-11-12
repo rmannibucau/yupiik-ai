@@ -254,6 +254,12 @@ public class TuiCommand implements Runnable {
     private static final int MAX_REGION_UNIT_SOURCE_CHARS = 512 * 1024;
     private final Map<RegionUnitKey, ContentPart> regionUnitCache = new LinkedHashMap<>(16, 0.75f, true);
     private long regionUnitCacheWeight;
+    private final ToolBodyCache toolBodyCache = new ToolBodyCache();
+    private TuiTranscriptModel renderOwner;
+    private String renderSessionId;
+    private ToolOverlayLayout toolOverlayLayout;
+
+    private record ToolOverlayLayout(ToolOutputStore.Entry entry, int width, Text text) {}
     // incremental live-thinking memo: the flushed part of the growing stream is
     // rendered once per stable prefix and the last (still open) line re-rendered
     private String lastLiveThoughtPrefix = "";
@@ -544,6 +550,7 @@ public class TuiCommand implements Runnable {
     }
 
     private void applyTheme(final String theme) {
+        clearRenderCaches();
         final var normalized = "light".equalsIgnoreCase(theme) ? "light" : "dark";
         this.theme = normalized;
         this.palette = Palette.from(normalized, tuiConfiguration);
@@ -895,6 +902,9 @@ public class TuiCommand implements Runnable {
      * block the quit. Does not wait for turns: the caller does.
      */
     private void disposeTab(final UiState state) {
+        clearRenderCaches();
+        state.toolOutputs.clear();
+        state.toolOverlay = null;
         final var runner = state.runner;
         if (runner != null) {
             shellRegistry.unregister(env(runner, state));
@@ -1513,32 +1523,9 @@ public class TuiCommand implements Runnable {
             // a running tool's output streams into the store so the running-tool overlay
             // (opened by clicking the live card) shows the live tail, not a blank body
             final var deque = state.pendingToolOrdinals.get(stream.name());
-            if (deque != null && !deque.isEmpty()) {
-                final var ordinal = deque.peekLast();
-                final var current = state.toolOutputs.get(ordinal);
-                if (current != null) {
-                    var output = current.output();
-                    final var cap = state.toolOutputs.maxOutputChars();
-                    if (output.length() < cap) {
-                        // BashTool streams line-by-line without the trailing \n (readLine strips it),
-                        // so put the EOL back or the live running-tool modal glues every line into a
-                        // single run until ToolFinished replaces the accumulation. The guard (mirroring
-                        // AnsiShellFrontend/ConversationTranscript) stays idempotent if a producer ever
-                        // emits a fragment that already carries its line ending.
-                        final var fragment = stream.fragment();
-                        output += (fragment.endsWith("\n") || fragment.endsWith("\r")) ? fragment : fragment + "\n";
-                        if (current.output().length() >= cap - 65536) {
-                            output = output.substring(output.length() - 65536) + "\n... older output truncated";
-                        }
-                    }
-                    state.toolOutputs.record(
-                            ordinal, new ToolOutputStore.Entry(current.name(), current.args(), output, false, -1L));
-                    // keep an open running-tool overlay live: swap the entry the modal renders
-                    final var overlay = state.toolOverlay;
-                    if (overlay != null && overlay.ordinal() == ordinal) {
-                        state.toolOverlay = overlay.withEntry(state.toolOutputs.get(ordinal));
-                    }
-                }
+            if (stream.ordinal() > 0 || (deque != null && !deque.isEmpty())) {
+                final var ordinal = stream.ordinal() > 0 ? stream.ordinal() : deque.peekLast();
+                state.toolOutputs.append(ordinal, stream.fragment());
             }
         } else if (event instanceof AgentEvent.ToolFinished finished) {
             // the transcript just stamped this call with ordinal #toolCallCount: keep the
@@ -2658,6 +2645,13 @@ public class TuiCommand implements Runnable {
             final var switched = !state.session.sessionId().equals(state.sessionId);
             state.sessionId = state.session.sessionId();
             if (switched) {
+                state.toolOutputs.clear();
+                state.toolOverlay = null;
+                state.pendingToolArgs.clear();
+                state.pendingToolOrdinals.clear();
+                state.collapsedTools.clear();
+                state.runCollapsed.clear();
+                clearRenderCaches();
                 // /resume (or any other session switch) replaced the session: the per-session
                 // world is keyed by session id so it has to be rebuilt
                 rebind(state);
@@ -2750,12 +2744,20 @@ public class TuiCommand implements Runnable {
 
             @Override
             public void clear() {
-                // conversation state lives in the transcript (already reset by the action)
+                runLater(state, () -> {
+                    clearRenderCaches();
+                    state.toolOutputs.clear();
+                    state.toolOverlay = null;
+                });
             }
 
             @Override
             public void onReplay(final String markdown) {
-                // replay already went through the shared transcript, which is the TUI model
+                runLater(state, () -> {
+                    clearRenderCaches();
+                    state.toolOutputs.clear();
+                    state.toolOverlay = null;
+                });
             }
         };
     }
@@ -3873,6 +3875,12 @@ public class TuiCommand implements Runnable {
     }
 
     private void render(final Frame frame, final UiState state) {
+        if (state.toolOverlay == null) {
+            if (toolOverlayLayout != null) {
+                toolBodyCache.clear();
+            }
+            toolOverlayLayout = null;
+        }
         state.lastRenderTick = clock.millis();
         state.dirty = false;
         frameZones.clear();
@@ -4415,6 +4423,11 @@ public class TuiCommand implements Runnable {
     }
 
     private void renderTranscript(final Rect rect, final Frame frame, final UiState state) {
+        if (renderOwner != state.model || !Objects.equals(renderSessionId, state.sessionId)) {
+            clearRenderCaches();
+            renderOwner = state.model;
+            renderSessionId = state.sessionId;
+        }
         final var block = conversationBlock();
         frame.renderWidget(block, rect);
         final var inner = block.inner(rect);
@@ -4679,6 +4692,29 @@ public class TuiCommand implements Runnable {
         static final ContentPart EMPTY = new ContentPart(List.of(), List.of(), null);
     }
 
+    private void clearRenderCaches() {
+        contentLock.lock();
+        try {
+            lastContentKey = null;
+            lastContent = null;
+        } finally {
+            contentLock.unlock();
+        }
+        regionUnitCache.clear();
+        regionUnitCacheWeight = 0;
+        toolBodyCache.clear();
+        toolOverlayLayout = null;
+        transcriptRenderer.clear();
+        syntaxHighlighter.clearCaches();
+        if (toolOutputFormat != null) {
+            toolOutputFormat.clearCaches();
+        }
+        lastLiveThoughtPrefix = "";
+        lastLiveThoughtLines = null;
+        renderOwner = null;
+        renderSessionId = null;
+    }
+
     /**
      * Cache key of one rendered region: it must cover every input the render depends on.
      * Kind plus source text identify the region content; {@code width} changes the wrap;
@@ -4877,6 +4913,11 @@ public class TuiCommand implements Runnable {
             pendingRuns.clear();
         };
         final var regions = TuiTranscriptModel.regions(md);
+        final var toolSources = new HashSet<String>();
+        if (state.toolOverlay != null) {
+            final var overlayEntry = state.toolOverlay.entry();
+            toolSources.add(stripLeadingCommandEcho(overlayEntry.output(), commandArgOf(overlayEntry.args())));
+        }
         // Keep only sources present in this frame: streaming revisions and trimmed or
         // switched-away history must not accumulate in the cache.
         final var sources = new HashSet<String>();
@@ -4898,6 +4939,12 @@ public class TuiCommand implements Runnable {
                 appendPart(local, localRows, part);
             } else if (region.tool()) {
                 final var parsed = ToolCard.parse(region.text());
+                toolSources.add(parsed.output());
+                if (parsed.running()) {
+                    final var full = state.toolOutputs.get(parsed.ordinal());
+                    toolSources.add(stripLeadingCommandEcho(
+                            parsed.output(), full == null ? parsed.name() : commandArgOf(full.args())));
+                }
                 final var card = parsed.withCapturedStatus(state.toolOutputs.get(parsed.ordinal()));
                 if (!card.running() && !pendingRuns.isEmpty()) {
                     pendingRuns.get(pendingRuns.size() - 1).add(new ToolRun.Member(card, region.text()));
@@ -4915,6 +4962,7 @@ public class TuiCommand implements Runnable {
             }
         }
         flushRuns.run();
+        toolBodyCache.retainSources(toolSources);
         final var result = new ContentResult(
                 List.copyOf(local),
                 List.copyOf(localRows),
@@ -4922,10 +4970,16 @@ public class TuiCommand implements Runnable {
                 List.copyOf(localFooterLinks),
                 List.copyOf(localRunHeaders),
                 state.lastCodeBlock);
+        long contentWeight = 2L * md.length() + 256L * local.size();
+        for (final var row : localRows) {
+            contentWeight += 256L + 64L * row.length();
+        }
         contentLock.lock();
         try {
-            lastContentKey = key;
-            lastContent = result;
+            final var retain =
+                    md.length() <= MAX_REGION_UNIT_SOURCE_CHARS && contentWeight <= MAX_REGION_UNIT_CACHE_WEIGHT;
+            lastContentKey = retain ? key : null;
+            lastContent = retain ? result : null;
         } finally {
             contentLock.unlock();
         }
@@ -5194,6 +5248,12 @@ public class TuiCommand implements Runnable {
         }
         final var prefix = live.substring(0, cut);
         final var suffix = live.substring(cut);
+        if (prefix.length() > 64 * 1024) {
+            // Render oversized sources but never pin their source/layout in a second memo.
+            lastLiveThoughtPrefix = "";
+            lastLiveThoughtLines = null;
+            return thoughtLines(live, width);
+        }
         if (lastLiveThoughtLines == null
                 || !prefix.equals(lastLiveThoughtPrefix)
                 || width != lastLiveThoughtWidth
@@ -5498,7 +5558,13 @@ public class TuiCommand implements Runnable {
         lines.add(Line.from(headerSpans.toArray(Span[]::new)));
         if (!card.output().isBlank()) {
             final var outputLines = toolBodyLines(
-                    card.name(), card.keyCommand(), null, card.output(), innerW, card.isDiff(diffRenderer));
+                    card.name(),
+                    card.keyCommand(),
+                    null,
+                    card.output(),
+                    innerW,
+                    card.isDiff(diffRenderer),
+                    MAX_INLINE_TOOL_LINES + 1);
             lines.addAll(new ArrayList<>(outputLines.subList(0, Math.min(outputLines.size(), MAX_INLINE_TOOL_LINES))));
         }
         return lines;
@@ -5660,8 +5726,14 @@ public class TuiCommand implements Runnable {
                 body = stripLeadingCommandEcho(body, rawCommand);
             }
             // ask_user answers read better as key: value pairs than raw JSON
-            var outputLines =
-                    toolBodyLines(card.name(), card.keyCommand(), null, body, innerW, card.isDiff(diffRenderer));
+            var outputLines = toolBodyLines(
+                    card.name(),
+                    card.keyCommand(),
+                    null,
+                    body,
+                    innerW,
+                    card.isDiff(diffRenderer),
+                    MAX_INLINE_TOOL_LINES + 1);
             // keep the card compact: a short inline preview, the rest lives behind
             // the "click to expand" footer / Ctrl+O overlay
             final var clipped = outputLines.size() > MAX_INLINE_TOOL_LINES;
@@ -7302,10 +7374,36 @@ public class TuiCommand implements Runnable {
             final String output,
             final int width,
             final boolean isDiff) {
+        return toolBodyLines(name, command, args, output, width, isDiff, Integer.MAX_VALUE);
+    }
+
+    private List<Line> toolBodyLines(
+            final String name,
+            final String command,
+            final String args,
+            final String output,
+            final int width,
+            final boolean isDiff,
+            final int limit) {
+        final var key = new ToolBodyCache.Key(name, command, args, output, width, isDiff, limit);
+        return new ArrayList<>(toolBodyCache.get(key, () -> {
+            final var lines = uncachedToolBodyLines(name, command, args, output, width, isDiff, limit);
+            return lines.size() > limit ? lines.subList(0, limit) : lines;
+        }));
+    }
+
+    private List<Line> uncachedToolBodyLines(
+            final String name,
+            final String command,
+            final String args,
+            final String output,
+            final int width,
+            final boolean isDiff,
+            final int limit) {
         if (output == null || output.isBlank()) {
             return new ArrayList<>();
         }
-        final var body = renderToolBody(name, command, output, width, isDiff);
+        final var body = renderToolBody(name, command, output, width, isDiff, limit);
         if (args == null || args.isBlank()) {
             return new ArrayList<>(body);
         }
@@ -7323,14 +7421,19 @@ public class TuiCommand implements Runnable {
     }
 
     private List<Line> renderToolBody(
-            final String name, final String command, final String output, final int width, final boolean isDiff) {
+            final String name,
+            final String command,
+            final String output,
+            final int width,
+            final boolean isDiff,
+            final int limit) {
         final var answers = "ask_user".equals(name) ? askUserCardRenderer.render(output, palette) : null;
         if (answers != null) {
             return answers;
         }
         try {
             if (!formatToolOutput) {
-                return legacyBody(output, width, isDiff);
+                return isDiff ? legacyBody(output, width, true) : plainToolPreview(output, width, limit);
             }
             // read/read_symbol print files with a "%6d\t" line-number prefix: the file to
             // highlight is the path the tool read (card/overlay command) or, for read_symbol,
@@ -7338,21 +7441,63 @@ public class TuiCommand implements Runnable {
             // numbered renderer keeps the numbers as a muted gutter and colors the content.
             final var readLanguage = readOutputLanguage(name, command, output);
             if (readLanguage != null) {
-                return toolNumberedCodeLines(output, width, readLanguage);
+                return toolNumberedCodeLines(
+                        previewSource(output, Integer.MAX_VALUE, limit), width, readLanguage, limit);
             }
             final var language = ToolOutputLanguage.guess(output, command);
             return switch (toolOutputFormat.detect(output, language)) {
                 case DIFF -> diffRenderer.render(output, width, palette);
                 case JSON -> syntaxHighlighter.highlightLines("json", toolOutputFormat.prettyJson(output));
                 case XML -> syntaxHighlighter.highlightLines("xml", toolOutputFormat.prettyXml(output));
-                case CODE -> toolCodeLines(output, width, language);
-                case YAML -> syntaxHighlighter.highlightLines("yaml", output);
+                case CODE ->
+                    MarkdownLines.wrapCode(
+                            syntaxHighlighter.highlightLines(language, previewSource(output, Integer.MAX_VALUE, limit)),
+                            Math.max(1, width),
+                            limit);
+                case YAML -> syntaxHighlighter.highlightLines("yaml", previewSource(output, Integer.MAX_VALUE, limit));
                 case MARKDOWN -> transcriptRenderer.renderRegion(output, width, toolStyle, markdownStyles);
-                case TEXT -> toolOutputLines(output, width, false);
+                case TEXT -> plainToolPreview(output, width, limit);
             };
         } catch (final RuntimeException e) {
-            return legacyBody(output, width, isDiff);
+            return isDiff ? legacyBody(output, width, true) : plainToolPreview(output, width, limit);
         }
+    }
+
+    private List<Line> plainToolPreview(final String output, final int width, final int limit) {
+        if (limit == Integer.MAX_VALUE) {
+            return toolOutputLines(output, width, false);
+        }
+        final var source = previewSource(output, width, limit);
+        final var lines = new ArrayList<Line>();
+        final var parts = source.split("\n", source.length() < output.length() ? -1 : 0);
+        for (final var line : parts) {
+            lines.add(Line.from(Span.styled(line, toolStyle)));
+        }
+        return MarkdownLines.wrapCode(lines, Math.max(1, width), limit);
+    }
+
+    /** Bounds work before plain/code wrapping; structured document formats keep their full parse. */
+    private static String previewSource(final String output, final int width, final int limit) {
+        if (limit == Integer.MAX_VALUE) {
+            return output;
+        }
+        var from = 0;
+        var rows = 0L;
+        final var columns = Math.max(1, width);
+        while (from < output.length()) {
+            final var newline = output.indexOf('\n', from);
+            final var end = newline < 0 ? output.length() : newline;
+            final var available = (long) (limit - rows) * columns;
+            if (end - from >= available) {
+                return output.substring(0, from + (int) available);
+            }
+            rows += Math.max(1L, ((long) end - from + columns - 1) / columns);
+            if (rows >= limit || newline < 0) {
+                return output.substring(0, end);
+            }
+            from = end + 1;
+        }
+        return output;
     }
 
     /**
@@ -7375,23 +7520,14 @@ public class TuiCommand implements Runnable {
     }
 
     /**
-     * Syntax colored output, one source line per row: the highlighter tokenizes per line
-     * and {@link MarkdownLines#wrapCode(List, int)} only hard-wraps what does not fit, so a
-     * wrong language guess costs colors, never the layout (which is exactly what the
-     * markdown/table detection used to cost).
-     */
-    private List<Line> toolCodeLines(final String output, final int width, final String language) {
-        return MarkdownLines.wrapCode(syntaxHighlighter.highlightLines(language, output), Math.max(1, width));
-    }
-
-    /**
      * Renders the numbered body of {@code read}/{@code read_symbol}: each {@code "%6d\t"} prefix
      * becomes a muted gutter span (so the number survives syntax coloring) and the content is
      * tokenized in {@code language}. Header/trailer lines without a number (the "symbol ..."
      * header, "Read directory ...", "{@code ... more lines below}" markers) stay plain, exactly
      * like {@link #toolOutputLines(String, int, boolean)} would render them.
      */
-    private List<Line> toolNumberedCodeLines(final String output, final int width, final String language) {
+    private List<Line> toolNumberedCodeLines(
+            final String output, final int width, final String language, final int limit) {
         final var gutter = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var lines = new ArrayList<Line>();
         for (final var raw : output.split("\n", -1)) {
@@ -7411,7 +7547,7 @@ public class TuiCommand implements Runnable {
             }
             lines.add(Line.from(spans.toArray(Span[]::new)));
         }
-        return MarkdownLines.wrapCode(lines, Math.max(1, width));
+        return MarkdownLines.wrapCode(lines, Math.max(1, width), limit);
     }
 
     private List<Line> legacyBody(final String output, final int width, final boolean isDiff) {
@@ -7499,6 +7635,10 @@ public class TuiCommand implements Runnable {
     }
 
     private void renderToolOverlay(final Frame frame, final UiState state) {
+        final var latestEntry = state.toolOutputs.get(state.toolOverlay.ordinal());
+        if (latestEntry != null && latestEntry != state.toolOverlay.entry()) {
+            state.toolOverlay = state.toolOverlay.withEntry(latestEntry);
+        }
         final var entry = state.toolOverlay.entry();
         final var width = Math.min(Math.max(70, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(14, frame.height() * 4 / 5), frame.height());
@@ -7523,28 +7663,10 @@ public class TuiCommand implements Runnable {
         if (inner == null) {
             return;
         }
-        final var command = toolCommandOf(entry);
-        // BashTool echoes the invoked command as its first stream line ("$ <command>"),
-        // which lands in the running-tool output store; the modal leads with its own
-        // bold "$ <command>" header, so drop the redundant echo from the body or the
-        // command would read twice at the top (header + echoed first output line).
-        final var output = stripLeadingCommandEcho(entry.output(), commandArgOf(entry.args()));
-        final var body = toolBodyLines(entry.name(), command, entry.args(), output, inner.width(), false);
-        // the full command always leads the modal: it is the first thing the user sees
-        // (and stays reachable at the top), so a long invocation is never hidden behind
-        // the ellipsized raw-args footer or buried in the output preview
-        if (command != null && !command.isBlank()) {
-            body.addAll(0, toolCommandHeader(command, inner.width()));
-        }
-        if (running) {
-            // a running tool streams into the overlay: keep the live output visible
-            // and mark the call as still executing (Esc cancels it)
-            body.add(Line.from(Span.styled("pending… (executing)", Style.EMPTY.fg(Color.hex(palette.textMuted())))));
-        }
         final var splits = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(1))
                 .split(inner);
-        final var text = Text.from(body.toArray(Line[]::new));
+        final var text = toolOverlayText(entry, inner.width());
         final var maxScroll =
                 Math.max(0, text.height() - Math.max(1, splits.getFirst().height()));
         final var overlay = state.toolOverlay;
@@ -7574,6 +7696,36 @@ public class TuiCommand implements Runnable {
                         .overflow(Overflow.CLIP)
                         .build(),
                 footerRect);
+    }
+
+    private Text toolOverlayText(final ToolOutputStore.Entry entry, final int width) {
+        if (toolOverlayLayout != null && toolOverlayLayout.entry() == entry && toolOverlayLayout.width() == width) {
+            return toolOverlayLayout.text();
+        }
+        final var command = toolCommandOf(entry);
+        // Bash echoes its command too; the modal already leads with the complete command header.
+        final var output = stripLeadingCommandEcho(entry.output(), commandArgOf(entry.args()));
+        final var body = toolBodyLines(entry.name(), command, entry.args(), output, width, false);
+        if (command != null && !command.isBlank()) {
+            body.addAll(0, toolCommandHeader(command, width));
+        }
+        if (entry.running()) {
+            body.add(Line.from(Span.styled("pending… (executing)", Style.EMPTY.fg(Color.hex(palette.textMuted())))));
+        }
+        final var text = Text.from(body.toArray(Line[]::new));
+        // The single overlay slot has the same source/layout budget as the body cache.
+        long weight = 2L
+                * (entry.output().length()
+                        + (entry.args() == null ? 0L : entry.args().length()));
+        for (final var line : body) {
+            weight += 64;
+            for (final var span : line.spans()) {
+                weight +=
+                        96L + 2L * (span.content() == null ? 0 : span.content().length());
+            }
+        }
+        toolOverlayLayout = weight <= 4L * 1024 * 1024 ? new ToolOverlayLayout(entry, width, text) : null;
+        return text;
     }
 
     /**

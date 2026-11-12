@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import dev.tamboui.style.Color;
+import dev.tamboui.text.Line;
 import dev.tamboui.tui.TuiConfig;
 import dev.tamboui.tui.TuiRunner;
 import dev.tamboui.tui.event.Event;
@@ -565,6 +566,104 @@ class TuiCommandRenderTest {
         assertTrue(text.contains("done with the turn"), text);
         assertTrue(text.contains("git status"), text);
         quit();
+    }
+
+    @Test
+    void toolPreviewMatchesFullBodyAndOverlayReusesLayout() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var body = TuiCommand.class.getDeclaredMethod(
+                "toolBodyLines",
+                String.class,
+                String.class,
+                String.class,
+                String.class,
+                int.class,
+                boolean.class,
+                int.class);
+        body.setAccessible(true);
+        for (final var fixture : List.of(
+                List.of("bash", "unknown-program", "a\n\n\n\nb"),
+                List.of("bash", "unknown-program", "0123456789".repeat(100) + "\nline two\nline three\nlast"),
+                List.of("read", "Example.java", "     1\tpublic class Example {\n     2\t  int n = 42;\n     3\t}"),
+                List.of("bash", "python", "print('a fairly long text with words')\n# comment\nprint('end')"),
+                List.of("bash", "unknown-program", "{\"a\": [1, 2, 3], \"b\": true}"),
+                List.of("bash", "unknown-program", "# Heading\n\n```java\nint n = 1;\n```"))) {
+            final var full = (List<Line>) body.invoke(
+                    command, fixture.get(0), fixture.get(1), null, fixture.get(2), 15, false, Integer.MAX_VALUE);
+            final var preview = (List<Line>)
+                    body.invoke(command, fixture.get(0), fixture.get(1), null, fixture.get(2), 15, false, 4);
+            assertEquals(full.subList(0, Math.min(4, full.size())), preview, fixture.get(1));
+        }
+        final var overlay =
+                TuiCommand.class.getDeclaredMethod("toolOverlayText", ToolOutputStore.Entry.class, int.class);
+        overlay.setAccessible(true);
+        final var entry = new ToolOutputStore.Entry("bash", "{\"command\":\"echo hello\"}", "hello", false, 1);
+        final var first = overlay.invoke(command, entry, 60);
+        Assertions.assertSame(first, overlay.invoke(command, entry, 60));
+        Assertions.assertNotSame(first, overlay.invoke(command, entry, 30));
+        final var clear = TuiCommand.class.getDeclaredMethod("clearRenderCaches");
+        clear.setAccessible(true);
+        clear.invoke(command);
+        Assertions.assertNotSame(first, overlay.invoke(command, entry, 60));
+    }
+
+    @Test
+    void toolLayoutsDropObsoleteRevisionsAndSessionSwitchClearsCaptures() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var chunks = TuiCommand.class.getDeclaredMethod(
+                "contentChunks",
+                List.class,
+                String.class,
+                int.class,
+                UiState.class,
+                List.class,
+                List.class,
+                List.class,
+                List.class);
+        chunks.setAccessible(true);
+        final var cache = TuiCommand.class.getDeclaredField("toolBodyCache");
+        cache.setAccessible(true);
+        final var entries = ToolBodyCache.class.getDeclaredField("entries");
+        entries.setAccessible(true);
+        for (var revision = 0; revision < 3; revision++) {
+            final var output = "revision " + revision;
+            final var markdown = ConversationTranscript.TOOL_BEGIN + "\n`bash (#1)`\n\n```text\n" + output + "\n```\n"
+                    + ConversationTranscript.TOOL_END;
+            chunks.invoke(
+                    command,
+                    new ArrayList<>(),
+                    markdown,
+                    60,
+                    state,
+                    new ArrayList<>(),
+                    new ArrayList<>(),
+                    new ArrayList<>(),
+                    new ArrayList<>());
+            final var retained = (Map<ToolBodyCache.Key, ?>) entries.get(cache.get(command));
+            assertTrue(retained.keySet().stream().allMatch(key -> key.output().contains(output)));
+        }
+        chunks.invoke(
+                command,
+                new ArrayList<>(),
+                "trimmed",
+                60,
+                state,
+                new ArrayList<>(),
+                new ArrayList<>(),
+                new ArrayList<>(),
+                new ArrayList<>());
+        assertTrue(((Map<?, ?>) entries.get(cache.get(command))).isEmpty());
+        state.sessionId = "previous";
+        state.session.sessionId("new-session");
+        final var capture = new ToolOutputStore.Entry("bash", "{}", "old session", false, 1);
+        state.toolOutputs.record(1, capture);
+        state.toolOverlay = new UiState.ToolOverlay(1, capture, 0);
+        final var sync = TuiCommand.class.getDeclaredMethod("syncSession", UiState.class);
+        sync.setAccessible(true);
+        sync.invoke(command, state);
+        assertEquals(0, state.toolOutputs.size());
+        Assertions.assertNull(state.toolOverlay);
     }
 
     @Test
