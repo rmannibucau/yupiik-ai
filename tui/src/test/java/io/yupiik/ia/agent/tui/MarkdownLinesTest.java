@@ -115,8 +115,39 @@ class MarkdownLinesTest {
     @Test
     void blockquotePrefixedOnEveryLine() {
         assertEquals(
-                List.of("│quoted", "│second"),
+                List.of("│ quoted", "│ second"),
                 plain(renderer.render("> quoted\n> second", 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
+    @Test
+    void quoteKeepsRailAcrossBlocksAndNestedContent() {
+        final var result = renderer.renderWithKinds(
+                "> first\n>\n> - item\n>\n>     code", 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        assertEquals(List.of("│ first", "│ ", "│ • item", "│   code"), plain(result.lines()));
+        assertEquals(result.lines().size(), result.kinds().size());
+    }
+
+    @Test
+    void calloutsHaveLabelsAndUnknownMarkersRemainLiteral() {
+        assertEquals(
+                List.of("│ WARNING", "│ body"),
+                plain(renderer.render("> [!WARNING]\n> body", 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+        assertEquals(
+                List.of("│ [!OTHER]", "│ body"),
+                plain(renderer.render("> [!OTHER]\n> body", 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
+    @Test
+    void quotedCodeAndTableKeepRailsAndRowKinds() {
+        final var result = renderer.renderWithKinds(
+                "> [!TIP]\n> code follows\n>\n> ```\n> alpha\n> beta\n> ```\n>\n> | a | b |\n> | - | - |\n> | c | d |",
+                40,
+                Style.EMPTY,
+                MarkdownStyles.DEFAULTS);
+        assertTrue(plain(result.lines()).stream().allMatch(line -> line.startsWith("│ ")));
+        assertTrue(plain(result.lines()).stream().anyMatch(line -> line.contains("alpha")));
+        assertTrue(plain(result.lines()).stream().anyMatch(line -> line.contains("c")));
+        assertEquals(result.lines().size(), result.kinds().size());
     }
 
     @Test

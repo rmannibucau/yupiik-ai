@@ -17,6 +17,8 @@ package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import dev.tamboui.style.Color;
+import dev.tamboui.style.Style;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -40,14 +42,14 @@ class PaletteTest {
     @Test
     void monoPaletteUsesResetColors() {
         final var palette = palette();
-        assertEquals(dev.tamboui.style.Color.RESET, palette.color("#123456"));
-        assertEquals(dev.tamboui.style.Style.EMPTY, palette.style("#123456"));
+        assertEquals(Color.RESET, palette.color("#123456"));
+        assertEquals(Style.EMPTY, palette.style("#123456"));
     }
 
     @Test
     void colorPaletteResolvesHex() {
         final var palette = darkPalette();
-        assertEquals(dev.tamboui.style.Color.hex("#9d7cd8"), palette.color("#9d7cd8"));
+        assertEquals(Color.hex("#9d7cd8"), palette.color("#9d7cd8"));
     }
 
     @Test
@@ -116,9 +118,9 @@ class PaletteTest {
         static void main(final String[] args) {
             final var palette = Palette.from("light", config(new String[12]));
             System.out.println(Palette.noColorRequested() + ":" + palette.mono() + ":"
-                    + palette.color(palette.accent()).equals(dev.tamboui.style.Color.RESET) + ":"
-                    + palette.bold(palette.accent()).equals(dev.tamboui.style.Style.EMPTY) + ":"
-                    + palette.blended(palette.accent(), 0.5).equals(dev.tamboui.style.Style.EMPTY));
+                    + palette.color(palette.accent()).equals(Color.RESET) + ":"
+                    + palette.bold(palette.accent()).equals(Style.EMPTY) + ":"
+                    + palette.blended(palette.accent(), 0.5).equals(Style.EMPTY));
         }
     }
 
@@ -157,6 +159,7 @@ class PaletteTest {
                 "",
                 0.8,
                 colors[11],
+                null,
                 null);
     }
 }

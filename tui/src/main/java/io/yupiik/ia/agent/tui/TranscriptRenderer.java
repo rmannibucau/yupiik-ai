@@ -71,6 +71,13 @@ final class TranscriptRenderer {
     private volatile Style lastBase;
     private volatile MarkdownStyles lastStyles;
 
+    void theme(final Palette palette, final TuiConfiguration.MarkdownColors colors, final boolean ascii) {
+        markdownLines.theme(palette, colors, ascii);
+        prefixCache.clear();
+        lastPrefix = null;
+        lastPrefixLines = null;
+    }
+
     /** A rendered line list plus the per-row copy kind of each line (same size). */
     record Rendered(List<Line> lines, List<SelectionState.RowKind> kinds) {
         private static final Rendered EMPTY = new Rendered(List.of(), List.of());
@@ -232,7 +239,9 @@ final class TranscriptRenderer {
                 // identical stable prefix as the previous frame: reuse verbatim
                 return lastPrefixLines;
             }
-            if (lastPrefix != null && prefix.startsWith(lastPrefix)) {
+            if (lastPrefix != null
+                    && prefix.startsWith(lastPrefix)
+                    && !prefix.substring(lastPrefix.length()).stripLeading().startsWith(">")) {
                 // append-only streaming: only the delta (the lines added since the
                 // previous frame) is markdown-parsed; the rest was already rendered.
                 final var delta = prefix.substring(lastPrefix.length());
@@ -327,10 +336,16 @@ final class TranscriptRenderer {
             i = j - 1;
         }
         var inFence = false;
+        var inQuote = false;
         var safe = 0;
         var start = 0;
         for (var i = 0; i < lines.length; i++) {
             final var trimmed = lines[i].strip();
+            if (trimmed.startsWith(">")) {
+                inQuote = true;
+            } else if (trimmed.isEmpty()) {
+                inQuote = false;
+            }
             if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
                 inFence = !inFence;
             }
@@ -338,7 +353,7 @@ final class TranscriptRenderer {
             if (nl < 0) {
                 break;
             }
-            if (!inFence && !tableLine[i]) {
+            if (!inFence && !inQuote && !tableLine[i]) {
                 safe = nl + 1;
             }
             start = nl + 1;

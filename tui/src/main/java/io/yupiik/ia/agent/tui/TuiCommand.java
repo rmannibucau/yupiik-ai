@@ -547,6 +547,7 @@ public class TuiCommand implements Runnable {
         final var normalized = "light".equalsIgnoreCase(theme) ? "light" : "dark";
         this.theme = normalized;
         this.palette = Palette.from(normalized, tuiConfiguration);
+        this.transcriptRenderer.theme(this.palette, tuiConfiguration.markdown(), glyphs.ascii());
         this.codeTheme = CodeTheme.parse(tuiConfiguration.codeTheme(), "light".equals(normalized));
         this.syntaxHighlighter.theme(codeTheme);
         // opacity is the transparency level toward the panel background (0 opaque,
@@ -1479,6 +1480,11 @@ public class TuiCommand implements Runnable {
             }
             if (event instanceof AgentEvent.Notice compactionNotice) {
                 handleCompactionNotice(state, compactionNotice);
+                if (compactionNotice.compaction() == AgentEvent.Notice.CompactionLifecycle.NONE) {
+                    notify(state, compactionNotice.message());
+                } else if (compactionNotice.compaction() == AgentEvent.Notice.CompactionLifecycle.START) {
+                    state.lastNotification = compactionNotice.message();
+                }
             }
             state.model.onEvent(event);
         }
@@ -1654,6 +1660,9 @@ public class TuiCommand implements Runnable {
 
     private boolean onKey(final Event event, final TuiRunner runner, final UiState state) {
         if (event instanceof final PasteEvent paste) {
+            if (state.notificationDetail != null) {
+                return true;
+            }
             // normalize CRLF/CR so multiline pastes render and submit cleanly
             final var text = paste.text().replace("\r\n", "\n").replace("\r", "\n");
             if (state.feedbackPrompt != null) {
@@ -1704,6 +1713,9 @@ public class TuiCommand implements Runnable {
         }
         if (state.errorDetail != null && state.errorOpen) {
             return onErrorKey(event, runner, state);
+        }
+        if (state.notificationDetail != null) {
+            return onNotificationKey(event, runner, state);
         }
         if (state.editPlan != null) {
             if (event instanceof final MouseEvent editMouse) {
@@ -2020,6 +2032,11 @@ public class TuiCommand implements Runnable {
             state.errorScroll = 0;
             return true;
         }
+        if (key.hasAlt() && key.isCharIgnoreCase('i') && state.lastNotification != null) {
+            state.notificationDetail = state.lastNotification;
+            state.notificationScroll = 0;
+            return true;
+        }
         if (key.hasAlt() && key.isCharIgnoreCase('x') && state.errorDetail != null) {
             clearError(state);
             return true;
@@ -2315,15 +2332,20 @@ public class TuiCommand implements Runnable {
         final var via = Clipboard.copy(text, null);
         final var payload = SelectionState.osc52Payload(text);
         final var copied = text.length();
+        final var notificationCopy = state.notificationDetail != null;
         runLater(state, () -> {
             try {
                 runner.backend().writeRaw(payload);
                 final var channel = via == null ? " (OSC 52)" : " via " + via;
                 state.pushToast("copied " + copied + " characters" + channel, ToastLevel.SUCCESS);
-                notify(state, "copied " + copied + " characters" + channel);
+                if (!notificationCopy) {
+                    notify(state, "copied " + copied + " characters" + channel);
+                }
             } catch (final IOException e) {
                 state.pushToast("clipboard copy failed: " + e.getMessage(), ToastLevel.ERROR);
-                notify(state, "clipboard copy failed: " + e.getMessage());
+                if (!notificationCopy) {
+                    notify(state, "clipboard copy failed: " + e.getMessage());
+                }
             }
         });
     }
@@ -3418,6 +3440,8 @@ public class TuiCommand implements Runnable {
             // single line search bar: nothing to scroll
         } else if (state.errorDetail != null && state.errorOpen) {
             state.errorScroll = scrollService.apply(state.errorScroll, delta);
+        } else if (state.notificationDetail != null) {
+            state.notificationScroll = scrollService.apply(state.notificationScroll, delta);
         } else if (state.editPlan != null) {
             // two buttons, no scrollable body
         } else if (state.feedbackPrompt != null) {
@@ -3993,6 +4017,9 @@ public class TuiCommand implements Runnable {
         }
         if (state.errorDetail != null && state.errorOpen) {
             renderErrorDetail(frame, state);
+        }
+        if (state.notificationDetail != null) {
+            renderNotificationDetail(frame, state);
         }
         // /btw is hidden while an approval is pending: the approval must stay on top and keep
         // its sole focus, and the overlay state survives so it reappears once resolved.
@@ -5538,11 +5565,8 @@ public class TuiCommand implements Runnable {
         final var secs = state.thinkingStartedAtMillis < 0
                 ? 0
                 : Math.max(0, (clock.millis() - state.thinkingStartedAtMillis) / 1000);
-        final var line = Line.from(
-                thoughtBar(),
-                Span.styled(
-                        spinnerPrefix(state, SpinnerStyle.SQUARE_CORNERS) + BusyLabels.thinking(secs),
-                        thoughtBarStyle));
+        final var line =
+                Line.from(thoughtBar(), Span.styled(spinnerPrefix(state) + BusyLabels.thinking(secs), thoughtBarStyle));
         addThoughtChunk(out, List.of(line), rows);
     }
 
@@ -6242,9 +6266,8 @@ public class TuiCommand implements Runnable {
                                 || state.model.runningToolCommand().isBlank()
                         ? state.model.runningTool()
                         : state.model.runningToolCommand();
-                final var line = Line.from(Span.styled(
-                        spinnerPrefix(state, SpinnerStyle.SQUARE_CORNERS) + BusyLabels.calling(ellipsize(name, 60)),
-                        accent));
+                final var line =
+                        Line.from(Span.styled(spinnerPrefix(state) + BusyLabels.calling(ellipsize(name, 60)), accent));
                 frame.renderWidget(
                         Paragraph.builder()
                                 .text(Text.from(line))
@@ -6256,7 +6279,7 @@ public class TuiCommand implements Runnable {
                 final var line = busy == null
                         ? Line.from(Span.styled(BusyLabels.working(), muted))
                         : Line.from(Span.styled(
-                                spinnerPrefix(state, busy.getKey()) + busy.getValue(),
+                                spinnerPrefix(state) + busy.getValue(),
                                 state.model.thinkingLength() > 0 ? palette.blended(palette.info(), 0.35) : muted));
                 frame.renderWidget(
                         Paragraph.builder()
@@ -6367,7 +6390,7 @@ public class TuiCommand implements Runnable {
                         || (!state.compactionActive
                                 && System.currentTimeMillis() - state.notificationShownAt > NOTIFICATION_TTL_MS)
                 ? 0
-                : ("  ⓘ " + state.notification).length();
+                : CharWidth.of("  ⓘ " + state.notification);
         final var totalW = new int[] {parts.stream().mapToInt(Span::width).sum()};
         // flexible informational messages (code graph refreshes, clipboard feedback, queue
         // notices, provider retries...) get priority over the trailing per-turn metrics when
@@ -7613,14 +7636,18 @@ public class TuiCommand implements Runnable {
             return;
         }
         final var lines = new ArrayList<Line>();
-        lines.add(Line.from(Span.styled(
-                ellipsize(detail.message(), inner.width()),
-                Style.EMPTY.fg(Color.hex(palette.error())).bold())));
+        for (final var row : detail.message().split("\n", -1)) {
+            lines.addAll(MarkdownLines.wrapCode(
+                    List.of(Line.from(Span.styled(
+                            row, Style.EMPTY.fg(Color.hex(palette.error())).bold()))),
+                    Math.max(1, inner.width())));
+        }
         lines.add(Line.empty());
         if (detail.stack() != null && !detail.stack().isBlank()) {
             for (final var l : detail.stack().split("\n")) {
-                lines.add(Line.from(
-                        Span.styled(ellipsize(l, inner.width()), Style.EMPTY.fg(Color.hex(palette.textMuted())))));
+                lines.addAll(MarkdownLines.wrapCode(
+                        List.of(Line.from(Span.styled(l, Style.EMPTY.fg(Color.hex(palette.textMuted()))))),
+                        Math.max(1, inner.width())));
             }
         } else {
             lines.add(Line.from(Span.styled("(no stack trace)", Style.EMPTY.fg(Color.hex(palette.textMuted())))));
@@ -7646,6 +7673,71 @@ public class TuiCommand implements Runnable {
                         .text(Text.from(Line.from(Span.styled(
                                 " Esc close | Wheel/Up/Down scroll | c copy | drag or Ctrl+Shift+C copies the selection ",
                                 Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
+                        .overflow(Overflow.CLIP)
+                        .build(),
+                splits.get(1));
+    }
+
+    /** Key handling for the retained informational notification. */
+    private boolean onNotificationKey(final Event event, final TuiRunner runner, final UiState state) {
+        if (event instanceof PasteEvent) {
+            return true;
+        }
+        if (event instanceof final MouseEvent mouse) {
+            return onModalMouse(mouse, runner, state);
+        }
+        if (!(event instanceof final KeyEvent key)) {
+            return false;
+        }
+        if (key.isCancel()
+                || key.isKey(KeyCode.ESCAPE)
+                || key.isCharIgnoreCase('q')
+                || (key.hasAlt() && key.isCharIgnoreCase('i'))) {
+            state.notificationDetail = null;
+        } else if (key.hasCtrl() && key.hasShift() && key.isCharIgnoreCase('c')) {
+            copySelection(runner, state);
+        } else if (key.isCharIgnoreCase('c')) {
+            copyText(runner, state, state.notificationDetail);
+        } else {
+            state.notificationScroll = scrollService.apply(state.notificationScroll, scrollService.keyDelta(key));
+        }
+        return true;
+    }
+
+    private void renderNotificationDetail(final Frame frame, final UiState state) {
+        final var width = Math.min(Math.max(70, frame.width() * 4 / 5), frame.width());
+        final var height = Math.min(Math.max(12, frame.height() * 3 / 5), frame.height());
+        final var inner =
+                modal(frame, Modal.rect(frame, width, height, 0.15), " notification ", palette.color(palette.info()));
+        if (inner == null) {
+            return;
+        }
+        final var lines = new ArrayList<Line>();
+        for (final var row : state.notificationDetail.split("\n", -1)) {
+            lines.addAll(MarkdownLines.wrapCode(
+                    List.of(Line.from(Span.styled(row, palette.style(palette.text())))), Math.max(1, inner.width())));
+        }
+        final var splits = Layout.vertical()
+                .constraints(Constraint.fill(), Constraint.length(1))
+                .split(inner);
+        state.notificationScroll = Math.clamp(
+                state.notificationScroll,
+                0,
+                Math.max(0, lines.size() - Math.max(1, splits.getFirst().height())));
+        if (!splits.getFirst().isEmpty()) {
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(Text.from(lines))
+                            .overflow(Overflow.CLIP)
+                            .scroll(state.notificationScroll)
+                            .build(),
+                    splits.getFirst());
+        }
+        frame.renderWidget(
+                Paragraph.builder()
+                        .text(Text.from(Line.from(Span.styled(
+                                " Esc close | Wheel/Up/Down scroll | c copy | Ctrl+Shift+C copy selection ",
+                                palette.style(palette.textMuted())))))
                         .overflow(Overflow.CLIP)
                         .build(),
                 splits.get(1));
@@ -7748,7 +7840,9 @@ public class TuiCommand implements Runnable {
         state.pendingPrompts.addAll(items);
         notify(state, "removed queued prompt (" + items.size() + " still pending)");
         if (!removed.isBlank()) {
-            state.pushToast("removed: " + TuiInputSupport.firstLine(removed), ToastLevel.INFO);
+            final var message = "removed: " + TuiInputSupport.firstLine(removed);
+            state.pushToast(message, ToastLevel.INFO);
+            state.lastNotification = "removed queued prompt (" + items.size() + " still pending)\nremoved: " + removed;
         }
     }
 
@@ -7789,18 +7883,24 @@ public class TuiCommand implements Runnable {
                     case WARNING -> palette.warning();
                     case INFO -> palette.info();
                 };
-        final var accent = Style.EMPTY.fg(Color.hex(color));
-        final var width = Math.clamp(toast.message().length() + 4, 16, Math.max(16, frame.width()));
-        final var rect = new Rect(Math.max(0, (frame.width() - width) / 2), Math.max(0, frame.height() - 6), width, 3);
-        final var inner = modal(frame, rect, " notice ", Color.hex(color));
+        final var accent = palette.style(color);
+        final var width = Math.min(frame.width(), Math.max(16, Math.min(72, CharWidth.of(toast.message()) + 4)));
+        final var rows = new ArrayList<Line>();
+        for (final var row : toast.message().split("\n", -1)) {
+            rows.addAll(MarkdownLines.wrapCode(List.of(Line.from(Span.styled(row, accent))), Math.max(1, width - 2)));
+        }
+        final var height = Math.min(frame.height(), Math.max(3, rows.size() + 2));
+        final var rect = new Rect(
+                Math.max(0, (frame.width() - width) / 2), Math.max(0, frame.height() - height - 3), width, height);
+        final var inner =
+                modal(frame, rect, " " + toast.level().name().toLowerCase(Locale.ROOT) + " ", palette.color(color));
         if (inner == null) {
             return;
         }
-        final var line = Line.from(Span.styled(toast.message(), accent));
         frame.renderWidget(
                 Paragraph.builder()
-                        .text(Text.from(line))
-                        .overflow(Overflow.CLIP)
+                        .text(Text.from(rows))
+                        .overflow(Overflow.ELLIPSIS)
                         .build(),
                 inner);
     }
@@ -7835,8 +7935,8 @@ public class TuiCommand implements Runnable {
     }
 
     /** Leading busy glyph + separating space for the given phase, from the shared spinner. */
-    private String spinnerPrefix(final UiState state, final SpinnerStyle style) {
-        final var spinner = spinnerOf(style);
+    private String spinnerPrefix(final UiState state) {
+        final var spinner = spinnerOf(SpinnerStyle.SQUARE_CORNERS);
         final var maxWidth = spinner.maxFrameWidth();
         final var frame = spinner.frameSet().frame((int) state.spinnerState.tick());
         // reserve the widest frame's columns so the label never shifts as frames cycle
@@ -7928,6 +8028,9 @@ public class TuiCommand implements Runnable {
     private static void notify(final UiState state, final String message) {
         state.notification = message;
         state.notificationShownAt = System.currentTimeMillis();
+        if (message != null && !message.isBlank()) {
+            state.lastNotification = message;
+        }
     }
 
     /**

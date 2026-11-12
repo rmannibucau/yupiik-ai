@@ -72,7 +72,8 @@ public final class KeymapCatalog {
                 new Binding("Ctrl+S", "compact context", "Session", false),
                 new Binding("Ctrl+L", "clear conversation", "Session", false),
                 new Binding("Ctrl+X", "remove queued prompt", "Session", false),
-                new Binding("Ctrl+E", "show last error", "Session", false),
+                new Binding("Alt+E", "show last error", "Session", false),
+                new Binding("Alt+I", "show last notification", "Session", false),
                 new Binding("Ctrl+C", "interrupt / quit", "Session", true),
                 new Binding("Alt+X", "dismiss error banner", "Overlays", false),
                 // overlays

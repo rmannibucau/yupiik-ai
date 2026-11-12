@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import dev.tamboui.tui.event.KeyCode;
 import dev.tamboui.tui.event.KeyEvent;
+import dev.tamboui.tui.event.MouseButton;
 import dev.tamboui.tui.event.MouseEvent;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -35,7 +36,7 @@ class ScrollServiceTest {
     @Test
     void nonScrollMouseEventsHaveNoDelta() {
         final var service = new ScrollService(null);
-        assertEquals(0, service.wheelDelta(MouseEvent.press(dev.tamboui.tui.event.MouseButton.LEFT, 1, 2)));
+        assertEquals(0, service.wheelDelta(MouseEvent.press(MouseButton.LEFT, 1, 2)));
         assertEquals(0, service.wheelDelta(null));
     }
 
@@ -124,6 +125,7 @@ class ScrollServiceTest {
                 "",
                 0.8,
                 "#ff5555",
-                new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0));
+                new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0),
+                null);
     }
 }

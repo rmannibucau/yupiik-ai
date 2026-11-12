@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Color;
 import dev.tamboui.style.Modifier;
 import dev.tamboui.style.Style;
@@ -148,10 +149,39 @@ class MarkdownThemeTest {
         assertTrue(bold.style().effectiveModifiers().contains(Modifier.BOLD), "bold must stay bold");
     }
 
+    @Test
+    void quoteAndCalloutColorsFollowPaletteAndAllowOverrides() {
+        final var renderer = new MarkdownLines();
+        final var palette = Palette.from("light", config(), false);
+        renderer.theme(
+                palette, new TuiConfiguration.MarkdownColors("#123456", "auto", null, null, "#abcdef", null), true);
+        final var lines = renderer.render(
+                "> quote\n\n> [!WARNING]\n> body\n\n> [!NOTE]\n> info",
+                80,
+                Style.EMPTY,
+                MarkdownTheme.of(palette, oneLight, null, null));
+        assertEquals("| ", lines.get(0).spans().get(0).content());
+        assertEquals(
+                Color.hex("#123456"), lines.get(0).spans().get(0).style().fg().orElseThrow());
+        assertEquals(
+                Color.hex("#abcdef"), lines.get(2).spans().get(0).style().fg().orElseThrow());
+        assertEquals(
+                Color.hex(palette.info()),
+                lines.get(5).spans().get(0).style().fg().orElseThrow());
+        renderer.theme(Palette.from("dark", config(), true), null, true);
+        assertTrue(
+                renderer
+                        .render("> [!WARNING]\n> body", 80, Style.EMPTY, MarkdownStyles.DEFAULTS)
+                        .getFirst()
+                        .spans()
+                        .stream()
+                        .allMatch(s -> s.style().fg().isEmpty()));
+    }
+
     private static TuiConfiguration config() {
         return new TuiConfiguration(
                 null, "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0,
                 0.22, 0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, true, "unicode",
-                "auto", "auto", List.of(), null, null, true, 3, 10, "", 0.8, "#ff5555", null);
+                "auto", "auto", List.of(), null, null, true, 3, 10, "", 0.8, "#ff5555", null, null);
     }
 }

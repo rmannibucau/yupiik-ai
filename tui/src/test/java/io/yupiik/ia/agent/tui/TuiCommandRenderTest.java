@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 import dev.tamboui.style.Color;
 import dev.tamboui.tui.TuiConfig;
 import dev.tamboui.tui.TuiRunner;
+import dev.tamboui.tui.event.Event;
 import dev.tamboui.tui.event.KeyCode;
 import dev.tamboui.tui.event.KeyEvent;
 import dev.tamboui.tui.event.KeyModifiers;
@@ -54,9 +55,11 @@ import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -67,12 +70,14 @@ import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.ConfigCommands;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
+import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -96,6 +101,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.logging.Level;
@@ -103,6 +109,7 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -138,7 +145,7 @@ class TuiCommandRenderTest {
 
     private MockLlmServer llm;
     private MockLlmServer llm2;
-    private java.util.function.Function<String, AgentLoop> sessionAgentLoopFactory;
+    private Function<String, AgentLoop> sessionAgentLoopFactory;
     private HeadlessBackend backend;
     private final AtomicReference<TuiRunner> tuiRef = new AtomicReference<>();
     private Thread uiThread;
@@ -223,7 +230,7 @@ class TuiCommandRenderTest {
         // plain Enter still submits, and the newline survived in the single prompt
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("done:2");
-        org.junit.jupiter.api.Assertions.assertEquals("line one\nline two", received.get());
+        Assertions.assertEquals("line one\nline two", received.get());
 
         quit();
     }
@@ -294,7 +301,7 @@ class TuiCommandRenderTest {
 
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("done:2");
-        org.junit.jupiter.api.Assertions.assertEquals("a\nb", received.get());
+        Assertions.assertEquals("a\nb", received.get());
 
         quit();
     }
@@ -602,8 +609,7 @@ class TuiCommandRenderTest {
         render.setAccessible(true);
         final var cacheField = TuiCommand.class.getDeclaredField("regionUnitCache");
         cacheField.setAccessible(true);
-        final var stable = io.yupiik.ia.agent.core.shell.ConversationTranscript.THOUGHT_BEGIN + "stable thought"
-                + io.yupiik.ia.agent.core.shell.ConversationTranscript.THOUGHT_END;
+        final var stable = ConversationTranscript.THOUGHT_BEGIN + "stable thought" + ConversationTranscript.THOUGHT_END;
         Object previous = null;
         for (var i = 0; i < 20; i++) {
             final var chunks = new ArrayList<>();
@@ -620,7 +626,7 @@ class TuiCommandRenderTest {
                     rows);
             assertTrue(rows.toString().contains("stable thought"));
             if (previous != null) {
-                org.junit.jupiter.api.Assertions.assertSame(previous, chunks.getFirst());
+                Assertions.assertSame(previous, chunks.getFirst());
             }
             previous = chunks.getFirst();
             assertTrue(((Map<?, ?>) cacheField.get(command)).size() <= 2, "old streaming revisions retained");
@@ -660,7 +666,7 @@ class TuiCommandRenderTest {
                 new ArrayList<>(),
                 new ArrayList<>(),
                 new ArrayList<>());
-        org.junit.jupiter.api.Assertions.assertNull(state.lastCodeBlock);
+        Assertions.assertNull(state.lastCodeBlock);
         assertEquals(1, ((Map<?, ?>) cacheField.get(command)).size(), "reset must release old regions");
     }
 
@@ -687,9 +693,9 @@ class TuiCommandRenderTest {
         key.setAccessible(true);
         final var cache = TuiCommand.class.getDeclaredField("regionUnitCache");
         cache.setAccessible(true);
-        final var thought = io.yupiik.ia.agent.core.shell.ConversationTranscript.THOUGHT_BEGIN
+        final var thought = ConversationTranscript.THOUGHT_BEGIN
                 + "thought with **bold** and `code`\n\n```java\nint n = 1;\n```"
-                + io.yupiik.ia.agent.core.shell.ConversationTranscript.THOUGHT_END;
+                + ConversationTranscript.THOUGHT_END;
         for (final var tail : List.of(
                 "paragraph",
                 "paragraph\n\nnext",
@@ -731,7 +737,7 @@ class TuiCommandRenderTest {
                     final var actual = accessor.invoke(chunks.get(i));
                     final var expected = accessor.invoke(coldChunks.get(i));
                     if (actual instanceof Object[] array) {
-                        org.junit.jupiter.api.Assertions.assertArrayEquals((Object[]) expected, array);
+                        Assertions.assertArrayEquals((Object[]) expected, array);
                     } else {
                         assertEquals(expected, actual, tail + ": " + field);
                     }
@@ -1223,7 +1229,7 @@ class TuiCommandRenderTest {
         final var fiveHours = 5 * 3600L;
         // a deadline far in the future so the reset caption ("Resets in 100d 0h") is stable across the
         // test's retries (formatQuotaReset reads the real clock).
-        final var resetAt = java.time.Instant.now().getEpochSecond() + 8_640_000L;
+        final var resetAt = Instant.now().getEpochSecond() + 8_640_000L;
         final var window = new AgentEvent.UsageUpdated.Quota.Window("PRIMARY", "primary", 90.0, fiveHours, resetAt);
         frontend.onEvent(new AgentEvent.UsageUpdated(
                 new Usage(0, 0, 0),
@@ -1437,6 +1443,93 @@ class TuiCommandRenderTest {
         awaitTextGone("TAIL");
         awaitText("ready"); // agent state still first and untouched
 
+        quit();
+    }
+
+    @Test
+    void notificationModalDoesNotPasteIntoPrompt() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        state.input.setText("existing draft");
+        state.notificationDetail = "notification details";
+        final var onKey = TuiCommand.class.getDeclaredMethod("onKey", Event.class, TuiRunner.class, UiState.class);
+        onKey.setAccessible(true);
+
+        assertEquals(true, onKey.invoke(command, new PasteEvent("unexpected text"), null, state));
+        assertEquals("existing draft", state.input.text());
+        assertEquals("notification details", state.notificationDetail);
+    }
+
+    @Test
+    void removedQueuedPromptRetainsAllLinesInNotification() throws Exception {
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        state.pendingPrompts.add("remaining prompt");
+        state.pendingPrompts.add("first line\nsecond line\nlast line");
+        final var removeQueued = TuiCommand.class.getDeclaredMethod("removeQueued", UiState.class, int.class);
+        removeQueued.setAccessible(true);
+
+        removeQueued.invoke(null, state, 1);
+
+        assertEquals(List.of("remaining prompt"), List.copyOf(state.pendingPrompts));
+        assertEquals("removed queued prompt (1 still pending)", state.notification);
+        assertEquals(
+                "removed queued prompt (1 still pending)\nremoved: first line\nsecond line\nlast line",
+                state.lastNotification);
+    }
+
+    @Test
+    void notificationModalRetainsAndScrollsFullMessage() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-notification-detail-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        frontend.onEvent(
+                new AgentEvent.Status("NOTICEHEAD\n" + "line of detail\n".repeat(30) + "NOTICETAIL", sessionId));
+        awaitText("NOTICEHEAD");
+        Thread.sleep(5_100); // status-strip TTL, followed by a repaint on opening the modal
+        tuiRef.get().dispatch(KeyEvent.ofChar('i', KeyModifiers.ALT));
+        awaitText("notification");
+        awaitText("NOTICEHEAD");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.PAGE_DOWN));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.PAGE_DOWN));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.PAGE_DOWN));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.PAGE_DOWN));
+        awaitText("NOTICETAIL");
+        frontend.onEvent(new AgentEvent.Status("NEWNOTICE", sessionId));
+        awaitText("NOTICETAIL"); // open modal keeps its original snapshot
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        tuiRef.get().dispatch(KeyEvent.ofChar('i', KeyModifiers.ALT));
+        awaitText("NEWNOTICE");
+        quit();
+    }
+
+    @Test
+    void infoNoticeAndLongErrorAreFullyReadable() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-notice-detail-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+        frontend.onEvent(new AgentEvent.Notice(
+                AgentEvent.Notice.Level.INFO, "INFOHEAD " + "x".repeat(180) + " INFOTAIL", sessionId));
+        tuiRef.get().dispatch(KeyEvent.ofChar('i', KeyModifiers.ALT));
+        awaitText("INFOTAIL");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        frontend.onEvent(new AgentEvent.Notice(
+                AgentEvent.Notice.Level.ERROR, "ERRORHEAD " + "x".repeat(180) + " ERRORTAIL", sessionId));
+        awaitText("ERRORHEAD");
+        tuiRef.get().dispatch(KeyEvent.ofChar('e', KeyModifiers.ALT));
+        awaitText("ERRORTAIL");
         quit();
     }
 
@@ -2749,14 +2842,13 @@ class TuiCommandRenderTest {
         final var tuiConfiguration = new TuiConfiguration(
                 null, "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0,
                 0.22, 0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, true, "unicode",
-                "auto", "auto", List.of(), null, null, true, 3, 10, "", 0.8, "#ff5555", null);
+                "auto", "auto", List.of(), null, null, true, 3, 10, "", 0.8, "#ff5555", null, null);
         final var httpClient = new HttpClientProducer().httpClient(configuration);
         httpClients.add(httpClient);
         final var chatClient =
                 new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), clock, httpClient);
         chatClients.add(chatClient);
-        final var mcpManager = new McpManager(
-                configuration, mapper, List.of(), httpClient, new io.yupiik.maven.knowledge.process.ProcessService());
+        final var mcpManager = new McpManager(configuration, mapper, List.of(), httpClient, new ProcessService());
         final var factory = new TuiRunnerFactory() {
             @Override
             public TuiRunner create(final TuiCommand.TuiConf tuiConf, final boolean hideCursor) throws Exception {
@@ -2821,7 +2913,7 @@ class TuiCommandRenderTest {
                                 new UserFeedbackService(),
                                 usageTracker,
                                 todoStore,
-                                new io.yupiik.ia.agent.core.runtime.StatusReporter(),
+                                new StatusReporter(),
                                 null,
                                 null);
                     }
@@ -2829,7 +2921,7 @@ class TuiCommandRenderTest {
                 sessionStore,
                 new SessionLifecycle(sessionStore),
                 chatClient,
-                new io.yupiik.ia.agent.core.style.ModelStyleService(configuration, chatClient),
+                new ModelStyleService(configuration, chatClient),
                 new SpeakerLabels(List.of(new FormatDatePromptHelper(clock)), configuration, chatClient),
                 new AutoLogConfigurer(configuration),
                 mcpManager,
@@ -4121,7 +4213,7 @@ class TuiCommandRenderTest {
 
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("lines:2"); // submitted as a single prompt
-        org.junit.jupiter.api.Assertions.assertEquals("line one\nline two", received.get());
+        Assertions.assertEquals("line one\nline two", received.get());
 
         quit();
     }
@@ -4307,9 +4399,9 @@ class TuiCommandRenderTest {
 
         // with a single tab the strip still renders: the "+" affordance lets the
         // user open a second session and each tab exposes its close marker
-        org.junit.jupiter.api.Assertions.assertTrue(
+        Assertions.assertTrue(
                 backend.text().contains(" +"), "single tab must show the add button, got:\n" + backend.text());
-        org.junit.jupiter.api.Assertions.assertTrue(
+        Assertions.assertTrue(
                 backend.text().contains(Glyphs.of("unicode").cross() + " "),
                 "tab must show the close marker, got:\n" + backend.text());
 
@@ -4353,7 +4445,7 @@ class TuiCommandRenderTest {
         // visual-column computation, so it never followed the caret
         final var promptStart = columnOfLineContaining("hello");
         final var atEnd = awaitCursorCell();
-        org.junit.jupiter.api.Assertions.assertTrue(
+        Assertions.assertTrue(
                 atEnd[0] > promptStart,
                 "cursor must sit past the start column after typing; start=" + promptStart + " cursor=" + atEnd[0]);
 
@@ -4362,9 +4454,8 @@ class TuiCommandRenderTest {
         // mid-reflow frame (prompt re-wrapping a row while an async refresh delays the next
         // render) cannot satisfy the wait at a stale row
         final var atHome = awaitCursorAt(promptStart, atEnd[1]);
-        org.junit.jupiter.api.Assertions.assertEquals(
-                promptStart, atHome[0], "HOME must move the cursor to the first character of the line");
-        org.junit.jupiter.api.Assertions.assertEquals(atEnd[1], atHome[1], "HOME must not change the cursor row");
+        Assertions.assertEquals(promptStart, atHome[0], "HOME must move the cursor to the first character of the line");
+        Assertions.assertEquals(atEnd[1], atHome[1], "HOME must not change the cursor row");
 
         quit();
     }
@@ -4392,7 +4483,7 @@ class TuiCommandRenderTest {
             tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.RIGHT));
         }
         final var moved = awaitCursorAt(promptStart + 5);
-        org.junit.jupiter.api.Assertions.assertTrue(
+        Assertions.assertTrue(
                 moved[0] > promptStart,
                 "cursor must sit inside the wrapped fragment, not pinned to its start; start=" + promptStart
                         + " cursor=" + moved[0]);
@@ -4421,8 +4512,7 @@ class TuiCommandRenderTest {
 
         tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, promptStart + 2, row));
         final var clicked = awaitCursorAt(promptStart + 2);
-        org.junit.jupiter.api.Assertions.assertEquals(
-                row, clicked[1], "clicking the prompt must not change the prompt row");
+        Assertions.assertEquals(row, clicked[1], "clicking the prompt must not change the prompt row");
 
         // the caret really moved: a typed char lands at the click position
         tuiRef.get().dispatch(KeyEvent.ofChar('X'));
@@ -4453,10 +4543,8 @@ class TuiCommandRenderTest {
         // makes that caret visible on the wrapped row instead of off-screen
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.END));
         final var endCell = awaitCursorCell();
-        org.junit.jupiter.api.Assertions.assertEquals(
-                wrappedRow, endCell[1], "END must put the caret on the wrapped fragment row");
-        org.junit.jupiter.api.Assertions.assertTrue(
-                endCell[0] > promptStart, "END must put the caret inside the wrapped fragment");
+        Assertions.assertEquals(wrappedRow, endCell[1], "END must put the caret on the wrapped fragment row");
+        Assertions.assertTrue(endCell[0] > promptStart, "END must put the caret inside the wrapped fragment");
 
         // UP moves to the previous visual fragment row, preserving the display
         // column clamped to the fragment end (GUI-editor behavior)
@@ -4468,8 +4556,7 @@ class TuiCommandRenderTest {
                     "no frame received while waiting for the caret to move to the previous fragment row");
             upCell = backend.lastReversed();
         }
-        org.junit.jupiter.api.Assertions.assertTrue(
-                upCell[0] > promptStart, "UP must keep the caret inside the previous fragment");
+        Assertions.assertTrue(upCell[0] > promptStart, "UP must keep the caret inside the previous fragment");
 
         // the caret is really at the fragment boundary: a typed char lands there
         tuiRef.get().dispatch(KeyEvent.ofChar('X'));
@@ -4498,7 +4585,7 @@ class TuiCommandRenderTest {
 
         tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, promptStart + 1, row));
         final var firstCell = awaitCursorAt(promptStart + 1);
-        org.junit.jupiter.api.Assertions.assertEquals(row, firstCell[1], "click must stay on the prompt row");
+        Assertions.assertEquals(row, firstCell[1], "click must stay on the prompt row");
 
         // a typed char lands before the wide char -> proves the caret sits at its start
         tuiRef.get().dispatch(KeyEvent.ofChar('X'));
@@ -4775,7 +4862,7 @@ class TuiCommandRenderTest {
         subagentRegistry.setTranscriptIdentity(sub.id(), "provider-x", "gpt-5.5");
         final var summary = "## Findings\n- item one\n\n```java\nvar x = 1;\n```\n";
         subagentRegistry.complete(
-                sub.id(), SubagentRegistry.SubagentResult.success(summary, "full conv", java.util.List.of("a.java")));
+                sub.id(), SubagentRegistry.SubagentResult.success(summary, "full conv", List.of("a.java")));
         shellRegistry.onEvent(
                 new AgentEvent.SubagentCompleted(summary, true, false, sessionId, sub.id(), "child", "gpt-5.5"));
 
@@ -5551,7 +5638,7 @@ class TuiCommandRenderTest {
         final var second = rowOf(after);
         assertTrue(
                 second > first, "'" + after + "' must come after '" + before + "' (" + first + " then " + second + ")");
-        org.junit.jupiter.api.Assertions.assertEquals(
+        Assertions.assertEquals(
                 first + 2,
                 second,
                 () -> "expected one blank row between '" + before + "' and '" + after + "', screen was:\n"

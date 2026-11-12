@@ -75,6 +75,9 @@ import org.commonmark.parser.Parser;
  */
 public final class MarkdownLines {
     private final Parser parser;
+    private Palette palette;
+    private TuiConfiguration.MarkdownColors colors;
+    private boolean ascii;
     /** Stateless renderer; held as a shared instance (the render chain below is static). */
     private static final TableRenderer TABLE_RENDERER = new TableRenderer();
 
@@ -83,6 +86,12 @@ public final class MarkdownLines {
                 .extensions(List.of(
                         StrikethroughExtension.create(), TablesExtension.create(), TaskListItemsExtension.create()))
                 .build();
+    }
+
+    void theme(final Palette palette, final TuiConfiguration.MarkdownColors colors, final boolean ascii) {
+        this.palette = palette;
+        this.colors = colors;
+        this.ascii = ascii;
     }
 
     /**
@@ -116,7 +125,7 @@ public final class MarkdownLines {
                 styles.codeBlock() == null ? base : styles.codeBlock().patch(base);
         for (final var segment : splitSegments(escapeCodeLike(markdown))) {
             if (segment.block()) {
-                emitLiteral(segment.text(), codeStyle, width, out, kinds);
+                emitLiteral(segment.text(), codeStyle, Prefix.NONE, width, out, kinds);
             } else {
                 final var root = parser.parse(segment.text());
                 renderNode(root, Prefix.NONE, base, styles, width, false, out, kinds);
@@ -196,6 +205,7 @@ public final class MarkdownLines {
 
     private static final Pattern FENCE_RUN = Pattern.compile("(`{3,}|~{3,})");
     private static final Pattern FENCE_CLOSE = Pattern.compile("^(`+|~+)\\s*$");
+    private static final Pattern CALLOUT = Pattern.compile("\\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)]");
     private static final Pattern CODE_LIKE_LINE = Pattern.compile(
             "(?:SELECT\\b|INSERT\\b|UPDATE\\b|DELETE\\s+FROM\\b|CREATE\\b|ALTER\\b|DROP\\b|WITH\\b\\s+\\w+\\s+AS\\b|FROM\\s+\\w+|COUNT\\s*\\(|"
                     + "<<['\"]|\\{\\s*\"command\"|\\bpython3?\\b|\\bcat\\s+>)");
@@ -429,7 +439,7 @@ public final class MarkdownLines {
         kinds.add(first ? SelectionState.RowKind.HARD : SelectionState.RowKind.CHAR_SPLIT);
     }
 
-    private static void renderNode(
+    private void renderNode(
             final Node node,
             final Prefix prefix,
             final Style base,
@@ -448,6 +458,7 @@ public final class MarkdownLines {
             emitLiteral(
                     codeLiteral(c.getLiteral()),
                     styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
+                    prefix,
                     width,
                     out,
                     kinds);
@@ -455,6 +466,7 @@ public final class MarkdownLines {
             emitLiteral(
                     codeLiteral(c.getLiteral()),
                     styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
+                    prefix,
                     width,
                     out,
                     kinds);
@@ -465,14 +477,29 @@ public final class MarkdownLines {
             emitLiteral(
                     literal == null || literal.isBlank() ? inlineText(h) : literal,
                     styles.html() == null ? base : styles.html().patch(base),
+                    prefix,
                     width,
                     out,
                     kinds);
         } else if (node instanceof BlockQuote q) {
-            final var markerStyle = styles.blockquote() == null ? Style.EMPTY : styles.blockquote();
-            final var marker = Span.styled(styles.blockquotePrefix(), markerStyle.patch(base));
+            final var callout = callout(q);
+            final var markerStyle = quoteStyle(callout, styles);
+            final var marker = Span.styled((ascii ? "|" : "│") + " ", markerStyle);
             final var nested =
                     Prefix.with(concat(prefix.first(), List.of(marker)), concat(prefix.cont(), List.of(marker)));
+            if (callout != null) {
+                final var paragraph = (Paragraph) q.getFirstChild();
+                final var text = (Text) paragraph.getFirstChild();
+                text.unlink();
+                final var next = paragraph.getFirstChild();
+                if (next instanceof SoftLineBreak || next instanceof HardLineBreak) {
+                    next.unlink();
+                }
+                appendWrapped(List.of(Span.styled(callout, markerStyle.bold())), false, width, nested, out, kinds);
+                if (paragraph.getFirstChild() == null) {
+                    paragraph.unlink();
+                }
+            }
             renderChildren(q, nested, base, styles, width, breakWords, out, kinds);
         } else if (node instanceof BulletList l) {
             for (final var child : children(l)) {
@@ -515,6 +542,50 @@ public final class MarkdownLines {
         return Span.styled("• ", listMarkerStyle(styles, base));
     }
 
+    private static String callout(final BlockQuote quote) {
+        if (!(quote.getFirstChild() instanceof Paragraph paragraph)
+                || !(paragraph.getFirstChild() instanceof Text text)) {
+            return null;
+        }
+        final var literal = text.getLiteral();
+        if (!CALLOUT.matcher(literal).matches()
+                || (text.getNext() != null
+                        && !(text.getNext() instanceof SoftLineBreak)
+                        && !(text.getNext() instanceof HardLineBreak))) {
+            return null;
+        }
+        return literal.substring(2, literal.length() - 1);
+    }
+
+    private Style quoteStyle(final String callout, final MarkdownStyles styles) {
+        if (palette == null) {
+            return styles.blockquote() == null ? Style.EMPTY : styles.blockquote();
+        }
+        final var fallback =
+                switch (callout == null ? "" : callout) {
+                    case "NOTE" -> palette.info();
+                    case "TIP" -> palette.success();
+                    case "IMPORTANT" -> palette.primary();
+                    case "WARNING" -> palette.warning();
+                    case "CAUTION" -> palette.error();
+                    default -> palette.textMuted();
+                };
+        final var configured = colors == null
+                ? null
+                : switch (callout == null ? "" : callout) {
+                    case "NOTE" -> colors.note();
+                    case "TIP" -> colors.tip();
+                    case "IMPORTANT" -> colors.important();
+                    case "WARNING" -> colors.warning();
+                    case "CAUTION" -> colors.caution();
+                    default -> colors.quote();
+                };
+        return palette.style(
+                configured == null || configured.isBlank() || "auto".equalsIgnoreCase(configured.strip())
+                        ? fallback
+                        : configured.strip());
+    }
+
     private static Style listMarkerStyle(final MarkdownStyles styles, final Style base) {
         return styles.listMarker() == null ? base : styles.listMarker().patch(base);
     }
@@ -532,7 +603,7 @@ public final class MarkdownLines {
         return null;
     }
 
-    private static void renderChildren(
+    private void renderChildren(
             final Node node,
             final Prefix prefix,
             final Style base,
@@ -546,7 +617,7 @@ public final class MarkdownLines {
             // blank source lines between block siblings must survive: markdown
             // only separates blocks with blank lines, so render one too
             if (renderedAny && !out.isEmpty() && !isBlankLine(out.get(out.size() - 1))) {
-                out.add(Line.empty());
+                out.add(Line.from(prefix.cont()));
                 kinds.add(SelectionState.RowKind.HARD);
             }
             renderNode(child, prefix, base, styles, width, breakWords, out, kinds);
@@ -563,7 +634,7 @@ public final class MarkdownLines {
         return true;
     }
 
-    private static void renderListItem(
+    private void renderListItem(
             final ListItem li,
             final Prefix prefix,
             final Span marker,
@@ -678,6 +749,7 @@ public final class MarkdownLines {
     private static void emitLiteral(
             final String literal,
             final Style style,
+            final Prefix prefix,
             final int width,
             final List<Line> out,
             final List<SelectionState.RowKind> kinds) {
@@ -685,8 +757,15 @@ public final class MarkdownLines {
             return;
         }
         for (final var row : literal.split("\n", -1)) {
+            final var wrapped = new ArrayList<Line>();
             appendCodeLine(
-                    row.isEmpty() ? List.of() : List.of(Span.styled(row, style)), Math.max(1, width), out, kinds);
+                    row.isEmpty() ? List.of() : List.of(Span.styled(row, style)),
+                    Math.max(1, width - widthOf(prefix.cont())),
+                    wrapped,
+                    kinds);
+            for (final var line : wrapped) {
+                out.add(Line.from(concat(prefix.cont(), line.spans())));
+            }
         }
     }
 
@@ -746,10 +825,11 @@ public final class MarkdownLines {
                 }
             }
         }
+        final var start = out.size();
         out.addAll(TABLE_RENDERER.render(headCells, bodyRows, width, prefix.first(), prefix.cont(), base));
         if (kinds != null) {
             // table rows are never soft continuations of each other
-            for (var i = 0; i < out.size(); i++) {
+            for (var i = start; i < out.size(); i++) {
                 kinds.add(SelectionState.RowKind.HARD);
             }
         }
@@ -1020,13 +1100,12 @@ public final class MarkdownLines {
         if (chars.isEmpty()) {
             return;
         }
-        final var firstChunk = Math.max(1, width - widthOf(prefix));
         final var rowCap = Math.max(1, width);
         var at = 0;
         var first = true;
         while (at < chars.size()) {
-            final var cap = first ? Math.min(firstChunk, chars.size() - at) : Math.min(rowCap, chars.size() - at);
-            final var row = new ArrayList<Span>(first ? prefix : List.of());
+            final var cap = Math.min(rowCap, chars.size() - at);
+            final var row = new ArrayList<Span>(prefix);
             for (var i = at; i < at + cap; i++) {
                 row.add(chars.get(i));
             }

@@ -195,6 +195,12 @@ final class UiState {
     volatile boolean errorOpen;
     volatile int errorScroll;
     volatile String notification;
+    /** Last nonempty informational message, retained after the status strip expires. */
+    volatile String lastNotification;
+    /** Snapshot shown in the notification modal, unaffected by subsequent notices. */
+    volatile String notificationDetail;
+
+    volatile int notificationScroll;
 
     /** Millis when {@link #notification} was set; {@code 0} when none is pending. */
     volatile long notificationShownAt;

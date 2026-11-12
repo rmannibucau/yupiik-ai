@@ -90,6 +90,12 @@ The markdown headings in assistant turns follow a fixed brand ladder: level 1 us
 Palette colors default to `auto` and follow the active named theme (`dark` or `light`); an explicit hex overrides the theme for that slot.
 The screen background defaults to `auto`, which keeps the terminal background untouched so a transparent terminal (e.g. Terminator) shows through; set `yca.tui.background` to a hex color to paint a translucent veil of that color over the terminal (see `yca.tui.backgroundOpacity`), or to an empty string to explicitly keep the terminal background.
 The inline code color follows the selected code theme by default.
+Markdown blockquotes use a continuous rail, and GitHub-style `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, and `[!CAUTION]` callouts display a labeled rail.
+Their colors can be overridden globally with `yca.tui.markdown.quote`, `note`, `tip`, `important`, `warning`, and `caution`, respectively; each accepts a hex color or `auto` (the default).
+Automatic colors follow the active palette's muted text, info, success, primary, warning, and error colors, respectively, including explicit palette overrides.
+`yca.tui.glyphs=ascii` uses an ASCII rail and spinner, and `NO_COLOR` suppresses callout colors.
+The latest informational status or toast remains available after it disappears from the screen: press `Alt+I` to open its full text, scroll with the wheel or navigation keys, and press `c` to copy it.
+Warnings and errors retain their separate `Alt+E` details, including the full message and any stack trace.
 At startup, a nonblank `yca.tui.theme.name` takes precedence over the persisted `/theme` selection, which in turn takes precedence over the legacy `tui.theme` setting (default `dark`).
 When `yca.tui.theme.name` is `auto`, the OS light/dark preference is detected at startup on a best-effort basis (macOS appearance, GNOME/KDE/GTK on Linux, Windows apps theme, `COLORFGBG` as a terminal fallback); when detection fails the normal precedence chain applies.
 The `/theme light` and `/theme dark` commands still switch the current theme and persist the selection, but an explicit `yca.tui.theme.name` takes precedence again on the next startup.

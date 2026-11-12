@@ -227,7 +227,30 @@ public record TuiConfiguration(
         @Property(
                 documentation =
                         "Tool output retention (full outputs kept for the Ctrl+O overlay and tool-card expansion).")
-        ToolOutputConfiguration toolOutput) {
+        ToolOutputConfiguration toolOutput,
+
+        @Property(documentation = "Markdown quote and callout colors; auto follows the active palette.")
+        MarkdownColors markdown) {
+
+    @JsonModel
+    public record MarkdownColors(
+            @Property(defaultValue = "\"auto\"", documentation = "Quote rail color; auto follows muted text.")
+            String quote,
+
+            @Property(defaultValue = "\"auto\"", documentation = "NOTE callout color; auto follows info.")
+            String note,
+
+            @Property(defaultValue = "\"auto\"", documentation = "TIP callout color; auto follows success.")
+            String tip,
+
+            @Property(defaultValue = "\"auto\"", documentation = "IMPORTANT callout color; auto follows primary.")
+            String important,
+
+            @Property(defaultValue = "\"auto\"", documentation = "WARNING callout color; auto follows warning.")
+            String warning,
+
+            @Property(defaultValue = "\"auto\"", documentation = "CAUTION callout color; auto follows error.")
+            String caution) {}
 
     /**
      * Retention limits of the captured tool outputs (see {@link TuiConfiguration#toolOutput()}).

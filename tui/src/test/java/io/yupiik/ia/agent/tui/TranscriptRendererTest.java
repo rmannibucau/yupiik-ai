@@ -35,6 +35,11 @@ class TranscriptRendererTest {
     }
 
     @Test
+    void streamingCalloutMatchesColdRender() {
+        assertEveryFrameMatchesAFullRender("before\n\n> [!WARNING]\n> first\n>\n> second\n\nafter");
+    }
+
+    @Test
     void lastSafeNewlineBeforeFence() {
         // safe after "a\n" (outside fence), not after "```\n", not at "code\n"
         assertEquals(2, renderer.lastSafeNewline("a\n```\ncode\n"));

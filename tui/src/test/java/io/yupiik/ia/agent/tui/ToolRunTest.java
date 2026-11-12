@@ -139,7 +139,8 @@ class ToolRunTest {
                 "",
                 0.8,
                 "#ff5555",
-                new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0));
+                new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0),
+                null);
     }
 
     @Test
