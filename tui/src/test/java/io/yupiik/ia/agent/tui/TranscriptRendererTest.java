@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTimeout;
@@ -24,6 +25,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
+import io.yupiik.ia.agent.core.agent.SubagentDeliveryBus;
+import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,6 +41,31 @@ class TranscriptRendererTest {
     @Test
     void emptySourceRendersEmpty() {
         assertEquals(List.of(), renderer.renderRegion("", 80, Style.EMPTY, MarkdownStyles.DEFAULTS));
+    }
+
+    @Test
+    void replayedSubagentSummaryRendersMarkdownWithoutEnvelope() {
+        final var model = new TuiTranscriptModel(new ThinkTagSplitter());
+        final var delivery = new SubagentDeliveryBus.Delivery(
+                "child-1",
+                "review",
+                "## Conclusion\n\n**Reviewed** the code.\n\n```java\nclass Review {}\n```",
+                true,
+                false);
+        model.replay(List.of(Message.user("review it"), Message.user(delivery.message())));
+        final var report =
+                TuiTranscriptModel.splitTurns(model.markdown("|", "welcome")).get(1);
+        assertFalse(report.user());
+        final var rendered = renderer.renderRegion(report.text(), 100, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        final var text = String.join("\n", plain(rendered));
+        assertTrue(text.contains("Conclusion"), text);
+        assertTrue(text.contains("Reviewed the code."), text);
+        assertTrue(text.contains("class Review {}"), text);
+        assertFalse(text.contains("## Conclusion"), text);
+        assertFalse(text.contains("**Reviewed**"), text);
+        assertFalse(text.contains("```"), text);
+        assertFalse(text.contains("<subagent"), text);
+        assertFalse(text.contains("</subagent>"), text);
     }
 
     @Test

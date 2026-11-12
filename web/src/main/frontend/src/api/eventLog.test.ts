@@ -147,6 +147,30 @@ describe('eventsToBlocks', () => {
     expect(cancelled[0]).toMatchObject({ kind: 'subagent', state: 'cancelled' });
   });
 
+  it.each([false, true])('merges replayed and live subagent completions into one card (replay first: %s)', replayFirst => {
+    const replay = ev({
+      type: 'subagent-completed', sessionId: 's1', subagentId: 'sub-1',
+      message: '## Conclusion\n\n**Done**',
+      data: { subagentId: 'sub-1', subagentName: 'active-instana-review', success: true, cancelled: false },
+    });
+    const live = ev({
+      type: 'subagent-completed', sessionId: 's1', subagentId: 'sub-1',
+      message: replay.message,
+      data: { success: true, cancelled: false, model: 'review-model' },
+    });
+    const completions = replayFirst ? [replay, live] : [live, replay];
+    const blocks = eventsToBlocks([
+      ev({ type: 'user', sessionId: 's1', message: 'review it' }),
+      ...completions,
+      replay, // another reconnect must not create a second card or lose live model metadata
+    ]);
+    expect(blocks.map(b => b.kind)).toEqual(['user', 'subagent']);
+    expect(blocks[1]).toMatchObject({
+      kind: 'subagent', state: 'done', subagentId: 'sub-1', name: 'active-instana-review',
+      summary: '## Conclusion\n\n**Done**', model: 'review-model',
+    });
+  });
+
   it('turn-done never settles a running subagent card (async children outlive the parent turn)', () => {
     const blocks = eventsToBlocks([
       ev({ type: 'subagent-started', sessionId: 's1', subagentId: 'sub-1', message: 'still working', data: { subagentName: 'child' } }),

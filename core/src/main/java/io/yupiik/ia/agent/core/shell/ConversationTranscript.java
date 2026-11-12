@@ -793,30 +793,33 @@ public class ConversationTranscript {
                         String subagentId,
                         String subagentName,
                         String model)) {
-            final var label = subagentName == null || subagentName.isBlank() ? subagentId : subagentName;
-            transcript
-                    .append("\n\n> subagent `")
-                    .append(label)
-                    .append("` ")
-                    .append(success ? "completed" : cancelled ? "cancelled" : "failed");
-            if (model != null && !model.isBlank()) {
-                transcript.append(" — model `").append(model.replace("`", "'")).append('`');
-            }
-            transcript.append('\n');
-            if (summary != null && !summary.isBlank()) {
-                // the body is the raw summary rendered as real markdown (the TUI splits it back
-                // into thought/tool/plain regions and the markdown renderer highlights it, fences
-                // included), so it must not carry the blockquote prefix: only the header and the
-                // pointer line are quoted, the body sits between them on plain lines
-                transcript
-                        .append('\n')
-                        .append(shieldSpeakerMarkers(userMarker(), assistantMarker(), capSummary(summary)))
-                        .append('\n');
-            }
-            transcript.append("\n> full report: /subagents ").append(subagentId).append('\n');
+            appendSubagentReport(
+                    subagentId,
+                    subagentName,
+                    success ? "completed" : cancelled ? "cancelled" : "failed",
+                    summary,
+                    model);
             touchTranscript();
             touch();
         }
+    }
+
+    private void appendSubagentReport(
+            final String id, final String name, final String state, final String summary, final String model) {
+        final var label = name == null || name.isBlank() ? id : name;
+        transcript.append("\n\n> subagent `").append(label).append("` ").append(state);
+        if (model != null && !model.isBlank()) {
+            transcript.append(" — model `").append(model.replace("`", "'")).append('`');
+        }
+        transcript.append('\n');
+        if (summary != null && !summary.isBlank()) {
+            // Keep the body unquoted so headings and fences render as real Markdown.
+            transcript
+                    .append('\n')
+                    .append(shieldSpeakerMarkers(userMarker(), assistantMarker(), capSummary(summary)))
+                    .append('\n');
+        }
+        transcript.append("\n> full report: /subagents ").append(id).append('\n');
     }
 
     /**
@@ -1179,11 +1182,21 @@ public class ConversationTranscript {
         final var toolNamesByCallId = Message.toolNames(history);
         for (final var message : history) {
             switch (message.role()) {
-                case "user" ->
-                    transcript
-                            .append("\n\n---\n\n" + markerFor(message, true) + "\n\n")
-                            .append(message.content())
-                            .append('\n');
+                case "user" -> {
+                    final var delivery = SubagentDeliveryView.parse(String.valueOf(message.content()));
+                    if (delivery == null) {
+                        transcript
+                                .append("\n\n---\n\n" + markerFor(message, true) + "\n\n")
+                                .append(message.content())
+                                .append('\n');
+                    } else {
+                        // Explicitly leave the human turn: otherwise the TUI inherits its user styling.
+                        // This is a display projection only; the stored role and LLM envelope stay intact.
+                        transcript.append("\n\n---\n\n" + assistantMarker() + "\n\n");
+                        appendSubagentReport(
+                                delivery.subagentId(), delivery.name(), delivery.state(), delivery.summary(), null);
+                    }
+                }
                 case "assistant" -> {
                     // persisted sessions keep the raw <think> content: split it so the
                     // replay renders past reasoning as thought regions too

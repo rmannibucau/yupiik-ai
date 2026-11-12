@@ -297,6 +297,9 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
         const b = blocks[target] as Extract<Block, { kind: 'subagent' }>;
         b.state = finalState;
         b.summary = summary;
+        if (ev.data?.subagentName) {
+          b.name = ev.data.subagentName as string;
+        }
         if (model) b.model = model;
       } else {
         blocks.push({

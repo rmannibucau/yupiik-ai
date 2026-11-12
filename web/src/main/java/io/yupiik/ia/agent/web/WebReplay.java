@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.web;
 
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.shell.SubagentDeliveryView;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -80,7 +81,30 @@ final class WebReplay {
                 continue; // notices / compaction markers: display-only
             }
             if ("user".equals(role)) {
-                out.add(new WebEventDto("user", sessionId, null, null, str(message.content()), Map.of()));
+                final var text = str(message.content());
+                final var delivery = SubagentDeliveryView.parse(text);
+                if (delivery != null) {
+                    final var id = delivery.subagentId();
+                    final var state = delivery.state();
+                    final var name = delivery.name();
+                    out.add(new WebEventDto(
+                            "subagent-completed",
+                            sessionId,
+                            id,
+                            name,
+                            delivery.summary(),
+                            Map.of(
+                                    "subagentId",
+                                    id,
+                                    "subagentName",
+                                    name,
+                                    "success",
+                                    "completed".equals(state),
+                                    "cancelled",
+                                    "cancelled".equals(state))));
+                } else {
+                    out.add(new WebEventDto("user", sessionId, null, null, text, Map.of()));
+                }
                 continue;
             }
             if ("assistant".equals(role)) {

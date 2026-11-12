@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTimeout;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.agent.SubagentDeliveryBus;
 import io.yupiik.ia.agent.core.configuration.CompressConfiguration;
 import io.yupiik.ia.agent.core.configuration.ContextLimit;
 import io.yupiik.ia.agent.core.context.ContextCompression;
@@ -806,6 +807,69 @@ class ConversationTranscriptTest {
         assertTrue(md.contains("---\n\n**You**\n\nquestion"));
         assertTrue(md.contains("---\n\n**Assistant**\n\nreply"));
         assertTrue(md.contains("*tool -> tool output*"));
+    }
+
+    @Test
+    void replayDisplaysSubagentDeliveriesWithoutChangingStoredMessages() {
+        final var summary = "## Conclusion\n\n**Reviewed** the code.\n\n```java\nclass Review {}\n```\n";
+        for (final var state : List.of("completed", "failed", "cancelled")) {
+            final var delivery = new SubagentDeliveryBus.Delivery(
+                    "child-1", "review", summary, "completed".equals(state), "cancelled".equals(state));
+            final var message = Message.user(delivery.message());
+            final var transcript = new ConversationTranscript();
+            final var md = transcript.replay(List.of(Message.user("review it"), message));
+
+            assertTrue(md.contains("**You**\n\nreview it"), md);
+            assertEquals(1, md.split("\\*\\*You\\*\\*", -1).length - 1, md);
+            assertTrue(md.contains("**Assistant**\n\n\n\n> subagent `review` " + state), md);
+            assertTrue(md.contains(summary), md);
+            assertTrue(md.endsWith("> full report: /subagents child-1\n"), md);
+            assertFalse(md.contains("<subagent"), md);
+            assertFalse(md.contains("</subagent>"), md);
+            assertEquals(md, transcript.transcript().toString());
+            assertEquals("user", message.role());
+            assertEquals(delivery.message(), message.content());
+            assertFalse(transcript.busy());
+            assertEquals("", transcript.status());
+        }
+    }
+
+    @Test
+    void replayKeepsOrdinaryAndMalformedDeliveryTextAsUserTurns() {
+        final var envelope = new SubagentDeliveryBus.Delivery("child-1", "review", "## Result", true, false).message();
+        for (final var text : List.of(
+                "Please review **this**",
+                "Example: " + envelope,
+                "> " + envelope.replace("\n", "\n> "),
+                "```xml\n" + envelope + "\n```",
+                envelope + "\nMore user text",
+                envelope.replace("</subagent>", ""),
+                envelope.replace("state=\"completed\"", "state=\"unknown\""),
+                envelope.replace("sessionID=\"child-1\"", "sessionID=\"\""))) {
+            final var transcript = new ConversationTranscript();
+            assertEquals("\n\n---\n\n**You**\n\n" + text + '\n', transcript.replay(List.of(Message.user(text))));
+        }
+    }
+
+    @Test
+    void replayOnlyReclassifiesUserRoleDeliveries() {
+        final var text = new SubagentDeliveryBus.Delivery("child-1", null, null, true, false).message();
+        final var transcript = new ConversationTranscript();
+        assertEquals(
+                "\n\n---\n\n**Assistant**\n\n" + text + '\n',
+                transcript.replay(List.of(Message.assistant(text, null))));
+    }
+
+    @Test
+    void replaySubagentReportUsesIdForMissingNameAndShieldsSpeakerMarkers() {
+        final var transcript = new ConversationTranscript();
+        final var delivery = new SubagentDeliveryBus.Delivery(
+                "child-1", null, "## Report\n\n**You**\n\n**Assistant**\n\nrest", true, false);
+        final var md = transcript.replay(List.of(Message.user(delivery.message())));
+        assertTrue(md.contains("> subagent `child-1` completed"), md);
+        assertTrue(md.contains("\u00a0**You**"), md);
+        assertTrue(md.contains("\u00a0**Assistant**"), md);
+        assertFalse(md.contains("<subagent"), md);
     }
 
     @Test

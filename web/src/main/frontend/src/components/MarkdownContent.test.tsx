@@ -2,12 +2,32 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { MarkdownContent } from './MarkdownContent';
+import { eventsToBlocks } from '../api/eventLog';
 
 function render(content: string): string {
   return renderToStaticMarkup(<MarkdownContent content={content} />);
 }
 
 describe('MarkdownContent', () => {
+  it('renders a replayed subagent summary as assistant Markdown rather than envelope text', () => {
+    const [block] = eventsToBlocks([{
+      type: 'subagent-completed', sessionId: 'parent', subagentId: 'child',
+      message: '## Conclusion\n\n**Reviewed**\n\n```text\nresult\n```',
+      data: { subagentName: 'active-instana-review', success: true, cancelled: false },
+    }]);
+    expect(block.kind).toBe('subagent');
+    if (block.kind !== 'subagent') {
+      throw new Error('Expected a subagent card');
+    }
+    const html = renderToStaticMarkup(<MarkdownContent content={block.summary ?? ''} variant="assistant" />);
+    expect(html).toContain('data-variant="assistant"');
+    expect(html).toContain('<h2>Conclusion</h2>');
+    expect(html).toContain('<strong>Reviewed</strong>');
+    expect(html).toContain('<pre class="yca-code-block">');
+    expect(html).not.toContain('data-variant="user"');
+    expect(html).not.toContain('&lt;subagent');
+  });
+
   it('defaults to a document root and supports every presentation variant', () => {
     expect(render('Hello')).toBe('<div class="aui-md" data-variant="document"><p>Hello</p></div>');
     for (const variant of ['user', 'assistant', 'document', 'thought'] as const) {

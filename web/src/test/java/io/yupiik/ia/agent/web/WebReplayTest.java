@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.web;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.agent.SubagentDeliveryBus;
 import io.yupiik.ia.agent.core.llm.Message;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,6 +27,66 @@ import org.junit.jupiter.api.Test;
 
 /** Replaying a persisted session must restore thought blocks, not only the visible answer. */
 class WebReplayTest {
+
+    @Test
+    void deliveredSubagentsReplayAsCompletionEventsWithoutChangingMessages() {
+        final var summary = "## Conclusion\n\n**Reviewed** the code.\n\n```java\nclass Review {}\n```\n";
+        for (final var state : List.of("completed", "failed", "cancelled")) {
+            final var delivery = new SubagentDeliveryBus.Delivery(
+                    "child-1", "active-instana-review", summary, "completed".equals(state), "cancelled".equals(state));
+            final var message = Message.user(delivery.message());
+            final var messages = List.of(Message.user("review it"), message, Message.assistant("Thanks", null));
+
+            final var events = WebReplay.replay("parent", messages);
+
+            assertEquals(
+                    List.of("user", "subagent-completed", "text-delta"),
+                    events.stream().map(WebEventDto::type).toList());
+            assertEquals(
+                    new WebEventDto(
+                            "subagent-completed",
+                            "parent",
+                            "child-1",
+                            "active-instana-review",
+                            summary,
+                            Map.of(
+                                    "subagentId",
+                                    "child-1",
+                                    "subagentName",
+                                    "active-instana-review",
+                                    "success",
+                                    "completed".equals(state),
+                                    "cancelled",
+                                    "cancelled".equals(state))),
+                    events.get(1));
+            assertEquals("user", message.role());
+            assertEquals(delivery.message(), message.content());
+        }
+    }
+
+    @Test
+    void ordinaryUserMessagesAndMalformedOrQuotedEnvelopesStayUserMessages() {
+        final var envelope = new SubagentDeliveryBus.Delivery("child-1", "review", "## Result", true, false).message();
+        for (final var text : List.of(
+                "Please review **this**",
+                "Example: " + envelope,
+                "```xml\n" + envelope + "\n```",
+                envelope + "\nMore user text",
+                envelope.replace("</subagent>", ""),
+                envelope.replace("state=\"completed\"", "state=\"unknown\""),
+                envelope.replace("sessionID=\"child-1\"", "sessionID=\"\""))) {
+            final var events = WebReplay.replay("parent", List.of(Message.user(text)));
+            assertEquals(List.of(new WebEventDto("user", "parent", null, null, text, Map.of())), events);
+        }
+    }
+
+    @Test
+    void subagentEnvelopeInAssistantTextIsNotReclassified() {
+        final var text = new SubagentDeliveryBus.Delivery("child-1", null, null, true, false).message();
+        assertEquals(
+                List.of(new WebEventDto("text-delta", "parent", null, null, text, Map.of())),
+                WebReplay.replay("parent", List.of(Message.assistant(text, null))));
+    }
 
     @Test
     void persistedThinkingIsReplayedAsThinkingDeltaBeforeTheAnswer() {

@@ -21,6 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.agent.SubagentDeliveryBus;
+import io.yupiik.ia.agent.core.context.ContextMeasurement.Snapshot;
+import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -134,6 +138,30 @@ class TuiTranscriptModelTest {
         assertTrue(turns.get(1).text().contains("hi there"));
         assertFalse(turns.get(2).user());
         assertTrue(turns.get(2).text().contains("bye"));
+    }
+
+    @Test
+    void replayedSubagentReportsAreNonUserMarkdownTurns() {
+        for (final var state : List.of("completed", "failed", "cancelled")) {
+            model.clearConversation();
+            final var summary = "## Conclusion\n\n**Reviewed** the code.\n\n```java\nclass Review {}\n```\n";
+            final var delivery = new SubagentDeliveryBus.Delivery(
+                    "child-1", "review", summary, "completed".equals(state), "cancelled".equals(state));
+            model.replay(List.of(
+                    Message.user("review it"), Message.user(delivery.message()), Message.assistant("Thanks", null)));
+
+            final var turns = TuiTranscriptModel.splitTurns(model.markdown("|", "welcome"));
+            assertEquals(3, turns.size());
+            assertTrue(turns.get(0).user());
+            assertTrue(turns.get(0).text().contains("review it"));
+            final var report = turns.get(1);
+            assertFalse(report.user());
+            assertTrue(report.text().contains("> subagent `review` " + state));
+            assertTrue(report.text().contains(summary));
+            assertFalse(report.text().contains("<subagent"));
+            assertFalse(turns.get(2).user());
+            assertTrue(turns.get(2).text().contains("Thanks"));
+        }
     }
 
     @Test
@@ -363,9 +391,8 @@ class TuiTranscriptModelTest {
 
     @Test
     void usageUpdatedTracksTokens() {
-        final var usage = new io.yupiik.ia.agent.core.llm.Usage(4000, 1200, 5200, 1500, 0);
-        final var measurement = new io.yupiik.ia.agent.core.context.ContextMeasurement.Snapshot(
-                42000, 42400, "provider-anchored", 40000, 2000, 1.05);
+        final var usage = new Usage(4000, 1200, 5200, 1500, 0);
+        final var measurement = new Snapshot(42000, 42400, "provider-anchored", 40000, 2000, 1.05);
         model.onEvent(new AgentEvent.UsageUpdated(
                 usage,
                 42000,
