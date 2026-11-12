@@ -382,6 +382,65 @@ pre.yca-tool-code.whitespace-pre-wrap code {
   overflow-wrap: anywhere;
 }
 
+/* Tool requests and results share the theme, but never share an implied applied state. */
+.yca-tool-card {
+  min-width: 0;
+  border: 1px solid var(--yca-border);
+  border-radius: var(--yca-radius-sm);
+  background: var(--yca-panel);
+  padding: 0.3rem 0.75rem;
+  font-size: 0.875rem;
+}
+.yca-tool-working { border-color: var(--yca-accent); }
+.yca-tool-failed { border-color: var(--yca-error); }
+.yca-tool-pending, .yca-tool-interrupted { border-color: var(--yca-warning); }
+.yca-tool-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  font-family: var(--yca-font-mono);
+  cursor: pointer;
+}
+.yca-tool-status { flex-shrink: 0; color: var(--yca-success); }
+.yca-tool-working .yca-tool-status { color: var(--yca-accent); }
+.yca-tool-failed .yca-tool-status { color: var(--yca-error); }
+.yca-tool-pending .yca-tool-status, .yca-tool-interrupted .yca-tool-status { color: var(--yca-warning); }
+.yca-tool-name, .yca-tool-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yca-tool-summary { color: var(--yca-muted); font-size: 0.75rem; }
+.yca-tool-body { padding: 0.75rem 0; }
+.yca-tool-body > section + section { border-top: 1px solid var(--yca-border); margin-top: 1rem; padding-top: 0.75rem; }
+.yca-tool-body h4, .yca-tool-body h5 { font-weight: 600; overflow-wrap: anywhere; }
+.yca-tool-body h4 { margin-bottom: 0.5rem; }
+.yca-tool-body h4 > span { font-weight: 400; margin-left: 0.5rem; }
+.yca-tool-muted { color: var(--yca-muted); }
+.yca-tool-warning { color: var(--yca-warning); }
+.yca-tool-fields > div { min-width: 0; margin: 0.5rem 0; }
+.yca-tool-fields dt { font-family: var(--yca-font-mono); color: var(--yca-muted); font-size: 0.75rem; }
+.yca-tool-fields dd { margin: 0; min-width: 0; }
+.yca-tool-card pre { tab-size: 4; white-space: pre; max-height: 24rem; overflow: auto; }
+.yca-tool-exact pre { border-left: 2px solid var(--yca-accent); }
+.yca-tool-patch-file { margin: 0.75rem 0; }
+.yca-diff-add { color: var(--yca-success); background: var(--yca-success-soft); }
+.yca-diff-remove { color: var(--yca-error); background: var(--yca-error-soft); }
+.yca-diff-hunk { color: var(--yca-accent); }
+.yca-tool-paging { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; font-size: 0.75rem; }
+.yca-tool-body button { color: var(--yca-accent); cursor: pointer; text-decoration: underline; }
+.yca-tool-body button:disabled { color: var(--yca-muted); cursor: default; text-decoration: none; }
+.yca-tool-disclosure { margin-top: 0.75rem; }
+.yca-tool-disclosure > summary { cursor: pointer; color: var(--yca-muted); }
+.yca-tool-card button:focus-visible, .yca-tool-card summary:focus-visible, .yca-tool-text [tabindex]:focus-visible {
+  outline: 2px solid var(--yca-accent);
+  outline-offset: 3px;
+}
+
 /* Prism classes with useInlineStyles=false: all eight exact TUI CodeTheme slots. */
 .yca-code-block .token.comment,
 .yca-code-block .token.prolog,

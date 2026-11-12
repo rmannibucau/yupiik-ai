@@ -20,6 +20,39 @@ For automation, the xref:../cli/run.adoc[`run`] command executes a single
 headless prompt and prints the result on stdout. It exits non-zero on failure,
 making it easy to call from scripts and CI.
 
+== Tool requests and results
+
+Tool details separate the request from the execution result.
+An edit or patch preview describes the *requested changes*, not a reconstruction of the file on disk.
+The result remains authoritative for success, failure, replacement counts and resolved paths.
+Requests remain useful when a tool is still running or fails before producing output.
+
+[options="header"]
+|===
+|Frontend |Presentation
+|`web` |Expand a tool card to inspect its request and result, with raw arguments and output available separately and controls to reveal more of long content.
+|`tui` |Open the full-output modal with `Ctrl+O` to inspect request details and the result; the inline transcript remains compact.
+|`cli` |An append-only activity transcript uses tool names and explicit states, with bounded request previews when output is shown.
+|`run` |Tool lifecycle and optional details use the logging channel, leaving stdout for the answer; no interactive cards or cursor controls are added.
+|===
+
+`edit_file` previews preserve the old and replacement snippets and identify whether one or all occurrences were requested.
+They do not invent file line numbers or expand every occurrence in the file.
+`apply_patch` previews support unified diffs and the `*** Begin Patch` dialect, including file operation headings.
+`write_file` shows the requested content rather than claiming that every line is newly added to an existing file.
+No frontend reads the current filesystem to reconstruct historical changes.
+
+Other built-in tools expose their relevant request fields, including search filters, source ranges, subagent settings and compression ranges.
+External tools fall back to readable arguments and output without assuming that a similarly named tool implements a built-in schema.
+Unknown or malformed content remains available as text rather than being executed or silently discarded.
+These views do not alter tool execution, stored conversation messages or model input.
+
+The existing tool-output visibility controls still apply: `hidden` suppresses ordinary activity, `collapsed` retains concise activity without bodies, and `shown` enables details.
+Failures remain diagnostics, and a pending tool result is not a failure.
+For `cli`, verbosity further selects compact, verbose or raw presentation.
+For `run`, the same visibility policy applies to both streamed and final tool output.
+Presentation truncation is separate from the xref:output.adoc[output optimization] performed before results enter the model context.
+
 == Account usage quota
 
 When the current provider advertises the Codex usage capability

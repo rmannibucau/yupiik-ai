@@ -15,12 +15,20 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.tamboui.style.Style;
+import dev.tamboui.text.Line;
+import dev.tamboui.text.Span;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -35,7 +43,8 @@ class ToolArgsPreviewTest {
     }
 
     private ToolArgsPreview preview() {
-        return new ToolArgsPreview(new ToolOutputFormat(mapper), new SyntaxHighlighter(), new DiffRenderer());
+        return new ToolArgsPreview(
+                new ToolOutputFormat(mapper), new SyntaxHighlighter(), new DiffRenderer(), new ToolPresenter(mapper));
     }
 
     @Test
@@ -92,11 +101,157 @@ class ToolArgsPreviewTest {
     }
 
     @Test
-    void unknownToolOrBadJsonFallsBackToNull() {
+    void malformedOrIncompleteArgumentsRemainVisible() {
         final var preview = preview();
-        assertNull(preview.preview("bash", "{\"command\":\"ls\"}", 80, PaletteTest.palette()));
-        assertNull(preview.preview("write_file", "not json", 80, PaletteTest.palette()));
+        assertTrue(text(preview.preview("bash", "{\"command\":\"ls\"}", 80, PaletteTest.palette()))
+                .contains("ls"));
+        assertTrue(text(preview.preview("write_file", "not json", 80, PaletteTest.palette()))
+                .contains("not json"));
         assertNull(preview.preview("write_file", null, 80, PaletteTest.palette()));
-        assertNull(preview.preview("write_file", "{\"path\":\"a.txt\"}", 80, PaletteTest.palette()));
+        assertTrue(text(preview.preview("write_file", "{\"path\":\"a.txt\"}", 80, PaletteTest.palette()))
+                .contains("a.txt"));
+    }
+
+    @Test
+    void editsPreserveWhitespaceDeletionScopeAndFinalNewline() {
+        final var args =
+                mapper.toString(Map.of("path", "a.txt", "oldString", " \t  \n", "newString", "", "replaceAll", true));
+        final var lines = preview().preview("edit_file", args, 100, PaletteTest.palette());
+        assertTrue(lines.stream().map(ToolArgsPreviewTest::plain).anyMatch(" -  \t  "::equals));
+        final var text = text(lines);
+        assertTrue(text.contains("all occurrences"), text);
+        assertTrue(text.contains("new: empty"), text);
+        assertFalse(text.contains(" + "), text);
+
+        final var newlineOnly = text(preview()
+                .preview(
+                        "edit_file",
+                        mapper.toString(Map.of("path", "a", "oldString", "x", "newString", "x\n")),
+                        100,
+                        PaletteTest.palette()));
+        assertTrue(newlineOnly.contains("old: 1 characters; no final newline"), newlineOnly);
+        assertTrue(newlineOnly.contains("new: 2 characters; ends with newline"), newlineOnly);
+        assertTrue(newlineOnly.contains("\\ No newline"), newlineOnly);
+        assertTrue(newlineOnly.contains("single occurrence"), newlineOnly);
+    }
+
+    @Test
+    void invalidFieldTypesDoNotInventAnEdit() {
+        for (final var args : List.of(
+                Map.of("path", "a", "oldString", 12, "newString", "x"),
+                Map.of("path", "a", "oldString", "x", "newString", false),
+                Map.of("path", "a", "oldString", "x", "newString", "y", "replaceAll", "true"),
+                Map.of("path", "a", "newString", "x"))) {
+            final var text = text(preview().preview("edit_file", mapper.toString(args), 100, PaletteTest.palette()));
+            assertFalse(text.contains("--- a/"), text);
+            assertFalse(text.contains("Requested changes"), text);
+        }
+    }
+
+    @Test
+    void writePreservesBlankContentTrailingSpacesAndNewlines() {
+        for (final var content : List.of("", "   ", "\n", "a  \n\n", "a\r\n")) {
+            final var lines = preview()
+                    .preview(
+                            "write_file",
+                            mapper.toString(Map.of("path", "a.txt", "content", content)),
+                            100,
+                            PaletteTest.palette());
+            final var start = 4; // request heading, path, content metadata, separator
+            assertEquals(
+                    content.replace("\r\n", "\n"),
+                    String.join(
+                            "\n",
+                            lines.subList(start, lines.size()).stream()
+                                    .map(ToolArgsPreviewTest::plain)
+                                    .toList()));
+        }
+    }
+
+    @Test
+    void allNonFileBuiltinsUseSharedDetails() {
+        final var args = "{\"value\":\"  spaced  \",\"nested\":{\"enabled\":false,\"items\":[1,2]}}";
+        final var presenter = new ToolPresenter(mapper);
+        for (final var name : List.of(
+                "bash",
+                "read",
+                "grep",
+                "glob",
+                "write_todo",
+                "memory_write",
+                "ask_user",
+                "webfetch",
+                "websearch",
+                "skill",
+                "spawn_subagent",
+                "check_subagents",
+                "list_subagent_options",
+                "maven_knowledge_content",
+                "maven_repository_knowledge",
+                "compress",
+                "code_resolve",
+                "code_trace_calls",
+                "code_check_graph",
+                "read_symbol",
+                "code_find_code")) {
+            assertEquals(
+                    presenter.request(name, args, Integer.MAX_VALUE),
+                    preview().preview(name, args, 200, PaletteTest.palette()).stream()
+                            .map(ToolArgsPreviewTest::plain)
+                            .toList(),
+                    name);
+        }
+    }
+
+    @Test
+    void externalNestedJsonIsPrettyAndHighlighted() {
+        final var lines = preview()
+                .preview("mcp_external", "{\"outer\":{\"items\":[true,{\"x\":2}]}}", 100, PaletteTest.palette());
+        assertTrue(lines.size() > 5);
+        final var text = text(lines);
+        assertTrue(text.contains("\"outer\""), text);
+        assertTrue(text.contains("\"x\""), text);
+        assertTrue(lines.stream()
+                .flatMap(line -> line.spans().stream())
+                .anyMatch(span -> !span.style().equals(Style.EMPTY)));
+    }
+
+    @Test
+    void openCodeOperationsAndLongPatchPayloadsAreNotTruncated() {
+        final var longLine = "0123456789".repeat(40);
+        final var patch = "*** Begin Patch\n*** Add File: a.txt\n+" + longLine
+                + "\n*** Update File: b.txt\n*** Move to: c.txt\n@@ section\n-old  \n+new  \n*** Delete File: d.txt\n*** End Patch";
+        final var lines =
+                preview().preview("apply_patch", mapper.toString(Map.of("patch", patch)), 30, PaletteTest.palette());
+        final var joined = lines.stream().map(ToolArgsPreviewTest::plain).reduce("", String::concat);
+        assertTrue(joined.contains(longLine), joined);
+        assertTrue(joined.contains("*** Add File: a.txt (+1 -0)"), joined);
+        assertTrue(joined.contains("*** Update File: b.txt (+1 -1)"), joined);
+        assertTrue(joined.contains("*** Move to: c.txt"), joined);
+        assertTrue(joined.contains("*** Delete File: d.txt (+0 -0)"), joined);
+    }
+
+    @Test
+    void highlightingFailureFallsBackToRawRequest() {
+        final var preview = new ToolArgsPreview(
+                new ToolOutputFormat(mapper),
+                new SyntaxHighlighter() {
+                    @Override
+                    public List<Line> highlightLines(final String lang, final String code) {
+                        throw new IllegalArgumentException("cannot highlight");
+                    }
+                },
+                new DiffRenderer(),
+                new ToolPresenter(mapper));
+        final var args = "{\"path\":\"a\",\"content\":\"test\"}";
+        assertEquals(args, text(preview.preview("write_file", args, 100, PaletteTest.palette())));
+    }
+
+    private static String plain(final Line line) {
+        return line.spans().stream().map(Span::content).reduce("", String::concat);
+    }
+
+    private static String text(final List<Line> lines) {
+        return String.join("\n", lines.stream().map(ToolArgsPreviewTest::plain).toList());
     }
 }

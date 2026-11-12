@@ -60,7 +60,7 @@ public class AnsiShellFrontend implements ShellFrontend {
 
     private volatile boolean showThinking;
     private volatile ToolOutputVisibility showToolOutput;
-    private volatile boolean toolStreamed;
+    private final ToolInvocations toolCalls = new ToolInvocations();
     /** Whether the dim 'thinking...' header was printed for the current reasoning round. */
     private boolean thinkingRoundOpen;
     /** Whether the last stderr emission (a thought delta) did not end with a newline. */
@@ -438,6 +438,19 @@ public class AnsiShellFrontend implements ShellFrontend {
             spinnerLock.unlock();
         }
         stopSpinner();
+        eventLock.lock();
+        try {
+            if (showToolOutput.shown() && verbosity != CliVerbosity.COMPACT) {
+                for (final var call : toolCalls.active()) {
+                    final var rest = call.flush();
+                    if (!rest.isEmpty()) {
+                        printlnErr(call.header() + " output: " + rest);
+                    }
+                }
+            }
+        } finally {
+            eventLock.unlock();
+        }
         print(textBuffer.flush());
         System.out.flush();
         System.err.flush();
@@ -503,29 +516,21 @@ public class AnsiShellFrontend implements ShellFrontend {
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
             stopSpinner();
-            toolStreamed = false;
             closeThinkingRound();
             onToolStarted(t);
         } else if (event instanceof final AgentEvent.ToolStream t) {
-            toolStreamed = true;
-            if (showToolOutput.shown() && verbosity == CliVerbosity.RAW) {
-                // streamed tool output replaces the spinner: frames and fragments
-                // share the stderr line and would interleave, so output wins
-                stopSpinner();
-                // same for a thought delta left mid-line: the fragment goes below it
-                ensureStderrNewline();
-                printErr(prefix + (t.fragment().endsWith("\n") ? t.fragment() : t.fragment() + "\n"));
-            } else if (showToolOutput.shown() && verbosity == CliVerbosity.VERBOSE) {
+            final var call = toolCalls.find(t.name(), t.ordinal(), t.sessionId(), t.subagentId());
+            if (showToolOutput.shown() && verbosity != CliVerbosity.COMPACT) {
                 stopSpinner();
                 ensureStderrNewline();
-                printErr(MarkdownColorizer.dim(prefix + t.fragment()));
+                for (final var line : call.append(t.fragment())) {
+                    printlnErr(prefix + "  " + call.header() + " output: " + line);
+                }
             }
         } else if (event instanceof final AgentEvent.ToolFinished t) {
             stats.incToolsRun();
             stopSpinner();
-            if (showToolOutput.shown()) {
-                onToolFinished(t);
-            }
+            onToolFinished(t);
             if (!showThinking) {
                 beginSpinner(prefix + "thinking");
             }
@@ -709,77 +714,88 @@ public class AnsiShellFrontend implements ShellFrontend {
     }
 
     private void onToolStarted(final AgentEvent.ToolStarted t) {
-        if (!showToolOutput.shown() && !showToolOutput.collapsed()) {
+        final var call = toolCalls.start(t);
+        if (showToolOutput == ToolOutputVisibility.HIDDEN) {
             return;
         }
-        final var collapsed = showToolOutput.collapsed();
         final var prefix = subagentPrefix(t);
-        if (verbosity == CliVerbosity.RAW) {
-            if (!collapsed) {
-                ensureStderrNewline();
-                printlnErr(MarkdownColorizer.status(prefix + "[tool] " + t.name() + " " + t.args()));
-            }
-            return;
-        }
-        // the whole card is one render unit: frames skipped on tryLock cannot
-        // draw between its lines once the spinner was stopped by the caller
         renderLock.lock();
         try {
             ensureStderrNewline();
-            printlnErr(MarkdownColorizer.bold(prefix + symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
+            printlnErr(MarkdownColorizer.bold(
+                    prefix + call.header() + " started" + call.summary(presenter, showToolOutput)));
+            if (showToolOutput.shown()) {
+                printlnErr(prefix + "  request:");
+                if (verbosity == CliVerbosity.RAW) {
+                    printlnErr(prefix + "    " + t.args());
+                } else {
+                    final var limit = verbosity == CliVerbosity.COMPACT ? DIFF_MAX_LINES : Integer.MAX_VALUE;
+                    final var diff = presenter.diff(t.name(), call.args(), limit);
+                    final var details = diff.isEmpty() ? presenter.request(t.name(), call.args(), limit) : diff;
+                    for (final var line : details) {
+                        printlnErr(prefix + "    "
+                                + (line.startsWith("+")
+                                        ? MarkdownColorizer.diffAdd(line)
+                                        : line.startsWith("-") ? MarkdownColorizer.diffDel(line) : line));
+                    }
+                }
+            }
         } finally {
             renderLock.unlock();
-        }
-        if (verbosity == CliVerbosity.COMPACT && !collapsed && t.name().equals("bash")) {
-            beginSpinner(prefix + BusyLabels.calling(presenter.summarize(t.name(), t.args())));
         }
     }
 
     private void onToolFinished(final AgentEvent.ToolFinished t) {
+        final var call = toolCalls.find(t.name(), t.ordinal(), t.sessionId(), t.subagentId());
         final var prefix = subagentPrefix(t);
-        final var indent = "  ";
-        renderLock.lock();
+        final var failure = !t.success() && !t.pending();
+        final var execution = t.pending() ? "" : presenter.executionDiagnostic(t.name(), t.output());
         try {
-            ensureStderrNewline();
-            if (verbosity == CliVerbosity.RAW) {
-                if (!t.success() && t.output() != null && !t.output().isBlank()) {
-                    printlnErr(MarkdownColorizer.error(prefix + t.output()));
-                }
+            if (showToolOutput == ToolOutputVisibility.HIDDEN && !failure && execution.isEmpty()) {
                 return;
             }
-            final var result = presenter.result(t.name(), t.output(), t.success());
-            printlnErr(MarkdownColorizer.dim(prefix + indent + symbols.resultPrefix())
-                    + (t.success() ? MarkdownColorizer.success(result) : MarkdownColorizer.error(result)));
-            if (verbosity == CliVerbosity.VERBOSE) {
-                // show the full result for tools that did not stream their output live (e.g. bash streams,
-                // most other tools only surface their output through ToolFinished)
-                if (!toolStreamed && t.output() != null && !t.output().isBlank()) {
-                    for (final var line : t.output().stripTrailing().split("\n")) {
-                        printlnErr(MarkdownColorizer.dim(prefix + indent + line));
+            renderLock.lock();
+            try {
+                ensureStderrNewline();
+                if (showToolOutput.shown() && verbosity != CliVerbosity.COMPACT) {
+                    final var rest = call.flush();
+                    if (!rest.isEmpty()) {
+                        printlnErr(prefix + "  " + call.header() + " output: " + rest);
                     }
                 }
-            }
-            if (verbosity == CliVerbosity.COMPACT) {
-                for (final var line : presenter.diff(t.name(), null, DIFF_MAX_LINES)) {
-                    printlnErr(prefix + indent + colorizeDiff(line));
+                final var state = t.pending() ? "pending" : t.success() ? "done" : "failed";
+                final var summary = prefix + call.header() + " " + state;
+                if (showToolOutput != ToolOutputVisibility.HIDDEN || failure) {
+                    printlnErr(
+                            t.pending()
+                                    ? MarkdownColorizer.status(summary)
+                                    : t.success()
+                                            ? MarkdownColorizer.success(summary)
+                                            : MarkdownColorizer.error(summary));
                 }
+                if (!execution.isEmpty()) {
+                    printlnErr(MarkdownColorizer.warning(prefix + call.header() + " " + execution));
+                }
+                if (showToolOutput.shown() || failure) {
+                    final var output = call.remaining(t.output());
+                    if (!output.isEmpty()) {
+                        printlnErr(prefix + "  result:");
+                        final var lines = output.split("\n", -1);
+                        final var limit = !failure && verbosity == CliVerbosity.COMPACT ? DIFF_MAX_LINES : lines.length;
+                        for (var i = 0; i < Math.min(limit, lines.length); i++) {
+                            printlnErr(prefix + "    " + lines[i]);
+                        }
+                        if (lines.length > limit) {
+                            printlnErr(prefix + "    ... " + (lines.length - limit) + " more lines");
+                        }
+                    }
+                }
+            } finally {
+                renderLock.unlock();
             }
         } finally {
-            renderLock.unlock();
+            toolCalls.remove(call);
         }
-    }
-
-    private String colorizeDiff(final String line) {
-        final var marker = line.startsWith(symbols.diffDel())
-                ? symbols.diffDel()
-                : line.startsWith(symbols.diffAdd()) ? symbols.diffAdd() : null;
-        if (marker == null) {
-            return MarkdownColorizer.dim(line);
-        }
-        final var rest = line.substring(marker.length());
-        return (marker.equals(symbols.diffDel())
-                ? MarkdownColorizer.diffDel(marker + rest)
-                : MarkdownColorizer.diffAdd(marker + rest));
     }
 
     /**

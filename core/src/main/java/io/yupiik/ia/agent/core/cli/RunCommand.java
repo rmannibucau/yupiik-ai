@@ -112,7 +112,7 @@ public class RunCommand implements Runnable {
                     value = "show-tool-output",
                     defaultValue = "\"collapsed\"",
                     documentation =
-                            "Tool output presentation: shown (print each non-streamed tool output), collapsed (log tool "
+                            "Tool output presentation: shown (print requested arguments, streams and results), collapsed (log tool "
                                     + "calls only, no output body) or hidden (log nothing). Accepts the legacy booleans "
                                     + "true/false (true = shown, false = collapsed/off).")
             String showToolOutput,
@@ -176,7 +176,7 @@ public class RunCommand implements Runnable {
         final var userCancelled = new AtomicBoolean();
         final var parsedToolOutput = ToolOutputVisibility.parse(conf.showToolOutput());
         final var showToolOutput = parsedToolOutput == null ? ToolOutputVisibility.COLLAPSED : parsedToolOutput;
-        final var frontend = new RunShellFrontend(conf.showThinking(), showToolOutput) {
+        final var frontend = new RunShellFrontend(conf.showThinking(), showToolOutput, new ToolPresenter(jsonMapper)) {
             @Override
             public void onEvent(final AgentEvent event) {
                 super.onEvent(event);

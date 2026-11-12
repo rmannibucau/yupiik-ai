@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import dev.tamboui.style.Color;
 import dev.tamboui.text.Line;
+import dev.tamboui.text.Text;
 import dev.tamboui.tui.TuiConfig;
 import dev.tamboui.tui.TuiRunner;
 import dev.tamboui.tui.event.Event;
@@ -664,6 +665,138 @@ class TuiCommandRenderTest {
         sync.invoke(command, state);
         assertEquals(0, state.toolOutputs.size());
         Assertions.assertNull(state.toolOverlay);
+    }
+
+    @Test
+    void fullToolRequestsSurviveEmptyFailedAndMalformedResultsWithoutExpandingInline() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var body = TuiCommand.class.getDeclaredMethod(
+                "toolBodyLines",
+                String.class,
+                String.class,
+                String.class,
+                String.class,
+                int.class,
+                boolean.class,
+                int.class);
+        body.setAccessible(true);
+        for (final var fixture : List.of(
+                List.of("write_file", "{\"path\":\"a.txt\",\"content\":\"pending payload\"}", ""),
+                List.of(
+                        "edit_file",
+                        "{\"path\":\"a\",\"oldString\":\"before\",\"newString\":\"after\"}",
+                        "permission denied"),
+                List.of("mcp_external", "{\"nested\":{\"items\":[1,2]}}", ""),
+                List.of("bash", "malformed raw request", "execution failed"),
+                List.of("mcp_external", "{}", "   "))) {
+            final var full = (List<Line>) body.invoke(
+                    command, fixture.get(0), null, fixture.get(1), fixture.get(2), 100, false, Integer.MAX_VALUE);
+            final var text = full.stream()
+                    .flatMap(line -> line.spans().stream())
+                    .map(span -> span.content())
+                    .reduce("", String::concat);
+            assertTrue(text.contains("Request"), text);
+            if (!fixture.get(2).isEmpty()) {
+                assertTrue(text.contains("Result"), text);
+                assertTrue(text.contains(fixture.get(2)), text);
+                assertTrue(text.indexOf("Request") < text.indexOf("Result"), text);
+            }
+            final var inline =
+                    (List<Line>) body.invoke(command, fixture.get(0), null, null, fixture.get(2), 100, false, 3);
+            final var inlineText = inline.stream()
+                    .flatMap(line -> line.spans().stream())
+                    .map(span -> span.content())
+                    .reduce("", String::concat);
+            assertFalse(inlineText.contains("Requested changes"), inlineText);
+            if (fixture.get(2).isEmpty()) {
+                assertTrue(inline.isEmpty());
+            }
+        }
+    }
+
+    @Test
+    void sameNameToolsFinishingInReverseKeepTheirOwnArgumentsAndCleanAliases() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var onEvent = TuiCommand.class.getDeclaredMethod("onEvent", AgentEvent.class, UiState.class);
+        onEvent.setAccessible(true);
+        final var firstArgs = "{\"command\":\"echo first\"}";
+        final var secondArgs = "{\"command\":\"echo second\"}";
+        onEvent.invoke(command, new AgentEvent.ToolStarted("bash", firstArgs, 10, "", null, null), state);
+        onEvent.invoke(command, new AgentEvent.ToolStarted("bash", secondArgs, 11, "", null, null), state);
+        onEvent.invoke(command, new AgentEvent.ToolFinished("bash", "second", true, false, 11, "", null, null), state);
+        assertEquals(secondArgs, state.toolOutputs.get(11).args());
+        assertEquals(firstArgs, state.toolOutputs.get(10).args());
+        assertTrue(state.toolOutputs.get(10).running());
+        assertEquals(List.of(firstArgs), new ArrayList<>(state.pendingToolArgs.get("bash")));
+        assertEquals(List.of(10L), new ArrayList<>(state.pendingToolOrdinals.get("bash")));
+        assertFalse(state.pendingToolOrdinals.containsKey("echo second"));
+        onEvent.invoke(command, new AgentEvent.ToolFinished("bash", "first", true, false, 10, "", null, null), state);
+        assertEquals(firstArgs, state.toolOutputs.get(10).args());
+        assertEquals("first", state.toolOutputs.get(10).output());
+        assertEquals("second", state.toolOutputs.get(11).output());
+        assertTrue(state.pendingToolArgs.isEmpty());
+        assertTrue(state.pendingToolOrdinals.isEmpty());
+    }
+
+    @Test
+    void runningEmptyOutputModalShowsRequestAndModalDiffsWrapWithoutInlineChanges() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var overlay =
+                TuiCommand.class.getDeclaredMethod("toolOverlayText", ToolOutputStore.Entry.class, int.class);
+        overlay.setAccessible(true);
+        final var args = "{\"path\":\"a.txt\",\"content\":\"draft body\"}";
+        final var running =
+                (Text) overlay.invoke(command, new ToolOutputStore.Entry("write_file", args, "", false, -1), 80);
+        final var text = running.lines().stream()
+                .flatMap(line -> line.spans().stream())
+                .map(span -> span.content())
+                .reduce("", String::concat);
+        assertTrue(text.contains("Requested changes"), text);
+        assertTrue(text.contains("draft body"), text);
+        assertTrue(text.contains("executing"), text);
+
+        final var longLine = "0123456789".repeat(40);
+        final var patch = "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+" + longLine;
+        final var full = (Text) overlay.invoke(
+                command, new ToolOutputStore.Entry("apply_patch", "{\"patch\":\"not executed\"}", patch, true, 0), 30);
+        final var fullText = full.lines().stream()
+                .flatMap(line -> line.spans().stream())
+                .map(span -> span.content())
+                .reduce("", String::concat);
+        assertTrue(fullText.contains(longLine), fullText);
+        final var body = TuiCommand.class.getDeclaredMethod(
+                "toolBodyLines",
+                String.class,
+                String.class,
+                String.class,
+                String.class,
+                int.class,
+                boolean.class,
+                int.class);
+        body.setAccessible(true);
+        final var inline =
+                (List<Line>) body.invoke(command, "apply_patch", null, null, patch, 30, true, Integer.MAX_VALUE);
+        assertTrue(inline.stream()
+                .allMatch(line -> line.spans().stream()
+                                .map(span -> span.content())
+                                .reduce("", String::concat)
+                                .length()
+                        <= 30));
+    }
+
+    @Test
+    void legacyToolFinishesStillConsumeArgumentsAndAliasesInStartOrder() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var onEvent = TuiCommand.class.getDeclaredMethod("onEvent", AgentEvent.class, UiState.class);
+        onEvent.setAccessible(true);
+        final var args = "{\"command\":\"echo legacy\"}";
+        onEvent.invoke(command, new AgentEvent.ToolStarted("bash", args, ""), state);
+        onEvent.invoke(command, new AgentEvent.ToolFinished("bash", "legacy", true, ""), state);
+        assertEquals(args, state.toolOutputs.get(state.model.toolCallCount()).args());
+        assertTrue(state.pendingToolArgs.isEmpty());
+        assertTrue(state.pendingToolOrdinals.isEmpty());
     }
 
     @Test
@@ -3059,7 +3192,8 @@ class TuiCommandRenderTest {
                 tabManager,
                 subagentRegistry,
                 new ScrollService(tuiConfiguration),
-                null);
+                null,
+                formatMapper);
     }
 
     @Test

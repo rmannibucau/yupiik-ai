@@ -64,6 +64,15 @@ class DiffRendererTest {
     }
 
     @Test
+    void detectsOpenCodeOperationsAndDoesNotDuplicateExistingStats() {
+        assertTrue(renderer.looksLikeDiff("*** Begin Patch\n*** Delete File: a\n*** End Patch"));
+        assertEquals(
+                "@@ section (+1 -1)",
+                plain(renderer.render("@@ section (+99 -99)\n-old\n+new", 100, PaletteTest.palette())
+                        .getFirst()));
+    }
+
+    @Test
     void rendersHunkCounter() {
         final var diff = """
                 @@ -1,3 +1,4 @@
@@ -118,6 +127,46 @@ class DiffRendererTest {
         assertEquals(
                 List.of(" plain context"),
                 lines.stream().map(DiffRendererTest::plain).toList());
+    }
+
+    @Test
+    void unequalReplacementLengthsEmphasizeEachSidesOwnRange() {
+        final var palette = PaletteTest.palette();
+        for (final var pair : List.of(List.of("OLD", "LONGER"), List.of("LONGER", "NEW"))) {
+            final var lines = renderer.render(
+                    "-prefix " + pair.get(0) + " suffix\n+prefix " + pair.get(1) + " suffix", 100, palette);
+            assertEquals(
+                    pair.get(0),
+                    lines.get(0).spans().stream()
+                            .filter(span -> span.style()
+                                    .equals(palette.style(palette.error())
+                                            .bold()
+                                            .underlined()))
+                            .map(Span::content)
+                            .reduce("", String::concat));
+            assertEquals(
+                    pair.get(1),
+                    lines.get(1).spans().stream()
+                            .filter(span -> span.style()
+                                    .equals(palette.style(palette.success())
+                                            .bold()
+                                            .underlined()))
+                            .map(Span::content)
+                            .reduce("", String::concat));
+        }
+    }
+
+    @Test
+    void countersStopAtFileAndOpenCodeOperationBoundaries() {
+        final var diff = "--- a/a\n+++ b/a\n@@ first\n-x\n+y\n--- a/b\n+++ b/b\n-z\n+w\n"
+                + "*** Update File: c\n@@ second\n-old\n+new\n*** Add File: d\n+extra\n*** End Patch";
+        final var texts = renderer.render(diff, 100, PaletteTest.palette()).stream()
+                .map(DiffRendererTest::plain)
+                .toList();
+        assertTrue(texts.contains("@@ first (+1 -1)"), texts.toString());
+        assertTrue(texts.contains("@@ second (+1 -1)"), texts.toString());
+        assertTrue(texts.contains("*** Update File: c (+1 -1)"), texts.toString());
+        assertTrue(texts.contains("*** Add File: d (+1 -0)"), texts.toString());
     }
 
     @Test

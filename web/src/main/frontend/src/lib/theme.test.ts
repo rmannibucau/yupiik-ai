@@ -27,6 +27,24 @@ const paletteSlots = ['accent', 'primary', 'success', 'warning', 'error', 'info'
   'border', 'border-active', 'panel', 'yolo'];
 const codeSlots = ['string', 'comment', 'number', 'keyword', 'type', 'tag', 'attr', 'annotation'];
 
+describe('Tool presentation theme and keyboard contracts', () => {
+  it('uses semantic theme colors for requested changes and lifecycle states', () => {
+    expect(declarations('.yca-tool-card')).toMatchObject({ background: 'var(--yca-panel)', 'min-width': '0' });
+    expect(declarations('.yca-diff-add')).toMatchObject({ color: 'var(--yca-success)', background: 'var(--yca-success-soft)' });
+    expect(declarations('.yca-diff-remove')).toMatchObject({ color: 'var(--yca-error)', background: 'var(--yca-error-soft)' });
+    expect(declarations('.yca-tool-failed')['border-color']).toBe('var(--yca-error)');
+    expect(declarations('.yca-tool-working')['border-color']).toBe('var(--yca-accent)');
+    expect(declarations('.yca-tool-pending')['border-color']).toBe('var(--yca-warning)');
+  });
+
+  it('retains significant whitespace, bounded scrolling, and visible focus rings', () => {
+    expect(declarations('.yca-tool-card pre')).toMatchObject({ 'white-space': 'pre', overflow: 'auto', 'max-height': '24rem' });
+    expect(declarations('.yca-tool-card button:focus-visible')['outline']).toBe('2px solid var(--yca-accent)');
+    expect(declarations('.yca-tool-card summary:focus-visible')['outline']).toBe('2px solid var(--yca-accent)');
+    expect(declarations('.yca-tool-text [tabindex]:focus-visible')['outline']).toBe('2px solid var(--yca-accent)');
+  });
+});
+
 describe('TUI theme defaults', () => {
   it.each([
     ['dark', dark, ['#02abea', '#d858ff', '#46f72f', '#fbbf24', '#f87171', '#7ad2f7', '#eef0f3',

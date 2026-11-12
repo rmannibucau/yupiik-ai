@@ -16,9 +16,9 @@
 package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -34,7 +34,8 @@ public class RunShellFrontend implements ShellFrontend {
 
     private final boolean showThinking;
     private final ToolOutputVisibility showToolOutput;
-    private final AtomicBoolean toolStreamed = new AtomicBoolean();
+    private final ToolPresenter presenter;
+    private final ToolInvocations toolCalls = new ToolInvocations();
     private boolean stderrNeedsNewline;
     /**
      * Actor owning the open (newline-less) stderr line, {@code null} when none:
@@ -44,7 +45,9 @@ public class RunShellFrontend implements ShellFrontend {
      */
     private String stderrLineOwner;
 
-    public RunShellFrontend(final boolean showThinking, final ToolOutputVisibility showToolOutput) {
+    public RunShellFrontend(
+            final boolean showThinking, final ToolOutputVisibility showToolOutput, final ToolPresenter presenter) {
+        this.presenter = presenter;
         this.showThinking = showThinking;
         this.showToolOutput = showToolOutput;
     }
@@ -105,22 +108,54 @@ public class RunShellFrontend implements ShellFrontend {
                 stderrLineOwner = t.subagentId();
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
-            toolStreamed.set(false);
-            ensureStderrNewline();
-            LOGGER.info(() -> prefix + "tool started: " + t.name());
+            final var call = toolCalls.start(t);
+            if (showToolOutput != ToolOutputVisibility.HIDDEN) {
+                ensureStderrNewline();
+                LOGGER.info(prefix + call.header() + " started" + call.summary(presenter, showToolOutput));
+                if (showToolOutput.shown()) {
+                    for (final var line : presenter.request(t.name(), t.args(), Integer.MAX_VALUE)) {
+                        LOGGER.info(prefix + "  request: " + line);
+                    }
+                }
+            }
         } else if (event instanceof final AgentEvent.ToolStream t) {
-            toolStreamed.set(true);
-            ensureStderrNewline();
-            LOGGER.info(() -> prefix + "[" + t.name() + "] " + t.fragment());
+            final var call = toolCalls.find(t.name(), t.ordinal(), t.sessionId(), t.subagentId());
+            if (showToolOutput.shown()) {
+                ensureStderrNewline();
+                for (final var line : call.append(t.fragment())) {
+                    LOGGER.info(prefix + call.header() + " output: " + line);
+                }
+            }
         } else if (event instanceof final AgentEvent.ToolFinished t) {
-            ensureStderrNewline();
-            if (!t.success()) {
-                LOGGER.warning(() -> prefix + "tool failed: " + t.name());
-            } else if (showToolOutput.shown()
-                    && !toolStreamed.get()
-                    && t.output() != null
-                    && !t.output().isBlank()) {
-                LOGGER.info(() -> prefix + "[" + t.name() + "] " + t.output().stripTrailing());
+            final var call = toolCalls.find(t.name(), t.ordinal(), t.sessionId(), t.subagentId());
+            final var failure = !t.success() && !t.pending();
+            final var execution = t.pending() ? "" : presenter.executionDiagnostic(t.name(), t.output());
+            try {
+                if (showToolOutput != ToolOutputVisibility.HIDDEN || failure || !execution.isEmpty()) {
+                    ensureStderrNewline();
+                    if (showToolOutput.shown()) {
+                        final var rest = call.flush();
+                        if (!rest.isEmpty()) {
+                            LOGGER.info(prefix + call.header() + " output: " + rest);
+                        }
+                    }
+                    final var state = t.pending() ? "pending" : t.success() ? "done" : "failed";
+                    final var level = !t.success() && !t.pending() ? Level.WARNING : Level.INFO;
+                    if (showToolOutput != ToolOutputVisibility.HIDDEN || failure) {
+                        log(level, prefix + call.header() + " " + state);
+                    }
+                    if (!execution.isEmpty()) {
+                        log(Level.WARNING, prefix + call.header() + " " + execution);
+                    }
+                    if (showToolOutput.shown() || failure) {
+                        final var remaining = call.remaining(t.output());
+                        if (!remaining.isEmpty()) {
+                            log(level, prefix + call.header() + " result:\n" + remaining);
+                        }
+                    }
+                }
+            } finally {
+                toolCalls.remove(call);
             }
         } else if (event instanceof final AgentEvent.Compacted c) {
             ensureStderrNewline();
@@ -159,6 +194,20 @@ public class RunShellFrontend implements ShellFrontend {
                 instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {
             error(prefix + message);
         }
+    }
+
+    @Override
+    public synchronized void endTurn() {
+        if (showToolOutput.shown()) {
+            for (final var call : toolCalls.active()) {
+                final var rest = call.flush();
+                if (!rest.isEmpty()) {
+                    ensureStderrNewline();
+                    LOGGER.info(call.header() + " output: " + rest);
+                }
+            }
+        }
+        ensureStderrNewline();
     }
 
     private void log(final Level level, final String message) {

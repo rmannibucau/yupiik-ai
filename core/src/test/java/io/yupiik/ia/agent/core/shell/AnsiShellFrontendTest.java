@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.cli.MarkdownColorizer;
 import io.yupiik.ia.agent.core.cli.Symbols;
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
+import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
@@ -477,9 +478,9 @@ class AnsiShellFrontendTest {
         final var frontend = frontend(false, false);
 
         final var lines = frontend.renderTodos(List.of(
-                new io.yupiik.ia.agent.core.todo.TodoItem("write", "completed"),
-                new io.yupiik.ia.agent.core.todo.TodoItem("test", "in_progress"),
-                new io.yupiik.ia.agent.core.todo.TodoItem("ship", "pending")));
+                new TodoItem("write", "completed"),
+                new TodoItem("test", "in_progress"),
+                new TodoItem("ship", "pending")));
 
         assertEquals(4, lines.size());
         assertTrue(lines.get(3).contains("1/3 done"));
@@ -495,7 +496,7 @@ class AnsiShellFrontendTest {
         assertTrue(err.toString().contains("reasoning"));
         assertFalse(frontend.spinnerRunning());
         frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", "s1"));
-        assertTrue(frontend.spinnerRunning());
+        assertFalse(frontend.spinnerRunning(), "tool activity must remain append-only");
         frontend.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1"));
         assertFalse(frontend.spinnerRunning());
         frontend.endTurn();
@@ -569,7 +570,7 @@ class AnsiShellFrontendTest {
 
         // streamed tool output owns the terminal line: the spinner must be gone
         // rather than animating frames between the output fragments
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line\n", "s1"));
         assertFalse(frontend.spinnerRunning(), "streamed output must stop the spinner");
         assertTrue(err.toString(StandardCharsets.UTF_8).contains("streamed line"));
         frontend.onEvent(new AgentEvent.ToolStream("bash", "second fragment", "s1"));
@@ -584,7 +585,7 @@ class AnsiShellFrontendTest {
         final var frontend = frontend(CliVerbosity.RAW, true, false);
         frontend.beginTurn();
         assertTrue(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line\n", "s1"));
         assertFalse(frontend.spinnerRunning(), "streamed output must stop the spinner");
         assertTrue(err.toString(StandardCharsets.UTF_8).contains("streamed line\n"));
         frontend.endTurn();
@@ -742,5 +743,147 @@ class AnsiShellFrontendTest {
         // disabling must make openExternalUrl a pure no-op (no browser spawn, no output)
         frontend.openExternalUrl("https://example.com/login");
         assertEquals("", out.toString());
+    }
+
+    @Test
+    void requestedChangesHaveActualOrdinalsScopeAndNoInventedWriteDiff() {
+        final var frontend = frontend(CliVerbosity.VERBOSE, false, false);
+        frontend.onEvent(new AgentEvent.ToolStarted(
+                "edit_file",
+                "{\"path\":\"a\",\"oldString\":\" \\n\",\"newString\":\"  \\n\",\"replaceAll\":true}",
+                41,
+                "s",
+                null,
+                null));
+        frontend.onEvent(new AgentEvent.ToolFinished("edit_file", "edited", true, false, 41, "s", null, null));
+        frontend.onEvent(
+                new AgentEvent.ToolStarted("write_file", "{\"path\":\"b\",\"content\":\"new\"}", 42, "s", null, null));
+        final var stderr = err.toString(StandardCharsets.UTF_8);
+        assertTrue(stderr.contains("#41 edit_file started"), stderr);
+        assertTrue(stderr.contains("requested replacement: a (all matches)"), stderr);
+        assertTrue(stderr.contains("-  "), stderr);
+        assertTrue(stderr.contains("+   "), stderr);
+        assertTrue(stderr.contains("requested file content (not a filesystem diff)"), stderr);
+        assertFalse(stderr.contains("+ new"), stderr);
+        assertFalse(stderr.contains("Bash("), stderr);
+        assertEquals("", out.toString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void interleavedCallsKeepFinalBodiesAndPendingIsNotFailure() {
+        final var frontend = frontend(CliVerbosity.VERBOSE, false, false);
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 4, "s", null, null));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", 5, "s", null, null));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "  partial", 4, "s", null, null));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "  \n", 4, "s", null, null));
+        frontend.onEvent(new AgentEvent.ToolFinished("bash", "other body", true, false, 5, "s", null, null));
+        frontend.onEvent(
+                new AgentEvent.ToolFinished("bash", "  partial  \nextra diagnostic", false, false, 4, "s", null, null));
+        frontend.onEvent(
+                new AgentEvent.ToolFinished("check_subagents", "still working", false, true, 6, "s", null, null));
+        final var stderr = err.toString(StandardCharsets.UTF_8);
+        assertTrue(stderr.contains("#4 bash output:   partial  "), stderr);
+        assertTrue(stderr.contains("other body"), stderr);
+        assertTrue(stderr.contains("extra diagnostic"), stderr);
+        assertTrue(stderr.contains("#6 check_subagents pending"), stderr);
+        assertFalse(stderr.contains("#6 check_subagents failed"), stderr);
+        assertEquals("", out.toString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void toolVisibilityHidesSuccessfulBodiesAndHiddenAlsoHidesLifecycle() {
+        for (final var visibility : List.of(ToolOutputVisibility.HIDDEN, ToolOutputVisibility.COLLAPSED)) {
+            err.reset();
+            final var frontend = frontend(false, false, visibility);
+            frontend.onEvent(
+                    new AgentEvent.ToolStarted("bash", "{\"command\":\"secret request\"}", 7, "s", null, null));
+            frontend.onEvent(new AgentEvent.ToolStream("bash", "secret stream\n", 7, "s", null, null));
+            frontend.onEvent(new AgentEvent.ToolFinished("bash", "secret result", true, false, 7, "s", null, null));
+            final var stderr = err.toString(StandardCharsets.UTF_8);
+            assertFalse(stderr.contains("secret"), stderr);
+            if (visibility == ToolOutputVisibility.HIDDEN) {
+                assertEquals("", stderr);
+            } else {
+                assertTrue(stderr.contains("#7 bash done"), stderr);
+            }
+        }
+    }
+
+    @Test
+    void failureBodiesRemainDiagnosticAndHiddenPendingStaysHidden() {
+        for (final var visibility : ToolOutputVisibility.values()) {
+            err.reset();
+            final var frontend = frontend(false, false, visibility);
+            frontend.onEvent(
+                    new AgentEvent.ToolStarted("bash", "{\"command\":\"private command\"}", 7, "s", null, null));
+            frontend.onEvent(new AgentEvent.ToolStream("bash", "error body\n", 7, "s", null, null));
+            frontend.onEvent(new AgentEvent.ToolFinished(
+                    "bash",
+                    "error body\n" + "diagnostic\n".repeat(40) + "last diagnostic",
+                    false,
+                    false,
+                    7,
+                    "s",
+                    null,
+                    null));
+            final var stderr = err.toString(StandardCharsets.UTF_8);
+            assertTrue(stderr.contains("#7 bash failed"), stderr);
+            assertTrue(stderr.contains("error body"), stderr);
+            assertTrue(stderr.contains("last diagnostic"), stderr);
+            if (!visibility.shown()) {
+                assertFalse(stderr.contains("private command"), stderr);
+            }
+            err.reset();
+            frontend.onEvent(
+                    new AgentEvent.ToolFinished("bash", "pending body\nExit code: 7", false, true, 8, "s", null, null));
+            final var pending = err.toString(StandardCharsets.UTF_8);
+            assertFalse(pending.contains("failed"), pending);
+            assertFalse(pending.contains("execution exit code"), pending);
+            if (visibility == ToolOutputVisibility.HIDDEN) {
+                assertEquals("", pending);
+            }
+        }
+        assertEquals("", out.toString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void compactAndCollapsedActivityKeepSummaryWithoutRepeatingName() {
+        for (final var visibility : List.of(ToolOutputVisibility.SHOWN, ToolOutputVisibility.COLLAPSED)) {
+            err.reset();
+            final var frontend = frontend(false, false, visibility);
+            frontend.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"pom.xml\"}", 3, "s", null, null));
+            final var stderr = err.toString(StandardCharsets.UTF_8);
+            assertTrue(stderr.contains("#3 read started (pom.xml)"), stderr);
+            assertFalse(stderr.contains("read(pom.xml)"), stderr);
+        }
+    }
+
+    @Test
+    void missingDiffFallsBackToRequestedArguments() {
+        final var frontend = frontend(false, false, ToolOutputVisibility.SHOWN);
+        for (final var name : List.of("edit_file", "apply_patch")) {
+            frontend.onEvent(new AgentEvent.ToolStarted(name, "{bad", "s"));
+            frontend.onEvent(new AgentEvent.ToolStarted(name, "{\"unexpected\":\"keep me\"}", "s"));
+        }
+        final var stderr = err.toString(StandardCharsets.UTF_8);
+        assertTrue(stderr.contains("requested arguments (raw):"), stderr);
+        assertTrue(stderr.contains("{bad"), stderr);
+        assertTrue(stderr.contains("unexpected: keep me"), stderr);
+    }
+
+    @Test
+    void nonzeroExecutionStatusIsDiagnosticWithoutChangingToolSuccess() {
+        for (final var visibility : ToolOutputVisibility.values()) {
+            err.reset();
+            final var frontend = frontend(false, false, visibility);
+            frontend.onEvent(
+                    new AgentEvent.ToolFinished("bash", "output\nExit code: 7", true, false, 4, "s", null, null));
+            final var stderr = err.toString(StandardCharsets.UTF_8);
+            assertTrue(stderr.contains("#4 bash execution exit code: 7"), stderr);
+            assertFalse(stderr.contains("failed"), stderr);
+            if (visibility != ToolOutputVisibility.HIDDEN) {
+                assertTrue(stderr.contains("#4 bash done"), stderr);
+            }
+        }
     }
 }

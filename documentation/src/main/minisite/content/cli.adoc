@@ -59,6 +59,34 @@ java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-{project_version
 TIP: The structural code graph (enabled by default) uses the `javac` API and
 therefore needs a JDK (not a plain JRE).
 
+== CLI and headless tool presentation
+
+The `cli` and `run` frontends identify tool invocations by their actual tool name and execution ordinal, for example `#12 read` or `#13 bash`.
+Legacy events without an ordinal retain a name-only header.
+Requests are separate from streamed output and final results; `started`, `done`, `failed` and `pending` describe the lifecycle rather than inferring failure from unfinished work.
+Requested edits and patches are previews, not proof that a change was applied.
+An `edit_file` preview preserves replacement whitespace and indicates single-match or all-match scope; `apply_patch` retains paths and hunks for either supported patch dialect.
+A `write_file` request shows the supplied content, not an invented old/new filesystem diff.
+
+Tool visibility has three states in both frontends:
+
+* `shown` displays requested details and results, including live tool output where enabled by the CLI verbosity.
+* `collapsed` displays concise lifecycle activity, hiding ordinary request and output bodies.
+* `hidden` suppresses ordinary tool activity, including live streams.
+
+Tool failures remain visible as diagnostics, including their result body, regardless of visibility.
+A pending result is not a failure.
+
+For `cli`, compact verbosity bounds request and result previews and marks omitted lines.
+Verbose verbosity displays complete requested details and tool output; raw verbosity retains raw request arguments and output.
+Details preserve string newlines and whitespace, and external tools fall back to nested, pretty-printed JSON.
+Streamed output is tracked independently per invocation and actor; a final result is suppressed only where it exactly repeats the already displayed prefix, so additional diagnostics remain visible.
+
+For `run`, `--show-tool-output shown|collapsed|hidden` controls the same visibility states, with `collapsed` as the default.
+Tool activity and failure diagnostics use logging, not stdout; stdout remains the answer stream for scripts and pipelines.
+Shown live tool output is buffered into complete lines, with an unfinished trailing fragment flushed at completion or turn end without trimming whitespace.
+These presentation settings do not change execution, exit status, or metrics collection.
+
 == Launch options
 
 yca runs either as a GraalVM native binary or as a plain JVM application.

@@ -61,9 +61,11 @@ import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
+import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -322,7 +324,8 @@ public class TuiCommand implements Runnable {
             final TabManager tabManager,
             final SubagentRegistry subagentRegistry,
             final ScrollService scrollService,
-            final ScheduledExecutorService scheduler) {
+            final ScheduledExecutorService scheduler,
+            final JsonMapper mapper) {
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
         this.configuration = configuration;
@@ -357,7 +360,8 @@ public class TuiCommand implements Runnable {
         this.scrollService = scrollService == null ? new ScrollService(null) : scrollService;
         this.formatToolOutput = !"off".equalsIgnoreCase(tuiConfiguration.toolOutputFormat());
         this.syntaxHighlighter = new SyntaxHighlighter().maxLineLength(configuration.maxLineLength());
-        this.toolArgsPreview = new ToolArgsPreview(toolOutputFormat, syntaxHighlighter, diffRenderer);
+        this.toolArgsPreview =
+                new ToolArgsPreview(toolOutputFormat, syntaxHighlighter, diffRenderer, new ToolPresenter(mapper));
         this.palette = Palette.from(conf.theme(), tuiConfiguration);
         this.glyphs = Glyphs.of(tuiConfiguration.glyphs());
         this.costEstimator = CostEstimator.parse(tuiConfiguration.pricing());
@@ -1512,7 +1516,7 @@ public class TuiCommand implements Runnable {
             // the renderer resolves the running card's ordinal from the command label
             // (a running card's ToolCard.name holds the command, not the tool name)
             final var cmd = commandOfArgs(started.args());
-            if (cmd != null && !cmd.isBlank()) {
+            if (cmd != null && !cmd.isBlank() && !cmd.equals(started.name())) {
                 state.pendingToolOrdinals
                         .computeIfAbsent(cmd, n -> new ArrayDeque<>())
                         .addLast(ordinal);
@@ -1531,11 +1535,29 @@ public class TuiCommand implements Runnable {
             // the transcript just stamped this call with ordinal #toolCallCount: keep the
             // full uncapped output around so the Ctrl+O overlay can expand the truncated card
             final var args = state.pendingToolArgs.get(finished.name());
-            final var argsValue = args == null || args.isEmpty() ? "" : args.pollFirst();
+            final var ordinals = state.pendingToolOrdinals.get(finished.name());
+            final var stored = finished.ordinal() > 0 ? state.toolOutputs.get(finished.ordinal()) : null;
+            final var argumentIndex = finished.ordinal() > 0
+                    ? ordinals == null ? -1 : new ArrayList<>(ordinals).indexOf(finished.ordinal())
+                    : 0;
+            // A finish can arrive out of order: its ordinal's snapshot, not the name FIFO,
+            // owns the request. The positional fallback also handles an evicted snapshot.
+            String queuedArgs = null;
+            if (args != null && argumentIndex >= 0) {
+                final var iterator = args.iterator();
+                for (var index = 0; iterator.hasNext(); index++) {
+                    final var candidate = iterator.next();
+                    if (index == argumentIndex) {
+                        queuedArgs = candidate;
+                        iterator.remove();
+                        break;
+                    }
+                }
+            }
+            final var argsValue = stored != null ? stored.args() : queuedArgs == null ? "" : queuedArgs;
             if (args != null && args.isEmpty()) {
                 state.pendingToolArgs.remove(finished.name());
             }
-            final var ordinals = state.pendingToolOrdinals.get(finished.name());
             // The runner stamps the same authoritative ordinal on both ToolStarted and ToolFinished
             // (a per-session atomic): prefer it so a same-name overlap (a subagent streaming the same
             // tool, or parallel batches) can never record the finish under the wrong reserved ordinal
@@ -1556,7 +1578,7 @@ public class TuiCommand implements Runnable {
             // drop the command-keyed alias (same ordinal) so the renderer fallback
             // cannot resurrect a finished card as if it were still running
             final var cmd = commandOfArgs(argsValue == null ? "" : argsValue);
-            if (cmd != null && !cmd.isBlank()) {
+            if (cmd != null && !cmd.isBlank() && !cmd.equals(finished.name())) {
                 final var alias = state.pendingToolOrdinals.get(cmd);
                 if (alias != null) {
                     alias.remove(ordinal);
@@ -7400,23 +7422,38 @@ public class TuiCommand implements Runnable {
             final int width,
             final boolean isDiff,
             final int limit) {
-        if (output == null || output.isBlank()) {
-            return new ArrayList<>();
-        }
-        final var body = renderToolBody(name, command, output, width, isDiff, limit);
+        final var body = output == null || (args == null ? output.isBlank() : output.isEmpty())
+                ? List.<Line>of()
+                : renderToolBody(name, command, output, width, isDiff, limit, args != null);
         if (args == null || args.isBlank()) {
             return new ArrayList<>(body);
         }
         // the Ctrl+O overlay enriches the historical rendering with a structured
         // preview of the meaningful arguments (file content / diff / patch)
-        final var preview = toolArgsPreview.preview(name, args, width, palette);
+        final List<Line> preview;
+        try {
+            preview = toolArgsPreview.preview(name, args, width, palette);
+        } catch (final RuntimeException e) {
+            final var fallback = new ArrayList<Line>();
+            fallback.add(Line.from(Span.styled("Request", palette.bold(palette.primary()))));
+            fallback.addAll(plainToolPreview(args, width, limit));
+            if (!body.isEmpty()) {
+                fallback.add(Line.from(Span.styled("Result", palette.bold(palette.primary()))));
+                fallback.addAll(body);
+            }
+            return fallback;
+        }
         if (preview == null || preview.isEmpty()) {
             return new ArrayList<>(body);
         }
         final var all = new ArrayList<Line>(preview.size() + body.size() + 1);
+        all.add(Line.from(Span.styled("Request", palette.bold(palette.primary()))));
         all.addAll(preview);
-        all.add(Line.empty());
-        all.addAll(body);
+        if (!body.isEmpty()) {
+            all.add(Line.empty());
+            all.add(Line.from(Span.styled("Result", palette.bold(palette.primary()))));
+            all.addAll(body);
+        }
         return all;
     }
 
@@ -7426,14 +7463,15 @@ public class TuiCommand implements Runnable {
             final String output,
             final int width,
             final boolean isDiff,
-            final int limit) {
+            final int limit,
+            final boolean fullOutput) {
         final var answers = "ask_user".equals(name) ? askUserCardRenderer.render(output, palette) : null;
         if (answers != null) {
             return answers;
         }
         try {
             if (!formatToolOutput) {
-                return isDiff ? legacyBody(output, width, true) : plainToolPreview(output, width, limit);
+                return isDiff && !fullOutput ? legacyBody(output, width, true) : plainToolPreview(output, width, limit);
             }
             // read/read_symbol print files with a "%6d\t" line-number prefix: the file to
             // highlight is the path the tool read (card/overlay command) or, for read_symbol,
@@ -7446,9 +7484,23 @@ public class TuiCommand implements Runnable {
             }
             final var language = ToolOutputLanguage.guess(output, command);
             return switch (toolOutputFormat.detect(output, language)) {
-                case DIFF -> diffRenderer.render(output, width, palette);
-                case JSON -> syntaxHighlighter.highlightLines("json", toolOutputFormat.prettyJson(output));
-                case XML -> syntaxHighlighter.highlightLines("xml", toolOutputFormat.prettyXml(output));
+                case DIFF ->
+                    fullOutput
+                            ? MarkdownLines.wrapCode(
+                                    diffRenderer.render(output, Integer.MAX_VALUE, palette), Math.max(1, width))
+                            : diffRenderer.render(output, width, palette);
+                case JSON ->
+                    fullOutput
+                            ? MarkdownLines.wrapCode(
+                                    syntaxHighlighter.highlightLines("json", toolOutputFormat.prettyJson(output)),
+                                    Math.max(1, width))
+                            : syntaxHighlighter.highlightLines("json", toolOutputFormat.prettyJson(output));
+                case XML ->
+                    fullOutput
+                            ? MarkdownLines.wrapCode(
+                                    syntaxHighlighter.highlightLines("xml", toolOutputFormat.prettyXml(output)),
+                                    Math.max(1, width))
+                            : syntaxHighlighter.highlightLines("xml", toolOutputFormat.prettyXml(output));
                 case CODE ->
                     MarkdownLines.wrapCode(
                             syntaxHighlighter.highlightLines(language, previewSource(output, Integer.MAX_VALUE, limit)),
@@ -7459,7 +7511,7 @@ public class TuiCommand implements Runnable {
                 case TEXT -> plainToolPreview(output, width, limit);
             };
         } catch (final RuntimeException e) {
-            return isDiff ? legacyBody(output, width, true) : plainToolPreview(output, width, limit);
+            return isDiff && !fullOutput ? legacyBody(output, width, true) : plainToolPreview(output, width, limit);
         }
     }
 

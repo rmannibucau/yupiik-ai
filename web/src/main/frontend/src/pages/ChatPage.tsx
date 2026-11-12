@@ -1,7 +1,7 @@
 import { ContextBar, formatQuotaReset, quotaWindowLabel } from '../components/UsageBar';
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router';
-import { CodeBlock } from '../components/CodeBlock';
+import { ToolCard } from '../components/ToolCard';
 import { MarkdownContent } from '../components/MarkdownContent';
 import { SessionMetadata } from '../components/SessionMetadata';
 import { call, onServerRequest, type ServerRequest } from '../api/rpc';
@@ -15,8 +15,6 @@ import {
 } from '../api/eventLog';
 import { useSlashCompletion, applySuggestion, type SlashSuggestion } from '../api/useSlashCompletion';
 import { normalizeMarkdown, hasOpenInlineSpan, stripEchoedRefs } from '../lib/markdown';
-import { guessToolLanguage, summarizeArgs } from '../lib/toolOutput';
-import { isToolVisuallyFailed } from '../lib/toolPresentation';
 
 // resizable sidebar width bounds and default (px), persisted in localStorage like the theme
 const SIDEBAR_DEFAULT_WIDTH = 256; // matches the historical w-64
@@ -1720,81 +1718,7 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
     );
   }
   if (block.kind === 'tool') {
-    const running = block.state === 'running';
-    const interrupted = block.state === 'interrupted';
-    const pending = block.pending === true;
-    const failed = isToolVisuallyFailed(block);
-    // Issue #2/#4: a running tool shows its live stream and a spinner; a failed tool is styled red.
-    // A pending tool (still running watermark, e.g. a collect wait that timed out) is neutral, never red.
-    const streamed = (block.content || '').trim();
-    const shownOutput = block.output || streamed;
-    // best-effort language detection for tool output syntax coloring (read_file path, bash command...).
-    // A wrong guess only costs colors, never layout; unknown languages fall back to the plain <pre>.
-    const shownOutputLang = guessToolLanguage(shownOutput, 'args' in block ? block.args : undefined);
-    // condensed tool input for the card header (bash command, read_file path/lines...) so the user always
-    // sees WHAT the tool was asked to do, not just its name - mirrors the TUI's condensed tool line.
-    // Visible in both the collapsed and expanded states (the header row is always rendered).
-    const argsSummary = summarizeArgs('args' in block ? block.args : undefined);
-    return (
-      <div
-        className="rounded border px-3 py-1 text-[15px]"
-        style={{
-          borderColor: pending
-            ? 'var(--yca-warning)'
-            : failed
-            ? 'var(--yca-error)'
-            : running
-            ? 'var(--yca-accent)'
-            : interrupted
-            ? 'var(--yca-warning-soft)'
-            : 'var(--yca-border)',
-          background: 'var(--yca-panel)',
-          borderRadius: 'var(--yca-radius-sm)',
-        }}
-      >
-        <button
-          className="flex w-full cursor-pointer items-center gap-1 font-mono text-sm hover:opacity-80"
-          onClick={toggleCard}
-          title={collapsed ? 'Expand tool output' : 'Collapse tool output'}
-        >
-          <span>{collapsed ? '▸' : '▾'}</span>
-          {running ? (
-            <span className="shrink-0" style={{ color: 'var(--yca-accent)' }}>▶ working…</span>
-          ) : interrupted ? (
-            <span className="shrink-0" style={{ color: 'var(--yca-warning)' }}>◧ interrupted</span>
-          ) : pending ? (
-            <span className="shrink-0" style={{ color: 'var(--yca-warning)' }}>◷ pending</span>
-          ) : failed ? (
-            <span className="shrink-0" style={{ color: 'var(--yca-error)' }}>✗</span>
-          ) : (
-            <span className="shrink-0" style={{ color: 'var(--yca-success)' }}>✓</span>
-          )}
-          <span className="truncate">{block.name}</span>
-          {argsSummary && (
-            <span
-              className="truncate text-xs"
-              style={{ color: 'var(--yca-muted)' }}
-              title={argsSummary}
-            >
-              {argsSummary}
-            </span>
-          )}
-          {failed && (
-            <span className="rounded px-1 text-xs" style={{ background: 'var(--yca-error-soft)', color: 'var(--yca-error)' }}>
-              failed
-            </span>
-          )}
-          {shownOutput && !collapsed && <span className="ml-1 shrink-0 text-xs opacity-60">{shownOutput.length} chars</span>}
-        </button>
-        {!collapsed && shownOutput && (
-          <CodeBlock
-            language={shownOutputLang ?? undefined}
-            className={`yca-tool-code${shownOutputLang ? '' : ' whitespace-pre-wrap'}`}
-            code={shownOutput.slice(0, 4000) + (shownOutput.length > 4000 ? (shownOutputLang ? '\n…' : '…') : '')}
-          />
-        )}
-      </div>
-    );
+    return <ToolCard block={block} collapsed={collapsed} onToggle={toggleCard} />;
   }
   if (block.kind === 'error') {
     return <div className="rounded border px-3 py-1 text-[15px]" style={{ borderColor: 'var(--yca-error)', color: 'var(--yca-error)' }}>{block.content}</div>;

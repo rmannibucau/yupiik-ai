@@ -17,50 +17,59 @@ package io.yupiik.ia.agent.tui;
 
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
+import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Structured preview for the tool detail modal (Ctrl+O): instead of showing the
- * raw tool arguments as JSON, the meaningful payload of write/edit/patch tools
- * is rendered directly - file content (syntax-highlighted), the old/new strings
- * of an edit as a unified diff, or the applied patch itself. Everything is best
- * effort: unparseable arguments or an unknown tool fall back to {@code null}
- * and the caller keeps the historical rendering.
- */
+/** Best-effort request details for the full-output modal, never the compact inline card. */
 public class ToolArgsPreview {
     private final ToolOutputFormat toolOutputFormat;
     private final SyntaxHighlighter syntaxHighlighter;
     private final DiffRenderer diffRenderer;
+    private final ToolPresenter presenter;
 
     public ToolArgsPreview(
             final ToolOutputFormat toolOutputFormat,
             final SyntaxHighlighter syntaxHighlighter,
-            final DiffRenderer diffRenderer) {
+            final DiffRenderer diffRenderer,
+            final ToolPresenter presenter) {
         this.toolOutputFormat = toolOutputFormat;
         this.syntaxHighlighter = syntaxHighlighter;
         this.diffRenderer = diffRenderer;
+        this.presenter = presenter;
     }
 
-    /**
-     * @return the preview lines for the tool detail modal, or {@code null} to
-     *         fall back to the default output rendering
-     */
+    /** Returns null only when there are no arguments to display. Rendering failures retain the raw request. */
     public List<Line> preview(final String name, final String argsJson, final int width, final Palette palette) {
-        if (argsJson == null || argsJson.isBlank() || width < 20) {
+        if (argsJson == null || argsJson.isBlank()) {
             return null;
         }
-        final var args = toolOutputFormat.parseArguments(argsJson);
-        if (args == null) {
-            return null;
+        try {
+            final var args = toolOutputFormat.parseArguments(argsJson);
+            final var filePreview = args == null
+                    ? null
+                    : switch (name == null ? "" : name) {
+                        case "write_file" -> writeFile(args, width, palette);
+                        case "edit_file" -> editFile(args, width, palette);
+                        case "apply_patch" -> applyPatch(args, width, palette);
+                        default -> null;
+                    };
+            if (filePreview != null) {
+                return filePreview;
+            }
+            final var details = presenter.request(name, argsJson, Integer.MAX_VALUE);
+            final var text = details.isEmpty() ? argsJson : String.join("\n", details);
+            final var stripped = text.stripLeading();
+            if (stripped.startsWith("{") || stripped.startsWith("[")) {
+                return MarkdownLines.wrapCode(
+                        syntaxHighlighter.highlightLines("json", toolOutputFormat.prettyJson(text)),
+                        Math.max(1, width));
+            }
+            return plain(text, width, palette);
+        } catch (final RuntimeException e) {
+            return plain(argsJson, width, palette);
         }
-        return switch (name) {
-            case "write_file" -> writeFile(args, width, palette);
-            case "edit_file" -> editFile(args, width, palette);
-            case "apply_patch" -> applyPatch(args, width, palette);
-            default -> null;
-        };
     }
 
     private List<Line> writeFile(final Map<String, Object> args, final int width, final Palette palette) {
@@ -68,47 +77,91 @@ public class ToolArgsPreview {
                 || !(args.get("path") instanceof final String path)) {
             return null;
         }
-        final var lines = new ArrayList<Line>();
-        lines.add(
-                Line.from(Span.styled("path: ", palette.muted()), Span.styled(path, palette.bold(palette.primary()))));
+        final var lines = heading(path, palette);
+        lines.add(Line.from(Span.styled("content: " + description(content), palette.muted())));
         lines.add(Line.empty());
         final var lang = SyntaxHighlighter.guessLanguage(path);
-        final var codeLines = syntaxHighlighter.highlightLines(lang == null ? "" : lang, content);
-        lines.addAll(MarkdownLines.wrapCode(codeLines, width));
+        lines.addAll(MarkdownLines.wrapCode(
+                syntaxHighlighter.highlightLines(lang == null ? "" : lang, content), Math.max(1, width)));
         return lines;
     }
 
     private List<Line> editFile(final Map<String, Object> args, final int width, final Palette palette) {
-        if (!(args.get("path") instanceof final String path)) {
+        if (!(args.get("path") instanceof final String path)
+                || !(args.get("oldString") instanceof final String oldString)
+                || !(args.get("newString") instanceof final String newString)
+                || (args.containsKey("replaceAll") && !(args.get("replaceAll") instanceof Boolean))) {
             return null;
         }
-        final var oldString = args.get("oldString") instanceof String s ? s : "";
-        final var newString = args.get("newString") instanceof String s ? s : "";
-        if (oldString.isBlank() && newString.isBlank()) {
-            return null;
-        }
-        final var patch = new StringBuilder();
-        patch.append("--- a/").append(path).append('\n');
-        patch.append("+++ b/").append(path).append('\n');
-        for (final var line : splitLines(oldString)) {
-            patch.append('-').append(line).append('\n');
-        }
-        for (final var line : splitLines(newString)) {
-            patch.append('+').append(line).append('\n');
-        }
-        return diffRenderer.render(patch.toString().stripTrailing(), width, palette);
+        final var lines = heading(path, palette);
+        lines.add(Line.from(Span.styled(
+                "scope: " + (Boolean.TRUE.equals(args.get("replaceAll")) ? "all occurrences" : "single occurrence"),
+                palette.muted())));
+        lines.add(Line.from(Span.styled("old: " + description(oldString), palette.muted())));
+        lines.add(Line.from(Span.styled("new: " + description(newString), palette.muted())));
+        final var patch = new StringBuilder("--- a/")
+                .append(path)
+                .append('\n')
+                .append("+++ b/")
+                .append(path)
+                .append('\n');
+        appendSide(patch, '-', oldString);
+        appendSide(patch, '+', newString);
+        lines.addAll(fullDiff(patch.toString(), width, palette));
+        return lines;
     }
 
     private List<Line> applyPatch(final Map<String, Object> args, final int width, final Palette palette) {
         if (!(args.get("patch") instanceof final String patch) || patch.isBlank()) {
             return null;
         }
-        return diffRenderer.render(patch, width, palette);
+        final var lines = new ArrayList<Line>();
+        lines.add(Line.from(Span.styled("Requested changes", palette.bold(palette.primary()))));
+        lines.addAll(fullDiff(patch, width, palette));
+        return lines;
     }
 
-    private static List<String> splitLines(final String text) {
-        return text == null || text.isEmpty()
-                ? List.of()
-                : List.of(text.replace("\r\n", "\n").split("\n", -1));
+    private List<Line> fullDiff(final String patch, final int width, final Palette palette) {
+        // Do not change DiffRenderer's inline clipping policy: only the modal wraps full lines.
+        return MarkdownLines.wrapCode(diffRenderer.render(patch, Integer.MAX_VALUE, palette), Math.max(1, width));
+    }
+
+    private ArrayList<Line> heading(final String path, final Palette palette) {
+        final var lines = new ArrayList<Line>();
+        lines.add(Line.from(Span.styled("Requested changes", palette.bold(palette.primary()))));
+        lines.add(
+                Line.from(Span.styled("path: ", palette.muted()), Span.styled(path, palette.bold(palette.primary()))));
+        return lines;
+    }
+
+    private static void appendSide(final StringBuilder patch, final char tag, final String text) {
+        if (text.isEmpty()) {
+            return;
+        }
+        final var parts = text.split("\n", -1);
+        final var count = parts.length - (text.endsWith("\n") ? 1 : 0);
+        for (var i = 0; i < count; i++) {
+            patch.append(tag).append(parts[i]).append('\n');
+        }
+        if (!text.endsWith("\n")) {
+            patch.append("\\ No newline at end of string\n");
+        }
+    }
+
+    private static String description(final String text) {
+        if (text.isEmpty()) {
+            return "empty";
+        }
+        return text.length() + " characters; "
+                + (text.contains("\r\n") ? "CRLF; " : "")
+                + (text.endsWith("\n") ? "ends with newline" : "no final newline");
+    }
+
+    private List<Line> plain(final String text, final int width, final Palette palette) {
+        final var lines = new ArrayList<Line>();
+        for (final var line : text.split("\n", -1)) {
+            lines.add(Line.from(Span.styled(line, palette.style(palette.text()))));
+        }
+        return MarkdownLines.wrapCode(lines, Math.max(1, width));
     }
 }

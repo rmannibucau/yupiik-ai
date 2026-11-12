@@ -44,7 +44,9 @@ public class DiffRenderer {
         var changed = 0;
         for (final var line : text.split("\n")) {
             final var s = line.stripLeading();
-            if (s.startsWith("@@") && s.contains("@@")) {
+            if (s.startsWith("*** Add File:") || s.startsWith("*** Update File:") || s.startsWith("*** Delete File:")) {
+                return true;
+            } else if (s.startsWith("@@") && s.contains("@@")) {
                 hunk = true;
             } else if (s.startsWith("--- ") || s.startsWith("+++ ")) {
                 fileHeaders = true;
@@ -74,10 +76,16 @@ public class DiffRenderer {
         var i = 0;
         while (i < lines.length) {
             final var raw = lines[i];
-            if (raw.startsWith("diff --git")
+            if (raw.startsWith("*** Add File:")
+                    || raw.startsWith("*** Update File:")
+                    || raw.startsWith("*** Delete File:")) {
+                out.add(Line.from(Span.styled(clip(operationLabel(lines, i), width), palette.bold(palette.primary()))));
+                i++;
+            } else if (raw.startsWith("diff --git")
                     || raw.startsWith("index ")
                     || raw.startsWith("--- ")
-                    || raw.startsWith("+++ ")) {
+                    || raw.startsWith("+++ ")
+                    || raw.startsWith("*** ")) {
                 out.add(Line.from(Span.styled(clip(raw, width), palette.bold(palette.primary()))));
                 i++;
             } else if (raw.startsWith("@@")) {
@@ -93,7 +101,7 @@ public class DiffRenderer {
                     out.add(Line.from(
                             spansFor('-', raw.substring(1), segment[0], segment[1], palette.error(), palette, width)));
                     out.add(Line.from(spansFor(
-                            '+', next.substring(1), segment[0], segment[1], palette.success(), palette, width)));
+                            '+', next.substring(1), segment[0], segment[2], palette.success(), palette, width)));
                     i += 2;
                 } else {
                     out.add(Line.from(spansFor('-', raw.substring(1), -1, -1, palette.error(), palette, width)));
@@ -113,7 +121,11 @@ public class DiffRenderer {
         var del = 0;
         for (var j = index + 1; j < lines.length; j++) {
             final var line = lines[j];
-            if (line.startsWith("@@") || line.startsWith("diff --git")) {
+            if (line.startsWith("@@")
+                    || line.startsWith("diff --git")
+                    || line.startsWith("--- ")
+                    || line.startsWith("+++ ")
+                    || line.startsWith("*** ")) {
                 break;
             }
             if (line.startsWith("+") && !line.startsWith("+++")) {
@@ -123,17 +135,35 @@ public class DiffRenderer {
             }
         }
         final var counters = " (+" + add + " -" + del + ")";
-        if (lines[index].length() + counters.length() <= 120) {
-            return lines[index] + counters;
+        final var header = lines[index].replaceFirst("\\s+\\(\\+\\d+ -\\d+\\)$", "");
+        return header + counters;
+    }
+
+    private String operationLabel(final String[] lines, final int index) {
+        var add = 0;
+        var del = 0;
+        for (var j = index + 1; j < lines.length; j++) {
+            final var line = lines[j];
+            if (line.startsWith("*** Add File:")
+                    || line.startsWith("*** Update File:")
+                    || line.startsWith("*** Delete File:")
+                    || line.startsWith("*** End Patch")) {
+                break;
+            }
+            if (line.startsWith("+")) {
+                add++;
+            } else if (line.startsWith("-")) {
+                del++;
+            }
         }
-        return lines[index];
+        return lines[index] + " (+" + add + " -" + del + ")";
     }
 
     /**
      * Computes the changed segment of a removed line compared to its paired
      * added line: common prefix/suffix trimming.
      *
-     * @return {@code {start, end}} delimiting the changed range of {@code a}
+     * @return {@code {start, endA, endB}} delimiting each side's changed range
      */
     private int[] changedSegment(final String a, final String b) {
         var prefix = 0;
@@ -147,7 +177,7 @@ public class DiffRenderer {
             endA--;
             endB--;
         }
-        return new int[] {prefix, endA};
+        return new int[] {prefix, endA, endB};
     }
 
     private List<Span> spansFor(
