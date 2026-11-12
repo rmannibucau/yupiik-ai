@@ -28,6 +28,7 @@ import {
 import { useSlashCompletion, applySuggestion, type SlashSuggestion } from '../api/useSlashCompletion';
 import { normalizeMarkdown, hasOpenInlineSpan, stripEchoedRefs } from '../lib/markdown';
 import { guessToolLanguage, summarizeArgs } from '../lib/toolOutput';
+import { isToolVisuallyFailed } from '../lib/toolPresentation';
 
 // register the language grammars the TUI highlights (java, ts/js, python, shell, sql, xml/json,
 // markdown/asciidoc) plus a generic fallback, so fenced code blocks get syntax highlighting
@@ -1862,7 +1863,7 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
     const running = block.state === 'running';
     const interrupted = block.state === 'interrupted';
     const pending = block.pending === true;
-    const failed = !running && !interrupted && !pending && block.success === false;
+    const failed = isToolVisuallyFailed(block);
     // Issue #2/#4: a running tool shows its live stream and a spinner; a failed tool is styled red.
     // A pending tool (still running watermark, e.g. a collect wait that timed out) is neutral, never red.
     const streamed = (block.content || '').trim();

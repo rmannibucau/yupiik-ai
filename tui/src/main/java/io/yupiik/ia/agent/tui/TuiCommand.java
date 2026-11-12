@@ -4870,7 +4870,8 @@ public class TuiCommand implements Runnable {
                 final var part = regionUnit("thought", region.text(), contentWidth, state);
                 appendPart(local, localRows, part);
             } else if (region.tool()) {
-                final var card = ToolCard.parse(region.text());
+                final var parsed = ToolCard.parse(region.text());
+                final var card = parsed.withCapturedStatus(state.toolOutputs.get(parsed.ordinal()));
                 if (!card.running() && !pendingRuns.isEmpty()) {
                     pendingRuns.get(pendingRuns.size() - 1).add(new ToolRun.Member(card, region.text()));
                 } else {
@@ -5555,6 +5556,7 @@ public class TuiCommand implements Runnable {
             final List<UiState.FooterLink> footerLinks,
             final List<String> rows) {
         var card = ToolCard.parse(regionText);
+        card = card.withCapturedStatus(state.toolOutputs.get(card.ordinal()));
         if (card.running() && card.ordinal() < 0) {
             // first render before a (#n) header exists: resolve from the started-not-
             // finished FIFO so the live card is still anchored (clickable overlay).

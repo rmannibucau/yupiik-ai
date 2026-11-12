@@ -37,6 +37,15 @@ public record ToolCard(
         long elapsedMs,
         boolean running,
         long ordinal) {
+    /** Uses the completed capture when the transcript contains only streamed/capped stdout. */
+    public ToolCard withCapturedStatus(final ToolOutputStore.Entry entry) {
+        if (entry == null || running || pending || entry.running() || entry.pending()) {
+            return this;
+        }
+        // The final capture is authoritative: streamed stdout can itself end with a misleading footer.
+        return new ToolCard(name, args, output, entry.failed(), pending, elapsedMs, running, ordinal);
+    }
+
     private static final Pattern DURATION = Pattern.compile("\\(\\s*(?:#(\\d+)\\s*,\\s*)?(\\d+)\\s*ms\\s*\\)");
     /** Trailing {@code (#n)} ordinal suffix of a live running-tool header. */
     private static final Pattern RUNNING_ORDINAL = Pattern.compile("^(.*)\\(\\s*#(\\d+)\\s*\\)\\s*$");
@@ -70,11 +79,12 @@ public record ToolCard(
         }
         final var name = nameOf(header);
         final var argsAndDuration = failed ? failedArgs(header) : pending ? pendingArgs(header) : successArgs(header);
+        final var output = extractCode(text);
         return new ToolCard(
                 name,
                 argsAndDuration.args(),
-                extractCode(text),
-                failed,
+                output,
+                failed || (!pending && BashExitStatus.failed(name, output)),
                 pending,
                 argsAndDuration.elapsed(),
                 false,

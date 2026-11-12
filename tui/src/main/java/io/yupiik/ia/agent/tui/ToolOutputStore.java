@@ -33,6 +33,10 @@ import java.util.Map;
 public final class ToolOutputStore {
     /** Full, uncapped record of a finished tool call; {@code elapsedMs < 0} marks a still-running call. */
     public record Entry(String name, String args, String output, boolean failed, boolean pending, long elapsedMs) {
+        public Entry {
+            failed = failed || (elapsedMs >= 0 && !pending && BashExitStatus.failed(name, output));
+        }
+
         /** Whether the call is still running (no final output/elapsed yet). */
         public boolean running() {
             return elapsedMs < 0;
@@ -79,7 +83,7 @@ public final class ToolOutputStore {
         if (output.length() > maxOutputChars) {
             output = output.substring(output.length() - maxOutputChars) + "\n... older output truncated";
         }
-        final var stored = new Entry(entry.name(), entry.args(), output, entry.failed(), entry.elapsedMs());
+        final var stored = new Entry(entry.name(), entry.args(), output, entry.failed(), entry.pending(), entry.elapsedMs());
         final var replaced = entries.put(ordinal, stored);
         // Not a LinkedHashMap on purpose: the separate insertion deque lets us plug more
         // complex eviction policies later (pinning running ordinals, two-tier aging, LRU...),
