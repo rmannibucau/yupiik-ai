@@ -137,7 +137,8 @@ public class SpawnSubagentTool implements EmbeddedTool {
                                         "Maximum model round-trips for the sub-agent; a non-positive or omitted value means no per-spawn override, so the configured subagent/global/provider limit applies."),
                         "tools",
                                 Schemas.arrayOf(
-                                        "Optional allowlist of tool names for the sub-agent; an empty list allows no tools.",
+                                        "Optional allowlist of bare tool names (for example, read or bash, not functions.read) "
+                                                + "for the sub-agent; an empty list allows no tools.",
                                         Schemas.str("Tool name"))),
                 "task");
     }

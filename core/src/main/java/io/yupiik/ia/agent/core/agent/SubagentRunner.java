@@ -253,19 +253,21 @@ public class SubagentRunner {
             return SubagentRegistry.SubagentResult.error("Unknown agent profile: " + state.profile(), "");
         }
         final Set<String> profileTools = profile == null ? null : agentProvider.allowedTools(profile.name());
-        final var effectiveAllowedTools =
-                intersectToolCeilings(state.parentAllowedTools(), profileTools, state.allowedTools());
+        Set<String> requestedTools = state.allowedTools();
         if (state.parentAllowedTools() != null || profileTools != null || state.allowedTools() != null) {
-            final var available = toolRegistry.tools().stream()
+            final var tools = toolRegistry.tools();
+            final var registered = tools.stream().map(EmbeddedTool::name).collect(Collectors.toSet());
+            final var available = tools.stream()
                     .filter(EmbeddedTool::usable)
                     .map(EmbeddedTool::name)
                     .collect(Collectors.toSet());
+            requestedTools = normalizeRequestedTools(requestedTools, registered, available);
             final var unknown = new TreeSet<String>();
             if (profileTools != null) {
                 unknown.addAll(profileTools);
             }
-            if (state.allowedTools() != null) {
-                unknown.addAll(state.allowedTools());
+            if (requestedTools != null) {
+                unknown.addAll(requestedTools);
             }
             if (state.parentAllowedTools() != null) {
                 unknown.addAll(state.parentAllowedTools());
@@ -276,6 +278,8 @@ public class SubagentRunner {
                         "Requested tools are not available: " + String.join(", ", unknown), "");
             }
         }
+        final var effectiveAllowedTools =
+                intersectToolCeilings(state.parentAllowedTools(), profileTools, requestedTools);
 
         // Create isolated services for this subagent: explicit instances built from shared infrastructure and
         // child-owned policy/history/todo state. The parent approval UI and usage aggregation are reused.
@@ -418,6 +422,26 @@ public class SubagentRunner {
                 ? SubagentRegistry.SubagentResult.success(result, fullConversation.toString(), artifacts)
                 : SubagentRegistry.SubagentResult.error(
                         "Subagent completed without result", fullConversation.toString());
+    }
+
+    private Set<String> normalizeRequestedTools(
+            final Set<String> requested, final Set<String> registered, final Set<String> available) {
+        if (requested == null) {
+            return null;
+        }
+        // Models can copy the presentation namespace into allowlist arguments. Only alias known,
+        // usable targets; real registered names take precedence, even when currently unusable.
+        return requested.stream()
+                .map(name -> {
+                    if (!registered.contains(name) && name.startsWith("functions.")) {
+                        final var bareName = name.substring("functions.".length());
+                        if (!bareName.startsWith("functions.") && available.contains(bareName)) {
+                            return bareName;
+                        }
+                    }
+                    return name;
+                })
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     @SafeVarargs
