@@ -632,7 +632,12 @@ public class TuiCommand implements Runnable {
         mcpManager.start();
         slashCommands.bind(arg -> {
             final var current = active();
-            return current == null ? ShellOutcome.none() : themeOutcome(arg, current);
+            if (current != null) {
+                // Slash actions execute on a worker; theme changes also invalidate
+                // render-thread-confined caches and must run between frames.
+                runLater(current, () -> themeOutcome(arg, current));
+            }
+            return ShellOutcome.none();
         });
         slashCommands.bindSubagents(this::openSubagents);
         shellRegistry.bindSubagents(subagentRegistry);

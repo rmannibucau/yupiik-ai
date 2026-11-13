@@ -116,10 +116,11 @@ class BaseExecApprovalUiTest {
     @EnumSource(Adapter.class)
     void deadlineKillsAndReapsProcess(final Adapter adapter) throws Exception {
         final var executable = script("while :; do :; done");
+        // Allow startup and PID publication on a loaded runner before deadline cleanup.
         try (final ApprovalUi ui = adapter.create(executable);
-                final var handle = ui.present("test", Duration.ofSeconds(1))) {
+                final var handle = ui.present("test", Duration.ofSeconds(5))) {
             final var pid = awaitPids(executable, 1).getFirst();
-            assertFalse(handle.decision().toCompletableFuture().get(3, TimeUnit.SECONDS));
+            assertFalse(handle.decision().toCompletableFuture().get(7, TimeUnit.SECONDS));
             assertReaped(pid);
         }
     }
@@ -292,7 +293,7 @@ class BaseExecApprovalUiTest {
     }
 
     private List<Long> awaitPids(final Path executable, final int count) throws Exception {
-        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (System.nanoTime() < deadline) {
             final var pids = pids(executable);
             if (pids.size() == count) {

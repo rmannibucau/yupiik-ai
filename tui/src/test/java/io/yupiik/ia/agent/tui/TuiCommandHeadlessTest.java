@@ -294,6 +294,56 @@ class TuiCommandHeadlessTest {
     }
 
     @Test
+    void themeSwitchWaitsForTheRenderThread() throws Exception {
+        final var home = Files.createTempDirectory(temp, "queued-theme-");
+        Files.writeString(home.resolve("theme"), "dark");
+        try (final var isolated = bootContainer(Map.of("yca.storageHome", home.toString()));
+                final var commands = isolated.lookup(TuiSlashCommands.class)) {
+            final var command = newUiCommand(isolated, lookupDeps(isolated));
+            backend = new HeadlessBackend();
+            uiThread = new Thread(command::run, "queued-theme-test");
+            uiThread.setDaemon(true);
+            uiThread.start();
+            awaitTui();
+            awaitText("yca coding agent");
+            final var entered = new CountDownLatch(1);
+            final var release = new CountDownLatch(1);
+            tuiRef.get().runLater(() -> {
+                entered.countDown();
+                try {
+                    if (!release.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                        throw new IllegalStateException("render-thread barrier timed out");
+                    }
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+            });
+            try {
+                assertTrue(entered.await(TIMEOUT_MS, TimeUnit.MILLISECONDS));
+                // Slash actions run off the UI thread. Even while rendering is paused,
+                // requesting a theme must return without mutating the theme or its caches.
+                commands.instance().commands().stream()
+                        .filter(c -> "/theme".equals(c.spec().name()))
+                        .findFirst()
+                        .orElseThrow()
+                        .action()
+                        .apply("light", null)
+                        .toCompletableFuture()
+                        .get(TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                assertEquals("dark", Files.readString(home.resolve("theme")));
+            } finally {
+                release.countDown();
+            }
+            awaitText("theme: light");
+            assertEquals("light", Files.readString(home.resolve("theme")));
+            tuiRef.get().quit();
+            uiThread.join(TIMEOUT_MS);
+            assertFalse(uiThread.isAlive());
+        }
+    }
+
+    @Test
     void screenBackgroundFollowsThemeUnlessExplicitlyConfigured() throws Exception {
         // option 1: auto/blank keep the terminal background (real transparency in Terminator),
         // an explicit hex paints a translucent veil blended toward the DETECTED terminal
@@ -553,6 +603,32 @@ class TuiCommandHeadlessTest {
     }
 
     @Test
+    void textWaitsAllowQuietIntervalsBeforePromptChanges() throws Exception {
+        final var command = newUiCommand(container, deps);
+        uiThread = new Thread(command::run, "tui-headless-delayed-input");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        drainFrames();
+
+        // A static screen emits no frames. A delayed update must still be allowed
+        // the full overall deadline, rather than failing after one quiet second.
+        try (final var scheduler = Executors.newSingleThreadScheduledExecutor()) {
+            final var paste = scheduler.schedule(
+                    () -> tuiRef.get().dispatch(new PasteEvent("delayed-input-marker")), 1_200, TimeUnit.MILLISECONDS);
+            awaitText("delayed-input-marker");
+            paste.get();
+            drainFrames();
+
+            final var clear = scheduler.schedule(
+                    () -> tuiRef.get().dispatch(KeyEvent.ofChar('u', KeyModifiers.CTRL)), 1_200, TimeUnit.MILLISECONDS);
+            awaitTextGone("delayed-input-marker");
+            clear.get();
+        }
+    }
+
+    @Test
     void idleTicksAreSkippedButHeartbeatAndMutationsStillRepaint() throws Exception {
         // dedicated container with a shortened safety repaint (120ms) so the test observes the
         // idle-skip and the heartbeat while staying well under half a second
@@ -733,8 +809,10 @@ class TuiCommandHeadlessTest {
     }
 
     private void awaitTui() throws InterruptedException {
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
         while (tuiRef.get() == null) {
-            assertTrue(backend.awaitFrame(1_000), "tui runner was not created in time");
+            assertTrue(System.nanoTime() < deadline, "tui runner was not created within " + TIMEOUT_MS + "ms");
+            backend.awaitFrame(50);
         }
     }
 
@@ -747,7 +825,9 @@ class TuiCommandHeadlessTest {
                         "did not see '" + expected + "' within " + TIMEOUT_MS + "ms; last screen:\n" + screen;
                 throw new AssertionError(message);
             }
-            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "'");
+            // Frame signals are only wake-ups, not the condition: unchanged frames
+            // are suppressed, and a draw can race with the preceding screen snapshot.
+            backend.awaitFrame(50);
             screen = backend.text();
         }
     }
@@ -761,7 +841,7 @@ class TuiCommandHeadlessTest {
                         "'" + expected + "' never disappeared within " + TIMEOUT_MS + "ms; last screen:\n" + screen;
                 throw new AssertionError(message);
             }
-            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "' to vanish");
+            backend.awaitFrame(50);
             screen = backend.text();
         }
     }

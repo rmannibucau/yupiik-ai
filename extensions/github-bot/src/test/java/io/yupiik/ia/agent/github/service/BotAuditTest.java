@@ -45,10 +45,13 @@ class BotAuditTest {
         final var logger = Logger.getLogger(BotAudit.class.getName());
         final var previous = logger.getLevel();
         final var messages = new ArrayList<String>();
+        final var testThread = Thread.currentThread();
         final var handler = new Handler() {
             @Override
             public void publish(final LogRecord record) {
-                messages.add(record.getMessage());
+                if (Thread.currentThread() == testThread) {
+                    messages.add(record.getMessage());
+                }
             }
 
             @Override
@@ -61,8 +64,12 @@ class BotAuditTest {
         logger.setLevel(Level.FINE);
         try (final var json =
                 new JsonMapperImpl(List.of(new BotAudit$AuditEntry$FusionJsonCodec()), key -> Optional.empty())) {
-            new BotAudit(BotTestConfiguration.home(home), json)
-                    .record("completed", TaskFixtures.task(Map.of("id", "task-id", "request", "sensitive-request")));
+            final var audit = new BotAudit(BotTestConfiguration.home(home), json);
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                executor.submit(() -> audit.record("worker-selected", TaskFixtures.task(Map.of("id", "other-task"))))
+                        .get();
+            }
+            audit.record("completed", TaskFixtures.task(Map.of("id", "task-id", "request", "sensitive-request")));
             assertEquals(List.of("GitHub bot event=completed task=task-id"), messages);
         } finally {
             logger.removeHandler(handler);

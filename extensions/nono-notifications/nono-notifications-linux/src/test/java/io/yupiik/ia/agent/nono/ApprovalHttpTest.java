@@ -27,16 +27,22 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -128,9 +134,7 @@ class ApprovalHttpTest {
                 assertEquals(
                         PosixFilePermissions.fromString("rwx------"),
                         Files.getPosixFilePermissions(root.resolve("launch")));
-                assertThrows(
-                        java.nio.file.FileAlreadyExistsException.class,
-                        () -> new PrivateState(root.resolve("launch"), mapper));
+                assertThrows(FileAlreadyExistsException.class, () -> new PrivateState(root.resolve("launch"), mapper));
             }
         } finally {
             try (final var files = Files.walk(root)) {
@@ -150,7 +154,7 @@ class ApprovalHttpTest {
                 final var state = new PrivateState(root.resolve("launch"), mapper)) {
             final ApprovalUi ui = (text, duration) -> new ApprovalHandle() {
                 @Override
-                public java.util.concurrent.CompletionStage<Boolean> decision() {
+                public CompletionStage<Boolean> decision() {
                     return answer;
                 }
 
@@ -179,7 +183,7 @@ class ApprovalHttpTest {
     @Test
     void concurrentRetriesShareDialogAndShutdownDenies() throws Exception {
         final var root = Files.createTempDirectory(Path.of(System.getProperty("user.home")), ".nono-concurrent-test-");
-        final var entered = new java.util.concurrent.CountDownLatch(1);
+        final var entered = new CountDownLatch(1);
         final var answer = new CompletableFuture<Boolean>();
         final var prompts = new AtomicInteger();
         final ApprovalUi ui = (text, duration) -> {
@@ -194,12 +198,12 @@ class ApprovalHttpTest {
                 final var request =
                         new ApprovalProtocol(mapper).parse(ApprovalProtocolTest.body("r1", "s1", "/target"));
                 final var first = workers.submit(() -> coordinator.decide(request, 3, System.nanoTime()));
-                assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS));
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
                 final var retry = workers.submit(() -> coordinator.decide(request, 3, System.nanoTime()));
                 coordinator.close();
                 answer.complete(true);
-                assertEquals("denied", first.get(2, java.util.concurrent.TimeUnit.SECONDS));
-                assertEquals("denied", retry.get(2, java.util.concurrent.TimeUnit.SECONDS));
+                assertEquals("denied", first.get(2, TimeUnit.SECONDS));
+                assertEquals("denied", retry.get(2, TimeUnit.SECONDS));
                 assertEquals(1, prompts.get());
             }
         } finally {
@@ -212,10 +216,10 @@ class ApprovalHttpTest {
     }
 
     @Test
-    void admits128PendingUniqueRequestsAndRejectsTheNextWithoutOpeningAnotherDialog() throws Exception {
+    void admits128PendingUniqueRequestsAndRejectsOneExcessWithoutOpeningAnotherDialog() throws Exception {
         final var root = Files.createTempDirectory(Path.of(System.getProperty("user.home")), ".nono-capacity-test-");
         final var answer = new CompletableFuture<Boolean>();
-        final var entered = new java.util.concurrent.CountDownLatch(1);
+        final var entered = new CountDownLatch(1);
         final var prompts = new AtomicInteger();
         final var visible = new AtomicInteger();
         final var maximumVisible = new AtomicInteger();
@@ -224,11 +228,10 @@ class ApprovalHttpTest {
             maximumVisible.accumulateAndGet(visible.incrementAndGet(), Math::max);
             entered.countDown();
             return new ApprovalHandle() {
-                private final java.util.concurrent.atomic.AtomicBoolean closed =
-                        new java.util.concurrent.atomic.AtomicBoolean();
+                private final AtomicBoolean closed = new AtomicBoolean();
 
                 @Override
-                public java.util.concurrent.CompletionStage<Boolean> decision() {
+                public CompletionStage<Boolean> decision() {
                     return answer;
                 }
 
@@ -258,8 +261,10 @@ class ApprovalHttpTest {
                 final var authorization =
                         "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.US_ASCII));
                 final var uri = URI.create("http://127.0.0.1:" + server.port() + "/approve");
-                final var pending = new java.util.ArrayList<CompletableFuture<HttpResponse<String>>>();
-                for (var index = 0; index < 128; index++) {
+                final var pending = new ArrayList<CompletableFuture<HttpResponse<String>>>();
+                // Arrival order is not guaranteed: the first response from 129 requests must
+                // be the capacity rejection while the other 128 still await the UI.
+                for (var index = 0; index < 129; index++) {
                     final var request = HttpRequest.newBuilder(uri)
                             .timeout(Duration.ofSeconds(60))
                             .header("Authorization", authorization)
@@ -270,14 +275,14 @@ class ApprovalHttpTest {
                             .build();
                     final var response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString());
                     pending.add(response);
-                    assertThrows(
-                            java.util.concurrent.TimeoutException.class,
-                            () -> response.get(20, java.util.concurrent.TimeUnit.MILLISECONDS),
-                            "Each of the first 128 unique requests must wait for the UI, not be rejected");
                 }
-                assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS));
-                final var excess =
-                        post(client, uri, authorization, ApprovalProtocolTest.body("overflow", "s1", "/target"));
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                CompletableFuture.anyOf(pending.toArray(CompletableFuture[]::new))
+                        .get(10, TimeUnit.SECONDS);
+                final var rejected =
+                        pending.stream().filter(CompletableFuture::isDone).toList();
+                assertEquals(1, rejected.size(), "Only the excess request may complete before the UI answers");
+                final var excess = rejected.getFirst().get();
                 assertEquals(200, excess.statusCode());
                 assertEquals("{\"decision\":\"denied\"}", excess.body());
                 assertEquals(1, prompts.get());
@@ -287,9 +292,13 @@ class ApprovalHttpTest {
                                 .statusCode());
                 answer.complete(true);
                 for (final var response : pending) {
-                    final var result = response.get(10, java.util.concurrent.TimeUnit.SECONDS);
+                    final var result = response.get(10, TimeUnit.SECONDS);
                     assertEquals(200, result.statusCode());
-                    assertEquals("{\"decision\":\"granted\"}", result.body());
+                    assertEquals(
+                            response == rejected.getFirst()
+                                    ? "{\"decision\":\"denied\"}"
+                                    : "{\"decision\":\"granted\"}",
+                            result.body());
                 }
                 assertEquals(128, prompts.get());
                 assertEquals(1, maximumVisible.get());
@@ -377,7 +386,7 @@ class ApprovalHttpTest {
     private ApprovalHandle handle(final CompletableFuture<Boolean> result) {
         return new ApprovalHandle() {
             @Override
-            public java.util.concurrent.CompletionStage<Boolean> decision() {
+            public CompletionStage<Boolean> decision() {
                 return result;
             }
 

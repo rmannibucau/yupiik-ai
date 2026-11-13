@@ -793,6 +793,6 @@ class SyntaxHighlighterTest {
     }
 
     private String lineText(final Line line) {
-        return line.spans().stream().map(Span::content).reduce("", String::concat);
+        return line.spans().stream().map(Span::content).collect(Collectors.joining());
     }
 }

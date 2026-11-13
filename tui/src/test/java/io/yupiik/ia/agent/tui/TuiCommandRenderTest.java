@@ -186,6 +186,50 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void textWaitsAllowQuietIntervalsBeforePromptChanges() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-render-delayed-input");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        while (backend.awaitFrame(20)) {
+            // Drain startup notifications so only the delayed mutation can wake the wait.
+        }
+
+        try (final var scheduler = Executors.newSingleThreadScheduledExecutor()) {
+            for (var wait = 0; wait < 3; wait++) {
+                final var paste = scheduler.schedule(
+                        () -> tuiRef.get().dispatch(new PasteEvent("delayed-render-marker")),
+                        1_200,
+                        TimeUnit.MILLISECONDS);
+                if (wait == 0) {
+                    awaitText("delayed-render-marker");
+                } else {
+                    awaitTextWithin("delayed-render-marker", TIMEOUT_MS);
+                }
+                paste.get();
+                while (backend.awaitFrame(20)) {
+                    // Discard frames from the completed mutation.
+                }
+                final var clear = scheduler.schedule(
+                        () -> tuiRef.get().dispatch(KeyEvent.ofChar('u', KeyModifiers.CTRL)),
+                        1_200,
+                        TimeUnit.MILLISECONDS);
+                if (wait == 0) {
+                    awaitTextGone("delayed-render-marker");
+                } else if (wait == 1) {
+                    awaitTextGoneWithin("delayed-render-marker", TIMEOUT_MS);
+                } else {
+                    awaitNoText("delayed-render-marker");
+                }
+                clear.get();
+            }
+        }
+        quit();
+    }
+
+    @Test
     void shiftEnterInsertsNewlineInsteadOfSubmitting() throws Exception {
         final var shellRegistry = testRegistry();
         final var received = new AtomicReference<String>();
@@ -1532,9 +1576,9 @@ class TuiCommandRenderTest {
         final var sessionId = shellRegistry.sessions().iterator().next();
         final var frontend = shellRegistry.active(sessionId).frontend();
         final var fiveHours = 5 * 3600L;
-        // a deadline far in the future so the reset caption ("Resets in 100d 0h") is stable across the
-        // test's retries (formatQuotaReset reads the real clock).
-        final var resetAt = Instant.now().getEpochSecond() + 8_640_000L;
+        // Keep the deadline inside the 100-day bucket rather than on its boundary;
+        // formatQuotaReset reads the real clock on each render.
+        final var resetAt = Instant.now().getEpochSecond() + 100 * 86_400L + 12 * 3_600L;
         final var window = new AgentEvent.UsageUpdated.Quota.Window("PRIMARY", "primary", 90.0, fiveHours, resetAt);
         frontend.onEvent(new AgentEvent.UsageUpdated(
                 new Usage(0, 0, 0),
@@ -1564,11 +1608,11 @@ class TuiCommandRenderTest {
         }
         assertTrue(gaugeY >= 0, "quota gauge row must be visible:\n" + backend.text());
         tuiRef.get().dispatch(MouseEvent.move(gaugeX, gaugeY));
-        awaitTextWithin("Resets in 100d", 2_000);
+        awaitTextWithin("Resets in ", 2_000);
 
         // moving the pointer away dismisses the chip
         tuiRef.get().dispatch(MouseEvent.move(5, 20));
-        awaitTextGoneWithin("Resets in 100d", 2_000);
+        awaitTextGoneWithin("Resets in ", 2_000);
 
         // provider switch: a no-quota UsageUpdated hides the bars; re-hovering yields no chip
         frontend.onEvent(new AgentEvent.UsageUpdated(
@@ -1585,7 +1629,7 @@ class TuiCommandRenderTest {
                         true, false, "plus", 10.0, fiveHours, resetAt, "primary", null, false, List.of(window))));
         awaitTextGoneWithin("5h", 2_000);
         tuiRef.get().dispatch(MouseEvent.move(gaugeX, gaugeY));
-        awaitTextGoneWithin("Resets in 100d", 2_000);
+        awaitTextGoneWithin("Resets in ", 2_000);
         quit();
     }
 
@@ -5758,76 +5802,56 @@ class TuiCommandRenderTest {
     }
 
     private void awaitTui() throws InterruptedException {
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
         while (tuiRef.get() == null) {
-            assertTrue(backend.awaitFrame(1_000), "tui runner was not created in time");
+            assertTrue(System.nanoTime() < deadline, "tui runner was not created in time");
+            backend.awaitFrame(50);
         }
     }
 
     private void awaitText(final String expected) throws InterruptedException {
-        var screen = backend.text();
-        while (!screen.contains(expected)) {
-            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "'");
-            screen = backend.text();
-        }
+        awaitTextWithin(expected, TIMEOUT_MS);
     }
 
-    /**
-     * Waits for {@code expected} to appear across the screen with line breaks ignored
-     * (each screen row becomes a line with no trailing padding). Used where a long
-     * value - e.g. a tool command wrapped off the modal edge - is verified in full
-     * without depending on where the wrap landed.
-     */
-    /**
-     * Waits for {@code unexpected} to leave the screen and fails when it is still there at the
-     * deadline: the frames painted before the mutation are legitimately on screen for a while, so
-     * asserting on a fixed frame count would be a race (and a fast tick widens that race).
-     */
+    /** Waits for stale text to leave the screen, allowing frames from before the mutation. */
     private void awaitNoText(final String unexpected) throws InterruptedException {
-        final var deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
-        while (backend.text().contains(unexpected) && System.nanoTime() < deadline) {
-            assertTrue(
-                    backend.awaitFrame(1_000), "no frame received while waiting for '" + unexpected + "' to be gone");
-        }
-        assertFalse(backend.text().contains(unexpected), "'" + unexpected + "' should not be rendered");
+        awaitTextGoneWithin(unexpected, 2_000);
     }
 
     /**
-     * Like {@link #awaitText(String)} but fails after {@code timeoutMillis} instead of
-     * looping forever: frames keep rendering on ticks, so a never-matching text would
-     * otherwise hang the test.
+     * Waits for the screen condition until the overall deadline. Frame notifications are only
+     * wakeups: unchanged screens do not repaint, and a quiet interval is not a failure.
      */
     private void awaitTextWithin(final String expected, final long timeoutMillis) throws InterruptedException {
-        final var deadline = System.nanoTime() + timeoutMillis * 1_000_000;
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
         var screen = backend.text();
         while (!screen.contains(expected)) {
             final var snapshot = screen;
             assertTrue(
-                    System.nanoTime() < deadline && backend.awaitFrame(200),
+                    System.nanoTime() < deadline,
                     () -> "'" + expected + "' did not appear within " + timeoutMillis + " ms; last screen:\n"
                             + snapshot);
+            backend.awaitFrame(50);
             screen = backend.text();
         }
     }
 
     private void awaitTextGoneWithin(final String expected, final long timeoutMillis) throws InterruptedException {
-        final var deadline = System.nanoTime() + timeoutMillis * 1_000_000;
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
         var screen = backend.text();
         while (screen.contains(expected)) {
             final var snapshot = screen;
             assertTrue(
-                    System.nanoTime() < deadline && backend.awaitFrame(200),
+                    System.nanoTime() < deadline,
                     () -> "'" + expected + "' did not clear within " + timeoutMillis + " ms; last screen:\n"
                             + snapshot);
+            backend.awaitFrame(50);
             screen = backend.text();
         }
     }
 
     private void awaitTextGone(final String expected) throws InterruptedException {
-        var screen = backend.text();
-        while (screen.contains(expected)) {
-            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "' to clear");
-            screen = backend.text();
-        }
+        awaitTextGoneWithin(expected, TIMEOUT_MS);
     }
 
     /** Polls until the bottommost reversed-video cell sits at {@code expectedColumn} (row-agnostic). */

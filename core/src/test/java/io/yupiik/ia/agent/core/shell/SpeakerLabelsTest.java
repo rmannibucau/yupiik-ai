@@ -38,7 +38,9 @@ import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -68,14 +70,13 @@ class SpeakerLabelsTest {
         this.mapper = mapper;
     }
 
-    /**
-     * The default templates render {@code {{formatDate "HH:mm:ss"}}} in the JVM default
-     * timezone on the current instant: assert the live-computed stamp, not a fixed one.
-     */
+    // Share a fixed instant between rendering and assertions so crossing a wall-clock
+    // second cannot make an otherwise correct label fail.
+    private static final Clock LABEL_CLOCK = Clock.fixed(Instant.parse("2031-04-05T06:07:08Z"), ZoneId.systemDefault());
     private static final DateTimeFormatter STAMP_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
 
     private static String stamp() {
-        return "[" + LocalTime.now().format(STAMP_FORMATTER) + "] ";
+        return "[" + LocalTime.now(LABEL_CLOCK).format(STAMP_FORMATTER) + "] ";
     }
 
     private static final String USER = System.getProperty("user.name");
@@ -107,9 +108,7 @@ class SpeakerLabelsTest {
 
     private SpeakerLabels labels(final CodingAgentConfiguration configuration) {
         return new SpeakerLabels(
-                List.of(new FormatDatePromptHelper(Clock.systemDefaultZone())),
-                configuration,
-                chatClient(configuration));
+                List.of(new FormatDatePromptHelper(LABEL_CLOCK)), configuration, chatClient(configuration));
     }
 
     @Test
