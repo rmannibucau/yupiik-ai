@@ -22,6 +22,7 @@ import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
+import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -509,7 +510,7 @@ class GithubPrivateContextTest {
                 }
             });
             server.start();
-            client = new GitHubClient(base, json, () -> "host-secret");
+            client = new GitHubClient(base, json, () -> "host-secret", BotTestConfiguration.CLOCK);
             source = new GithubPrivateContext(client, json);
         }
 

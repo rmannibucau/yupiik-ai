@@ -129,7 +129,11 @@ public class GithubServices {
                 };
         try {
             return new GitHubClient(
-                    URI.create(conf.api()), json, authentication, Duration.ofMillis(conf.requestIntervalMillis()));
+                    URI.create(conf.api()),
+                    json,
+                    authentication,
+                    Duration.ofMillis(conf.requestIntervalMillis()),
+                    clock);
         } catch (final RuntimeException | Error e) {
             authentication.close();
             throw e;

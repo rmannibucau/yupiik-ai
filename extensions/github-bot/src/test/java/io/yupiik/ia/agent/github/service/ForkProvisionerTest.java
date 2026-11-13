@@ -288,7 +288,10 @@ class ForkProvisionerTest {
 
         private GitHubClient newClient() {
             return new GitHubClient(
-                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()), json, () -> "secret");
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                    json,
+                    () -> "secret",
+                    BotTestConfiguration.CLOCK);
         }
 
         private void reply(final int status, final String body) {

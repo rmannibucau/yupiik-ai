@@ -128,7 +128,7 @@ Host authentication supports a PAT or a GitHub App installation with a PEM PKCS#
 `github.repositories.visibility` is now an enum list using `PUBLIC`, `PRIVATE`, and `INTERNAL`; migrate older lowercase visibility configuration values to uppercase (comma-separated in CLI and environment sources).
 With `github.auth.installationId=0`, App authentication discovers an installation only for one exact explicit repository or one organization discovery source; ambiguous selections require an explicit installation ID.
 An App-authenticated GET receiving 401 refreshes its installation token once; POSTs are never replayed, including after authentication failures.
-Optional `github.requestIntervalMillis` spaces host REST request starts within a process, including retries and writes, up to one minute; it is not a shared quota across worker processes or App token issuance requests.
+Optional `github.requestIntervalMillis` spaces host REST and GraphQL request starts within a process, including REST retries and writes, up to one minute; it is not a shared quota across worker processes or App token issuance requests.
 Remote API credential transport requires HTTPS; numeric loopback HTTP is reserved for local tests.
 The host credential is never passed to the agent.
 Use a distinct agent credential for upstream reads, pull requests and reviews, and a separate fork-write credential when required by the resource-owner permission boundary.
@@ -137,8 +137,81 @@ Optional `github.authorization.teams` adds an active-team-membership restriction
 User logins are resolved from their immutable IDs; team API failures fail closed.
 Optional `worker.provisionFork` allows organization fork creation with the host credential; personal-account destinations must still be provisioned manually.
 A durable intent precedes the single creation request, and later attempts only verify the resulting fork; ambiguous creation requires operator reconciliation, never a repeated POST.
-Optional `poll.reviews.enabled` scans submitted native review summaries as well as the usual issue and inline-comment feeds.
-Review discovery retains per-PR continuations and conservatively replays completed scans, so its retained state and request cost grow with repository history.
+Optional `poll.reviews.enabled` scans submitted native review summaries on open PRs as well as the usual issue and inline-comment feeds.
+Native-review discovery uses GraphQL batches of up to 10 repositories, with 10 open PRs per repository discovery page (`states: OPEN`) and the first 100 reviews inline for each PR.
+Closed and merged PRs are outside this collector's coverage, and review follow-up requests recheck that the PR is open.
+A PR reopened later becomes eligible again, and invocation receipts still prevent duplicate tasks.
+A PR can close after discovery while its current request is in flight; mentions on PRs closed before discovery are intentionally outside this collector's coverage.
+Root PR discovery and each PR's review connection retain independent durable cursors, with `poll.pageBudget` applied separately to each connection rather than as a total request or runtime limit.
+A discovery page advances only after its reviews have been processed successfully within their connection budgets; an open PR's remaining review backlog resumes when that discovery page is revisited.
+When a saved review continuation exists, the embedded first review page is ignored in favor of that continuation, so replaying discovery can add requests and response bytes.
+Completed traversals restart conservatively to discover pending reviews submitted later.
+GraphQL responses with errors, including partial data accompanied by errors, are rejected as a whole, and failed pages retain their continuations.
+GraphQL POSTs are never automatically retried, including after HTTP 401; a later poll retries collection with invocation receipts preventing duplicate tasks, not replaying writes.
+The new GraphQL cursor namespace resets legacy REST continuation URLs and the old retained closed-PR catalog while preserving `initialSince` and invocation receipts, so migration does not duplicate previously collected invocations.
+The usual issue and inline-comment feeds remain on REST to preserve their incremental `since` semantics rather than replacing them with full GraphQL traversals; the open-only restriction applies to the native-review-body collector.
+`poll.pageBudget` also limits each REST endpoint traversal, not the total requests or runtime of a poll.
+`poll.parallelism` defaults to `4`, accepts `1` through `16`, and bounds concurrent repository scans for REST and concurrent batches for native-review GraphQL, with at most 10 repositories per batch.
+Use `POLL_PARALLELISM=1` or `--poll-parallelism 1` for serial REST repository scans and serial GraphQL batches, not one repository per GraphQL request.
+Pages and feeds within a repository remain ordered; the optional Discussion collector runs separately and can add requests concurrently.
+`github.requestIntervalMillis` still spaces request starts across all threads sharing the host client, and rate-limit deferrals still stop further starts in that process.
+
+=== Search-first mention collection and direct reconciliation
+
+`poll.search.enabled` defaults to `true` and applies search-first selection to all mention feeds, including the optional native-review and Discussion collectors when enabled.
+Set `--poll-search-enabled false` or `POLL_SEARCH_ENABLED=false` to retain the existing direct collection behavior without search-based repository selection.
+`poll.search.reconciliationIntervalSeconds` defaults to `3600` and accepts values from `1` through `604800`, inclusive.
+For example, use `--poll-search-reconciliationIntervalSeconds 3600` or `POLL_SEARCH_RECONCILIATIONINTERVALSECONDS=3600` for hourly direct reconciliation.
+
+The first poll performs a full direct baseline across the selected repositories using the existing issue and comment feeds, plus native reviews and Discussions when explicitly enabled.
+Search-first collection begins only after that baseline is durably complete and runs between periodic full direct reconciliations.
+A persistent running marker records the first or due full reconciliation; failures and incomplete pages leave it active so subsequent polls continue direct collection until all feed continuations complete.
+Only then is the reconciliation completion clock recorded; an attempted or partially completed pass does not postpone reconciliation as if it had succeeded.
+
+Between reconciliations, GraphQL search uses the configured mention login in `mentions:` queries with search kind `ISSUE` for issue and pull-request parents, and additionally `DISCUSSION` when Discussion polling is enabled.
+There is no global open-only search filter, because closed issues and their comments remain eligible for the existing feeds.
+The native-review-body collector retains its separate open-PR restriction described above.
+Search results only select repositories: the existing collectors read all actual feeds, reviews and Discussions within those candidate repositories, enforcing author and optional team authorization, `since` bounds and invocation receipts.
+This is repository-level candidate granularity, not a new parent-only targeted fetch mechanism; one matching parent can trigger collection across that repository's enabled feeds.
+Downstream feed continuations progress before search, even if the parent that originally selected the repository is no longer indexed.
+
+Configured organization and user sources seed broad search scope to keep query counts low, but the exact selected repository list is enforced before any feeds are read.
+Explicit repositories are batched to keep query length bounded.
+Search state is scoped by API endpoint, configured login, selected repository names and search kind, so plans and continuations are not shared across different scopes.
+Plans, learned splits, durable cursors and statistics reside in the existing `github.home/state.json` cursors under `mention-search/v1/<sha>/...`, without secrets or content bodies.
+Subsequent polls reuse learned splits and durable cursors rather than rebuilding the plan each time.
+
+Search pages contain up to 100 results and retain a durable cursor.
+Completed traversals conservatively restart on the next poll to catch edits to older parents and indexing lag; restarting is not a strict freshness or completeness guarantee.
+At 900 or more results, the plan splits before GitHub's 1,000-result cap, partitioning repositories first and then using inclusive creation-time intervals.
+Creation-time boundaries remain stable under edits, and an unbounded tail admits newly created parents.
+Each search kind has an independent per-poll search HTTP-call page budget that includes probes, separate from downstream feed connection budgets.
+Persistent round-robin scheduling prevents starvation across search leaves.
+Tree and leaf hard bounds, or dense time ranges that cannot be split further, fall back to direct repository collection rather than truncating results.
+Partial or malformed responses and consumer failures do not acknowledge the affected search cursor.
+
+Operators can inspect search statistics in `state.json`, including leaf count, total requests, last pages, duration and last completion information, but must not edit the state file while the bot is running.
+Periodic direct reconciliation remains necessary for freshness and because native-review mention search and Discussion index coverage have not been verified as complete.
+Later acceptance testing must explicitly verify those cases for the deployed revision; search-first selection is not a claim of 100% new mention coverage.
+After the baseline, a quiet unsplit scope can require only one search query, or two with Discussions enabled, but this excludes repository discovery and is not a full end-to-end benchmark.
+This configuration documentation does not imply a live deployment, scheduler change or completed live acceptance test.
+
+=== Poll diagnostics
+
+Each poll logs completion metrics for `discovery` and `total`, including failures.
+Direct collection retains the `mentions` and `reviews-and-discussions` phases; search-first collection reports `search-mentions-and-reviews` and `search-discussions` instead.
+`durationMillis` is elapsed wall time; `requests` counts actual host-client HTTP attempts, including retries, errors, and conditional requests.
+`httpMillis` accumulates transport time through response-body receipt, and `pacingMillis` accumulates time in the request-spacing gate, including lock contention.
+Direct review and Discussion scans run concurrently, so their counters are reported together and accumulated times can exceed elapsed wall time.
+The total overlaps its component phases; do not add it to them.
+Counters are process-local and do not include separate App-token issuance clients or worker processes.
+Metrics contain no request URLs, bodies, or credentials.
+For example, `GitHub poll phase=mentions outcome=success durationMillis=1200 requests=3 httpMillis=800 pacingMillis=350` identifies the phase and its network and spacing costs.
+Repository discovery and ETag caches are not persisted across CLI invocations, unlike polling cursors and invocation receipts.
+Unchanged queue transactions retain the state lock but skip state-file replacement and fsync; mutations still use the durable atomic-write sequence.
+
+=== Worker operation
+
 Worker failure notifications use the existing opt-in shared `yca.notifications` integration and contain task/repository identifiers only.
 Delivery is best effort, not a durable external notification guarantee.
 `worker.parallelism` bounds concurrent worker processes sharing the queue through fixed slot locks and per-task leases.
@@ -224,9 +297,11 @@ Nono and Kubernetes connectivity must be explicitly arranged and tested by the o
 
 [source,json]
 ----
-{"poll":{"reviews":{"enabled":true},"discussions":{"enabled":true}}}
+{"poll":{"search":{"enabled":true,"reconciliationIntervalSeconds":3600},"reviews":{"enabled":true},"discussions":{"enabled":true}}}
 ----
 
-Review and Discussion scans run concurrently on virtual threads after the issue/comment scan, sharing one paced GitHub client and rate-limit cooldown.
+This example explicitly enables the optional review and Discussion feeds while retaining default search-first selection and hourly direct reconciliation.
+During direct collection, review and Discussion scans run concurrently on virtual threads after the issue/comment scan, sharing one paced GitHub client and rate-limit cooldown.
+Between reconciliations, search selects candidate repositories for the existing collectors rather than replacing their feed reads.
 A repository with Discussions disabled is logged at INFO and skipped without failing other repositories or feeds.
 Permission, authentication and transport errors are not silently ignored.

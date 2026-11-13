@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfi
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.model.TaskState;
+import io.yupiik.ia.agent.github.service.BotAudit;
 import io.yupiik.ia.agent.github.service.BotAudit$AuditEntry$FusionJsonCodec;
 import io.yupiik.ia.agent.github.service.BotMaintenance;
 import io.yupiik.ia.agent.github.service.GithubServices;
@@ -37,6 +38,7 @@ import java.nio.file.Path;
 import java.security.KeyPairGenerator;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -55,6 +57,29 @@ class BotCommandTest {
 
     @TempDir
     Path home;
+
+    @Test
+    void manualCreationUsesInjectedClockForTaskAndAudit() throws Exception {
+        final var conf = BotTestConfiguration.home(home);
+        try (final var json =
+                BotJsonMapper.create(List.of(new BotAudit$AuditEntry$FusionJsonCodec()), ignored -> Optional.empty())) {
+            final var store = new TaskStore(conf, json);
+            final var clock = Clock.fixed(Instant.parse("2035-02-03T04:05:06Z"), ZoneOffset.UTC);
+            new CreateCommand(
+                            new CreateCommand.Options("acme/repo", 1, TaskKind.help, "request", false),
+                            json,
+                            store,
+                            new BotAudit(conf, json, clock),
+                            clock)
+                    .run();
+            final var tasks = store.transaction(state -> state.list());
+            assertEquals(1, tasks.size());
+            assertEquals(clock.instant().toString(), tasks.getFirst().createdAt());
+            final var audit = (Map<?, ?>) json.fromString(Object.class, Files.readString(home.resolve("audit.jsonl")));
+            assertEquals(clock.instant().toString(), audit.get("at"));
+            assertEquals("manual-created", audit.get("event"));
+        }
+    }
 
     @Test
     void previewsMutationsWithoutChangingTasksReceiptsOrAudit() throws Exception {
@@ -85,12 +110,13 @@ class BotCommandTest {
                             BotTestConfiguration.audit(conf, json)),
                     new PurgeCommand(
                             new PurgeCommand.Options(7, true),
-                            new BotMaintenance(BotTestConfiguration.store(conf, json), Clock.systemUTC())),
+                            new BotMaintenance(BotTestConfiguration.store(conf, json), BotTestConfiguration.CLOCK)),
                     new CreateCommand(
                             new CreateCommand.Options("acme/repo", 1, TaskKind.help, "preview", true),
                             json,
                             BotTestConfiguration.store(conf, json),
-                            BotTestConfiguration.audit(conf, json)))) {
+                            BotTestConfiguration.audit(conf, json),
+                            BotTestConfiguration.CLOCK))) {
                 command.run();
                 assertEquals(original, Files.readString(home.resolve("state.json")));
             }
@@ -267,7 +293,10 @@ class BotCommandTest {
                             "token",
                             "installation-token",
                             "expires_at",
-                            Instant.now().plusSeconds(3600).toString()));
+                            BotTestConfiguration.CLOCK
+                                    .instant()
+                                    .plusSeconds(3600)
+                                    .toString()));
                 } else if (!"Bearer installation-token"
                         .equals(exchange.getRequestHeaders().getFirst("Authorization"))) {
                     exchange.sendResponseHeaders(401, -1);
@@ -403,7 +432,7 @@ class BotCommandTest {
                     .get();
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> new GithubServices().client(incomplete, json, Clock.systemUTC()));
+                    () -> new GithubServices().client(incomplete, json, BotTestConfiguration.CLOCK));
             final var values = Map.of(
                     "github.auth.type",
                     "app",
@@ -418,7 +447,7 @@ class BotCommandTest {
                     .get();
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> new GithubServices().client(invalid, json, Clock.systemUTC()));
+                    () -> new GithubServices().client(invalid, json, BotTestConfiguration.CLOCK));
         }
     }
 }

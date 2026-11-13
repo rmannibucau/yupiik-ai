@@ -48,7 +48,10 @@ class TeamAuthorizationTest {
         server.start();
         try (final var json = new JsonMapperImpl(List.of(), key -> Optional.empty());
                 final var github = new GitHubClient(
-                        URI.create("http://127.0.0.1:" + server.getAddress().getPort()), json, () -> "test")) {
+                        URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                        json,
+                        () -> "test",
+                        BotTestConfiguration.CLOCK)) {
             assertTrue(BotTestConfiguration.authorization(github, "").allows(null, null));
             assertTrue(BotTestConfiguration.authorization(github, "acme/dev").allows(42, "alice"));
             assertTrue(BotTestConfiguration.authorization(github, "acme/dev").allows(42, null));

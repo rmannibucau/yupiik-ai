@@ -64,7 +64,7 @@ class BotAuditTest {
         logger.setLevel(Level.FINE);
         try (final var json =
                 new JsonMapperImpl(List.of(new BotAudit$AuditEntry$FusionJsonCodec()), key -> Optional.empty())) {
-            final var audit = new BotAudit(BotTestConfiguration.home(home), json);
+            final var audit = new BotAudit(BotTestConfiguration.home(home), json, BotTestConfiguration.CLOCK);
             try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
                 executor.submit(() -> audit.record("worker-selected", TaskFixtures.task(Map.of("id", "other-task"))))
                         .get();
@@ -81,7 +81,7 @@ class BotAuditTest {
     void concurrentRecordsAreCompleteJsonWithoutTaskTextOrCredentials() throws Exception {
         try (final var json =
                 new JsonMapperImpl(List.of(new BotAudit$AuditEntry$FusionJsonCodec()), key -> Optional.empty())) {
-            final var audit = new BotAudit(BotTestConfiguration.home(home), json);
+            final var audit = new BotAudit(BotTestConfiguration.home(home), json, BotTestConfiguration.CLOCK);
             try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
                 final var futures = IntStream.range(0, 20)
                         .mapToObj(i -> executor.submit(() -> audit.record(
@@ -96,7 +96,8 @@ class BotAuditTest {
             final var lines = Files.readAllLines(home.resolve("audit.jsonl"));
             assertEquals(20, lines.size());
             for (final var line : lines) {
-                assertNotNull(json.fromString(Object.class, line));
+                final var entry = (Map<?, ?>) json.fromString(Object.class, line);
+                assertEquals(BotTestConfiguration.CLOCK.instant().toString(), entry.get("at"));
                 assertFalse(line.contains("secret"));
             }
             Files.delete(home.resolve("audit.jsonl"));

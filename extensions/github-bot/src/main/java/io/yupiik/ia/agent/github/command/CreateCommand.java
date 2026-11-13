@@ -24,7 +24,7 @@ import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.service.BotAudit;
 import io.yupiik.ia.agent.github.store.MutableTask;
 import io.yupiik.ia.agent.github.store.TaskStore;
-import java.time.Instant;
+import java.time.Clock;
 import java.util.UUID;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -40,10 +40,17 @@ public class CreateCommand implements Runnable {
     private final JsonMapper json;
     private final TaskStore store;
     private final BotAudit audit;
+    private final Clock clock;
 
-    public CreateCommand(final Options options, final JsonMapper json, final TaskStore store, final BotAudit audit) {
+    public CreateCommand(
+            final Options options,
+            final JsonMapper json,
+            final TaskStore store,
+            final BotAudit audit,
+            final Clock clock) {
         this.options = options;
         this.json = json;
+        this.clock = clock;
         this.store = store;
         this.audit = audit;
     }
@@ -81,7 +88,7 @@ public class CreateCommand implements Runnable {
         task.number((long) options.number());
         task.kind(options.kind());
         task.request(options.request());
-        task.createdAt(Instant.now().toString());
+        task.createdAt(clock.instant().toString());
         task.reference("https://github.com/" + options.repository() + "/issues/" + options.number());
         if (options.dryRun()) {
             LOGGER.info(json.toString(task.document()));

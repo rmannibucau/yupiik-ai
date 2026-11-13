@@ -40,11 +40,18 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -53,6 +60,126 @@ class ReviewSummaryPollerTest {
 
     @TempDir
     Path home;
+
+    @Test
+    void closedPullsAndLegacyCatalogAreNotFetchedAcrossRestart() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.pulls = List.of(Map.of("number", 12), Map.of("number", 13, "state", "closed"));
+            fixture.reviews.put(
+                    12,
+                    List.of(changed(1, "submitted_at", NOW.minusSeconds(3600).toString())));
+            fixture.reviews.put(13, List.of(changed(2, "html_url", reference(13, 2))));
+            fixture.store.transaction(state -> {
+                state.cursors()
+                        .put(
+                                "owner/repo/review-summary-pulls:next",
+                                fixture.api() + "/repos/owner/repo/pulls?state=all&per_page=100&page=2");
+                state.cursors().put("owner/repo/pulls/12/reviews:known", "true");
+                state.cursors().put("owner/repo/pulls/13/reviews:known", "true");
+                state.cursors().put("owner/repo/review-summary-open-pulls:next", "/obsolete-rest-discovery");
+                state.cursors().put("owner/repo/pulls/12/reviews:next", "/obsolete-rest-reviews");
+                return null;
+            });
+            final var conf = fixture.conf(Map.of("pageBudget", 20));
+            assertEquals(0, fixture.poll(conf));
+            final var firstRequests = List.copyOf(fixture.requests);
+            assertEquals(1, firstRequests.size(), "Open pulls and their first review pages share one request");
+            assertTrue(fixture.queries.getFirst().contains("states:[OPEN]"));
+            assertTrue(firstRequests.stream().allMatch("/graphql"::equals));
+            fixture.requests.clear();
+            fixture.queries.clear();
+
+            try (final var github = new GitHubClient(
+                    URI.create(fixture.api()), fixture.json, () -> "test", BotTestConfiguration.CLOCK)) {
+                assertEquals(
+                        0,
+                        BotTestConfiguration.reviewSummaryPoller(
+                                        conf.shared(),
+                                        conf.poll(),
+                                        new TaskStore(BotTestConfiguration.home(home), fixture.json),
+                                        github,
+                                        fixed(NOW.plusSeconds(86400)),
+                                        null)
+                                .poll(List.of("owner/repo")));
+            }
+            assertEquals(firstRequests, fixture.requests);
+            assertTrue(fixture.store.<Boolean>transaction(state -> state.cursors().keySet().stream()
+                    .noneMatch(key ->
+                            key.endsWith("/reviews:known") || key.equals("owner/repo/review-summary-pulls:next"))));
+            assertFalse(fixture.store.<Boolean>transaction(
+                    state -> state.cursors().containsKey("owner/repo/review-summary-open-pulls:next")));
+            assertFalse(fixture.store.<Boolean>transaction(
+                    state -> state.cursors().containsKey("owner/repo/pulls/12/reviews:next")));
+            assertEquals(
+                    NOW.toString(),
+                    fixture.store.transaction(state -> state.cursors().get("initialSince")));
+        }
+    }
+
+    @Test
+    void closedPullsDoNotAccumulateRequestsAndReopenedPullsBecomeEligibleAgain() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.pulls = List.of(Map.of("number", 12), Map.of("number", 13), Map.of("number", 14));
+            final var conf = fixture.conf(Map.of("pageBudget", 1));
+            for (int page = 0; page < 3; page++) {
+                fixture.requests.clear();
+                fixture.queries.clear();
+                assertEquals(0, fixture.poll(conf));
+                assertEquals(1, fixture.requests.size(), "Only PRs on the current open discovery page are scanned");
+            }
+            fixture.pulls = List.of(
+                    Map.of("number", 12, "state", "closed"),
+                    Map.of("number", 13, "state", "closed"),
+                    Map.of("number", 14, "state", "closed"));
+            fixture.requests.clear();
+            fixture.queries.clear();
+            assertEquals(0, fixture.poll(conf));
+            assertEquals(1, fixture.requests.size(), "No review calls remain once all PRs close");
+            fixture.pulls = List.of(Map.of("number", 13));
+            fixture.reviews.put(13, List.of(changed(1, "html_url", reference(13, 1))));
+            fixture.requests.clear();
+            fixture.queries.clear();
+            assertEquals(1, fixture.poll(conf));
+            assertEquals(1, fixture.requests.size());
+            assertEquals(0, fixture.poll(conf), "Reopening must not bypass invocation receipts");
+        }
+    }
+
+    @Test
+    void skipsClosedOrUnknownStateEvenIfOpenListingReturnsThem() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.returnClosedPulls = true;
+            fixture.pulls = List.of(
+                    Map.of("number", 12, "state", "closed"),
+                    Map.of("number", 13, "state", "unknown"),
+                    Map.of("number", 14));
+            fixture.reviews.put(12, List.of(review(1)));
+            fixture.reviews.put(14, List.of(changed(2, "html_url", reference(14, 2))));
+            assertEquals(1, fixture.poll(fixture.conf(Map.of("pageBudget", 20))));
+            assertEquals(3, fixture.requests.size(), "Three discovery pages include their eligible review pages");
+            assertTrue(fixture.requests.stream()
+                    .noneMatch(path -> path.contains("/pulls/12/") || path.contains("/pulls/13/")));
+        }
+    }
+
+    @Test
+    void overlapsOpenReviewRequestsAcrossRepositoriesWithinConfiguredBound() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.pulls = List.of(Map.of("number", 12));
+            fixture.reviewOverlap = new CountDownLatch(2);
+            final var conf = fixture.conf(Map.of("parallelism", 2));
+            assertEquals(
+                    0,
+                    BotTestConfiguration.reviewSummaryPoller(
+                                    conf.shared(), conf.poll(), fixture.store, fixture.github, fixed(NOW), null)
+                            .poll(IntStream.range(0, 21)
+                                    .mapToObj(i -> "owner/repo" + i)
+                                    .toList()));
+            assertFalse(fixture.overlapTimedOut.get(), "Independent review batches did not overlap");
+            assertEquals(2, fixture.maximumReviews.get());
+            assertEquals(3, fixture.requests.size());
+        }
+    }
 
     @Test
     void defaultOptOutAndFailClosedValidationNeverCallNetwork() throws Exception {
@@ -79,7 +206,7 @@ class ReviewSummaryPollerTest {
     @Test
     void onlySubmittedAuthorizedHumanMentionsEnqueueAndReceiptsSurviveTaskDeletion() throws Exception {
         try (final var fixture = new Fixture()) {
-            fixture.pulls = List.of(Map.of("number", 12, "state", "closed"));
+            fixture.pulls = List.of(Map.of("number", 12, "state", "open"));
             final var missingTime = review(2);
             missingTime.remove("submitted_at");
             fixture.reviews.put(
@@ -114,7 +241,8 @@ class ReviewSummaryPollerTest {
                 return null;
             });
             // New store/client/poller instances exercise durable state, not an in-memory deduplication set.
-            try (final var github = new GitHubClient(URI.create(fixture.api()), fixture.json, () -> "test")) {
+            try (final var github = new GitHubClient(
+                    URI.create(fixture.api()), fixture.json, () -> "test", BotTestConfiguration.CLOCK)) {
                 assertEquals(
                         0,
                         BotTestConfiguration.reviewSummaryPoller(
@@ -130,7 +258,8 @@ class ReviewSummaryPollerTest {
                     .transaction(state ->
                             state.list().stream().map(TaskFixtures::map).toList())
                     .isEmpty());
-            assertTrue(fixture.requests.getFirst().contains("state=all&sort=updated&direction=desc"));
+            assertTrue(fixture.queries.getFirst().contains("states:[OPEN]"));
+            assertTrue(fixture.queries.getFirst().contains("orderBy:{field:UPDATED_AT,direction:DESC}"));
         }
     }
 
@@ -146,7 +275,7 @@ class ReviewSummaryPollerTest {
                             changed(3, "body", "ordinary sensitive nonmention"),
                             changed(4, "body", "`@bot review hidden mention`")));
             final var conf = fixture.conf(Map.of("pageBudget", 20));
-            final var audit = new BotAudit(BotTestConfiguration.home(home), fixture.json);
+            final var audit = new BotAudit(BotTestConfiguration.home(home), fixture.json, BotTestConfiguration.CLOCK);
             // Poller must pass the same sink into its internally created review-summary poller.
             assertEquals(
                     1,
@@ -206,15 +335,17 @@ class ReviewSummaryPollerTest {
             fixture.reviews.put(13, List.of(changed(5, "html_url", reference(13, 5))));
             fixture.reviews.put(14, List.of(changed(6, "html_url", reference(14, 6))));
             final var conf = fixture.conf(Map.of("pageBudget", 1));
-            assertEquals(1, fixture.poll(conf));
-            assertEquals(2, fixture.requests.size());
-            fixture.requests.clear();
-            assertEquals(2, fixture.poll(conf));
-            assertEquals(3, fixture.requests.size());
-            fixture.requests.clear();
-            assertEquals(2, fixture.poll(conf));
-            assertEquals(4, fixture.requests.size());
-            assertEquals(1, fixture.poll(conf));
+            for (int scan = 0; scan < 10; scan++) {
+                fixture.requests.clear();
+                fixture.queries.clear();
+                fixture.poll(conf);
+                assertTrue(fixture.requests.size() <= 2, "One discovery page, with at most one resumed review page");
+                assertEquals(
+                        1,
+                        fixture.queries.stream()
+                                .filter(query -> query.contains("pullRequests("))
+                                .count());
+            }
             assertEquals(
                     6,
                     fixture.store
@@ -260,11 +391,15 @@ class ReviewSummaryPollerTest {
             fixture.reviews.put(13, List.of(changed(4, "html_url", reference(13, 4))));
             final var conf = fixture.conf(Map.of());
             assertEquals(1, fixture.poll(conf));
+            final var continuation = fixture.store.transaction(state -> Map.copyOf(state.cursors()));
             fixture.failReview.set(true);
             assertThrows(GitHubClient.HttpException.class, () -> fixture.poll(conf));
+            assertEquals(continuation, fixture.store.transaction(state -> state.cursors()));
             fixture.failReview.set(false);
-            assertEquals(2, fixture.poll(conf));
             assertEquals(1, fixture.poll(conf));
+            assertEquals(1, fixture.poll(conf));
+            fixture.poll(conf);
+            fixture.poll(conf);
             assertEquals(
                     4,
                     fixture.store
@@ -361,7 +496,8 @@ class ReviewSummaryPollerTest {
                                     fixture.store,
                                     fixture.github,
                                     fixed(NOW),
-                                    new BotAudit(BotTestConfiguration.home(home), fixture.json))
+                                    new BotAudit(
+                                            BotTestConfiguration.home(home), fixture.json, BotTestConfiguration.CLOCK))
                             .poll(List.of("owner/repo")));
             final var events = Files.readAllLines(home.resolve("audit.jsonl"));
             assertEquals(1, events.size());
@@ -383,6 +519,117 @@ class ReviewSummaryPollerTest {
             assertEquals(1, fixture.poll(conf));
             assertTrue(fixture.requests.contains("/user/42"));
             assertTrue(fixture.requests.contains("/orgs/owner/teams/team/memberships/human"));
+        }
+    }
+
+    @Test
+    void batchesFortySevenRepositoriesIntoFiveRequestsIncludingReviewBodies() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.pullPageSize = 10;
+            fixture.reviewPageSize = 100;
+            fixture.pulls = List.of(Map.of("number", 12));
+            fixture.reviews.put(12, List.of(changed(1, "body", "ordinary review")));
+            final var conf = fixture.conf(Map.of("parallelism", 1));
+            assertEquals(
+                    0,
+                    BotTestConfiguration.reviewSummaryPoller(
+                                    conf.shared(), conf.poll(), fixture.store, fixture.github, fixed(NOW), null)
+                            .poll(IntStream.range(0, 47)
+                                    .mapToObj(i -> "owner/repo" + i)
+                                    .toList()));
+            assertEquals(5, fixture.requests.size());
+            assertTrue(fixture.requests.stream().allMatch("/graphql"::equals));
+            assertTrue(fixture.queries.stream().allMatch(query -> query.contains("reviews(first:100)")));
+        }
+    }
+
+    @Test
+    void partialDataAndMalformedLateAliasLeaveCursorsAndTasksUntouched() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.pulls = List.of(Map.of("number", 12), Map.of("number", 13));
+            fixture.reviews.put(12, List.of(review(1), review(2)));
+            final var conf = fixture.conf(Map.of());
+            assertEquals(1, fixture.poll(conf));
+            final var before = Files.readString(home.resolve("state.json"));
+            fixture.partialErrors = true;
+            assertThrows(IllegalStateException.class, () -> fixture.poll(conf));
+            assertEquals(before, Files.readString(home.resolve("state.json")));
+            fixture.partialErrors = false;
+            fixture.malformedSecondAlias = true;
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> BotTestConfiguration.reviewSummaryPoller(
+                                    conf.shared(), conf.poll(), fixture.store, fixture.github, fixed(NOW), null)
+                            .poll(List.of("owner/repo", "owner/other")));
+            assertEquals(before, Files.readString(home.resolve("state.json")));
+            fixture.malformedSecondAlias = false;
+            fixture.poll(conf);
+            assertEquals(1, fixture.poll(conf), "Failed batch must not lose the saved review backlog");
+            assertEquals(
+                    2, fixture.store.<Integer>transaction(state -> state.list().size()));
+        }
+    }
+
+    @Test
+    void failedNestedPageKeepsDiscoveryEligibleAndResumesAfterRestartWithoutDuplicates() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.pulls = List.of(Map.of("number", 12));
+            fixture.reviews.put(12, List.of(review(1), review(2), review(3)));
+            fixture.failReviewPage = true;
+            final var conf = fixture.conf(Map.of("pageBudget", 20));
+            assertThrows(GitHubClient.HttpException.class, () -> fixture.poll(conf));
+            assertEquals(2, fixture.requests.size(), "GraphQL POST must not be automatically replayed");
+            assertEquals(
+                    1, fixture.store.<Integer>transaction(state -> state.list().size()));
+            final var cursors = fixture.store.transaction(state -> Map.copyOf(state.cursors()));
+            assertFalse(cursors.containsKey("owner/repo/review-summary-graphql/pulls:next"));
+            assertEquals("cursor-1", cursors.get("owner/repo/review-summary-graphql/pulls/12/reviews:next"));
+            fixture.failReviewPage = false;
+            try (final var github = new GitHubClient(
+                    URI.create(fixture.api()), fixture.json, () -> "test", BotTestConfiguration.CLOCK)) {
+                assertEquals(
+                        2,
+                        BotTestConfiguration.reviewSummaryPoller(
+                                        conf.shared(),
+                                        conf.poll(),
+                                        new TaskStore(BotTestConfiguration.home(home), fixture.json),
+                                        github,
+                                        fixed(NOW),
+                                        null)
+                                .poll(List.of("owner/repo")));
+            }
+            assertEquals(
+                    3, fixture.store.<Integer>transaction(state -> state.list().size()));
+            assertEquals(0, fixture.poll(conf));
+        }
+    }
+
+    @Test
+    void closureDuringReviewContinuationStopsScanningUntilReopened() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.pulls = List.of(Map.of("number", 12));
+            fixture.reviews.put(12, List.of(review(1), review(2)));
+            fixture.closeDuringReview = true;
+            final var conf = fixture.conf(Map.of("pageBudget", 20));
+            assertEquals(1, fixture.poll(conf));
+            assertEquals(2, fixture.requests.size());
+            assertFalse(fixture.store.<Boolean>transaction(
+                    state -> state.cursors().containsKey("owner/repo/review-summary-graphql/pulls/12/reviews:next")));
+            fixture.closeDuringReview = false;
+            assertEquals(1, fixture.poll(conf));
+            assertEquals(0, fixture.poll(conf));
+        }
+    }
+
+    @Test
+    void completedTraversalDetectsMentionsEditedIntoExistingReviewBodies() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.pulls = List.of(Map.of("number", 12));
+            fixture.reviews.put(12, List.of(changed(1, "body", "ordinary review")));
+            assertEquals(0, fixture.poll(fixture.conf(Map.of())));
+            fixture.reviews.put(12, List.of(review(1)));
+            assertEquals(1, fixture.poll(fixture.conf(Map.of())));
+            assertEquals(0, fixture.poll(fixture.conf(Map.of())));
         }
     }
 
@@ -422,12 +669,25 @@ class ReviewSummaryPollerTest {
         private final JsonMapperImpl json =
                 BotJsonMapper.create(List.of(new BotAudit$AuditEntry$FusionJsonCodec()), key -> Optional.empty());
         private final HttpServer server;
+        private final ExecutorService serverThreads = Executors.newVirtualThreadPerTaskExecutor();
+        private final AtomicInteger activeReviews = new AtomicInteger();
+        private final AtomicInteger maximumReviews = new AtomicInteger();
+        private final AtomicBoolean overlapTimedOut = new AtomicBoolean();
+        private CountDownLatch reviewOverlap;
         private final GitHubClient github;
         private final TaskStore store = new TaskStore(BotTestConfiguration.home(home), json);
         private final List<String> requests = new CopyOnWriteArrayList<>();
+        private final List<String> queries = new CopyOnWriteArrayList<>();
         private final Map<Integer, List<Map<String, Object>>> reviews = new LinkedHashMap<>();
         private final AtomicBoolean failReview = new AtomicBoolean();
+        private boolean failReviewPage;
+        private boolean partialErrors;
+        private boolean closeDuringReview;
+        private boolean malformedSecondAlias;
+        private int pullPageSize = 1;
+        private int reviewPageSize = 1;
         private final AtomicBoolean failTeam = new AtomicBoolean();
+        private boolean returnClosedPulls;
         private List<Map<String, Object>> pulls = List.of();
         private String membership = "active";
         private String resolvedLogin = "human";
@@ -435,8 +695,9 @@ class ReviewSummaryPollerTest {
         private Fixture() throws IOException {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/", this::respond);
+            server.setExecutor(serverThreads);
             server.start();
-            github = new GitHubClient(URI.create(api()), json, () -> "test");
+            github = new GitHubClient(URI.create(api()), json, () -> "test", BotTestConfiguration.CLOCK);
         }
 
         private String api() {
@@ -460,7 +721,7 @@ class ReviewSummaryPollerTest {
             overrides.forEach((key, value) -> values.put(
                     switch (key) {
                         case "userIds", "teams" -> "github.authorization." + key;
-                        case "since", "pageBudget" -> "poll." + key;
+                        case "since", "pageBudget", "parallelism" -> "poll." + key;
                         case "pollReviews" -> "poll.reviews.enabled";
                         default -> throw new IllegalArgumentException("Unsupported setting: " + key);
                     },
@@ -474,49 +735,140 @@ class ReviewSummaryPollerTest {
         }
 
         private void respond(final HttpExchange exchange) throws IOException {
-            final var uri = exchange.getRequestURI();
-            final var path = uri.getPath();
-            requests.add(uri.toString());
-            Object body;
-            int status = 200;
-            if (path.equals("/user/42")) {
-                body = Map.of("id", 42, "login", resolvedLogin);
-            } else if (path.startsWith("/orgs/")) {
-                status = failTeam.get() ? 403 : 200;
-                body = Map.of("state", membership);
-            } else {
-                final List<?> items;
-                if (path.endsWith("/reviews")) {
-                    final var number = Integer.parseInt(path.split("/")[5]);
-                    items = reviews.getOrDefault(number, List.of());
-                    status = failReview.get() ? 403 : 200;
+            try (exchange) {
+                final var path = exchange.getRequestURI().getPath();
+                requests.add(exchange.getRequestURI().toString());
+                Object body;
+                int status = 200;
+                if (path.equals("/user/42")) {
+                    body = Map.of("id", 42, "login", resolvedLogin);
+                } else if (path.startsWith("/orgs/")) {
+                    status = failTeam.get() ? 403 : 200;
+                    body = Map.of("state", membership);
+                } else if (path.equals("/graphql")) {
+                    overlap();
+                    final var request = json.fromString(
+                            GitHubClient.GraphqlRequest.class,
+                            new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+                    queries.add(request.query());
+                    final var variables = TaskStore.map(request.variables());
+                    final boolean discovery = request.query().contains("pullRequests(");
+                    status = failReview.get() || (!discovery && failReviewPage) ? 403 : 200;
+                    final var data = new LinkedHashMap<String, Object>();
+                    if (discovery) {
+                        for (int i = 0; variables.containsKey("owner" + i); i++) {
+                            final var repo = variables.get("owner" + i) + "/" + variables.get("name" + i);
+                            final var nodes = pulls.stream()
+                                    .filter(pull ->
+                                            returnClosedPulls || "open".equals(pull.getOrDefault("state", "open")))
+                                    .map(pull -> graphPull(pull, null))
+                                    .toList();
+                            data.put(
+                                    "r" + i,
+                                    Map.of(
+                                            "nameWithOwner",
+                                            repo,
+                                            "pullRequests",
+                                            connection(nodes, (String) variables.get("after" + i), pullPageSize)));
+                        }
+                        if (malformedSecondAlias) {
+                            data.put("r1", Map.of("nameWithOwner", "wrong/repository"));
+                        }
+                    } else {
+                        final int number = ((Number) variables.get("number")).intValue();
+                        final var pull = new LinkedHashMap<>(pulls.stream()
+                                .filter(item -> ((Number) item.get("number")).intValue() == number)
+                                .findFirst()
+                                .orElseThrow());
+                        if (closeDuringReview) {
+                            pull.put("state", "closed");
+                        }
+                        data.put(
+                                "repository",
+                                Map.of(
+                                        "nameWithOwner",
+                                        variables.get("owner") + "/" + variables.get("name"),
+                                        "pullRequest",
+                                        graphPull(pull, (String) variables.get("after"))));
+                    }
+                    body = partialErrors
+                            ? Map.of("data", data, "errors", List.of(Map.of("message", "private")))
+                            : Map.of("data", data);
                 } else {
-                    items = pulls;
+                    // The ordinary issue and inline-comment feeds have no entries in this fixture.
+                    body = List.of();
                 }
-                final var query = uri.getQuery();
-                final int page = query != null && query.contains("&page=")
-                        ? Integer.parseInt(query.substring(query.lastIndexOf("&page=") + 6))
-                        : 1;
-                final int offset = Math.min(page - 1, items.size());
-                body = items.subList(offset, Math.min(offset + 1, items.size()));
-                if (offset + 1 < items.size()) {
-                    final var baseQuery = query.replaceAll("&page=[0-9]+", "");
-                    exchange.getResponseHeaders()
-                            .set(
-                                    "Link",
-                                    "<" + api() + path + "?" + baseQuery + "&page=" + (page + 1) + ">; rel=\"next\"");
-                }
+                final var bytes = json.toString(body).getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(status, bytes.length);
+                exchange.getResponseBody().write(bytes);
             }
-            final var bytes = json.toString(body).getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(status, bytes.length);
-            exchange.getResponseBody().write(bytes);
-            exchange.close();
+        }
+
+        private void overlap() throws IOException {
+            if (reviewOverlap == null) {
+                return;
+            }
+            maximumReviews.accumulateAndGet(activeReviews.incrementAndGet(), Math::max);
+            try {
+                reviewOverlap.countDown();
+                if (!reviewOverlap.await(5, TimeUnit.SECONDS)) {
+                    overlapTimedOut.set(true);
+                }
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException(interrupted);
+            } finally {
+                activeReviews.decrementAndGet();
+            }
+        }
+
+        private Map<String, Object> graphPull(final Map<String, Object> pull, final String after) {
+            final var number = ((Number) pull.get("number")).intValue();
+            final var nodes = reviews.getOrDefault(number, List.of()).stream()
+                    .map(item -> {
+                        final var node = new LinkedHashMap<String, Object>();
+                        node.put("databaseId", item.get("id"));
+                        node.put("body", item.get("body"));
+                        node.put("state", item.get("state"));
+                        node.put("submittedAt", item.get("submitted_at"));
+                        node.put("url", item.get("html_url"));
+                        final var user = item.get("user");
+                        node.put(
+                                "author",
+                                user == null
+                                        ? null
+                                        : Map.of(
+                                                "__typename",
+                                                        TaskStore.map(user).get("type"),
+                                                "login", TaskStore.map(user).get("login"),
+                                                "databaseId",
+                                                        TaskStore.map(user).get("id")));
+                        return node;
+                    })
+                    .toList();
+            return Map.of(
+                    "number",
+                    number,
+                    "state",
+                    pull.getOrDefault("state", "open").toString().toUpperCase(Locale.ROOT),
+                    "reviews",
+                    connection(nodes, after, reviewPageSize));
+        }
+
+        private Map<String, Object> connection(final List<?> items, final String after, final int size) {
+            final int offset = Math.min(after == null ? 0 : Integer.parseInt(after.substring(7)), items.size());
+            final int end = Math.min(offset + size, items.size());
+            final var info = new LinkedHashMap<String, Object>();
+            info.put("hasNextPage", end < items.size());
+            info.put("endCursor", end < items.size() ? "cursor-" + end : null);
+            return Map.of("nodes", items.subList(offset, end), "pageInfo", info);
         }
 
         @Override
         public void close() {
             github.close();
             server.stop(0);
+            serverThreads.close();
             json.close();
         }
     }

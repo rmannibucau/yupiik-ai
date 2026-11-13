@@ -15,10 +15,12 @@
  */
 package io.yupiik.ia.agent.github.service;
 
+import static java.util.stream.Collectors.toSet;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.command.PollCommand$Options$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.command.PollCommand.Options;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
@@ -40,9 +42,15 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -51,6 +59,10 @@ class PollerTest {
     Path home;
 
     private GithubBotConfiguration configuration(final String api, final String ids) {
+        return configuration(api, ids, "owner/repo");
+    }
+
+    private GithubBotConfiguration configuration(final String api, final String ids, final String repositories) {
         return new GithubBotConfiguration(
                 home.toString(),
                 api,
@@ -60,7 +72,469 @@ class PollerTest {
                         GithubBotConfiguration.AuthType.pat, "GH_TOKEN", "", 0, "", "GH_AGENT_TOKEN"),
                 new GithubBotConfiguration.Authorization(ids, ""),
                 new GithubBotConfiguration.Repositories(
-                        "owner/repo", "", "", "", List.of(RepositorySelector.Visibility.values()), false, false));
+                        repositories, "", "", "", List.of(RepositorySelector.Visibility.values()), false, false));
+    }
+
+    @Test
+    void boundsRepositoryPollingAtTwoOverlappingHttpRequests() throws Exception {
+        assertRepositoryPollingConcurrency(2);
+    }
+
+    @Test
+    void parallelismOnePreservesSerialRepositoryAndEndpointOrder() throws Exception {
+        assertRepositoryPollingConcurrency(1);
+    }
+
+    private void assertRepositoryPollingConcurrency(final int parallelism) throws Exception {
+        final var paths = new CopyOnWriteArrayList<String>();
+        final var active = new AtomicInteger();
+        final var maximum = new AtomicInteger();
+        final var overlap = new CountDownLatch(2);
+        final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try (final var handlers = Executors.newVirtualThreadPerTaskExecutor();
+                final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty())) {
+            server.setExecutor(handlers);
+            server.createContext("/", exchange -> {
+                final var path = exchange.getRequestURI().getPath();
+                paths.add(path);
+                maximum.accumulateAndGet(active.incrementAndGet(), Math::max);
+                try {
+                    try {
+                        if (parallelism == 2 && path.endsWith("/issues")) {
+                            overlap.countDown();
+                            if (!overlap.await(5, TimeUnit.SECONDS)) {
+                                throw new IllegalStateException("Repository HTTP responses did not overlap");
+                            }
+                        }
+                        Thread.sleep(40);
+                    } finally {
+                        // Count withheld responses, not server cleanup after the client receives the body.
+                        active.decrementAndGet();
+                    }
+                    final var repository = path.split("/")[3];
+                    final var body = path.endsWith("/issues")
+                            ? json.toString(List.of(Map.of(
+                                    "id",
+                                    1,
+                                    "user",
+                                    Map.of("id", 42, "login", "human"),
+                                    "body",
+                                    "@bot solve fix it",
+                                    "html_url",
+                                    "https://github.com/owner/" + repository + "/issues/12")))
+                            : "[]";
+                    final var bytes = body.getBytes(StandardCharsets.UTF_8);
+                    exchange.sendResponseHeaders(200, bytes.length);
+                    exchange.getResponseBody().write(bytes);
+                } catch (final InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(error);
+                } finally {
+                    exchange.close();
+                }
+            });
+            server.start();
+            try {
+                final var conf = configuration(
+                        "http://127.0.0.1:" + server.getAddress().getPort(),
+                        "42",
+                        "owner/first,owner/second,owner/third");
+                final var store = new TaskStore(conf, json);
+                try (final var github =
+                        new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
+                    final var poller = BotTestConfiguration.poller(
+                            conf,
+                            new PollOptions(
+                                    "now",
+                                    1,
+                                    new PollOptions.Reviews(false),
+                                    new PollOptions.Discussions(false),
+                                    parallelism,
+                                    new PollOptions.Search(false, 3600)),
+                            store,
+                            github,
+                            Clock.systemUTC(),
+                            null);
+                    assertEquals(3, poller.poll());
+                    assertEquals(parallelism, maximum.get());
+                    assertEquals(9, paths.size());
+                    if (parallelism == 1) {
+                        assertEquals(
+                                List.of(
+                                        "/repos/owner/first/issues",
+                                        "/repos/owner/first/issues/comments",
+                                        "/repos/owner/first/pulls/comments",
+                                        "/repos/owner/second/issues",
+                                        "/repos/owner/second/issues/comments",
+                                        "/repos/owner/second/pulls/comments",
+                                        "/repos/owner/third/issues",
+                                        "/repos/owner/third/issues/comments",
+                                        "/repos/owner/third/pulls/comments"),
+                                paths);
+                    }
+                    final var tasks = store.transaction(state ->
+                            state.list().stream().map(TaskFixtures::map).toList());
+                    assertEquals(3, tasks.size());
+                    assertEquals(
+                            Set.of("owner/first", "owner/second", "owner/third"),
+                            tasks.stream().map(task -> task.get("repository")).collect(toSet()));
+                    assertEquals(
+                            1,
+                            tasks.stream()
+                                    .map(task -> task.get("batchId"))
+                                    .distinct()
+                                    .count());
+                    assertEquals(0, poller.poll());
+                    assertEquals(
+                            tasks,
+                            store.transaction(state ->
+                                    state.list().stream().map(TaskFixtures::map).toList()));
+                }
+            } finally {
+                server.stop(0);
+            }
+        }
+    }
+
+    @Test
+    void invalidParallelismFailsBeforeHttp() throws Exception {
+        final var requests = new AtomicInteger();
+        final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            requests.incrementAndGet();
+            exchange.sendResponseHeaders(200, 2);
+            exchange.getResponseBody().write("[]".getBytes(StandardCharsets.UTF_8));
+            exchange.close();
+        });
+        server.start();
+        try (final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty());
+                final var github = new GitHubClient(
+                        URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                        json,
+                        () -> "test",
+                        BotTestConfiguration.CLOCK)) {
+            final var conf =
+                    configuration("http://127.0.0.1:" + server.getAddress().getPort(), "42");
+            for (final var invalid : List.of(Integer.MIN_VALUE, -1, 0, 17, Integer.MAX_VALUE)) {
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> BotTestConfiguration.poller(
+                                        conf,
+                                        new PollOptions(
+                                                "now",
+                                                1,
+                                                new PollOptions.Reviews(false),
+                                                new PollOptions.Discussions(false),
+                                                invalid,
+                                                new PollOptions.Search(false, 3600)),
+                                        new TaskStore(conf, json),
+                                        github,
+                                        Clock.systemUTC(),
+                                        null)
+                                .poll());
+            }
+            assertEquals(0, requests.get());
+            assertEquals(0, github.statistics().requests());
+            final var defaults = new PollCommand$Options$FusionConfigurationFactory(ignored -> Optional.empty())
+                    .get()
+                    .poll();
+            assertEquals(4, defaults.parallelism());
+            assertTrue(defaults.search().enabled());
+            assertEquals(3600, defaults.search().reconciliationIntervalSeconds());
+            assertEquals(
+                    16,
+                    new PollOptions(
+                                    "now",
+                                    1,
+                                    new PollOptions.Reviews(false),
+                                    new PollOptions.Discussions(false),
+                                    16,
+                                    new PollOptions.Search(false, 3600))
+                            .parallelism());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void repositoryFailureCancelsSlowSiblingAndReplaysWithoutTaskLossOrDuplicates() throws Exception {
+        final var slowRequest = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        final var fail = new AtomicBoolean(true);
+        final var paths = new CopyOnWriteArrayList<String>();
+        final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try (final var handlers = Executors.newVirtualThreadPerTaskExecutor();
+                final var callers = Executors.newVirtualThreadPerTaskExecutor();
+                final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty())) {
+            server.setExecutor(handlers);
+            server.createContext("/", exchange -> {
+                final var path = exchange.getRequestURI().getPath();
+                paths.add(path);
+                try {
+                    if (fail.get() && path.equals("/repos/owner/first/issues/comments")) {
+                        slowRequest.countDown();
+                        if (!release.await(10, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("Slow response was not released");
+                        }
+                    }
+                    final var failing = fail.get() && path.equals("/repos/owner/second/issues");
+                    if (failing && !slowRequest.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Sibling never reached its slow request");
+                    }
+                    final var repository = path.split("/")[3];
+                    final var body = path.endsWith("/issues")
+                            ? json.toString(List.of(Map.of(
+                                    "id",
+                                    1,
+                                    "user",
+                                    Map.of("id", 42, "login", "human"),
+                                    "body",
+                                    "@bot solve fix it",
+                                    "html_url",
+                                    "https://github.com/owner/" + repository + "/issues/12")))
+                            : "[]";
+                    final var bytes = body.getBytes(StandardCharsets.UTF_8);
+                    exchange.sendResponseHeaders(failing ? 400 : 200, bytes.length);
+                    exchange.getResponseBody().write(bytes);
+                } catch (final InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(error);
+                } finally {
+                    exchange.close();
+                }
+            });
+            server.start();
+            try {
+                final var conf = configuration(
+                        "http://127.0.0.1:" + server.getAddress().getPort(), "42", "owner/first,owner/second");
+                final var store = new TaskStore(conf, json);
+                final var options = new PollOptions(
+                        "now",
+                        1,
+                        new PollOptions.Reviews(false),
+                        new PollOptions.Discussions(false),
+                        2,
+                        new PollOptions.Search(false, 3600));
+                try (final var github =
+                        new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
+                    final var failed = callers.submit(
+                            () -> BotTestConfiguration.poller(conf, options, store, github, Clock.systemUTC(), null)
+                                    .poll());
+                    assertTrue(slowRequest.await(5, TimeUnit.SECONDS));
+                    final var error = assertThrows(ExecutionException.class, () -> failed.get(5, TimeUnit.SECONDS));
+                    assertInstanceOf(GitHubClient.HttpException.class, error.getCause());
+                    // The poll must return while the server still withholds the sibling response.
+                    assertEquals(1, release.getCount());
+                    assertFalse(paths.contains("/repos/owner/first/pulls/comments"));
+                    assertFalse(store.<Boolean>transaction(
+                            state -> state.cursors().containsKey("owner/first/issues/comments")));
+                    assertFalse(
+                            store.<Boolean>transaction(state -> state.cursors().containsKey("owner/second/issues")));
+                    final var persisted = store.transaction(state ->
+                            state.list().stream().map(TaskFixtures::map).toList());
+                    assertEquals(1, persisted.size());
+                    assertEquals("owner/first", persisted.getFirst().get("repository"));
+                    fail.set(false);
+                    release.countDown();
+                    // Reconstruct the poller/store to exercise durable replay, not in-memory deduplication.
+                    final var restarted = new TaskStore(conf, json);
+                    final var poller =
+                            BotTestConfiguration.poller(conf, options, restarted, github, Clock.systemUTC(), null);
+                    assertEquals(1, poller.poll());
+                    assertEquals(0, poller.poll());
+                    final var tasks = restarted.transaction(state ->
+                            state.list().stream().map(TaskFixtures::map).toList());
+                    assertEquals(2, tasks.size());
+                    assertTrue(tasks.contains(persisted.getFirst()));
+                    assertEquals(
+                            Set.of("owner/first", "owner/second"),
+                            tasks.stream().map(task -> task.get("repository")).collect(toSet()));
+                }
+            } finally {
+                release.countDown();
+                server.stop(0);
+            }
+        }
+    }
+
+    @Test
+    void interruptedPollCancelsRepositoryRequestsAndPreservesInterruptStatus() throws Exception {
+        final var entered = new CountDownLatch(2);
+        final var release = new CountDownLatch(1);
+        final var interrupted = new AtomicBoolean();
+        final var failure = new AtomicReference<RuntimeException>();
+        final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try (final var handlers = Executors.newVirtualThreadPerTaskExecutor();
+                final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty())) {
+            server.setExecutor(handlers);
+            server.createContext("/", exchange -> {
+                entered.countDown();
+                try {
+                    if (!release.await(10, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Interrupted poll did not finish");
+                    }
+                    exchange.sendResponseHeaders(200, 2);
+                    exchange.getResponseBody().write("[]".getBytes(StandardCharsets.UTF_8));
+                } catch (final InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(error);
+                } finally {
+                    exchange.close();
+                }
+            });
+            server.start();
+            try {
+                final var conf = configuration(
+                        "http://127.0.0.1:" + server.getAddress().getPort(), "42", "owner/first,owner/second");
+                try (final var github =
+                        new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
+                    final var poller = BotTestConfiguration.poller(
+                            conf,
+                            new PollOptions(
+                                    "now",
+                                    1,
+                                    new PollOptions.Reviews(false),
+                                    new PollOptions.Discussions(false),
+                                    2,
+                                    new PollOptions.Search(false, 3600)),
+                            new TaskStore(conf, json),
+                            github,
+                            Clock.systemUTC(),
+                            null);
+                    final var caller = Thread.ofVirtual().start(() -> {
+                        try {
+                            poller.poll();
+                        } catch (final RuntimeException error) {
+                            failure.set(error);
+                        } finally {
+                            interrupted.set(Thread.currentThread().isInterrupted());
+                        }
+                    });
+                    try {
+                        assertTrue(entered.await(5, TimeUnit.SECONDS));
+                        caller.interrupt();
+                        caller.join(5_000);
+                        assertFalse(caller.isAlive(), "Interrupted poll waited for withheld HTTP responses");
+                        assertInstanceOf(IllegalStateException.class, failure.get());
+                        assertInstanceOf(
+                                InterruptedException.class, failure.get().getCause());
+                        assertTrue(interrupted.get());
+                        assertEquals(1, release.getCount());
+                    } finally {
+                        caller.interrupt();
+                        release.countDown();
+                        caller.join(5_000);
+                    }
+                }
+            } finally {
+                release.countDown();
+                server.stop(0);
+            }
+        }
+    }
+
+    @Test
+    void logsPerPhaseTransportCountsAcrossRestartsAndOnFailure() throws Exception {
+        final var messages = new CopyOnWriteArrayList<String>();
+        final var testThread = Thread.currentThread().threadId();
+        final var handler = new Handler() {
+            @Override
+            public void publish(final LogRecord record) {
+                if (record.getLongThreadID() == testThread
+                        && record.getMessage().startsWith("GitHub poll phase=")) {
+                    messages.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+        };
+        final var logger = Logger.getLogger(Poller.class.getName());
+        final var fail = new AtomicBoolean();
+        final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            final var body = "/graphql".equals(exchange.getRequestURI().getPath()) ? """
+                      {"data":{"r0":{"nameWithOwner":"owner/repo","pullRequests":{
+                        "nodes":[{"number":12,"state":"OPEN","reviews":{
+                          "nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],
+                        "pageInfo":{"hasNextPage":false,"endCursor":null}}}}}
+                      """ : "[]";
+            final var bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(fail.get() ? 400 : 200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        logger.addHandler(handler);
+        try (final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty())) {
+            final var conf =
+                    configuration("http://127.0.0.1:" + server.getAddress().getPort(), "42");
+            final var options = new PollOptions(
+                    "now",
+                    20,
+                    new PollOptions.Reviews(true),
+                    new PollOptions.Discussions(false),
+                    4,
+                    new PollOptions.Search(false, 3600));
+            for (int run = 0; run < 2; run++) {
+                messages.clear();
+                try (final var github = new GitHubClient(
+                        URI.create(conf.api()), json, () -> "private-token", BotTestConfiguration.CLOCK)) {
+                    assertEquals(
+                            0,
+                            BotTestConfiguration.poller(
+                                            conf, options, new TaskStore(conf, json), github, Clock.systemUTC(), null)
+                                    .poll());
+                    assertEquals(4, github.statistics().requests());
+                }
+                assertEquals(4, messages.size());
+                assertTrue(
+                        messages.stream()
+                                .anyMatch(
+                                        message -> message.matches(
+                                                "GitHub poll phase=discovery outcome=success durationMillis=\\d+ requests=0 httpMillis=\\d+ pacingMillis=\\d+")));
+                assertTrue(
+                        messages.stream()
+                                .anyMatch(
+                                        message -> message.matches(
+                                                "GitHub poll phase=mentions outcome=success durationMillis=\\d+ requests=3 httpMillis=\\d+ pacingMillis=\\d+")));
+                assertTrue(
+                        messages.stream()
+                                .anyMatch(
+                                        message -> message.matches(
+                                                "GitHub poll phase=reviews-and-discussions outcome=success durationMillis=\\d+ requests=1 httpMillis=\\d+ pacingMillis=\\d+")));
+                assertTrue(
+                        messages.stream()
+                                .anyMatch(
+                                        message -> message.matches(
+                                                "GitHub poll phase=total outcome=success durationMillis=\\d+ requests=4 httpMillis=\\d+ pacingMillis=\\d+")));
+            }
+            messages.clear();
+            fail.set(true);
+            try (final var github =
+                    new GitHubClient(URI.create(conf.api()), json, () -> "private-token", BotTestConfiguration.CLOCK)) {
+                assertThrows(
+                        GitHubClient.HttpException.class,
+                        () -> BotTestConfiguration.poller(
+                                        conf, options, new TaskStore(conf, json), github, Clock.systemUTC(), null)
+                                .poll());
+                assertEquals(1, github.statistics().requests());
+            }
+            assertEquals(3, messages.size());
+            assertTrue(
+                    messages.stream()
+                            .anyMatch(
+                                    message -> message.matches(
+                                            "GitHub poll phase=total outcome=failure durationMillis=\\d+ requests=1 httpMillis=\\d+ pacingMillis=\\d+")));
+            assertTrue(messages.stream()
+                    .noneMatch(message -> message.contains("private-token") || message.contains("since=")));
+        } finally {
+            logger.removeHandler(handler);
+            server.stop(0);
+        }
     }
 
     @Test
@@ -75,12 +549,20 @@ class PollerTest {
         server.start();
         try (final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty());
                 final var github = new GitHubClient(
-                        URI.create("http://127.0.0.1:" + server.getAddress().getPort()), json, () -> "test")) {
+                        URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                        json,
+                        () -> "test",
+                        BotTestConfiguration.CLOCK)) {
             final var conf =
                     configuration("http://127.0.0.1:" + server.getAddress().getPort(), "42");
             final var store = new TaskStore(conf, json);
-            final var options = new Options(
-                    new PollOptions("now", 1, new PollOptions.Reviews(true), new PollOptions.Discussions(true)));
+            final var options = new Options(new PollOptions(
+                    "now",
+                    1,
+                    new PollOptions.Reviews(true),
+                    new PollOptions.Discussions(true),
+                    4,
+                    new PollOptions.Search(false, 3600)));
             final var started = new CountDownLatch(2);
             final Runnable rendezvous = () -> {
                 assertTrue(Thread.currentThread().isVirtual());
@@ -184,14 +666,21 @@ class PollerTest {
             final var conf =
                     configuration("http://127.0.0.1:" + server.getAddress().getPort(), "42");
             final var store = new TaskStore(BotTestConfiguration.home(home), json);
-            try (final var github = new GitHubClient(URI.create(conf.api()), json, () -> "test")) {
+            try (final var github =
+                    new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
                 final var poller = BotTestConfiguration.poller(
                         conf,
-                        new PollOptions("now", 1, new PollOptions.Reviews(false), new PollOptions.Discussions(false)),
+                        new PollOptions(
+                                "now",
+                                1,
+                                new PollOptions.Reviews(false),
+                                new PollOptions.Discussions(false),
+                                4,
+                                new PollOptions.Search(false, 3600)),
                         store,
                         github,
                         Clock.fixed(Instant.parse("2026-11-11T12:00:00Z"), ZoneOffset.UTC),
-                        new BotAudit(BotTestConfiguration.home(home), json));
+                        new BotAudit(BotTestConfiguration.home(home), json, BotTestConfiguration.CLOCK));
                 assertEquals(1, poller.poll());
                 assertEquals(
                         1,
@@ -241,7 +730,8 @@ class PollerTest {
     void emptyAllowlistDeniesBeforeNetwork() {
         try (final var json = BotJsonMapper.create(
                         List.of(new BotAudit$AuditEntry$FusionJsonCodec()), key -> Optional.empty());
-                final var github = new GitHubClient(URI.create("http://127.0.0.1:1"), json, () -> "test")) {
+                final var github = new GitHubClient(
+                        URI.create("http://127.0.0.1:1"), json, () -> "test", BotTestConfiguration.CLOCK)) {
             assertThrows(
                     IllegalStateException.class,
                     () -> BotTestConfiguration.poller(
@@ -250,7 +740,9 @@ class PollerTest {
                                             "now",
                                             1,
                                             new PollOptions.Reviews(false),
-                                            new PollOptions.Discussions(false)),
+                                            new PollOptions.Discussions(false),
+                                            4,
+                                            new PollOptions.Search(false, 3600)),
                                     new TaskStore(BotTestConfiguration.home(home), json),
                                     github,
                                     Clock.systemUTC(),
@@ -276,11 +768,17 @@ class PollerTest {
             final var conf =
                     configuration("http://127.0.0.1:" + server.getAddress().getPort(), "42");
             final var store = new TaskStore(BotTestConfiguration.home(home), json);
-            try (final var github = new GitHubClient(URI.create(conf.api()), json, () -> "test")) {
+            try (final var github =
+                    new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
                 BotTestConfiguration.poller(
                                 conf,
                                 new PollOptions(
-                                        "now", 1, new PollOptions.Reviews(false), new PollOptions.Discussions(false)),
+                                        "now",
+                                        1,
+                                        new PollOptions.Reviews(false),
+                                        new PollOptions.Discussions(false),
+                                        4,
+                                        new PollOptions.Search(false, 3600)),
                                 store,
                                 github,
                                 Clock.systemUTC(),
@@ -332,7 +830,8 @@ class PollerTest {
                     configuration("http://127.0.0.1:" + server.getAddress().getPort(), "42");
             final var store = new TaskStore(BotTestConfiguration.home(home), json);
             final var first = Instant.parse("2026-11-11T12:00:00Z");
-            try (final var github = new GitHubClient(URI.create(conf.api()), json, () -> "test")) {
+            try (final var github =
+                    new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
                 assertEquals(
                         0,
                         BotTestConfiguration.poller(
@@ -341,7 +840,9 @@ class PollerTest {
                                                 "now",
                                                 1,
                                                 new PollOptions.Reviews(false),
-                                                new PollOptions.Discussions(false)),
+                                                new PollOptions.Discussions(false),
+                                                4,
+                                                new PollOptions.Search(false, 3600)),
                                         store,
                                         github,
                                         Clock.fixed(first, ZoneOffset.UTC),
@@ -356,7 +857,9 @@ class PollerTest {
                                                 "now",
                                                 1,
                                                 new PollOptions.Reviews(false),
-                                                new PollOptions.Discussions(false)),
+                                                new PollOptions.Discussions(false),
+                                                4,
+                                                new PollOptions.Search(false, 3600)),
                                         store,
                                         github,
                                         Clock.fixed(first.plusSeconds(600), ZoneOffset.UTC),
@@ -373,7 +876,9 @@ class PollerTest {
                                                 "now",
                                                 1,
                                                 new PollOptions.Reviews(false),
-                                                new PollOptions.Discussions(false)),
+                                                new PollOptions.Discussions(false),
+                                                4,
+                                                new PollOptions.Search(false, 3600)),
                                         store,
                                         github,
                                         Clock.fixed(first.plusSeconds(1200), ZoneOffset.UTC),
@@ -416,11 +921,17 @@ class PollerTest {
             final var conf =
                     configuration("http://127.0.0.1:" + server.getAddress().getPort(), "42");
             final var store = new TaskStore(BotTestConfiguration.home(home), json);
-            try (final var github = new GitHubClient(URI.create(conf.api()), json, () -> "test")) {
+            try (final var github =
+                    new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
                 final var first = executor.submit(() -> BotTestConfiguration.poller(
                                 conf,
                                 new PollOptions(
-                                        "now", 1, new PollOptions.Reviews(false), new PollOptions.Discussions(false)),
+                                        "now",
+                                        1,
+                                        new PollOptions.Reviews(false),
+                                        new PollOptions.Discussions(false),
+                                        4,
+                                        new PollOptions.Search(false, 3600)),
                                 store,
                                 github,
                                 Clock.systemUTC(),
@@ -430,7 +941,12 @@ class PollerTest {
                 final var second = executor.submit(() -> BotTestConfiguration.poller(
                                 conf,
                                 new PollOptions(
-                                        "now", 1, new PollOptions.Reviews(false), new PollOptions.Discussions(false)),
+                                        "now",
+                                        1,
+                                        new PollOptions.Reviews(false),
+                                        new PollOptions.Discussions(false),
+                                        4,
+                                        new PollOptions.Search(false, 3600)),
                                 store,
                                 github,
                                 Clock.systemUTC(),

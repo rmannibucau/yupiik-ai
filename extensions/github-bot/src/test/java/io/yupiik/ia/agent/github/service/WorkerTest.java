@@ -183,7 +183,7 @@ class WorkerTest {
                 new GithubBotConfiguration.Authorization("42", ""),
                 new GithubBotConfiguration.Repositories(
                         "owner/repo", "", "", "", List.of(RepositorySelector.Visibility.values()), false, false));
-        github = new GitHubClient(URI.create(api), json, () -> "test");
+        github = new GitHubClient(URI.create(api), json, () -> "test", BotTestConfiguration.CLOCK);
     }
 
     @AfterEach
@@ -321,6 +321,9 @@ class WorkerTest {
         assertEquals(
                 TaskState.pending, store.transaction(state -> state.task(id).state()));
         assertEquals(1, ((Number) store.transaction(state -> state.task(id).attempts())).intValue());
+        assertEquals(
+                BotTestConfiguration.CLOCK.instant().toString(),
+                store.transaction(state -> state.task(id).startedAt()));
         assertTrue(posts.isEmpty());
         final var directory = Path.of(
                 store.<String>transaction(state -> String.valueOf(state.task(id).attemptDirectory())));
@@ -709,7 +712,7 @@ class WorkerTest {
         assertEquals("done", finished.get("state"));
         assertEquals(0, ((Number) finished.get("attempts")).intValue());
         assertEquals(URL, finished.get("commentUrl"));
-        assertNotNull(finished.get("completedAt"));
+        assertEquals(BotTestConfiguration.CLOCK.instant().toString(), finished.get("completedAt"));
         assertFalse(finished.containsKey("result"));
         assertTrue(intentAtPost);
         assertEquals(

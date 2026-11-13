@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
+import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -58,7 +59,10 @@ class GithubContextBrokerTest {
         server.start();
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty());
                 final var client = new GitHubClient(
-                        URI.create("http://127.0.0.1:" + server.getAddress().getPort()), json, () -> "host-secret")) {
+                        URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                        json,
+                        () -> "host-secret",
+                        BotTestConfiguration.CLOCK)) {
             Files.createDirectory(temporary.resolve("workspace"));
             try (final var broker = new GithubContextBroker(
                     client,
@@ -104,7 +108,8 @@ class GithubContextBrokerTest {
     void rejectsInvalidIdentityBeforeCreatingMailbox() throws Exception {
         Files.createDirectory(temporary.resolve("workspace"));
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty());
-                final var client = new GitHubClient(URI.create("http://127.0.0.1:1"), json, () -> "")) {
+                final var client = new GitHubClient(
+                        URI.create("http://127.0.0.1:1"), json, () -> "", BotTestConfiguration.CLOCK)) {
             assertThrows(
                     IllegalArgumentException.class,
                     () -> new GithubContextBroker(

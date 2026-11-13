@@ -66,7 +66,7 @@ public final class AuthTokenProvider implements Supplier<String>, AutoCloseable 
         this.key = key;
         this.json = json;
         this.clock = clock;
-        this.app = pat == null ? new GitHubClient(base, json, this::jwt) : null;
+        this.app = pat == null ? new GitHubClient(base, json, this::jwt, clock) : null;
     }
 
     /** PAT supplier is re-read for every request, allowing external rotation. */

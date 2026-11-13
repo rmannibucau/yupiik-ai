@@ -30,7 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.time.Instant;
+import java.time.Clock;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
@@ -45,10 +45,12 @@ public class BotAudit {
     private static final ConcurrentHashMap<Path, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
     private final GithubBotConfiguration configuration;
     private final JsonMapper json;
+    private final Clock clock;
 
-    public BotAudit(final GithubBotConfiguration configuration, final JsonMapper json) {
+    public BotAudit(final GithubBotConfiguration configuration, final JsonMapper json, final Clock clock) {
         this.configuration = configuration;
         this.json = json;
+        this.clock = clock;
     }
 
     public void record(final String event, final TaskDocument task) {
@@ -71,7 +73,7 @@ public class BotAudit {
                         StandardOpenOption.APPEND,
                         LinkOption.NOFOLLOW_LINKS)) {
             final var audit = new AuditEntry(
-                    Instant.now().toString(),
+                    clock.instant().toString(),
                     event,
                     task.id(),
                     task.actorId(),

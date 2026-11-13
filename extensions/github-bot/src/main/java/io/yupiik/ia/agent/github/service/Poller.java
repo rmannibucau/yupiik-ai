@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.github.service;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.MentionSearchClient;
 import io.yupiik.ia.agent.github.command.PollCommand;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
@@ -32,24 +33,33 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 /** Polling never calls a model. Identity checks precede durable enqueue. */
 @ApplicationScoped
 public class Poller {
 
+    private static final Logger LOGGER = Logger.getLogger(Poller.class.getName());
     private static final ConcurrentHashMap<Path, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
     private final GithubBotConfiguration conf;
     private final PollOptions options;
@@ -97,11 +107,29 @@ public class Poller {
         try (final var channel = FileChannel.open(
                         path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
                 final var lock = channel.lock()) {
-            return scan();
+            return measured("total", this::scan);
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         } finally {
             local.unlock();
+        }
+    }
+
+    private <T> T measured(final String phase, final Supplier<T> operation) {
+        final var started = System.nanoTime();
+        final var before = github.statistics();
+        boolean success = false;
+        try {
+            final var result = operation.get();
+            success = true;
+            return result;
+        } finally {
+            final var after = github.statistics();
+            LOGGER.info("GitHub poll phase=" + phase + " outcome=" + (success ? "success" : "failure")
+                    + " durationMillis=" + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+                    + " requests=" + (after.requests() - before.requests())
+                    + " httpMillis=" + TimeUnit.NANOSECONDS.toMillis(after.httpNanos() - before.httpNanos())
+                    + " pacingMillis=" + TimeUnit.NANOSECONDS.toMillis(after.pacingNanos() - before.pacingNanos()));
         }
     }
 
@@ -117,130 +145,272 @@ public class Poller {
         if (allowed.isEmpty()) {
             throw new IllegalStateException("No authorized immutable user IDs configured; polling denied");
         }
-        final var batch = UUID.randomUUID().toString();
-        int created = 0;
-        final var selected = repositories();
-        for (final var repo : selected) {
-            for (final var endpoint : List.of("issues", "issues/comments", "pulls/comments")) {
-                final var key = repo + "/" + endpoint;
-                final var start = clock.instant();
-                final var cursors = store.transaction(state -> {
-                    // Persist 'now' once, not once per restarted scan or endpoint.
-                    final var initial = state.cursors()
-                            .computeIfAbsent(
-                                    "initialSince",
-                                    ignored -> "now".equals(options.since())
-                                            ? start.toString()
-                                            : Instant.parse(options.since()).toString());
-                    final var snapshot = new LinkedHashMap<>(state.cursors());
-                    snapshot.putIfAbsent(key, initial);
-                    return snapshot;
+        final var selected = measured("discovery", this::repositories);
+        LOGGER.info(() -> "GitHub poll repositories=" + selected.size()
+                + " reviewsEnabled=" + options.reviews().enabled()
+                + " discussionsEnabled=" + options.discussions().enabled()
+                + " searchEnabled=" + options.search().enabled());
+        if (!options.search().enabled()) {
+            return direct(selected, allowed);
+        }
+
+        // A quiet search must not move the initial lower bound to the time of the first later hit.
+        final var started = clock.instant();
+        store.transaction(state -> {
+            final var initial = "now".equals(options.since())
+                    ? started.toString()
+                    : Instant.parse(options.since()).toString();
+            state.cursors().putIfAbsent("initialSince", initial);
+            if (options.discussions().enabled()) {
+                state.cursors().putIfAbsent("discussion:initialSince", initial);
+            }
+            return null;
+        });
+        final var key = reconciliationKey(selected);
+        final var reconcile = store.transaction(state -> {
+            final var completed = state.cursors().get(key + ":completed");
+            return state.cursors().containsKey(key + ":running")
+                    || completed == null
+                    || started.isBefore(Instant.parse(completed))
+                    || !started.isBefore(Instant.parse(completed)
+                            .plusSeconds(options.search().reconciliationIntervalSeconds()));
+        });
+        if (reconcile) {
+            // Leave this marker on failure or bounded incomplete scans: the next invocation must
+            // resume directly even when the search index has no matching parent yet.
+            store.transaction(state -> {
+                state.cursors().putIfAbsent(key + ":running", started.toString());
+                return null;
+            });
+            final var created = direct(selected, allowed);
+            if (pending(selected, false).isEmpty() && pending(selected, true).isEmpty()) {
+                store.transaction(state -> {
+                    state.cursors().put(key + ":completed", clock.instant().toString());
+                    state.cursors().remove(key + ":running");
+                    return null;
                 });
-                final var since =
-                        Instant.parse(String.valueOf(cursors.get(key))).minusSeconds(300);
-                final var savedNext = cursors.get(key + ":next");
-                final var scanStart = String.valueOf(cursors.getOrDefault(key + ":scanStart", start.toString()));
-                String next = savedNext == null
-                        ? "/repos/" + repo + "/" + endpoint + "?per_page=100&sort=updated&direction=asc&since="
-                                + URLEncoder.encode(since.toString(), StandardCharsets.UTF_8)
-                                + (endpoint.equals("issues") ? "&state=all" : "")
-                        : String.valueOf(cursors.getOrDefault(key + ":overlap", savedNext));
-                // Replay the preceding page in addition to the budget, covering page-boundary shifts.
-                final int budget = options.pageBudget() + (cursors.containsKey(key + ":overlap") ? 1 : 0);
-                String overlap = next;
-                int pages = 0;
-                while (next != null && pages++ < budget) {
-                    overlap = next;
-                    final var page = github.page(next);
-                    if (!(page.body() instanceof List<?> items)) {
-                        throw new IllegalStateException("Expected GitHub list");
+            }
+            return created;
+        }
+        return search(selected, allowed);
+    }
+
+    private int direct(final List<String> selected, final Set<String> allowed) {
+        final var created = measured("mentions", () -> scanMentions(selected, allowed));
+        return measured("reviews-and-discussions", () -> scanOptional(selected, created));
+    }
+
+    private int search(final List<String> selected, final Set<String> allowed) {
+        final var search = new MentionSearch(conf, store, github, clock);
+        final var visited = new HashSet<String>();
+        final var issueCreated = measured("search-mentions-and-reviews", () -> {
+            // Acknowledged candidate pages can leave independent feed/review continuations. Resume
+            // those first, even if the parent has since disappeared from search or was edited.
+            int created = scanIssueCandidates(pending(selected, false), allowed, visited);
+            created += search.poll(
+                    selected,
+                    MentionSearchClient.Kind.ISSUE,
+                    options.pageBudget(),
+                    repos -> scanIssueCandidates(repos, allowed, visited));
+            return created;
+        });
+        if (!options.discussions().enabled()) {
+            return issueCreated;
+        }
+        return issueCreated
+                + measured("search-discussions", () -> {
+                    final var discussionVisited = new HashSet<String>();
+                    int created = scanDiscussionCandidates(pending(selected, true), discussionVisited);
+                    created += search.poll(
+                            selected,
+                            MentionSearchClient.Kind.DISCUSSION,
+                            options.pageBudget(),
+                            repos -> scanDiscussionCandidates(repos, discussionVisited));
+                    return created;
+                });
+    }
+
+    private int scanIssueCandidates(
+            final List<String> candidates, final Set<String> allowed, final Set<String> visited) {
+        final var selected = candidates.stream().filter(visited::add).toList();
+        if (selected.isEmpty()) {
+            return 0;
+        }
+        final var created = scanMentions(selected, allowed);
+        return created + (options.reviews().enabled() ? reviews.poll(selected) : 0);
+    }
+
+    private int scanDiscussionCandidates(final List<String> candidates, final Set<String> visited) {
+        final var selected = candidates.stream().filter(visited::add).toList();
+        return selected.isEmpty() ? 0 : discussions.poll(selected);
+    }
+
+    private List<String> pending(final List<String> selected, final boolean discussion) {
+        if (discussion && !options.discussions().enabled()) {
+            return List.of();
+        }
+        return store.transaction(state -> selected.stream()
+                .filter(repo -> state.cursors().keySet().stream().anyMatch(key -> {
+                    if (!key.startsWith(repo + "/") || !key.endsWith(":next")) {
+                        return false;
                     }
-                    for (final var raw : items) {
-                        final var item = TaskStore.map(raw);
-                        final var user = item.get("user") instanceof Map<?, ?>
-                                ? TaskStore.map(item.get("user"))
-                                : Map.<String, Object>of();
-                        final var parsed =
-                                MentionParser.parse(String.valueOf(item.getOrDefault("body", "")), conf.login());
-                        if (parsed.isEmpty()) {
-                            continue;
-                        }
-                        if (!allowed.contains(String.valueOf(user.get("id")))
-                                || conf.login().equalsIgnoreCase(String.valueOf(user.get("login")))
-                                || "Bot".equals(user.get("type"))
-                                || !authorization.allows(user.get("id"), String.valueOf(user.get("login")))) {
-                            if (audit != null) {
-                                final var identifiers = MutableTask.create();
-                                identifiers.repository(repo);
-                                if (user.get("id") != null) {
-                                    identifiers.actorId(String.valueOf(user.get("id")));
-                                }
-                                audit.record("auth-denied", identifiers.document());
+                    if (discussion) {
+                        return key.startsWith(repo + "/discussion:");
+                    }
+                    return key.equals(repo + "/issues:next")
+                            || key.equals(repo + "/issues/comments:next")
+                            || key.equals(repo + "/pulls/comments:next")
+                            || (options.reviews().enabled() && key.startsWith(repo + "/review-summary-graphql/"));
+                }))
+                .toList());
+    }
+
+    private String reconciliationKey(final List<String> selected) {
+        final var scope = conf.api() + "\n" + conf.login().toLowerCase(Locale.ROOT) + "\n"
+                + options.reviews().enabled() + ":" + options.discussions().enabled() + "\n"
+                + selected.stream()
+                        .map(repo -> repo.toLowerCase(Locale.ROOT))
+                        .distinct()
+                        .sorted()
+                        .collect(Collectors.joining("\n"));
+        try {
+            return "mention-search/reconciliation/v1/"
+                    + HexFormat.of()
+                            .formatHex(MessageDigest.getInstance("SHA-256")
+                                    .digest(scope.getBytes(StandardCharsets.UTF_8)));
+        } catch (final NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private int scanMentions(final List<String> selected, final Set<String> allowed) {
+        final var batch = UUID.randomUUID().toString();
+        return PollingTasks.sum(options.parallelism(), selected, repo -> scanMentions(repo, allowed, batch));
+    }
+
+    private int scanMentions(final String repo, final Set<String> allowed, final String batch) {
+        int created = 0;
+        for (final var endpoint : List.of("issues", "issues/comments", "pulls/comments")) {
+            final var key = repo + "/" + endpoint;
+            final var start = clock.instant();
+            final var cursors = store.transaction(state -> {
+                // Persist 'now' once, not once per restarted scan or endpoint.
+                final var initial = state.cursors()
+                        .computeIfAbsent(
+                                "initialSince",
+                                ignored -> "now".equals(options.since())
+                                        ? start.toString()
+                                        : Instant.parse(options.since()).toString());
+                final var snapshot = new LinkedHashMap<>(state.cursors());
+                snapshot.putIfAbsent(key, initial);
+                return snapshot;
+            });
+            final var since = Instant.parse(String.valueOf(cursors.get(key))).minusSeconds(300);
+            final var savedNext = cursors.get(key + ":next");
+            final var scanStart = String.valueOf(cursors.getOrDefault(key + ":scanStart", start.toString()));
+            String next = savedNext == null
+                    ? "/repos/" + repo + "/" + endpoint + "?per_page=100&sort=updated&direction=asc&since="
+                            + URLEncoder.encode(since.toString(), StandardCharsets.UTF_8)
+                            + (endpoint.equals("issues") ? "&state=all" : "")
+                    : String.valueOf(cursors.getOrDefault(key + ":overlap", savedNext));
+            // Replay the preceding page in addition to the budget, covering page-boundary shifts.
+            final int budget = options.pageBudget() + (cursors.containsKey(key + ":overlap") ? 1 : 0);
+            String overlap = next;
+            int pages = 0;
+            while (next != null && pages++ < budget) {
+                overlap = next;
+                final var page = github.page(next);
+                if (!(page.body() instanceof List<?> items)) {
+                    throw new IllegalStateException("Expected GitHub list");
+                }
+                for (final var raw : items) {
+                    final var item = TaskStore.map(raw);
+                    final var user = item.get("user") instanceof Map<?, ?>
+                            ? TaskStore.map(item.get("user"))
+                            : Map.<String, Object>of();
+                    final var parsed = MentionParser.parse(String.valueOf(item.getOrDefault("body", "")), conf.login());
+                    if (parsed.isEmpty()) {
+                        continue;
+                    }
+                    if (!allowed.contains(String.valueOf(user.get("id")))
+                            || conf.login().equalsIgnoreCase(String.valueOf(user.get("login")))
+                            || "Bot".equals(user.get("type"))
+                            || !authorization.allows(user.get("id"), String.valueOf(user.get("login")))) {
+                        if (audit != null) {
+                            final var identifiers = MutableTask.create();
+                            identifiers.repository(repo);
+                            if (user.get("id") != null) {
+                                identifiers.actorId(String.valueOf(user.get("id")));
                             }
-                            continue;
+                            audit.record("auth-denied", identifiers.document());
                         }
-                        final var invocation = parsed.orElseThrow();
-                        final var ref = String.valueOf(item.get("html_url"));
-                        final var uri = URI.create(ref);
-                        final var parts = uri.getPath().split("/");
-                        if (parts.length < 5 || !(parts[3].equals("issues") || parts[3].equals("pull"))) {
-                            throw new IllegalStateException("Unexpected event reference");
+                        continue;
+                    }
+                    final var invocation = parsed.orElseThrow();
+                    final var ref = String.valueOf(item.get("html_url"));
+                    final var uri = URI.create(ref);
+                    final var parts = uri.getPath().split("/");
+                    if (parts.length < 5 || !(parts[3].equals("issues") || parts[3].equals("pull"))) {
+                        throw new IllegalStateException("Unexpected event reference");
+                    }
+                    final var number = Integer.parseInt(parts[4]);
+                    final var task = MutableTask.create();
+                    task.repository(repo);
+                    task.number((long) number);
+                    task.reference(ref);
+                    task.kind(TaskKind.valueOf(invocation.kind()));
+                    task.request(invocation.request());
+                    task.actorId(String.valueOf(user.get("id")));
+                    task.batchId(batch);
+                    task.createdAt(clock.instant().toString());
+                    final var receipt = key + ":" + item.get("id");
+                    final var id = store.transaction(state -> {
+                        if (state.receipts().containsKey(receipt)) {
+                            return null;
                         }
-                        final var number = Integer.parseInt(parts[4]);
-                        final var task = MutableTask.create();
-                        task.repository(repo);
-                        task.number((long) number);
-                        task.reference(ref);
-                        task.kind(TaskKind.valueOf(invocation.kind()));
-                        task.request(invocation.request());
-                        task.actorId(String.valueOf(user.get("id")));
-                        task.batchId(batch);
-                        task.createdAt(clock.instant().toString());
-                        final var receipt = key + ":" + item.get("id");
-                        final var id = store.transaction(state -> {
-                            if (state.receipts().containsKey(receipt)) {
-                                return null;
-                            }
-                            return state.enqueue(receipt, task.document());
-                        });
-                        if (id != null) {
-                            created++;
-                            if (audit != null) {
-                                task.id(id);
-                                audit.record("enqueued", task.document());
-                            }
+                        return state.enqueue(receipt, task.document());
+                    });
+                    if (id != null) {
+                        created++;
+                        if (audit != null) {
+                            task.id(id);
+                            audit.record("enqueued", task.document());
                         }
                     }
-                    next = page.next();
                 }
-                // A capped/failed scan must retain its completed watermark. Receipts absorb replay.
-                if (next == null) {
-                    store.transaction(state -> {
-                        final var old = Instant.parse(
-                                String.valueOf(state.cursors().getOrDefault(key, Instant.EPOCH.toString())));
-                        final var completed = Instant.parse(scanStart);
-                        // Offset pagination is mutable. A resumed traversal cannot prove that earlier
-                        // pages did not shrink; retain the lower bound and replay on the next traversal.
-                        if (savedNext == null && completed.isAfter(old)) {
-                            state.cursors().put(key, completed.toString());
-                        }
-                        state.cursors().remove(key + ":next");
-                        state.cursors().remove(key + ":scanStart");
-                        state.cursors().remove(key + ":overlap");
-                        return null;
-                    });
-                } else {
-                    final var continuation = next;
-                    final var replay = overlap;
-                    store.transaction(state -> {
-                        state.cursors().put(key + ":next", continuation);
-                        state.cursors().put(key + ":overlap", replay);
-                        state.cursors().put(key + ":scanStart", scanStart);
-                        return null;
-                    });
-                }
+                next = page.next();
+            }
+            // A capped/failed scan must retain its completed watermark. Receipts absorb replay.
+            if (next == null) {
+                store.transaction(state -> {
+                    final var old =
+                            Instant.parse(String.valueOf(state.cursors().getOrDefault(key, Instant.EPOCH.toString())));
+                    final var completed = Instant.parse(scanStart);
+                    // Offset pagination is mutable. A resumed traversal cannot prove that earlier
+                    // pages did not shrink; retain the lower bound and replay on the next traversal.
+                    if (savedNext == null && completed.isAfter(old)) {
+                        state.cursors().put(key, completed.toString());
+                    }
+                    state.cursors().remove(key + ":next");
+                    state.cursors().remove(key + ":scanStart");
+                    state.cursors().remove(key + ":overlap");
+                    return null;
+                });
+            } else {
+                final var continuation = next;
+                final var replay = overlap;
+                store.transaction(state -> {
+                    state.cursors().put(key + ":next", continuation);
+                    state.cursors().put(key + ":overlap", replay);
+                    state.cursors().put(key + ":scanStart", scanStart);
+                    return null;
+                });
             }
         }
+        return created;
+    }
+
+    private int scanOptional(final List<String> selected, final int created) {
         try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             final var reviewScan = executor.submit(() -> options.reviews().enabled() ? reviews.poll(selected) : 0);
             final var discussionScan =

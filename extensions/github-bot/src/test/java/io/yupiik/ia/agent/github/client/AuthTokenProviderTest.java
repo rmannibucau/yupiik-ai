@@ -21,6 +21,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.service.GithubServices;
+import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -54,7 +55,7 @@ class AuthTokenProviderTest {
         final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/app/installations/42/access_tokens", exchange -> {
             final var body = ("{\"token\":\"token-" + issued.incrementAndGet() + "\",\"expires_at\":\""
-                            + Instant.now().plusSeconds(3600) + "\"}")
+                            + BotTestConfiguration.CLOCK.instant().plusSeconds(3600) + "\"}")
                     .getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(201, body.length);
             exchange.getResponseBody().write(body);
@@ -88,8 +89,8 @@ class AuthTokenProviderTest {
                                 new AuthTokenProvider$JwtClaims$FusionJsonCodec()),
                         key -> Optional.empty());
                 final var provider =
-                        AuthTokenProvider.app(base, json, "app", 42, pair.getPrivate(), Clock.systemUTC());
-                final var client = new GitHubClient(base, json, provider)) {
+                        AuthTokenProvider.app(base, json, "app", 42, pair.getPrivate(), BotTestConfiguration.CLOCK);
+                final var client = new GitHubClient(base, json, provider, BotTestConfiguration.CLOCK)) {
             client.get("/resource");
             assertEquals(2, issued.get());
             assertEquals(2, reads.get());
@@ -268,16 +269,16 @@ class AuthTokenProviderTest {
                     "{\"id\":1.5}",
                     "{\"id\":9223372036854775808}")) {
                 response.set(body);
-                try (final var provider =
-                        AuthTokenProvider.appForOrganization(base, json, "app-id", "acme", key, Clock.systemUTC())) {
+                try (final var provider = AuthTokenProvider.appForOrganization(
+                        base, json, "app-id", "acme", key, BotTestConfiguration.CLOCK)) {
                     final var failure = assertThrows(IllegalStateException.class, provider::get, body);
                     assertTrue(failure.getMessage().contains("positive integer id"));
                 }
             }
             for (final var code : List.of(401, 403, 404)) {
                 status.set(code);
-                try (final var provider =
-                        AuthTokenProvider.appForOrganization(base, json, "app-id", "acme", key, Clock.systemUTC())) {
+                try (final var provider = AuthTokenProvider.appForOrganization(
+                        base, json, "app-id", "acme", key, BotTestConfiguration.CLOCK)) {
                     assertThrows(GitHubClient.HttpException.class, provider::get);
                 }
             }

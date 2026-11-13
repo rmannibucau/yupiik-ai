@@ -98,7 +98,10 @@ class ReviewPublisherTest {
         });
         server.start();
         github = new GitHubClient(
-                URI.create("http://127.0.0.1:" + server.getAddress().getPort()), json, () -> "test");
+                URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                json,
+                () -> "test",
+                BotTestConfiguration.CLOCK);
     }
 
     @AfterEach

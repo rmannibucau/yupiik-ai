@@ -579,7 +579,7 @@ class DiscussionSupportTest {
                 exchange.close();
             });
             server.start();
-            github = new GitHubClient(URI.create(api()), json, () -> "test");
+            github = new GitHubClient(URI.create(api()), json, () -> "test", BotTestConfiguration.CLOCK);
         }
 
         private String api() {
@@ -607,7 +607,12 @@ class DiscussionSupportTest {
             return BotTestConfiguration.discussionPoller(
                     conf,
                     new PollOptions(
-                            "now", budget, new PollOptions.Reviews(false), new PollOptions.Discussions(enabled)),
+                            "now",
+                            budget,
+                            new PollOptions.Reviews(false),
+                            new PollOptions.Discussions(enabled),
+                            4,
+                            new PollOptions.Search(false, 3600)),
                     store,
                     github,
                     Clock.fixed(NOW, ZoneOffset.UTC),

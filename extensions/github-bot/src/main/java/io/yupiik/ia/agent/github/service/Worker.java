@@ -52,8 +52,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -88,6 +88,7 @@ public class Worker {
     private final WorkerOptions options;
     private final ExecutorConfiguration execution;
     private final BotAudit audit;
+    private final Clock clock;
     private final TeamAuthorization authorization;
     private final AttemptPreparation preparation;
     private final GithubPrivateContext privateContext;
@@ -112,12 +113,14 @@ public class Worker {
             final ForkProvisioner forks,
             final ReviewPublisher reviews,
             final StrictSolvePublisher strictSolve,
-            final DiscussionPublisher discussions) {
+            final DiscussionPublisher discussions,
+            final Clock clock) {
         this.conf = conf;
         this.options = commandOptions == null ? null : commandOptions.worker();
         this.store = store;
         this.github = github;
         this.json = json;
+        this.clock = clock;
         this.execution = execution;
         this.audit = audit;
         this.authorization = authorization;
@@ -555,7 +558,7 @@ public class Worker {
                 actual.executionBackend(execution.backend().name().toLowerCase(Locale.ROOT));
                 actual.executionFingerprint(executionFingerprint());
                 actual.attemptDirectory(attemptPath);
-                actual.startedAt(Instant.now().toString());
+                actual.startedAt(clock.instant().toString());
                 return null;
             });
             task = store.transaction(state -> state.task(id).document());
@@ -837,7 +840,7 @@ public class Worker {
                 case "reviewUrl" -> actual.reviewUrl(responseUrl);
                 default -> throw new IllegalArgumentException("Unsupported response field: " + responseKey);
             }
-            actual.completedAt(Instant.now().toString());
+            actual.completedAt(clock.instant().toString());
             actual.result(null);
             return null;
         });

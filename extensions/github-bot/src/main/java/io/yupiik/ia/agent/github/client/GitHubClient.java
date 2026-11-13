@@ -25,6 +25,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
@@ -38,11 +39,12 @@ import java.util.Objects;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
-/** Same-origin REST client. Only GETs are retried; long rate limits are returned to the scheduler. */
+/** Same-origin REST/GraphQL transport. Only GETs are retried; long rate limits return to the scheduler. */
 public final class GitHubClient implements AutoCloseable {
     private static final Pattern TRAILING_SLASH = Pattern.compile("/$");
     private static final Pattern NEXT = Pattern.compile("<([^>]+)>\\s*;\\s*rel=\"next\"");
@@ -51,6 +53,7 @@ public final class GitHubClient implements AutoCloseable {
     private final HttpClient http;
     private final URI base;
     private final JsonMapper json;
+    private final Clock clock;
     private final Supplier<String> token;
     private final Map<String, Cached> cache = new LinkedHashMap<>();
     private final ReentrantLock pacing = new ReentrantLock();
@@ -59,13 +62,27 @@ public final class GitHubClient implements AutoCloseable {
     private long previousRequest;
     private boolean requested;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicLong requests = new AtomicLong();
+    private final AtomicLong httpNanos = new AtomicLong();
+    private final AtomicLong pacingNanos = new AtomicLong();
 
-    public GitHubClient(final URI base, final JsonMapper json, final Supplier<String> token) {
-        this(base, json, token, Duration.ZERO);
+    /** Process-local transport totals, including retries and conditional requests, without request data. */
+    public Statistics statistics() {
+        return new Statistics(requests.get(), httpNanos.get(), pacingNanos.get());
+    }
+
+    public record Statistics(long requests, long httpNanos, long pacingNanos) {}
+
+    public GitHubClient(final URI base, final JsonMapper json, final Supplier<String> token, final Clock clock) {
+        this(base, json, token, Duration.ZERO, clock);
     }
 
     public GitHubClient(
-            final URI base, final JsonMapper json, final Supplier<String> token, final Duration requestInterval) {
+            final URI base,
+            final JsonMapper json,
+            final Supplier<String> token,
+            final Duration requestInterval,
+            final Clock clock) {
         if (requestInterval.isNegative() || requestInterval.compareTo(Duration.ofMinutes(1)) > 0) {
             throw new IllegalArgumentException("Request interval must be between zero and one minute");
         }
@@ -85,6 +102,7 @@ public final class GitHubClient implements AutoCloseable {
         }
         this.base = base;
         this.json = Objects.requireNonNull(json);
+        this.clock = Objects.requireNonNull(clock);
         this.token = Objects.requireNonNull(token);
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
@@ -99,7 +117,7 @@ public final class GitHubClient implements AutoCloseable {
     private void pace() {
         pacing.lock();
         try {
-            if (rateLimitUntil.isAfter(Instant.now())) {
+            if (rateLimitUntil.isAfter(clock.instant())) {
                 throw new DeferredRequestException(429, rateLimitUntil);
             }
             if (requested) {
@@ -121,9 +139,20 @@ public final class GitHubClient implements AutoCloseable {
 
     /** GraphQL reads and mutations are never automatically replayed, including partial-error responses. */
     public Object graphql(final String query, final Map<String, Object> variables) {
-        final var path = "/api/v3".equals(TRAILING_SLASH.matcher(base.getPath()).replaceAll(""))
-                ? base.resolve("/api/graphql").toString()
-                : "/graphql";
+        // Native review polling uses GraphQL to fetch open PRs and their review bodies together across
+        // repositories, instead of one REST PR-list request per repository plus one per PR's reviews.
+        // A read-only comparison on 47 repositories (31 open PRs, 21 reviews) needed 78 REST requests
+        // versus 5 GraphQL requests with identical coverage. Ten-repository batches with ten PRs and
+        // 100 reviews per page cost 5 GraphQL points; requesting 100 PRs raised that to 47 points.
+        // These are review-phase measurements, not an end-to-end poll guarantee. Both nested
+        // connections must still paginate independently, and partial data must never advance cursors.
+        // Search further reduces quiet polls by selecting candidate repositories before those reads.
+        // Its independently paginated, persistent shards split below GitHub's 1,000-result cap.
+        // Search is not an event log or an authorization boundary: consumers read the actual feeds,
+        // and periodic direct reconciliation covers index lag and unverified mention coverage.
+        // Keep incremental issue/comment feeds on REST: their repository-wide since endpoints
+        // avoid per-issue GraphQL walks and preserve detection of edited comments.
+        final var path = toGraphQlPath();
         final var response = post(path, new GraphqlRequest(query, variables));
         if (!(response instanceof Map<?, ?> envelope)
                 || envelope.containsKey("errors")
@@ -136,9 +165,7 @@ public final class GitHubClient implements AutoCloseable {
     }
 
     public DiscussionClient.Envelope discussionGraphql(final String query, final DiscussionClient.Variables variables) {
-        final var path = "/api/v3".equals(TRAILING_SLASH.matcher(base.getPath()).replaceAll(""))
-                ? base.resolve("/api/graphql").toString()
-                : "/graphql";
+        final var path = toGraphQlPath();
         final var envelope = (DiscussionClient.Envelope)
                 request("POST", path, new GraphqlRequest(query, variables), DiscussionClient.Envelope.class)
                         .body();
@@ -152,6 +179,12 @@ public final class GitHubClient implements AutoCloseable {
 
     public Page page(final String path) {
         return request("GET", path, null, Object.class);
+    }
+
+    private String toGraphQlPath() {
+        return "/api/v3".equals(TRAILING_SLASH.matcher(base.getPath()).replaceAll(""))
+                ? base.resolve("/api/graphql").toString()
+                : "/graphql";
     }
 
     private URI uri(final String path) {
@@ -207,8 +240,21 @@ public final class GitHubClient implements AutoCloseable {
                 request.header("If-None-Match", cached.etag());
             }
             try {
-                pace();
-                final var response = http.send(request.build(), info -> new BoundedBodySubscriber());
+                final var pacingStart = System.nanoTime();
+                try {
+                    pace();
+                } finally {
+                    pacingNanos.addAndGet(System.nanoTime() - pacingStart);
+                }
+                final var built = request.build();
+                final var httpStart = System.nanoTime();
+                requests.incrementAndGet();
+                final HttpResponse<String> response;
+                try {
+                    response = http.send(built, info -> new BoundedBodySubscriber());
+                } finally {
+                    httpNanos.addAndGet(System.nanoTime() - httpStart);
+                }
                 final int status = response.statusCode();
                 if (status == 401
                         && get
@@ -240,7 +286,7 @@ public final class GitHubClient implements AutoCloseable {
                         final var delay = retryDelay(response, attempt, true);
                         final Instant until;
                         try {
-                            until = Instant.now().plus(delay);
+                            until = clock.instant().plus(delay);
                         } catch (final DateTimeException | ArithmeticException overflow) {
                             throw new DeferredRequestException(status, Instant.MAX);
                         }
@@ -257,7 +303,7 @@ public final class GitHubClient implements AutoCloseable {
                         final var delay = retryDelay(response, attempt, limited);
                         final Instant retryAt;
                         try {
-                            retryAt = Instant.now().plus(delay);
+                            retryAt = clock.instant().plus(delay);
                         } catch (final DateTimeException | ArithmeticException e) {
                             throw new DeferredRequestException(status, Instant.MAX);
                         }
@@ -329,7 +375,7 @@ public final class GitHubClient implements AutoCloseable {
         }
     }
 
-    private static Duration retryDelay(final HttpResponse<?> response, final int attempt, final boolean limited) {
+    private Duration retryDelay(final HttpResponse<?> response, final int attempt, final boolean limited) {
         Duration delay = Duration.ofMillis(100L << attempt);
         boolean specified = false;
         final var retry = response.headers().firstValue("Retry-After");
@@ -340,7 +386,7 @@ public final class GitHubClient implements AutoCloseable {
             } catch (final RuntimeException ignored) {
                 try {
                     delay = Duration.between(
-                            Instant.now(),
+                            clock.instant(),
                             ZonedDateTime.parse(retry.get(), DateTimeFormatter.RFC_1123_DATE_TIME)
                                     .toInstant());
                     specified = true;
@@ -352,7 +398,7 @@ public final class GitHubClient implements AutoCloseable {
         if (response.headers().firstValue("X-RateLimit-Remaining").orElse("").equals("0")) {
             try {
                 final var reset = Duration.between(
-                        Instant.now(),
+                        clock.instant(),
                         Instant.ofEpochSecond(Long.parseLong(response.headers()
                                 .firstValue("X-RateLimit-Reset")
                                 .orElseThrow())));

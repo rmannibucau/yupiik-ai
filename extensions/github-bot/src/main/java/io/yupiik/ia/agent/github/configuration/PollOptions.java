@@ -33,7 +33,42 @@ public record PollOptions(
         Reviews reviews,
 
         @Property(documentation = "Repository Discussion mention polling.")
-        Discussions discussions) {
+        Discussions discussions,
+
+        @Property(
+                defaultValue = "4",
+                documentation =
+                        "Maximum concurrent repository scans or native-review GraphQL batches, from 1 (serial) to 16.")
+        int parallelism,
+
+        @Property(documentation = "Adaptive mention-search discovery with periodic direct reconciliation.")
+        Search search) {
+    public PollOptions {
+        if (parallelism < 1 || parallelism > 16) {
+            throw new IllegalArgumentException("Poll parallelism must be between 1 and 16");
+        }
+    }
+
+    public record Search(
+            @Property(
+                    defaultValue = "true",
+                    documentation =
+                            "Use paginated mention search to select repositories between direct reconciliations.")
+            boolean enabled,
+
+            @Property(
+                    defaultValue = "3600",
+                    documentation =
+                            "Seconds between completed direct reconciliations (1 to 604800); the first poll reconciles directly.")
+            int reconciliationIntervalSeconds) {
+        public Search {
+            if (reconciliationIntervalSeconds < 1 || reconciliationIntervalSeconds > 604800) {
+                throw new IllegalArgumentException(
+                        "Search reconciliation interval must be between 1 and 604800 seconds");
+            }
+        }
+    }
+
     public record Reviews(
             @Property(defaultValue = "false", documentation = "Poll submitted review bodies for mentions.")
             boolean enabled) {}

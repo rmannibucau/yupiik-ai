@@ -21,6 +21,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
+import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -402,7 +403,7 @@ class GithubContextSnapshotTest {
                 }
             });
             server.start();
-            client = new GitHubClient(base, json, () -> "host-secret");
+            client = new GitHubClient(base, json, () -> "host-secret", BotTestConfiguration.CLOCK);
             snapshot = new GithubContextSnapshot(client, json);
         }
 

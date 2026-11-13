@@ -256,7 +256,10 @@ class GithubAgentLoopTest {
         });
         server.start();
         try (final var github = new GitHubClient(
-                URI.create("http://127.0.0.1:" + server.getAddress().getPort()), json, () -> "host-only-token")) {
+                URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                json,
+                () -> "host-only-token",
+                BotTestConfiguration.CLOCK)) {
             final var produced = TaskStore.map(json.fromString(Object.class, Files.readString(result)));
             assertEquals(id, produced.get("taskId"));
             if (invalidFinding) {

@@ -44,10 +44,14 @@ import io.yupiik.ia.agent.github.service.Worker;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.Optional;
 
 public final class BotTestConfiguration {
+    public static final Clock CLOCK = Clock.fixed(Instant.parse("2026-11-13T12:00:00Z"), ZoneOffset.UTC);
+
     private BotTestConfiguration() {}
 
     public static GithubBotConfiguration home(final Path home) {
@@ -64,7 +68,7 @@ public final class BotTestConfiguration {
     }
 
     public static BotAudit audit(final GithubBotConfiguration conf, final JsonMapper json) {
-        return new BotAudit(conf, json);
+        return new BotAudit(conf, json, CLOCK);
     }
 
     public static TeamAuthorization authorization(final GitHubClient github, final String teams) {
@@ -114,7 +118,8 @@ public final class BotTestConfiguration {
                 new ForkProvisioner(github, store),
                 new ReviewPublisher(github, store, conf),
                 new StrictSolvePublisher(github, store, json, commandOptions),
-                new DiscussionPublisher(new DiscussionClient(github), store, conf));
+                new DiscussionPublisher(new DiscussionClient(github), store, conf),
+                CLOCK);
     }
 
     public static ReviewSummaryPoller reviewSummaryPoller(
@@ -181,9 +186,8 @@ public final class BotTestConfiguration {
         return new PollCommand(options, null) {
             @Override
             public void run() {
-                try (final var runtime = new GithubServices().client(conf, json, Clock.systemUTC())) {
-                    new PollCommand(options, poller(conf, options.poll(), store, runtime, Clock.systemUTC(), audit))
-                            .run();
+                try (final var runtime = new GithubServices().client(conf, json, CLOCK)) {
+                    new PollCommand(options, poller(conf, options.poll(), store, runtime, CLOCK, audit)).run();
                 }
             }
         };
@@ -200,7 +204,7 @@ public final class BotTestConfiguration {
         return new WorkerCommand(options, store, null, notifications) {
             @Override
             public void run() {
-                try (final var runtime = new GithubServices().client(conf, json, Clock.systemUTC())) {
+                try (final var runtime = new GithubServices().client(conf, json, CLOCK)) {
                     new WorkerCommand(
                                     options,
                                     store,

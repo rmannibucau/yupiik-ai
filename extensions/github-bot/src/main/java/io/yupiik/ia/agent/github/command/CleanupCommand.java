@@ -40,18 +40,21 @@ public class CleanupCommand implements Runnable {
     private final ExecutorConfiguration executor;
     private final JsonMapper json;
     private final TaskStore store;
+    private final Clock clock;
 
     public CleanupCommand(
             final Options options,
             final GithubBotConfiguration conf,
             final ExecutorConfiguration executor,
             final JsonMapper json,
-            final TaskStore store) {
+            final TaskStore store,
+            final Clock clock) {
         this.options = options;
         this.conf = conf;
         this.executor = executor;
         this.json = json;
         this.store = store;
+        this.clock = clock;
     }
 
     @RootConfiguration("-")
@@ -73,7 +76,7 @@ public class CleanupCommand implements Runnable {
                     "Cleanup requires github.executor.attemptRoot, never the shared temporary directory");
         }
         final var home = Path.of(conf.home());
-        LOGGER.info(json.toString(new OrphanCleanup(store, home, Path.of(executor.attemptRoot()), Clock.systemUTC())
+        LOGGER.info(json.toString(new OrphanCleanup(store, home, Path.of(executor.attemptRoot()), clock)
                 .cleanup(Duration.ofHours(options.minimumAgeHours()), options.dryRun())));
     }
 }

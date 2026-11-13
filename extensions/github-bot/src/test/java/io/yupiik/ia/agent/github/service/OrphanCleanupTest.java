@@ -17,6 +17,8 @@ package io.yupiik.ia.agent.github.service;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.ia.agent.github.command.CleanupCommand;
+import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
@@ -41,6 +43,33 @@ class OrphanCleanupTest {
     Path root;
 
     private final Instant now = Instant.parse("2026-11-11T12:00:00Z");
+
+    @Test
+    void cleanupCommandUsesInjectedClockForMinimumAge() throws Exception {
+        final var home = Files.createDirectory(root.resolve("state"));
+        final var attempts = Files.createDirectory(root.resolve("attempts"));
+        final var orphan = prepared(attempts, "yca-github-clock");
+        final var configuration = BotTestConfiguration.home(home);
+        final var execution = new ExecutorConfiguration$FusionConfigurationFactory(key ->
+                        "github.executor.attemptRoot".equals(key) ? Optional.of(attempts.toString()) : Optional.empty())
+                .get();
+        try (final var json =
+                BotJsonMapper.create(List.of(new OrphanCleanup$Report$FusionJsonCodec()), key -> Optional.empty())) {
+            final var store = new TaskStore(configuration, json);
+            final var options = new CleanupCommand.Options(24, false);
+            new CleanupCommand(
+                            options,
+                            configuration,
+                            execution,
+                            json,
+                            store,
+                            Clock.fixed(now.minus(Duration.ofDays(4)), ZoneOffset.UTC))
+                    .run();
+            assertTrue(Files.exists(orphan));
+            new CleanupCommand(options, configuration, execution, json, store, Clock.fixed(now, ZoneOffset.UTC)).run();
+            assertFalse(Files.exists(orphan));
+        }
+    }
 
     @Test
     void deletesOnlyOldUnreferencedNeverLaunchableAttempts() throws Exception {

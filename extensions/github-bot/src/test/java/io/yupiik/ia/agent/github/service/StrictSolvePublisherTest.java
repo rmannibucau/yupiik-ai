@@ -434,7 +434,10 @@ class StrictSolvePublisherTest {
             });
             server.start();
             github = new GitHubClient(
-                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()), json, () -> "host-secret");
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                    json,
+                    () -> "host-secret",
+                    BotTestConfiguration.CLOCK);
             publisher = BotTestConfiguration.strictSolvePublisher(github, store, json, "bot");
         }
 

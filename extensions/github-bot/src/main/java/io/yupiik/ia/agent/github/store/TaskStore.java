@@ -87,12 +87,20 @@ public class TaskStore {
                 if (Files.isSymbolicLink(path)) {
                     throw new IllegalStateException("Symbolic state file");
                 }
-                final var data = Files.exists(path) ? read(path) : new StateDocument(1, null, null, null);
-                final var state = new State(data);
+                final var content = Files.exists(path) ? Files.readString(path) : null;
+                final var data = content == null ? new StateDocument(1, null, null, null) : read(content);
+                final var before = new State(data).document();
+                // Decode independently: MutableTask and its nested collections must not alias the snapshot.
+                // Compare normalized documents so an absent store or unchanged legacy fields do not cause writes.
+                final var state = new State(content == null ? data : json.fromString(StateDocument.class, content));
                 final var result = operation.apply(state);
+                final var document = state.document();
+                if (before.equals(document)) {
+                    return result;
+                }
                 final var temp = Files.createTempFile(home, ".state-", ".tmp");
                 try {
-                    Files.writeString(temp, json.toString(state.document()));
+                    Files.writeString(temp, json.toString(document));
                     try (final var output = FileChannel.open(temp, StandardOpenOption.WRITE)) {
                         output.force(true);
                     }
@@ -112,8 +120,7 @@ public class TaskStore {
         }
     }
 
-    private StateDocument read(final Path path) throws IOException {
-        final var content = Files.readString(path);
+    private StateDocument read(final String content) {
         // Shape checks protect retained evidence from permissive collection codecs, not schema migrations.
         final var shape = map(json.fromString(Object.class, content));
         for (final var section : List.of("tasks", "cursors", "receipts")) {
