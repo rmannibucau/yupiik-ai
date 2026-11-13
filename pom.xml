@@ -181,6 +181,8 @@
           <artifactId>maven-surefire-plugin</artifactId>
           <version>3.6.0</version>
           <configuration>
+            <!-- Bound stuck test forks even when test interruption cannot stop them. -->
+            <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>
             <!-- Surefire's <parallel>/<threadCount> are TestNG/JUnit4-provider knobs and do
                  nothing here (the suite runs on the JUnit Platform provider), and
                  <forkCount> was measured to be a net loss: a fork per group of classes pays
@@ -195,7 +197,9 @@
                 junit.jupiter.execution.parallel.mode.default = same_thread
                 junit.jupiter.execution.parallel.mode.classes.default = concurrent
                 junit.jupiter.execution.parallel.config.strategy = fixed
-                junit.jupiter.execution.parallel.config.fixed.parallelism = 4</configurationParameters>
+                junit.jupiter.execution.parallel.config.fixed.parallelism = 4
+                junit.jupiter.execution.timeout.default = 60 s
+                junit.jupiter.execution.timeout.threaddump.enabled = true</configurationParameters>
             </properties>
             <systemPropertyVariables>
               <!-- jline 3.25: a real tty makes the system terminal spawn PosixPtyTerminal pump
