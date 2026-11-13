@@ -68,49 +68,45 @@ class SkipRetriesTest {
         // call 1: the in-flight permit holder (its dialect stage stays open until released)
         final var first = wrapper.chat(dial, null, () -> false, null, true).toCompletableFuture();
 
-        // call 2: blocks on the semaphore - prove it by awaiting the wrapper's "concurrency limit
-        // reached" pause instead of a racy sleep
+        // Admission is non-blocking: call directly so the assertion does not depend on a shared
+        // common-pool worker being available to start the second call.
         final var blocked = new CountDownLatch(1);
-        final var second = CompletableFuture.runAsync(() -> {
-            try {
-                wrapper.chat(
-                                dial,
-                                null,
-                                () -> false,
-                                pause -> {
-                                    if (pause.reason() != null
-                                            && pause.reason().contains("concurrency limit reached")) {
-                                        blocked.countDown();
-                                    }
-                                },
-                                true)
-                        .toCompletableFuture()
-                        .join();
-                fail("the second cooperative call must surface its transient failure");
-            } catch (final CompletionException expected) {
-                // surface path: the failure is the expected outcome
-            }
-        });
+        try {
+            final var second = wrapper.chat(
+                            dial,
+                            null,
+                            () -> false,
+                            pause -> {
+                                if (pause.reason() != null && pause.reason().contains("concurrency limit reached")) {
+                                    blocked.countDown();
+                                }
+                            },
+                            true)
+                    .toCompletableFuture();
 
-        assertTrue(blocked.await(5, TimeUnit.SECONDS), "the second call must be throttled on the semaphore");
-        assertEquals(
-                1,
-                dial.calls.get(),
-                "while the first call holds the permit, the second must not have reached the dialect");
+            assertTrue(blocked.await(5, TimeUnit.SECONDS), "the second call must be throttled on the semaphore");
+            assertEquals(
+                    1,
+                    dial.calls.get(),
+                    "while the first call holds the permit, the second must not have reached the dialect");
 
-        // release the in-flight first call: it fails with the same transient 500, cooperatively
-        // (no retry), which frees the permit for the second call
-        dial.releaseFirst.complete(null);
-        final var firstFailure = assertThrows(ExecutionException.class, () -> first.get(5, TimeUnit.SECONDS));
-        assertTrue(
-                firstFailure.getCause() instanceof IOException
-                        && firstFailure.getCause().getMessage().contains("(500): boom"),
-                "got: " + firstFailure.getCause());
+            // Release the first failure and its permit; each call must surface its own single failure.
+            dial.releaseFirst.complete(null);
+            final var firstFailure = assertThrows(ExecutionException.class, () -> first.get(5, TimeUnit.SECONDS));
+            assertInstanceOf(IOException.class, firstFailure.getCause());
+            assertTrue(firstFailure.getCause().getMessage().contains("(500): boom"), "got: " + firstFailure.getCause());
 
-        // the second call now runs (exactly its own single attempt) and fails the same way
-        second.get(5, TimeUnit.SECONDS);
-        assertEquals(
-                2, dial.calls.get(), "each cooperative call must run exactly one attempt: no wrapper retry happened");
+            final var secondFailure = assertThrows(ExecutionException.class, () -> second.get(5, TimeUnit.SECONDS));
+            assertInstanceOf(IOException.class, secondFailure.getCause());
+            assertTrue(
+                    secondFailure.getCause().getMessage().contains("(500): boom"), "got: " + secondFailure.getCause());
+            assertEquals(
+                    2,
+                    dial.calls.get(),
+                    "each cooperative call must run exactly one attempt: no wrapper retry happened");
+        } finally {
+            dial.releaseFirst.complete(null);
+        }
     }
 
     @Test
