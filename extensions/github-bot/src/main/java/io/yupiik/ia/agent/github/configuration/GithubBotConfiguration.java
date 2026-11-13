@@ -88,7 +88,11 @@ public record GithubBotConfiguration(
     public record Authorization(
             @Property(
                     defaultValue = "\"\"",
-                    documentation = "Comma-separated immutable authorized GitHub user IDs. Empty denies all.")
+                    documentation = "Comma-separated immutable numeric GitHub user IDs, not usernames."
+                            + " To find your own ID, open https://api.github.com/users/YOUR_USERNAME"
+                            + " and copy the numeric 'id' field (not 'node_id')."
+                            + " IDs remain stable when usernames change."
+                            + " Empty denies all.")
             String userIds,
 
             @Property(
