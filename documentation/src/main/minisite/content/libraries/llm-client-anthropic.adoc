@@ -38,6 +38,41 @@ gateways emit for extended/adaptive thinking) - is surfaced into the neutral
 `output_tokens_details.reasoning_tokens`. The same breakdown is carried by the
 non-streaming, streaming and SSE-reconstruction paths.
 
+== Prompt caching
+
+The dialect enables prompt caching by default, independently of the configured provider identifier or gateway hostname.
+It sends top-level `cache_control: {"type":"ephemeral"}` for automatic conversation caching and retains an explicit system breakpoint for the stable tools/system prefix.
+Automatic caching advances to the last cacheable content block, including conversation text and tool results, rather than caching only the system prompt.
+No application-side cache or cookie affinity is introduced.
+
+The default cache lifetime is five minutes.
+An explicit `cache_control` object in provider options or request extensions is preserved, including `ttl: "1h"` where supported by the model and gateway.
+Request extensions override provider options.
+Generated system breakpoints use the top-level TTL, or one hour when an explicit content-block breakpoint requires a longer-lived prefix, so a shorter-lived generated prefix does not precede a longer-lived breakpoint.
+Legacy split breakpoints use the top-level TTL and are not added among caller-supplied content-block controls.
+Caller-supplied content-block controls take priority; when they are present, automatic caching is only included if the caller explicitly supplies a top-level `cache_control` object, avoiding implicit endpoint TTL conflicts.
+Generated controls are limited to the remaining slots within Anthropic's four-breakpoint limit.
+Callers remain responsible for the count and TTL ordering of their explicit controls, including any explicitly supplied top-level control.
+
+[cols="1,3",options="header"]
+|===
+|Option |Behavior
+|`promptCache: false` or `promptCache: "false"` |Disable caching, removing generated and explicit wire cache controls.
+|`promptCache: "system"` |Keep system-only generated caching for gateways that do not support the top-level automatic control.
+|`cache_control: null` in request extensions |Suppress top-level automatic caching while retaining the system breakpoint.
+|`anthropicSplitBlocks: true` |Opt into legacy volatile-tail block splitting; this is not required for automatic caching and is disabled by default.
+|===
+
+`promptCache` and `anthropicSplitBlocks` are local options and never appear in the API payload.
+For YCA, put these fields in the provider's `providerSpecificOptions` JSON string; for example, `"providerSpecificOptions": "{\"promptCache\":\"system\"}"` selects the compatibility mode.
+No configuration change is needed to enable the new automatic default on a compatible gateway.
+
+Cache hits require an identical prefix and the model's minimum cacheable token count.
+Changes to tools, system instructions, earlier history or compression can invalidate the affected prefix; a changing session-state tail does not make an earlier stable prefix uncacheable.
+Within an agent turn, session-state updates are appended; after persisted history is reloaded, volatile tails are omitted, so full-prefix reuse across that boundary is not guaranteed.
+Anthropic usage distinguishes fresh `input_tokens`, `cache_creation_input_tokens` and `cache_read_input_tokens`; their sum is the total input context, not just `input_tokens` alone.
+Automatic caching is provider-side prompt-prefix caching, not Azure API Management semantic response caching, and does not require speculative routing headers or cookies.
+
 == Streaming
 
 Anthropic content-block streaming maps:

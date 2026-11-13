@@ -196,6 +196,107 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void anthropicCacheDefaultDoesNotDependOnProviderId() throws Exception {
+        final var body = anthropicCacheRequest("{}");
+        assertEquals(Map.of("type", "ephemeral"), body.get("cache_control"));
+        final var system = (Map<?, ?>) ((List<?>) body.get("system")).getFirst();
+        assertEquals(Map.of("type", "ephemeral"), system.get("cache_control"));
+        assertFalse(body.containsKey("promptCache"));
+    }
+
+    @Test
+    void anthropicProviderOptionsCanDisablePromptCache() throws Exception {
+        final var body = anthropicCacheRequest("""
+                {"promptCache":false}
+                """);
+        assertFalse(bodies.getLast().contains("\"cache_control\""));
+        assertFalse(body.containsKey("promptCache"));
+    }
+
+    @Test
+    void anthropicProviderOptionsCanCacheOnlySystem() throws Exception {
+        final var body = anthropicCacheRequest("""
+                {"promptCache":"system"}
+                """);
+        assertFalse(body.containsKey("cache_control"));
+        final var system = (Map<?, ?>) ((List<?>) body.get("system")).getFirst();
+        assertEquals(Map.of("type", "ephemeral"), system.get("cache_control"));
+        assertFalse(mapper.toString(body.get("messages")).contains("\"cache_control\""));
+        assertFalse(body.containsKey("promptCache"));
+    }
+
+    @Test
+    void anthropicProviderOptionsPreserveCacheTtl() throws Exception {
+        final var body = anthropicCacheRequest("""
+                {"cache_control":{"type":"ephemeral","ttl":"1h"}}
+                """);
+        final var control = Map.of("type", "ephemeral", "ttl", "1h");
+        assertEquals(control, body.get("cache_control"));
+        final var system = (Map<?, ?>) ((List<?>) body.get("system")).getFirst();
+        assertEquals(control, system.get("cache_control"));
+    }
+
+    @Test
+    void openAiDoesNotAcquireAnthropicCacheDefault() throws Exception {
+        client.close();
+        final var config = configuration(Map.of(
+                "yca.provider.providers.0.id", "claude-whatever",
+                "yca.provider.providers.0.api", "completions"));
+        client = new ChatClient(config, mapper, new ProviderManager(config, mapper), Clock.systemUTC(), http);
+        client.chat(new ChatCompletionRequest(
+                "$claude-whatever/test-model",
+                List.of(Message.system("Stable instructions"), Message.user("hi")),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
+        assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
+        assertFalse(bodies.getLast().contains("\"cache_control\""));
+        assertFalse(bodies.getLast().contains("\"promptCache\""));
+    }
+
+    private Map<?, ?> anthropicCacheRequest(final String options) throws Exception {
+        server.createContext("/v1/messages", exchange -> {
+            bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, """
+                    {"id":"m1","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}
+                    """, "application/json");
+        });
+        client.close();
+        final var config = configuration(Map.of(
+                "yca.provider.providers.0.id",
+                "claude-whatever",
+                "yca.provider.providers.0.api",
+                "anthropic",
+                "yca.provider.providers.0.baseUrl",
+                "http://localhost:" + server.getAddress().getPort() + "/v1/messages",
+                "yca.provider.providers.0.outputTokens",
+                "64",
+                "yca.provider.providers.0.providerSpecificOptions",
+                options));
+        client = new ChatClient(config, mapper, new ProviderManager(config, mapper), Clock.systemUTC(), http);
+        final var result = client.chat(new ChatCompletionRequest(
+                "$claude-whatever/test-model",
+                List.of(Message.system("Stable instructions"), Message.user("hi")),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
+        assertEquals("hello", result.message().content());
+        assertEquals(ApiFlavor.ANTHROPIC, client.flavor());
+        assertEquals(1, bodies.size());
+        return (Map<?, ?>) mapper.fromString(Object.class, bodies.getLast());
+    }
+
+    @Test
     void reasoningReplayUsesDestinationCapabilityAndPayloadEstimates() throws Exception {
         final var history = new ChatCompletionRequest(
                 "test-model",

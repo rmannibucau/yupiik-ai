@@ -483,8 +483,14 @@ public final class AnthropicDialect extends AbstractDialect {
         }
         String system = null;
         final List<AnthropicMessage> messages = new ArrayList<>();
-        final Map<String, Object> requestExtensions = request.extensions() == null ? Map.of() : request.extensions();
-        final var promptCache = !"false".equals(requestExtensions.get("promptCache"));
+        final var requestExtensions = new HashMap<String, Object>(provider.options());
+        if (request.extensions() != null) {
+            requestExtensions.putAll(request.extensions());
+        }
+        final var cacheMode = String.valueOf(requestExtensions.get("promptCache"));
+        final var promptCache = !"false".equalsIgnoreCase(cacheMode);
+        final var systemOnlyCache = "system".equalsIgnoreCase(cacheMode);
+        final var splitBreakpoints = new ArrayList<Map<String, Object>>();
         final var splitBlocks = isSplitBlocksEnabled(requestExtensions);
         // Anthropic requires every assistant tool_use block to be immediately answered by its
         // tool_result block(s): an unmatched tool_use (its result never landed, e.g. a queued prompt,
@@ -563,8 +569,8 @@ public final class AnthropicDialect extends AbstractDialect {
                     if (isError) {
                         result.put("is_error", true);
                     }
-                    if (promptCache && split >= 0) {
-                        result.put("cache_control", Map.of("type", "ephemeral"));
+                    if (promptCache && !systemOnlyCache && split >= 0) {
+                        splitBreakpoints.add(result);
                     }
                     content.add(result);
                     if (split >= 0) {
@@ -579,17 +585,14 @@ public final class AnthropicDialect extends AbstractDialect {
                             && message.content() instanceof String s) {
                         final var split = s.lastIndexOf("\n\n<session-state>");
                         if (split >= 0) {
+                            final var stable = new LinkedHashMap<String, Object>();
+                            stable.put("type", "text");
+                            stable.put("text", s.substring(0, split));
+                            if (!systemOnlyCache) {
+                                splitBreakpoints.add(stable);
+                            }
                             messages.add(new AnthropicMessage(
-                                    "user",
-                                    List.of(
-                                            Map.of(
-                                                    "type",
-                                                    "text",
-                                                    "text",
-                                                    s.substring(0, split),
-                                                    "cache_control",
-                                                    Map.of("type", "ephemeral")),
-                                            Map.of("type", "text", "text", s.substring(split + 2)))));
+                                    "user", List.of(stable, Map.of("type", "text", "text", s.substring(split + 2)))));
                             continue;
                         }
                     }
@@ -613,22 +616,58 @@ public final class AnthropicDialect extends AbstractDialect {
         if (requestExtensions.get("top_k") instanceof Number n) {
             topK = n.intValue();
         }
-        Map<String, Object> passthrough = requestExtensions;
-        if (requestExtensions.containsKey("promptCache")
-                || requestExtensions.containsKey("anthropicSplitBlocks")
-                || topK != null) {
-            final var stripped = new HashMap<String, Object>();
-            requestExtensions.forEach((k, v) -> {
-                if (!"promptCache".equals(k) && !"top_k".equals(k) && !"anthropicSplitBlocks".equals(k)) {
-                    stripped.put(k, v);
-                }
-            });
-            passthrough = stripped;
+        final var passthrough = new HashMap<>(requestExtensions);
+        passthrough.remove("promptCache");
+        passthrough.remove("anthropicSplitBlocks");
+        passthrough.remove("top_k");
+        if (!promptCache) {
+            passthrough.remove("cache_control");
+            for (var i = 0; i < messages.size(); i++) {
+                messages.set(i, withoutCacheControl(messages.get(i)));
+            }
+        }
+        // Configure caching after wire conversion so plain text, tool_use and tool_result all
+        // participate, independently of provider ids. Never add a fifth breakpoint or mutate
+        // caller-owned content. Explicit controls (including null to suppress automatic caching)
+        // take precedence; use their TTL on earlier generated breakpoints too (long TTLs go first).
+        final var control = requestExtensions.get("cache_control") instanceof Map<?, ?> explicit
+                ? explicit
+                : Map.of("type", "ephemeral");
+        final var explicitBreakpoints = cacheBreakpoints(messages);
+        // A valid caller-supplied 1h block must not acquire a generated 5m system prefix.
+        // Leave mixed explicit block TTL ordering to the caller, and don't insert legacy
+        // split breakpoints among their controls.
+        final var systemControl = explicitBreakpoints.stream().anyMatch(c -> "1h".equals(c.get("ttl")))
+                ? Map.of("type", "ephemeral", "ttl", "1h")
+                : control;
+        var remainingBreakpoints = 4 - explicitBreakpoints.size();
+        // Existing block controls already opt into explicit caching. Don't introduce an
+        // automatic endpoint with a potentially conflicting TTL; only forward one if the
+        // caller explicitly supplies it, reserving its slot before generated breakpoints.
+        final var automatic = promptCache
+                && !systemOnlyCache
+                && (requestExtensions.get("cache_control") instanceof Map<?, ?>
+                        || (!requestExtensions.containsKey("cache_control") && explicitBreakpoints.isEmpty()));
+        if (automatic) {
+            passthrough.put("cache_control", control);
+            remainingBreakpoints--;
+        } else {
+            passthrough.remove("cache_control");
+        }
+        final var cacheSystem = promptCache && system != null && remainingBreakpoints > 0;
+        if (cacheSystem) {
+            remainingBreakpoints--;
+        }
+        for (var i = splitBreakpoints.size() - 1; i >= 0 && remainingBreakpoints > 0; i--) {
+            if (explicitBreakpoints.isEmpty()) {
+                splitBreakpoints.get(i).put("cache_control", control);
+                remainingBreakpoints--;
+            }
         }
         return new AnthropicMessagesRequest(
                 request.model(),
                 maxTokens,
-                system == null ? null : toSystemBlocks(system, promptCache),
+                system == null ? null : toSystemBlocks(system, cacheSystem ? systemControl : null),
                 messages,
                 request.temperature(),
                 request.topP(),
@@ -691,11 +730,42 @@ public final class AnthropicDialect extends AbstractDialect {
      * ephemeral {@code cache_control} breakpoint makes the stable system prompt (rules, project
      * context, skills) a cache hit across turns instead of a full re-read every request.
      */
-    private static Object toSystemBlocks(final String system, final boolean promptCache) {
-        if (!promptCache) {
+    private static Object toSystemBlocks(final String system, final Map<?, ?> control) {
+        if (control == null) {
             return system;
         }
-        return List.of(Map.of("type", "text", "text", system, "cache_control", Map.of("type", "ephemeral")));
+        return List.of(Map.of("type", "text", "text", system, "cache_control", control));
+    }
+
+    private static List<Map<?, ?>> cacheBreakpoints(final List<AnthropicMessage> messages) {
+        final var controls = new ArrayList<Map<?, ?>>();
+        for (final var message : messages) {
+            if (message.content() instanceof List<?> blocks) {
+                for (final var block : blocks) {
+                    if (block instanceof Map<?, ?> map && map.get("cache_control") instanceof Map<?, ?> control) {
+                        controls.add(control);
+                    }
+                }
+            }
+        }
+        return controls;
+    }
+
+    private static AnthropicMessage withoutCacheControl(final AnthropicMessage message) {
+        if (!(message.content() instanceof List<?> blocks)) {
+            return message;
+        }
+        final var content = new ArrayList<Object>(blocks.size());
+        for (final var block : blocks) {
+            if (block instanceof Map<?, ?> map && map.containsKey("cache_control")) {
+                final var copy = new LinkedHashMap<>(map);
+                copy.remove("cache_control");
+                content.add(copy);
+            } else {
+                content.add(block);
+            }
+        }
+        return new AnthropicMessage(message.role(), content);
     }
 
     /** Flags the message carrying the volatile session-state tail appended by the agent loop on the wire. */

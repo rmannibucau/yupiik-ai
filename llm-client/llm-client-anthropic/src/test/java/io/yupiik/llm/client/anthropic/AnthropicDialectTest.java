@@ -305,11 +305,11 @@ class AnthropicDialectTest {
                 Map.of("anthropicSplitBlocks", true));
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
-        // system breakpoint + stable prefix breakpoint, volatile tail block without one
+        // system + stable prefix breakpoints, plus automatic caching of the conversation
         assertEquals(
-                2,
+                3,
                 body.split("cache_control", -1).length - 1,
-                "expected two cache breakpoints (system + stable prefix):\n" + body);
+                "expected system + stable prefix + automatic caching:\n" + body);
         assertTrue(body.contains("<session-state>\\nDate: x\\n</session-state>"), body);
         assertFalse(body.contains("volatileTail"), "the message flag must not leak to the payload:\n" + body);
     }
@@ -350,9 +350,8 @@ class AnthropicDialectTest {
                 null);
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
-        // no explicit splitBlocks extension -> no split, tail inline, single system breakpoint
-        assertEquals(
-                1, body.split("cache_control", -1).length - 1, "expected a single cache breakpoint (system):\n" + body);
+        // no explicit splitBlocks extension -> no split, tail inline, system + automatic caching
+        assertEquals(2, body.split("cache_control", -1).length - 1, "expected system + automatic caching:\n" + body);
         assertTrue(body.contains("\"content\":\"prompt\\n\\n<session-state>\\nDate: x\\n</session-state>\""), body);
     }
 
@@ -392,9 +391,8 @@ class AnthropicDialectTest {
                 Map.of("anthropicSplitBlocks", false));
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
-        // only the system keeps a breakpoint; the tail rides inline as a plain string
-        assertEquals(
-                1, body.split("cache_control", -1).length - 1, "expected a single cache breakpoint (system):\n" + body);
+        // the tail rides inline as a plain string; automatic caching remains enabled
+        assertEquals(2, body.split("cache_control", -1).length - 1, "expected system + automatic caching:\n" + body);
         assertTrue(body.contains("\"content\":\"prompt\\n\\n<session-state>\\nDate: x\\n</session-state>\""), body);
         assertFalse(body.contains("anthropicSplitBlocks"), "the flag must not leak to the payload:\n" + body);
     }
