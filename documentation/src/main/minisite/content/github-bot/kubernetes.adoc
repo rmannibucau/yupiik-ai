@@ -14,7 +14,7 @@ From the repository root:
 [source,bash]
 ----
 mvn spotless:apply -pl extensions/github-bot -Pimage-dispatcher compile jib:build \
-  -Dgithub-bot.dispatcher.base-image=eclipse-temurin@sha256:YOUR_JRE_BASE_DIGEST \
+  -Dgithub-bot.dispatcher.base-image=ossyupiik/java-docker@sha256:YOUR_REVIEWED_BASE_INDEX_DIGEST \
   -Dgithub-bot.dispatcher.image=YOUR_REGISTRY/yca-github-dispatcher:YOUR_IMMUTABLE_TAG
 mvn spotless:apply -pl extensions/github-bot -Pimage-agent compile jib:build \
   -Dgithub-bot.agent.base-image=YOUR_REGISTRY/vetted-agent-toolchain@sha256:YOUR_TOOLCHAIN_BASE_DIGEST \

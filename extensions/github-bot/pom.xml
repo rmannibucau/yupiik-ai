@@ -6,7 +6,10 @@
   <name>YCA :: GitHub Bot</name>
   <properties>
     <jib.version>3.5.2</jib.version>
-    <github-bot.dispatcher.base-image>eclipse-temurin:25-jre</github-bot.dispatcher.base-image>
+    <github-bot.images.goal>dockerBuild</github-bot.images.goal>
+    <github-bot.image.architecture>amd64</github-bot.image.architecture>
+    <!-- Pin the multi-platform index, not an architecture-specific manifest. -->
+    <github-bot.dispatcher.base-image>ossyupiik/java-docker:25.0.5-alpine3.24-docker29.9.2@sha256:1ff6f05991dfddd87092a64c2be460a601504c307c92fbd9c367a118ddc7ea3d</github-bot.dispatcher.base-image>
     <github-bot.dispatcher.image>yca-github-dispatcher:local</github-bot.dispatcher.image>
     <!-- No agent base default: supply a vetted JDK 25 and development toolchain image. -->
     <github-bot.agent.image>yca-github-agent:local</github-bot.agent.image>
@@ -41,6 +44,49 @@
     </dependency>
   </dependencies>
   <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>com.google.cloud.tools</groupId>
+          <artifactId>jib-maven-plugin</artifactId>
+          <version>${jib.version}</version>
+          <configuration>
+            <from>
+              <platforms>
+                <platform>
+                  <os>linux</os>
+                  <architecture>${github-bot.image.architecture}</architecture>
+                </platform>
+              </platforms>
+            </from>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-enforcer-plugin</artifactId>
+          <version>3.6.2</version>
+          <executions>
+            <execution>
+              <id>require-agent-base</id>
+              <goals>
+                <goal>enforce</goal>
+              </goals>
+              <phase>validate</phase>
+              <configuration>
+                <rules>
+                  <requireProperty>
+                    <property>github-bot.agent.base-image</property>
+                    <message>Supply -Dgithub-bot.agent.base-image with a vetted JDK 25 and development toolchain image.</message>
+                    <regex>.*\S.*</regex>
+                    <regexMessage>The agent base image must not be blank.</regexMessage>
+                  </requireProperty>
+                </rules>
+              </configuration>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
+    </pluginManagement>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -90,8 +136,108 @@
       </plugin>
     </plugins>
   </build>
-  <!-- Image creation is explicit only; never bind Jib goals to the build lifecycle. -->
+  <!-- Ordinary builds never create images. Only image-all opts into package bindings. -->
   <profiles>
+    <profile>
+      <id>image-all</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-enforcer-plugin</artifactId>
+          </plugin>
+          <plugin>
+            <groupId>com.google.cloud.tools</groupId>
+            <artifactId>jib-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>dispatcher-image</id>
+                <goals>
+                  <goal>${github-bot.images.goal}</goal>
+                </goals>
+                <phase>package</phase>
+                <configuration>
+                  <from>
+                    <image>${github-bot.dispatcher.base-image}</image>
+                  </from>
+                  <to>
+                    <image>${github-bot.dispatcher.image}</image>
+                  </to>
+                  <container>
+                    <mainClass>io.yupiik.fusion.framework.api.main.CliLauncher</mainClass>
+                    <user>10001:10001</user>
+                    <environment>
+                      <HOME>/tmp</HOME>
+                    </environment>
+                  </container>
+                  <outputPaths>
+                    <tar>${project.build.directory}/jib-dispatcher-image.tar</tar>
+                    <digest>${project.build.directory}/jib-dispatcher-image.digest</digest>
+                    <imageId>${project.build.directory}/jib-dispatcher-image.id</imageId>
+                  </outputPaths>
+                </configuration>
+              </execution>
+              <execution>
+                <id>agent-image</id>
+                <goals>
+                  <goal>${github-bot.images.goal}</goal>
+                </goals>
+                <phase>package</phase>
+                <configuration>
+                  <from>
+                    <image>${github-bot.agent.base-image}</image>
+                  </from>
+                  <to>
+                    <image>${github-bot.agent.image}</image>
+                  </to>
+                  <container>
+                    <mainClass>io.yupiik.fusion.framework.api.main.CliLauncher</mainClass>
+                    <user>10001:10001</user>
+                    <environment>
+                      <HOME>/attempt/storage</HOME>
+                      <MAVEN_CONFIG>/attempt/storage/.m2</MAVEN_CONFIG>
+                      <MAVEN_OPTS>-Duser.home=/attempt/storage</MAVEN_OPTS>
+                    </environment>
+                  </container>
+                  <outputPaths>
+                    <tar>${project.build.directory}/jib-agent-image.tar</tar>
+                    <digest>${project.build.directory}/jib-agent-image.digest</digest>
+                    <imageId>${project.build.directory}/jib-agent-image.id</imageId>
+                  </outputPaths>
+                </configuration>
+              </execution>
+              <execution>
+                <id>egress-image</id>
+                <goals>
+                  <goal>${github-bot.images.goal}</goal>
+                </goals>
+                <phase>package</phase>
+                <configuration>
+                  <from>
+                    <image>${github-bot.egress.base-image}</image>
+                  </from>
+                  <to>
+                    <image>${github-bot.egress.image}</image>
+                  </to>
+                  <container>
+                    <mainClass>io.yupiik.ia.agent.github.execution.EgressGateway</mainClass>
+                    <user>65532:65532</user>
+                    <jvmFlags>
+                      <jvmFlag>-Xmx128m</jvmFlag>
+                    </jvmFlags>
+                  </container>
+                  <outputPaths>
+                    <tar>${project.build.directory}/jib-egress-image.tar</tar>
+                    <digest>${project.build.directory}/jib-egress-image.digest</digest>
+                    <imageId>${project.build.directory}/jib-egress-image.id</imageId>
+                  </outputPaths>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
     <profile>
       <id>image-dispatcher</id>
       <build>
@@ -99,7 +245,6 @@
           <plugin>
             <groupId>com.google.cloud.tools</groupId>
             <artifactId>jib-maven-plugin</artifactId>
-            <version>${jib.version}</version>
             <configuration>
               <from>
                 <image>${github-bot.dispatcher.base-image}</image>
@@ -124,9 +269,12 @@
       <build>
         <plugins>
           <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-enforcer-plugin</artifactId>
+          </plugin>
+          <plugin>
             <groupId>com.google.cloud.tools</groupId>
             <artifactId>jib-maven-plugin</artifactId>
-            <version>${jib.version}</version>
             <configuration>
               <from>
                 <image>${github-bot.agent.base-image}</image>
@@ -139,6 +287,8 @@
                 <user>10001:10001</user>
                 <environment>
                   <HOME>/attempt/storage</HOME>
+                  <MAVEN_CONFIG>/attempt/storage/.m2</MAVEN_CONFIG>
+                  <MAVEN_OPTS>-Duser.home=/attempt/storage</MAVEN_OPTS>
                 </environment>
               </container>
             </configuration>
@@ -153,7 +303,6 @@
           <plugin>
             <groupId>com.google.cloud.tools</groupId>
             <artifactId>jib-maven-plugin</artifactId>
-            <version>${jib.version}</version>
             <configuration>
               <from>
                 <image>${github-bot.egress.base-image}</image>

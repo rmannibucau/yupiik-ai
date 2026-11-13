@@ -27,7 +27,7 @@ java -jar "$BOT_JAR" --help
 ----
 
 Expected outcome: the pipeline's executable dispatcher fat JAR and a separate local `yca-github-agent:local` image.
-The agent base is mandatory and has no default: supply an operator-reviewed, credential-free toolchain image containing JDK 25, git, gh, a shell, CA certificates and all build tools required by your repositories (for example Maven, Node/npm and Python).
+The agent base is mandatory and has no default: supply an operator-reviewed, credential-free toolchain image containing JDK 25, git, a shell, CA certificates and all tools required by your repositories and workflows (for example Maven, Node/npm, Python or gh).
 Jib layers the application onto that base; it does not install development tools, and a stock JRE base is not a usable agent toolchain.
 Ensure `java` and the tools are on the base image's `PATH` and readable/executable by UID/GID 10001 without root initialization.
 Verify the toolchain works with a read-only root filesystem, writable attempt directories and `/tmp`, and no ambient user credentials.
@@ -38,36 +38,77 @@ If selecting Nono instead, prepare the runtime described below and omit the Dock
 == Jib image profiles
 
 All bot images use `com.google.cloud.tools:jib-maven-plugin:3.5.2` in `extensions/github-bot/pom.xml`.
-Select exactly one image profile per invocation.
-No image goals are bound to `test`, `package` or any other lifecycle phase; even with a profile selected, image creation requires an explicit `jib:dockerBuild`, `jib:build` or `jib:buildTar` goal.
+Select exactly one image profile per invocation: either one of the individual profiles below or the aggregate `image-all` profile, not a combination.
+The individual `image-dispatcher`, `image-agent` and `image-egress` profiles remain supported and require `compile` followed by an explicit `jib:dockerBuild`, `jib:build` or `jib:buildTar` goal; they do not bind image goals to the lifecycle.
+The opt-in `image-all` profile is the exception: it binds three Jib executions to `package`, one for each image.
+Without an image profile, the normal build does not create images.
 The examples use module-only invocation after the pipeline has installed its reactor dependencies, avoiding image goals on unrelated modules.
 
 [cols="1,2,2,2",options="header"]
 |===
-|Profile |Base property (default) |Target property (default) |Runtime
-|`image-dispatcher` |`github-bot.dispatcher.base-image` (`eclipse-temurin:25-jre`) |`github-bot.dispatcher.image` (`yca-github-dispatcher:local`) |`CliLauncher`, UID/GID 10001, `HOME=/tmp`
+|Individual profile |Base property (default) |Target property (default) |Runtime
+|`image-dispatcher` |`github-bot.dispatcher.base-image` (`ossyupiik/java-docker:25.0.5-alpine3.24-docker29.9.2`, pinned by multi-platform index digest) |`github-bot.dispatcher.image` (`yca-github-dispatcher:local`) |`CliLauncher`, UID/GID 10001, `HOME=/tmp`
 |`image-agent` |`github-bot.agent.base-image` (required; no default) |`github-bot.agent.image` (`yca-github-agent:local`) |`CliLauncher`, UID/GID 10001, `HOME=/attempt/storage`
 |`image-egress` |`github-bot.egress.base-image` (`eclipse-temurin:25-jre`) |`github-bot.egress.image` (`yca-egress:local`) |`EgressGateway`, UID/GID 65532, `-Xmx128m`
 |===
 
-The Kubernetes dispatcher uses the same `image-dispatcher` profile: Fusion's embedded client needs no external Kubernetes CLI.
-Jib generates the Java entrypoint and runtime classpath from module classes and runtime dependencies, independently of the shaded fat JAR used for host execution.
-No launcher script or fixed in-image JAR path is needed.
+The aggregate profile uses the same base and target properties and runtime settings for all three images.
+After reactor dependencies have been installed, build all three images from the repository root with one command:
+
+[source,bash]
+----
+mvn -pl extensions/github-bot -Pimage-all package \
+  -Dgithub-bot.agent.base-image=YOUR_REGISTRY/vetted-agent-toolchain@sha256:YOUR_BASE_DIGEST
+----
+
+`github-bot.images.goal` defaults to `dockerBuild`, which requires the local Docker CLI/daemon and loads all three images there.
+Set `-Dgithub-bot.images.goal=build` to publish all three images directly to a registry without a Docker daemon, or `-Dgithub-bot.images.goal=buildTar` to produce three image archives.
+For registry publishing, set the target properties to your registry image names and supply authentication through your trusted credential helper or Maven settings, never committed credentials.
+The agent base remains mandatory with no default, including for `image-all`; it must contain the vetted JDK 25, git and repository tools described above.
+For Java/Maven-only repositories, `maven:4.0.0-rc-7-eclipse-temurin-25-noble` is a candidate containing JDK 25, Maven and git; pin its reviewed digest and validate it under the deployment's runtime constraints.
+It does not include gh, Node/npm or Python, so repositories requiring those tools need a different reviewed toolchain.
+Both agent image profiles set `MAVEN_CONFIG=/attempt/storage/.m2` and `MAVEN_OPTS=-Duser.home=/attempt/storage` alongside `HOME=/attempt/storage`, keeping Maven's user files in writable attempt storage without relying on the base image's root-oriented entrypoint.
+
+With the default module build directory, aggregate outputs use separate names so the executions do not overwrite each other:
+
+[cols="1,2,2,2",options="header"]
+|===
+|Image |Archive (`buildTar`) |Digest |Image ID
+|Dispatcher |`target/jib-dispatcher-image.tar` |`target/jib-dispatcher-image.digest` |`target/jib-dispatcher-image.id`
+|Agent |`target/jib-agent-image.tar` |`target/jib-agent-image.digest` |`target/jib-agent-image.id`
+|Egress |`target/jib-egress-image.tar` |`target/jib-egress-image.digest` |`target/jib-egress-image.id`
+|===
+
+These paths are relative to `extensions/github-bot`; archive files are produced when using `buildTar`.
+The individual profiles retain their legacy `target/jib-image.tar`, `target/jib-image.digest` and `target/jib-image.id` output names.
+
+The Kubernetes dispatcher uses the same dispatcher image: Fusion's embedded client needs no external Kubernetes CLI.
+Jib generates direct Java entrypoints and runtime classpaths from module classes and runtime dependencies, independently of the shaded fat JAR used for host execution.
+No Dockerfile, shell wrapper or fixed in-image JAR path is needed.
+The dispatcher inherits Docker CLI 29.9.2 at `/usr/bin/docker` from `ossyupiik/java-docker:25.0.5-alpine3.24-docker29.9.2`, with no Docker daemon or agent development toolchain.
+The default base is pinned to the multi-platform index digest `sha256:1ff6f05991dfddd87092a64c2be460a601504c307c92fbd9c367a118ddc7ea3d`, covering Linux AMD64 and ARM64.
+Maven does not download, extract or stage a Docker CLI archive.
+All image profiles use `github-bot.image.architecture`, defaulting to `amd64`; set `-Dgithub-bot.image.architecture=arm64` for an ARM64 image.
+Each invocation builds one selected platform, including when publishing to a registry.
+Use vetted agent and egress bases supporting the selected architecture.
+Never bake tokens into any image; inject the host GitHub token as `GH_TOKEN` into the dispatcher only at runtime, not into the agent or egress image.
+Separately scoped agent credentials are provisioned at runtime as described below, not inherited from the dispatcher token.
 The agent has no baked-in command arguments: the executor appends `run` and its YCA arguments directly to the generated `CliLauncher` entrypoint.
 Provision `/attempt/storage` as writable by the executor UID; setting `HOME` does not create or grant access to the mounted directory.
 
-For a local dispatcher image, use:
+For a local dispatcher image using the individual profile, use:
 
 [source,bash]
 ----
 mvn spotless:apply -pl extensions/github-bot -Pimage-dispatcher compile jib:dockerBuild
 ----
 
+Keep the explicit `compile jib:<goal>` form for each individual profile.
 `jib:dockerBuild` requires the local Docker CLI/daemon and loads the image there.
 Use `jib:build` to publish directly to a registry without a Docker daemon, with registry authentication supplied through your trusted credential helper or Maven settings, never committed credentials.
 Use `jib:buildTar` for an image archive at `extensions/github-bot/target/jib-image.tar` with the default build directory.
 Override the appropriate base property with `REGISTRY/BASE@sha256:DIGEST` for each production build.
-After publishing, record Jib's `target/jib-image.digest` for that module and configure the executor or deployment with `REGISTRY/IMAGE@sha256:DIGEST` rather than the build tag.
+After publishing, record the appropriate Jib digest file for each image (`target/jib-image.digest` for an individual profile, or the per-image aggregate files above) and configure the executor or deployment with `REGISTRY/IMAGE@sha256:DIGEST` rather than the build tag.
 Keep these digests and the reviewed toolchain provenance with your deployment records.
 
 == Create disjoint private state and attempts
