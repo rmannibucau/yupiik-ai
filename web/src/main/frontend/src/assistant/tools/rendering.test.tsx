@@ -49,6 +49,68 @@ function open(details: HTMLDetailsElement) {
 }
 
 describe('standalone assistant-ui rendering integration', () => {
+  it.each([false, true])('renders successful final skills as Markdown with separate optional front matter (%s)', (withFrontMatter) => {
+    const metadata = 'name: example\r\ndescription: "**literal**"\r\n';
+    const body = '\r\n# Skill instructions\r\n\r\nUse **care** and `tools`.\r\n\r\n- First step\r\n\r\n```java\r\nclass Skill {}\r\n```\r\n';
+    const output = (withFrontMatter ? `---\r\n${metadata}---\r\n` : '') + body;
+    const block: ToolBlock = { kind: 'tool', name: 'skill', state: 'done', success: true, content: '# Stale stream', output, args: '{"name":"example"}' };
+    render(<ToolCard block={block} collapsed={false} onToggle={() => {}} />);
+    const result = host.querySelector('[aria-label="Tool result"]')!;
+    expect(result.querySelector('h1')?.textContent).toBe('Skill instructions');
+    expect(result.querySelector('strong')?.textContent).toBe('care');
+    expect(result.querySelector('li')?.textContent).toBe('First step');
+    expect(result.querySelector('.aui-md')?.getAttribute('data-variant')).toBe('document');
+    expect(result.querySelector('code.language-java')?.textContent).toContain('class Skill {}');
+    expect(result.textContent).not.toContain('Stale stream');
+    const frontMatter = result.querySelector('[aria-label="Skill front matter"]');
+    if (withFrontMatter) {
+      expect(frontMatter?.querySelector('code')?.textContent).toBe(metadata);
+      expect(frontMatter?.querySelector('strong')).toBeNull();
+      expect(result.querySelector('.aui-md')?.textContent).not.toContain('description:');
+    } else {
+      expect(frontMatter).toBeNull();
+    }
+    const details = raw('Raw output');
+    expect(details.querySelector('code')).toBeNull();
+    open(details);
+    expect(details.querySelector('code')?.textContent).toBe(output);
+  });
+
+  it.each([
+    { state: 'done', success: false },
+    { state: 'done', success: undefined },
+    { state: 'running', success: true },
+    { state: 'interrupted', success: true },
+    { state: 'done', success: true, pending: true },
+    { state: 'done', success: true, name: 'mcp.skill' },
+  ] satisfies Partial<ToolBlock>[])('does not render unsuccessful, unfinished or external skill results as Markdown: %j', (props) => {
+    const output = '---\nname: example\n---\n# Not a document\n\n**Failure or preview**';
+    const block: ToolBlock = { kind: 'tool', name: 'skill', content: output, ...props };
+    render(<ToolCard block={block} collapsed={false} onToggle={() => {}} />);
+    const result = host.querySelector('[aria-label="Tool result"]')!;
+    expect(result.querySelector('.aui-md')).toBeNull();
+    expect(result.querySelector('[aria-label="Skill front matter"]')).toBeNull();
+    expect(result.querySelector('code')?.textContent).toBe(output);
+    if (props.success === false) {
+      expect(result.textContent).toContain('Tool failed.');
+    }
+    const details = raw('Raw output');
+    open(details);
+    expect(details.querySelector('code')?.textContent).toBe(output);
+  });
+
+  it('updates a streamed skill to its final document and respects authoritative empty output', () => {
+    const block: ToolBlock = { kind: 'tool', name: 'skill', state: 'running', content: '# Stream preview' };
+    render(<ToolCard block={block} collapsed={false} onToggle={() => {}} />);
+    expect(host.querySelector('.aui-md')).toBeNull();
+    render(<ToolCard block={{ ...block, state: 'done', success: true, output: '# Final body' }} collapsed={false} onToggle={() => {}} />);
+    expect(host.querySelector('h1')?.textContent).toBe('Final body');
+    render(<ToolCard block={{ ...block, state: 'done', success: true, output: '' }} collapsed={false} onToggle={() => {}} />);
+    expect(host.querySelector('.aui-md')).toBeNull();
+    expect(host.textContent).toContain('Empty output.');
+    expect(host.textContent).not.toContain('Stream preview');
+  });
+
   it('keeps ToolCard controlled, lazy and standalone and cleans up upstream scroll anchoring', () => {
     vi.useFakeTimers();
     const onToggle = vi.fn();

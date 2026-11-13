@@ -261,7 +261,7 @@ public class TuiCommand implements Runnable {
     private String renderSessionId;
     private ToolOverlayLayout toolOverlayLayout;
 
-    private record ToolOverlayLayout(ToolOutputStore.Entry entry, int width, Text text) {}
+    private record ToolOverlayLayout(ToolOutputStore.Entry entry, int width, boolean raw, Text text) {}
     // incremental live-thinking memo: the flushed part of the growing stream is
     // rendered once per stable prefix and the last (still open) line re-rendered
     private String lastLiveThoughtPrefix = "";
@@ -7300,7 +7300,8 @@ public class TuiCommand implements Runnable {
         state.toolOverlay = new UiState.ToolOverlay(
                 state.toolOverlay.ordinal(),
                 state.toolOverlay.entry(),
-                Math.max(0, state.toolOverlay.scroll() + delta));
+                Math.max(0, state.toolOverlay.scroll() + delta),
+                state.toolOverlay.raw());
     }
 
     /** Key/mouse handling while the full tool output overlay is open. */
@@ -7336,6 +7337,13 @@ public class TuiCommand implements Runnable {
         }
         if (key.isCharIgnoreCase('c')) {
             copyText(runner, state, state.toolOverlay.entry().output());
+            return true;
+        }
+        if (key.isCharIgnoreCase('r')
+                && "skill".equals(state.toolOverlay.entry().name())) {
+            final var overlay = state.toolOverlay;
+            state.toolOverlay = new UiState.ToolOverlay(overlay.ordinal(), overlay.entry(), 0, !overlay.raw());
+            state.selection.clear();
             return true;
         }
         scrollToolOverlay(state, scrollService.keyDelta(key));
@@ -7718,12 +7726,12 @@ public class TuiCommand implements Runnable {
         final var splits = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(1))
                 .split(inner);
-        final var text = toolOverlayText(entry, inner.width());
+        final var text = toolOverlayText(entry, inner.width(), state.toolOverlay.raw());
         final var maxScroll =
                 Math.max(0, text.height() - Math.max(1, splits.getFirst().height()));
         final var overlay = state.toolOverlay;
-        state.toolOverlay =
-                new UiState.ToolOverlay(overlay.ordinal(), overlay.entry(), Math.clamp(overlay.scroll(), 0, maxScroll));
+        state.toolOverlay = new UiState.ToolOverlay(
+                overlay.ordinal(), overlay.entry(), Math.clamp(overlay.scroll(), 0, maxScroll), overlay.raw());
         if (!splits.getFirst().isEmpty()) {
             frame.renderWidget(
                     Paragraph.builder()
@@ -7733,8 +7741,8 @@ public class TuiCommand implements Runnable {
                             .build(),
                     splits.getFirst());
         }
-        final var hint =
-                "Ctrl+O/q/Esc close | Wheel/Up/Down scroll | c copy output | drag or Ctrl+Shift+C copies the selection ";
+        final var hint = ("skill".equals(entry.name()) ? (state.toolOverlay.raw() ? "r rendered | " : "r raw | ") : "")
+                + "Ctrl+O/q/Esc close | Wheel/Up/Down scroll | c copy output | drag or Ctrl+Shift+C copies the selection ";
         final var footerRect = splits.get(1);
         state.toolOverlayFooter = footerRect;
         final var footer = " "
@@ -7751,13 +7759,28 @@ public class TuiCommand implements Runnable {
     }
 
     private Text toolOverlayText(final ToolOutputStore.Entry entry, final int width) {
-        if (toolOverlayLayout != null && toolOverlayLayout.entry() == entry && toolOverlayLayout.width() == width) {
+        return toolOverlayText(entry, width, false);
+    }
+
+    private Text toolOverlayText(final ToolOutputStore.Entry entry, final int width, final boolean raw) {
+        if (toolOverlayLayout != null
+                && toolOverlayLayout.entry() == entry
+                && toolOverlayLayout.width() == width
+                && toolOverlayLayout.raw() == raw) {
             return toolOverlayLayout.text();
         }
         final var command = toolCommandOf(entry);
         // Bash echoes its command too; the modal already leads with the complete command header.
         final var output = stripLeadingCommandEcho(entry.output(), commandArgOf(entry.args()));
-        final var body = toolBodyLines(entry.name(), command, entry.args(), output, width, false);
+        final List<Line> body;
+        if ("skill".equals(entry.name())) {
+            // Skill instructions are a known document, not source to infer from its front matter or code examples.
+            body = raw || !formatToolOutput || entry.failed() || entry.pending() || entry.running()
+                    ? new ArrayList<>(plainToolPreview(entry.output(), width, Integer.MAX_VALUE))
+                    : skillDocumentLines(entry.output(), width);
+        } else {
+            body = toolBodyLines(entry.name(), command, entry.args(), output, width, false);
+        }
         if (command != null && !command.isBlank()) {
             body.addAll(0, toolCommandHeader(command, width));
         }
@@ -7776,8 +7799,21 @@ public class TuiCommand implements Runnable {
                         96L + 2L * (span.content() == null ? 0 : span.content().length());
             }
         }
-        toolOverlayLayout = weight <= 4L * 1024 * 1024 ? new ToolOverlayLayout(entry, width, text) : null;
+        toolOverlayLayout = weight <= 4L * 1024 * 1024 ? new ToolOverlayLayout(entry, width, raw, text) : null;
         return text;
+    }
+
+    private List<Line> skillDocumentLines(final String output, final int width) {
+        final var document = SkillDocument.parse(output);
+        final var lines = new ArrayList<Line>();
+        if (document.metadata() != null) {
+            lines.add(Line.from(Span.styled("Skill metadata", palette.bold(palette.primary()))));
+            lines.addAll(MarkdownLines.wrapCode(
+                    syntaxHighlighter.highlightLines("yaml", document.metadata()), Math.max(1, width)));
+            lines.add(Line.empty());
+        }
+        lines.addAll(transcriptRenderer.renderRegion(document.body(), width, toolStyle, markdownStyles));
+        return lines;
     }
 
     /**

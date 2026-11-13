@@ -52,10 +52,14 @@ final class UiState {
     record Wait(String message, SpinnerStyle style, long armedAtMillis) {}
 
     /** Full-screen expandable view of one captured tool output (Ctrl+O). */
-    record ToolOverlay(long ordinal, ToolOutputStore.Entry entry, int scroll) {
+    record ToolOverlay(long ordinal, ToolOutputStore.Entry entry, int scroll, boolean raw) {
+        ToolOverlay(final long ordinal, final ToolOutputStore.Entry entry, final int scroll) {
+            this(ordinal, entry, scroll, false);
+        }
+
         /** Replaces the entry of a focused overlay, keeping the scroll offset (live running-tool output). */
         ToolOverlay withEntry(final ToolOutputStore.Entry fresh) {
-            return new ToolOverlay(ordinal, fresh, scroll);
+            return new ToolOverlay(ordinal, fresh, scroll, raw);
         }
     }
 

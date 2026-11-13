@@ -609,6 +609,79 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void skillDetailsRenderDocumentAndKeepRawSource() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var overlay = TuiCommand.class.getDeclaredMethod(
+                "toolOverlayText", ToolOutputStore.Entry.class, int.class, boolean.class);
+        overlay.setAccessible(true);
+        for (final var prefix : List.of("", "---\nname: example\ndescription: Example skill\n---\n")) {
+            final var source = prefix + "# Instructions\n\nUse **careful changes** and `tests`.\n";
+            final var entry = new ToolOutputStore.Entry("skill", "{\"name\":\"example\"}", source, false, 1);
+            final var rendered = (Text) overlay.invoke(command, entry, 100, false);
+            final var text = rendered.lines().stream()
+                    .flatMap(line -> line.spans().stream())
+                    .map(span -> span.content())
+                    .reduce("", String::concat);
+            assertTrue(text.contains("Instructions"), text);
+            assertTrue(text.contains("careful changes"), text);
+            assertFalse(text.contains("**careful changes**"), text);
+            assertFalse(text.contains("# Instructions"), text);
+            assertEquals(!prefix.isEmpty(), text.contains("Skill metadata"));
+            final var raw = (Text) overlay.invoke(command, entry, 100, true);
+            final var rawText = raw.lines().stream()
+                    .flatMap(line -> line.spans().stream())
+                    .map(span -> span.content())
+                    .reduce("", String::concat);
+            assertTrue(rawText.contains("# Instructions"), rawText);
+            assertTrue(rawText.contains("**careful changes**"), rawText);
+            assertEquals(source, entry.output());
+            Assertions.assertSame(raw, overlay.invoke(command, entry, 100, true));
+            Assertions.assertNotSame(raw, overlay.invoke(command, entry, 100, false));
+        }
+        for (final var unfinished : List.of(
+                new ToolOutputStore.Entry("skill", "{}", "Skill not found: **example**", true, 1),
+                new ToolOutputStore.Entry("skill", "{}", "Waiting for **example**", false, true, 1),
+                new ToolOutputStore.Entry("skill", "{}", "Loading **example**", false, -1))) {
+            final var diagnostic = (Text) overlay.invoke(command, unfinished, 100, false);
+            assertTrue(diagnostic.lines().stream()
+                    .flatMap(line -> line.spans().stream())
+                    .anyMatch(span -> span.content().contains("**example**")));
+        }
+    }
+
+    @Test
+    void skillModalTogglesRawSourceAndCopiesOriginal() throws Exception {
+        final var registry = testRegistry();
+        final var command = command(registry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-skill-document-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        final var source = "---\nname: example\n---\n# Skill instructions\n\nUse **careful changes**.\n";
+        registry.onEvent(new AgentEvent.ToolStarted("skill", "{\"name\":\"example\"}", sid(registry)));
+        registry.onEvent(new AgentEvent.ToolFinished("skill", source, true, sid(registry)));
+        awaitText("✓ skill");
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ skill")));
+        awaitText("full output");
+        awaitText("Skill metadata");
+        awaitText("Use careful changes.");
+        tuiRef.get().dispatch(KeyEvent.ofChar('r'));
+        awaitText("Use **careful changes**.");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.DOWN));
+        awaitText("Use **careful changes**.");
+        tuiRef.get().dispatch(KeyEvent.ofChar('r'));
+        awaitText("Use careful changes.");
+        tuiRef.get().dispatch(KeyEvent.ofChar('c'));
+        final var deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+        while (!backend.raw().contains(SelectionState.osc52Payload(source)) && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertTrue(backend.raw().contains(SelectionState.osc52Payload(source)), backend.raw());
+        quit();
+    }
+
+    @Test
     void toolLayoutsDropObsoleteRevisionsAndSessionSwitchClearsCaptures() throws Exception {
         final var command = command(testRegistry(), stubAgentLoop());
         final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());

@@ -9,6 +9,7 @@ import {
   type BuiltinName,
 } from '../lib/toolDetails';
 import { CodeBlock } from './CodeBlock';
+import { SkillResult } from './SkillResult';
 
 type ToolBlock = Extract<Block, { kind: 'tool' }>;
 const RESULT_LABELS: Record<BuiltinName, string> = {
@@ -119,7 +120,9 @@ export const ToolCard = memo(function ToolCard({ block, collapsed, onToggle }: {
       <h4>{final ? 'Result' : 'Result preview'} <span className="yca-tool-muted">{resultLabel}</span></h4>
       {!final && <p className="yca-tool-muted">{block.state === 'interrupted' ? 'Execution interrupted; output may be incomplete.' : block.pending ? 'Still pending; this is not a final result.' : 'Running; output may be incomplete.'}</p>}
       {failed && <p className="yca-tool-warning">Tool failed. The request above is intent, not confirmation that changes were applied.</p>}
-      {output !== '' ? <ProgressiveText label={resultLabel} text={presentation.text} language={presentation.language} diff={presentation.diff} /> : <p className="yca-tool-muted">{block.output !== undefined ? 'Empty output.' : 'No output available.'}</p>}
+      {output !== '' ? (block.name === 'skill' && final && block.success === true
+        ? <SkillResult content={output} />
+        : <ProgressiveText label={resultLabel} text={presentation.text} language={presentation.language} diff={presentation.diff} />) : <p className="yca-tool-muted">{block.output !== undefined ? 'Empty output.' : 'No output available.'}</p>}
     </>}
   >
     <ToolDisclosure label="Raw arguments"><ProgressiveText label="Raw arguments" text={block.args ?? 'Arguments unavailable in this event.'} /></ToolDisclosure>

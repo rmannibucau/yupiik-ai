@@ -47,6 +47,13 @@ External tools fall back to readable arguments and output without assuming that 
 Unknown or malformed content remains available as text rather than being executed or silently discarded.
 These views do not alter tool execution, stored conversation messages or model input.
 
+Successful `skill` results display their instruction body as rendered Markdown in TUI tool details and expanded web cards.
+Leading YAML front matter, when closed by `---` or `...`, is displayed separately as skill metadata rather than interpreted as instruction text.
+In the TUI full-output modal, press `r` to toggle between the document and raw source, and `c` to copy the original captured output including metadata.
+Disabling TUI tool-output formatting keeps the source view.
+In the web interface, use the separate Raw output disclosure to inspect the original source.
+Failed, pending and running skill results remain diagnostic source text.
+
 The existing tool-output visibility controls still apply: `hidden` suppresses ordinary activity, `collapsed` retains concise activity without bodies, and `shown` enables details.
 Failures remain diagnostics, and a pending tool result is not a failure.
 For `cli`, verbosity further selects compact, verbose or raw presentation.
