@@ -121,21 +121,14 @@ class LlmClientResilienceWrapperTest {
     @Test
     void concurrencyLimitEmitsAPauseWhileBlocked() throws Exception {
         final var firstStarted = new CountDownLatch(1);
-        final var releaseFirst = new CountDownLatch(1);
+        final var releaseFirst = new CompletableFuture<LlmResponse>();
         final var count = new AtomicInteger();
         final var dial = new ScriptedDialect() {
             @Override
             public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
                 if (count.getAndIncrement() == 0) {
                     firstStarted.countDown();
-                    return CompletableFuture.supplyAsync(() -> {
-                        try {
-                            releaseFirst.await();
-                        } catch (final InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                        }
-                        return response();
-                    });
+                    return releaseFirst;
                 }
                 return CompletableFuture.completedFuture(response());
             }
@@ -150,17 +143,20 @@ class LlmClientResilienceWrapperTest {
         });
 
         final var first = wrapper.chat(dial, null, () -> false);
-        assertTrue(firstStarted.await(5, TimeUnit.SECONDS), "first request must start");
-        // the second request blocks on the concurrency permit: the pause must be emitted
-        // without waiting for the first request to finish (run it on a worker thread)
-        final var second = CompletableFuture.supplyAsync(() ->
-                wrapper.chat(dial, null, () -> false).toCompletableFuture().join());
-        assertTrue(
-                pauseSeen.await(5, TimeUnit.SECONDS),
-                "a blocked request must surface a concurrency pause, got: " + pauses);
-        releaseFirst.countDown();
-        assertEquals("ok", first.toCompletableFuture().get(5, TimeUnit.SECONDS).text());
-        assertEquals("ok", second.get(5, TimeUnit.SECONDS).text());
+        try {
+            assertTrue(firstStarted.await(5, TimeUnit.SECONDS), "first request must start");
+            // Admission is asynchronous: no common-pool task is needed to start a waiting call.
+            final var second = wrapper.chat(dial, null, () -> false).toCompletableFuture();
+            assertTrue(
+                    pauseSeen.await(5, TimeUnit.SECONDS),
+                    "a blocked request must surface a concurrency pause, got: " + pauses);
+            releaseFirst.complete(response());
+            assertEquals(
+                    "ok", first.toCompletableFuture().get(5, TimeUnit.SECONDS).text());
+            assertEquals("ok", second.get(5, TimeUnit.SECONDS).text());
+        } finally {
+            releaseFirst.complete(response());
+        }
     }
 
     @Test
@@ -709,40 +705,42 @@ class LlmClientResilienceWrapperTest {
         // even with skipRetries=true the wrapper is not a pass-through: the concurrency permit
         // (maxConcurrent=1) serializes two cooperative calls, proving the throttle loop still runs.
         final var entered = new AtomicInteger();
-        final var release = new CountDownLatch(1);
+        final var firstStarted = new CountDownLatch(1);
+        final var pauseSeen = new CountDownLatch(1);
+        final var release = new CompletableFuture<LlmResponse>();
         final var dial = new ScriptedDialect() {
             @Override
             public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
                 final var call = entered.incrementAndGet();
                 if (call == 1) {
-                    return CompletableFuture.supplyAsync(() -> {
-                        try {
-                            release.await();
-                        } catch (final InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                        }
-                        return response();
-                    });
+                    firstStarted.countDown();
+                    return release;
                 }
                 return CompletableFuture.completedFuture(response());
             }
         };
-        final var wrapper = new LlmClientResilienceWrapper(config(1, 0, 1), null);
+        final var wrapper = new LlmClientResilienceWrapper(config(1, 0, 1), pause -> {
+            if (pause.reason() != null && pause.reason().contains("concurrency limit reached")) {
+                pauseSeen.countDown();
+            }
+        });
         final var first = wrapper.chat(dial, null, () -> false, null, true);
-        final var second = CompletableFuture.supplyAsync(() -> wrapper.chat(dial, null, () -> false, null, true)
-                .toCompletableFuture()
-                .join());
-        // give the second call a moment to reach the permit gate: it must NOT have entered the
-        // dialect while the first call still holds the permit
-        Thread.sleep(200);
-        assertEquals(
-                1,
-                entered.get(),
-                "the second cooperative call must block on the concurrency permit, not enter the dialect");
-        release.countDown();
-        assertEquals("ok", first.toCompletableFuture().get(5, TimeUnit.SECONDS).text());
-        assertEquals("ok", second.get(5, TimeUnit.SECONDS).text());
-        assertEquals(2, entered.get(), "both cooperative calls must eventually run once the permit is released");
+        try {
+            assertTrue(firstStarted.await(5, TimeUnit.SECONDS), "first request must start");
+            final var second = wrapper.chat(dial, null, () -> false, null, true).toCompletableFuture();
+            assertTrue(pauseSeen.await(5, TimeUnit.SECONDS), "the second cooperative call must reach the permit gate");
+            assertEquals(
+                    1,
+                    entered.get(),
+                    "the second cooperative call must block on the concurrency permit, not enter the dialect");
+            release.complete(response());
+            assertEquals(
+                    "ok", first.toCompletableFuture().get(5, TimeUnit.SECONDS).text());
+            assertEquals("ok", second.get(5, TimeUnit.SECONDS).text());
+            assertEquals(2, entered.get(), "both cooperative calls must eventually run once the permit is released");
+        } finally {
+            release.complete(response());
+        }
     }
 
     private static LlmResponse response() {
