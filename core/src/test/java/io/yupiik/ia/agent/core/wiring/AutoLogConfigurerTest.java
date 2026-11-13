@@ -25,14 +25,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.framework.api.lifecycle.Start;
 import io.yupiik.fusion.framework.api.lifecycle.Stop;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.test.TestJvm;
 import io.yupiik.logging.jul.formatter.InlineFormatter;
 import io.yupiik.logging.jul.handler.StandardHandler;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.logging.ConsoleHandler;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
 
@@ -94,22 +98,34 @@ class AutoLogConfigurerTest {
     }
 
     @Test
-    void leavesTheRootLoggerAloneWhenAConfigFileIsSet() {
-        final var previous = System.getProperty("java.util.logging.config.file");
-        System.setProperty("java.util.logging.config.file", "/tmp/yca-jul-test.properties");
-        final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
-        try {
-            configurer.onStart(new Start());
-            assertNull(
-                    configurer.installedInlineHandler(),
-                    "an explicit java.util.logging.config.file must keep the JDK defaults");
-            assertFalse(containsStandardHandler(Logger.getLogger("").getHandlers()));
-        } finally {
-            configurer.onStop(new Stop());
-            if (previous == null) {
-                System.clearProperty("java.util.logging.config.file");
-            } else {
-                System.setProperty("java.util.logging.config.file", previous);
+    void leavesTheRootLoggerAloneWhenAConfigFileIsSet(@TempDir final Path tmp) throws Exception {
+        final var logging = tmp.resolve("logging.properties");
+        Files.writeString(logging, "handlers=java.util.logging.ConsoleHandler\n.level=WARNING\n");
+        TestJvm.run(
+                tmp,
+                ConfigFilePeer.class,
+                Map.of("java.util.logging.config.file", logging.toAbsolutePath().toString()));
+    }
+
+    public static final class ConfigFilePeer {
+        public static void main(final String[] args) {
+            final var root = Logger.getLogger("");
+            final var handlers = root.getHandlers();
+            assertEquals(Level.WARNING, root.getLevel(), "JUL must load the explicit configuration at startup");
+            assertEquals(1, handlers.length);
+            assertInstanceOf(ConsoleHandler.class, handlers[0]);
+            final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
+            try {
+                configurer.onStart(new Start());
+                assertNull(
+                        configurer.installedInlineHandler(),
+                        "an explicit java.util.logging.config.file must preserve the supplied configuration");
+                assertFalse(containsStandardHandler(root.getHandlers()));
+                assertEquals(Level.WARNING, root.getLevel());
+                assertEquals(1, root.getHandlers().length);
+                assertTrue(contains(root.getHandlers(), handlers[0]), "the configured handler must be preserved");
+            } finally {
+                configurer.onStop(new Stop());
             }
         }
     }

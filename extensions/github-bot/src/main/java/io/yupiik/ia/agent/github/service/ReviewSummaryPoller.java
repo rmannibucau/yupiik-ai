@@ -83,7 +83,8 @@ public class ReviewSummaryPoller {
         this.conf = conf;
         this.options = commandOptions == null ? null : commandOptions.poll();
         this.store = store;
-        this.reviews = new ReviewClient(github);
+        // Fusion creates the lazy subclass with null constructor arguments, before injecting the real instance.
+        this.reviews = github == null ? null : new ReviewClient(github);
         this.clock = clock;
         this.audit = audit;
         this.authorization = authorization;

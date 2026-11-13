@@ -24,6 +24,7 @@ import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
 import io.yupiik.fusion.framework.handlebars.spi.Template;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.security.MavenSecretService;
+import io.yupiik.ia.agent.core.test.TestJvm;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -77,26 +78,31 @@ class MavenServerPasswordTemplateHelperTest {
 
     @Test
     void resolvesSystemPropertyPlaceholder() throws Exception {
-        System.setProperty("yca.test.server.password", SERVER_PASSWORD);
-        try {
-            final var m2 = new FakeM2(tmp);
-            m2.writeSettings(MASTER, "${sys.test.never.set.placeholder}", """
-                    <server>
-                      <id>prop</id>
-                      <username>u</username>
-                      <password>${sys.yca.test.server.password}</password>
-                    </server>
-                    """);
+        final var m2 = new FakeM2(tmp);
+        m2.writeSettings(MASTER, "${sys.test.never.set.placeholder}", """
+                <server>
+                  <id>prop</id>
+                  <username>u</username>
+                  <password>${sys.yca.test.server.password}</password>
+                </server>
+                """);
+        TestJvm.run(
+                tmp,
+                SystemPropertyPeer.class,
+                Map.of("yca.test.server.password", SERVER_PASSWORD),
+                tmp.toAbsolutePath().toString());
+    }
 
-            final var helper = helper(m2);
+    public static final class SystemPropertyPeer {
+        public static void main(final String[] args) throws Exception {
+            final var m2 = new FakeM2(Path.of(args[0]));
+            final var helper = new MavenServerPasswordTemplateHelperTest().helper(m2);
             // a resolved ${sys.NAME} placeholder expands to the system property value
             assertEquals(SERVER_PASSWORD, render(helper, "{{mavenServerPassword \"prop\"}}"));
             // an unresolved ${sys.NAME} placeholder resolves to an empty value and fails the render
             final var e =
                     assertThrows(RuntimeException.class, () -> render(helper, "{{mavenServerPassword \"central\"}}"));
             assertTrue(e.getMessage().contains("central"), e.getMessage());
-        } finally {
-            System.clearProperty("yca.test.server.password");
         }
     }
 

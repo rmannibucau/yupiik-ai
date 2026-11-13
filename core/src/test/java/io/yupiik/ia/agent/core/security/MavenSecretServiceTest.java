@@ -18,12 +18,14 @@ package io.yupiik.ia.agent.core.security;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.test.TestJvm;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.Map;
 import java.util.Set;
 import javax.crypto.Cipher;
 import javax.crypto.SecretKeyFactory;
@@ -188,13 +190,17 @@ class MavenSecretServiceTest {
                   </servers>
                 </settings>
                 """);
-        System.setProperty("yca.test.header.token", "resolved-placeholder-secret");
+        TestJvm.run(
+                tmp,
+                HeaderPlaceholderPeer.class,
+                Map.of("yca.test.header.token", "resolved-placeholder-secret"),
+                settings.toAbsolutePath().toString());
+    }
 
-        try {
-            final var secrets = new MavenSecretService().collectSecretNames(settings);
+    public static final class HeaderPlaceholderPeer {
+        public static void main(final String[] args) {
+            final var secrets = new MavenSecretService().collectSecretNames(Path.of(args[0]));
             assertTrue(secrets.contains("resolved-placeholder-secret"), "placeholder must resolve: " + secrets);
-        } finally {
-            System.clearProperty("yca.test.header.token");
         }
     }
 
