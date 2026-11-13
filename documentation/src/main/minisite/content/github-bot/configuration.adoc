@@ -24,6 +24,69 @@ The following settings, defaults and environment variable names are generated fr
 
 include::content/_partials/generated/documentation.github-bot.adoc[]
 
+=== Qwen3.8 with NInfer: sizing and reasoning replay
+
+For a NInfer server advertising a 196608-token total window, the following is a candidate agent configuration for Qwen3.8-27B reviews.
+Replace the endpoint and provider token, and keep the dedicated agent configuration private rather than changing an interactive global default.
+The trusted attempt configuration retains the nested provider capabilities and pruning settings shown here.
+
+[source,json]
+----
+{
+  "yca": {
+    "provider": {
+      "defaultProvider": "qwen",
+      "providers": [{
+        "id": "qwen",
+        "baseUrl": "https://llm.example.com/v1/chat/completions",
+        "apiKey": "REPLACE_WITH_PROVIDER_TOKEN",
+        "model": "qwen3.8-27b",
+        "api": "completions",
+        "contextWindow": 196608,
+        "outputTokens": 32768,
+        "maxConcurrent": 1,
+        "capabilities": {
+          "openai": { "replayReasoning": true }
+        },
+        "providerSpecificOptions": "{\"temperature\":0.6,\"top_p\":0.95,\"top_k\":20,\"min_p\":0,\"reasoning_effort\":\"low\",\"chat_template_kwargs\":{\"preserve_thinking\":true}}"
+      }]
+    },
+    "pruning": { "ingestionOutputCapChars": 65536 }
+  }
+}
+----
+
+`contextWindow` is the total input-plus-generation capacity, not an input-only limit.
+Reserving 32768 output tokens leaves a nominal 163840 tokens for instructions, tool definitions, history and tool results before safety margins and compaction thresholds.
+The output ceiling applies to each LLM response, including new reasoning, answer text and tool calls, not to the whole multi-step task.
+Low reasoning effort is guidance rather than a hard thinking-token limit.
+
+Reasoning consumes output tokens when generated even if it is never replayed.
+With replay enabled, retained assistant thinking is sent as `reasoning_content` and consumes input capacity on later requests when the server template includes it.
+Use `capabilities.openai.replayReasoning`, not `openaiCapabilities.replayReasoning`; this opt-in defaults to false and applies only to Chat Completions.
+Merge provider-specific options with existing sampling settings rather than accidentally replacing unrelated options.
+
+NInfer's tested Qwen3.8 template keeps received reasoning across user messages with `preserve_thinking=true`.
+With false it keeps reasoning only after the last wire-level user message, not necessarily the last human question.
+YCA injects internal `<session-state>` updates as user messages during tool loops, so false can discard reasoning from earlier steps of the same task.
+The replay flag controls what YCA sends; `preserve_thinking` controls what NInfer renders and does not enable or disable new thinking.
+Verify both behaviors against the deployed server and embedded model template rather than assuming every Qwen server has identical semantics.
+
+The ingestion cap is measured in characters, separately from token budgets.
+The default 20000-character head/tail cap omitted important production-code changes in a roughly 49 KB review diff; 65536 admitted the complete diff in that test.
+Larger diffs still require targeted file/range retrieval instead of repeatedly fetching the same truncated output.
+
+In a limited headless PLAN review experiment on 2026-11-13, one replay-plus-preservation run finished in 181 seconds, versus 405 seconds for the same seed with preservation disabled, while peak input grew from 65214 to 91825 tokens.
+Two replay-disabled seeds timed out, but none of the completed responses hit the 32768-token output ceiling; simply raising that ceiling is not an established remedy.
+A matched second-user-query pair retained an additional 60635 input tokens with preservation enabled, without demonstrating better accuracy or latency.
+These are small stochastic observations, not bot acceptance tests or a reliability guarantee: completed reviews still missed reproducible cases and made unsupported claims.
+
+WARNING: Validate review findings and measure actual prompt usage before unattended deployment; replay can substantially increase context pressure, and near-window compaction was not stress-tested by these experiments.
+
+Provider request timeouts and `github.executor.timeoutSeconds` bound different stages of execution.
+If the optional LLM relay is enabled, its 120-second request lifetime remains an additional bound even when the provider timeout is longer.
+Keep worker parallelism consistent with the model server's concurrency capacity and perform the normal bot acceptance checks with the deployed revision.
+
 == Operations
 
 [source,bash]
