@@ -709,7 +709,8 @@ public class TuiCommand implements Runnable {
                     "yca-tui-shutdown");
             Runtime.getRuntime().addShutdownHook(shutdownHook);
             try {
-                tui.run((event, runner) -> onKey(event, runner, active()), frame -> render(frame, active()));
+                final var repaint = new DragRepaint();
+                tui.run(repaint::handle, repaint::render);
             } finally {
                 // quitting the app tears every tab down: interrupt each running turn, wait
                 // for the in-flight futures and release the per-session resources
@@ -782,6 +783,44 @@ public class TuiCommand implements Runnable {
     private UiState active() {
         return tabManager.active();
     }
+
+    /**
+     * Updates every drag immediately, but paints queued drag updates together instead of
+     * rendering the whole scene per mouse report. Confined to one runner's render thread.
+     * A normal queued event requests the paint so the runner retains its error handling,
+     * post-render processors and debug overlay; no queue draining or direct drawing is needed.
+     */
+    private final class DragRepaint {
+        private long generation;
+        private boolean pending;
+
+        private boolean handle(final Event event, final TuiRunner runner) {
+            if (event instanceof final DragRepaintEvent repaint) {
+                return pending && repaint.generation() == generation;
+            }
+            final var redraw = onKey(event, runner, active());
+            if (event instanceof final MouseEvent mouse
+                    && mouse.kind() == MouseEventKind.DRAG
+                    && mouse.isLeftButton()) {
+                if (redraw && !pending) {
+                    pending = true;
+                    runner.dispatch(new DragRepaintEvent(generation));
+                }
+                return false;
+            }
+            // Preserve input boundaries, including events that normally need no frame.
+            return redraw || pending;
+        }
+
+        private void render(final Frame frame) {
+            // Resize/debug frames can bypass handle(). Any frame satisfies the pending paint.
+            pending = false;
+            generation++;
+            TuiCommand.this.render(frame, active());
+        }
+    }
+
+    private record DragRepaintEvent(long generation) implements Event {}
 
     /**
      * Names the sessions this run touched so the user can resume the right one afterwards. Called

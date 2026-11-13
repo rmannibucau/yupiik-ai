@@ -35,6 +35,7 @@ import dev.tamboui.tui.event.KeyModifiers;
 import dev.tamboui.tui.event.MouseButton;
 import dev.tamboui.tui.event.MouseEvent;
 import dev.tamboui.tui.event.PasteEvent;
+import dev.tamboui.tui.event.ResizeEvent;
 import dev.tamboui.widget.Widget;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
@@ -106,6 +107,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -154,6 +156,7 @@ class TuiCommandRenderTest {
     private HeadlessBackend backend;
     private final AtomicReference<TuiRunner> tuiRef = new AtomicReference<>();
     private Thread uiThread;
+    private Duration tickRate = TICK_RATE;
 
     private JsonMapper formatMapper;
     /** The configuration wired into the {@link TuiCommand} under test; a test may override it to e.g. configure multi-provider scenarios. */
@@ -3471,7 +3474,7 @@ class TuiCommandRenderTest {
                         // so each awaitFrame below costs at least one tick. 20ms made the 48 tests
                         // of this class cost seconds for no added coverage - the clock is a
                         // MutableClock, so elapsed-time rendering does not depend on this value.
-                        .tickRate(TICK_RATE)
+                        .tickRate(tickRate)
                         // the event loop waits at most pollTimeout between two runs, so this is
                         // also how long quit() takes to be noticed: the default 40ms was paid by
                         // every single test when joining the ui thread
@@ -4602,6 +4605,227 @@ class TuiCommandRenderTest {
         }
         assertTrue(backend.raw().contains(SelectionState.osc52Payload("@123@")), backend.raw());
         quit();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    void dragBurstCoalescesRepaints(final boolean modal) throws Exception {
+        startDragSelection(modal);
+        final var row = rowOf("abcdefghijklmnopqrstuvwxyz");
+        final var from = columnOfLineContaining("abcdefghijklmnopqrstuvwxyz");
+        final var frames = dragBatch(runner -> {
+            runner.dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
+            for (int i = 0; i < 2000; i++) {
+                runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 2 + i % 8, row));
+            }
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 7, row));
+        });
+        assertEquals(2, frames, "one press frame and one final drag frame");
+        assertTrue(backend.reversed(from + 7, row), backend.text());
+        assertFalse(backend.reversed(from + 8, row), backend.text());
+        quit();
+    }
+
+    @Test
+    void isolatedDragPaintsWithoutTickOrNextInput() throws Exception {
+        startDragSelection(false);
+        final var row = rowOf("abcdefghijklmnopqrstuvwxyz");
+        final var from = columnOfLineContaining("abcdefghijklmnopqrstuvwxyz");
+        assertEquals(1, dragBatch(runner -> runner.dispatch(MouseEvent.press(MouseButton.LEFT, from, row))));
+        assertEquals(1, dragBatch(runner -> runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 5, row))));
+        assertTrue(backend.reversed(from + 5, row), backend.text());
+        assertFalse(backend.reversed(from + 6, row), backend.text());
+        assertEquals(0, dragBatch(runner -> runner.dispatch(new Event() {})), "no lingering repaint request");
+        quit();
+    }
+
+    @Test
+    void resizeInvalidatesOldRepaintWithoutLosingNewDrag() throws Exception {
+        startDragSelection(false);
+        final var row = rowOf("abcdefghijklmnopqrstuvwxyz");
+        final var from = columnOfLineContaining("abcdefghijklmnopqrstuvwxyz");
+        final var frames = dragBatch(runner -> {
+            runner.dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 3, row));
+            // Resize is rendered by TuiRunner itself, without calling the application's handler.
+            runner.dispatch(ResizeEvent.of(HeadlessBackend.WIDTH, HeadlessBackend.HEIGHT));
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 7, row));
+        });
+        assertEquals(3, frames, "press, resize, and the newer drag repaint; the old request must be inert");
+        assertTrue(backend.reversed(from + 7, row), backend.text());
+        assertFalse(backend.reversed(from + 8, row), backend.text());
+        quit();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    void dragBurstReleaseCopiesLatestCoordinates(final boolean modal) throws Exception {
+        startDragSelection(modal);
+        final var row = rowOf("abcdefghijklmnopqrstuvwxyz");
+        final var from = columnOfLineContaining("abcdefghijklmnopqrstuvwxyz");
+        final var frames = dragBatch(runner -> {
+            runner.dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
+            for (int i = 0; i < 2000; i++) {
+                runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 2 + i % 8, row));
+            }
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 7, row));
+            runner.dispatch(MouseEvent.release(MouseButton.LEFT, from + 7, row));
+        });
+        assertEquals(2, frames, "release renders the latest selection and satisfies the pending repaint");
+        assertTrue(backend.raw().contains(SelectionState.osc52Payload("abcdefgh")), backend.raw());
+        quit();
+    }
+
+    @Test
+    void dragRepaintPreservesNoopInputBoundary() throws Exception {
+        startDragSelection(false);
+        final var row = rowOf("abcdefghijklmnopqrstuvwxyz");
+        final var from = columnOfLineContaining("abcdefghijklmnopqrstuvwxyz");
+        assertEquals(3, dragBatch(runner -> {
+            runner.dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 3, row));
+            runner.dispatch(new Event() {}); // normally returns false: still a paint boundary
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 7, row));
+        }));
+        assertTrue(backend.reversed(from + 7, row), backend.text());
+        assertFalse(backend.reversed(from + 8, row), backend.text());
+        quit();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    void dragRepaintPreservesSeparateGestures(final boolean modal) throws Exception {
+        startDragSelection(modal);
+        final var row = rowOf("abcdefghijklmnopqrstuvwxyz");
+        final var from = columnOfLineContaining("abcdefghijklmnopqrstuvwxyz");
+        assertEquals(4, dragBatch(runner -> {
+            runner.dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 3, row));
+            runner.dispatch(MouseEvent.release(MouseButton.LEFT, from + 3, row));
+            runner.dispatch(MouseEvent.press(MouseButton.LEFT, from + 10, row));
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 13, row));
+            runner.dispatch(MouseEvent.release(MouseButton.LEFT, from + 13, row));
+        }));
+        final var raw = backend.raw();
+        final var first = raw.indexOf(SelectionState.osc52Payload("abcd"));
+        final var second = raw.indexOf(SelectionState.osc52Payload("klmn"));
+        assertTrue(first >= 0 && second > first, raw);
+        quit();
+    }
+
+    @Test
+    void dragRepaintPreservesPasteKeyAndScrollOrder() throws Exception {
+        startDragSelection(false);
+        final var row = rowOf("abcdefghijklmnopqrstuvwxyz");
+        final var from = columnOfLineContaining("abcdefghijklmnopqrstuvwxyz");
+        dragBatch(runner -> {
+            runner.dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 3, row));
+            runner.dispatch(new PasteEvent("DRAG_ORDER_AB"));
+            runner.dispatch(KeyEvent.ofKey(KeyCode.LEFT));
+            runner.dispatch(MouseEvent.scrollDown(from, row));
+            runner.dispatch(KeyEvent.ofChar('X'));
+        });
+        assertTrue(backend.text().contains("DRAG_ORDER_AXB"), backend.text());
+        quit();
+    }
+
+    @Test
+    void dragRepaintUsesActiveTab() throws Exception {
+        startDragSelection(false);
+        final var row = rowOf("abcdefghijklmnopqrstuvwxyz");
+        final var from = columnOfLineContaining("abcdefghijklmnopqrstuvwxyz");
+        dragBatch(runner -> {
+            runner.dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 3, row));
+            runner.dispatch(KeyEvent.ofChar('n', KeyModifiers.CTRL));
+            runner.dispatch(new PasteEvent("NEW_TAB_AFTER_DRAG"));
+        });
+        assertTrue(backend.text().contains("NEW_TAB_AFTER_DRAG"), backend.text());
+        assertFalse(backend.text().contains("abcdefghijklmnopqrstuvwxyz"), backend.text());
+        dragBatch(runner -> runner.dispatch(KeyEvent.ofKey(KeyCode.TAB, KeyModifiers.CTRL)));
+        assertTrue(backend.text().contains("abcdefghijklmnopqrstuvwxyz"), backend.text());
+        quit();
+    }
+
+    @Test
+    void dragRepaintIncludesQueuedBackgroundUpdates() throws Exception {
+        final var registry = startDragSelection(false);
+        final var row = rowOf("abcdefghijklmnopqrstuvwxyz");
+        final var from = columnOfLineContaining("abcdefghijklmnopqrstuvwxyz");
+        assertEquals(2, dragBatch(runner -> {
+            runner.dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 3, row));
+            registry.onEvent(new AgentEvent.Status("BACKGROUND_DURING_DRAG", sid(registry)));
+        }));
+        assertTrue(backend.text().contains("BACKGROUND_DURING_DRAG"), backend.text());
+        quit();
+    }
+
+    @Test
+    void dragRepaintDoesNotPreventShutdown() throws Exception {
+        startDragSelection(false);
+        final var row = rowOf("abcdefghijklmnopqrstuvwxyz");
+        final var from = columnOfLineContaining("abcdefghijklmnopqrstuvwxyz");
+        final var stopped = new CountDownLatch(1);
+        final var runner = tuiRef.get();
+        runner.runLater(() -> {
+            runner.dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
+            runner.dispatch(MouseEvent.drag(MouseButton.LEFT, from + 3, row));
+            // This is ahead of the repaint token appended by the drag handler.
+            runner.runLater(() -> {
+                runner.quit();
+                stopped.countDown();
+            });
+        });
+        assertTrue(stopped.await(TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        quit();
+    }
+
+    private ShellRegistry startDragSelection(final boolean modal) throws Exception {
+        // No automatic ticks: the assertions below count only input/request-triggered renders.
+        tickRate = Duration.ofHours(1);
+        final var registry = testRegistry();
+        final var command = command(registry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-drag-repaint-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        if (modal) {
+            registry.onEvent(new AgentEvent.ToolStarted("bash", "{}", sid(registry)));
+            registry.onEvent(new AgentEvent.ToolFinished("bash", "abcdefghijklmnopqrstuvwxyz", true, sid(registry)));
+        } else {
+            registry.onEvent(new AgentEvent.TextDelta("```text\nabcdefghijklmnopqrstuvwxyz\n```", sid(registry)));
+            registry.onEvent(new AgentEvent.TurnDone("```text\nabcdefghijklmnopqrstuvwxyz\n```", sid(registry)));
+        }
+        // Registry updates queue UI work. This explicit input paints it without an automatic tick.
+        tuiRef.get().dispatch(new PasteEvent(""));
+        if (modal) {
+            awaitText("✓ bash");
+            tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ bash")));
+            awaitText("full output");
+        }
+        awaitText("abcdefghijklmnopqrstuvwxyz");
+        return registry;
+    }
+
+    private long dragBatch(final Consumer<TuiRunner> events) throws InterruptedException {
+        final var runner = tuiRef.get();
+        final var completed = new CountDownLatch(1);
+        final var frames = new AtomicLong();
+        runner.runLater(() -> {
+            final var before = backend.frames();
+            events.accept(runner);
+            // The first fence is ahead of repaint requests appended while handling the inputs.
+            // The second is behind those requests, so completion also observes their frames.
+            runner.runLater(() -> runner.runLater(() -> {
+                frames.set(backend.frames() - before);
+                completed.countDown();
+            }));
+        });
+        assertTrue(completed.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "drag batch did not drain");
+        return frames.get();
     }
 
     /** The modal registers its own copy zone: a drag started inside it selects (and copies) it. */

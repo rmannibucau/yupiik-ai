@@ -26,6 +26,7 @@ import dev.tamboui.terminal.Backend;
 import java.util.Optional;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -43,6 +44,7 @@ final class HeadlessBackend implements Backend {
     private final Buffer buffer;
     private final Semaphore drawn = new Semaphore(0);
     private final StringBuilder raw = new StringBuilder();
+    private final AtomicLong frames = new AtomicLong();
 
     HeadlessBackend() {
         this(WIDTH, HEIGHT);
@@ -65,10 +67,16 @@ final class HeadlessBackend implements Backend {
             for (int i = 0; i < diff.size(); i++) {
                 buffer.set(diff.getX(i), diff.getY(i), diff.getCell(i));
             }
+            frames.incrementAndGet();
         } finally {
             lock.unlock();
         }
         drawn.release();
+    }
+
+    /** Number of backend draws, including frames whose diff is empty. */
+    long frames() {
+        return frames.get();
     }
 
     /** Records what the app writes outside of the cell grid: clipboard OSC 52 payloads. */
