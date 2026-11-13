@@ -256,6 +256,15 @@ public class TuiCommand implements Runnable {
     private static final int MAX_REGION_UNIT_SOURCE_CHARS = 512 * 1024;
     private final Map<RegionUnitKey, ContentPart> regionUnitCache = new LinkedHashMap<>(16, 0.75f, true);
     private long regionUnitCacheWeight;
+    // A replay can be one giant prose region that bypasses both outer caches. Cache complete
+    // speaker turns (including their open suffix and header) at the existing rendering boundary.
+    // Admission never evicts a live entry: an over-budget sequential history must not thrash
+    // the entire cache on every frame. Unvisited entries are released at the end of the frame.
+    private static final int MAX_TURN_UNIT_CACHE_ENTRIES = 4096;
+    private static final long MAX_TURN_UNIT_CACHE_WEIGHT = 8L * 1024 * 1024;
+    private final Map<TurnUnitKey, CachedTurnUnit> turnUnitCache = new LinkedHashMap<>();
+    private long turnUnitCacheWeight;
+    private long turnUnitFrame;
     private final ToolBodyCache toolBodyCache = new ToolBodyCache();
     private TuiTranscriptModel renderOwner;
     private String renderSessionId;
@@ -4729,6 +4738,9 @@ public class TuiCommand implements Runnable {
         }
         regionUnitCache.clear();
         regionUnitCacheWeight = 0;
+        turnUnitCache.clear();
+        turnUnitCacheWeight = 0;
+        turnUnitFrame = 0;
         toolBodyCache.clear();
         toolOverlayLayout = null;
         transcriptRenderer.clear();
@@ -4759,6 +4771,15 @@ public class TuiCommand implements Runnable {
             int markdownStylesId,
             String userLabel,
             String assistantLabel) {}
+
+    private record TurnUnitKey(
+            TuiTranscriptModel.TurnSegment turn,
+            int width,
+            Palette palette,
+            MarkdownStyles styles,
+            String headerLabel) {}
+
+    private record CachedTurnUnit(ContentPart part, long weight, long frame) {}
 
     /**
      * Renders one stable region (thought / log / plain prose) through a bounded content-keyed
@@ -4832,7 +4853,11 @@ public class TuiCommand implements Runnable {
 
     // Conservative accounting for source, rows, spans and widget closures; not a heap-size claim.
     private static long regionWeight(final RegionUnitKey key, final ContentPart part) {
-        var weight = 256L + 2L * key.text().length() + 256L * part.chunks().size();
+        return contentPartWeight(key.text(), part);
+    }
+
+    private static long contentPartWeight(final String source, final ContentPart part) {
+        var weight = 256L + 2L * source.length() + 256L * part.chunks().size();
         for (final var row : part.rows()) {
             weight += 256L + 64L * row.length();
         }
@@ -4913,6 +4938,7 @@ public class TuiCommand implements Runnable {
             runHeaders.addAll(cached.runHeaders());
             return;
         }
+        turnUnitFrame++;
         final var contentWidth = Math.max(1, width - 2); // room for the per-region left bar
         final var local = new ArrayList<RenderedChunk>();
         final var localRows = new ArrayList<String>();
@@ -4989,6 +5015,14 @@ public class TuiCommand implements Runnable {
             }
         }
         flushRuns.run();
+        final var turns = turnUnitCache.values().iterator();
+        while (turns.hasNext()) {
+            final var turn = turns.next();
+            if (turn.frame() != turnUnitFrame) {
+                turnUnitCacheWeight -= turn.weight();
+                turns.remove();
+            }
+        }
         toolBodyCache.retainSources(toolSources);
         final var result = new ContentResult(
                 List.copyOf(local),
@@ -5342,38 +5376,7 @@ public class TuiCommand implements Runnable {
                     if (turn.text().isBlank()) {
                         continue;
                     }
-                    // the `**You**`/`**Assistant**` marker is split out of the rendered body
-                    // and drawn back as a turn header (blank line + role-colored label + rule
-                    // to the panel edge): the boundary must stay readable when scrolling back,
-                    // which a single gray word at the text indent could not convey. A labelled
-                    // segment starts on the marker line, so drop exactly that first line.
-                    final var markerEnd = turn.labelled() ? turn.text().indexOf('\n') : -1;
-                    final var body = markerEnd < 0
-                            ? turn.text()
-                            : turn.text().substring(markerEnd + 1).stripLeading();
-                    final var bar = turn.user() ? userBar() : outputBar();
-                    final var roleMarkdown = turn.user() ? userMarkdownStyles : assistantMarkdownStyles;
-                    final var rendered =
-                            transcriptRenderer.renderRegionWithKinds(body, width, Style.EMPTY, roleMarkdown);
-                    final var lines = new ArrayList<>(withBar(rendered.lines(), bar));
-                    final var kinds = new ArrayList<>(rendered.kinds());
-                    if (turn.labelled()) {
-                        // the header keeps the same bar so the left border stays continuous and
-                        // the rule reads flush with the panel edge like every content line. The
-                        // label comes from the marker as written at turn start (real timestamp);
-                        // a fresh render is only a fallback for hand-edited transcripts without
-                        // one. Colors stay role-driven: primary (user) vs accent (assistant).
-                        final var headerLabel =
-                                turn.label() == null || turn.label().isBlank()
-                                        ? (turn.user() ? state.model.userLabel() : state.model.assistantLabel())
-                                        : turn.label();
-                        lines.add(0, Line.from(bar).append(turnHeader(turn.user(), width, headerLabel)));
-                        kinds.add(0, SelectionState.RowKind.HEADER);
-                        // spacer row above the header: two turns must never read as one
-                        lines.add(0, Line.from(bar));
-                        kinds.add(0, SelectionState.RowKind.HARD);
-                    }
-                    addMarkdownChunk(out, lines, kinds, rows);
+                    appendPart(out, rows, turnUnit(turn, width, state));
                     anySegment = true;
                 }
             } else {
@@ -5407,6 +5410,50 @@ public class TuiCommand implements Runnable {
 
     private void addMarkdownChunk(final List<RenderedChunk> out, final List<Line> lines, final List<String> rows) {
         addMarkdownChunk(out, lines, null, rows);
+    }
+
+    private ContentPart turnUnit(final TuiTranscriptModel.TurnSegment turn, final int width, final UiState state) {
+        final var roleMarkdown = turn.user() ? userMarkdownStyles : assistantMarkdownStyles;
+        final var headerLabel = !turn.labelled()
+                ? ""
+                : turn.label() == null || turn.label().isBlank()
+                        ? (turn.user() ? state.model.userLabel() : state.model.assistantLabel())
+                        : turn.label();
+        final var key = new TurnUnitKey(turn, width, palette, roleMarkdown, headerLabel);
+        final var cached = turnUnitCache.get(key);
+        if (cached != null) {
+            turnUnitCache.put(key, new CachedTurnUnit(cached.part(), cached.weight(), turnUnitFrame));
+            return cached.part();
+        }
+        // Keep the original miss path: the marker is drawn as a role-colored header, while
+        // the complete body (including any unterminated line) goes through the same renderer.
+        final var markerEnd = turn.labelled() ? turn.text().indexOf('\n') : -1;
+        final var body = markerEnd < 0
+                ? turn.text()
+                : turn.text().substring(markerEnd + 1).stripLeading();
+        final var bar = turn.user() ? userBar() : outputBar();
+        final var rendered = transcriptRenderer.renderRegionWithKinds(body, width, Style.EMPTY, roleMarkdown);
+        final var lines = new ArrayList<>(withBar(rendered.lines(), bar));
+        final var kinds = new ArrayList<>(rendered.kinds());
+        if (turn.labelled()) {
+            lines.add(0, Line.from(bar).append(turnHeader(turn.user(), width, headerLabel)));
+            kinds.add(0, SelectionState.RowKind.HEADER);
+            lines.add(0, Line.from(bar));
+            kinds.add(0, SelectionState.RowKind.HARD);
+        }
+        final var chunks = new ArrayList<RenderedChunk>();
+        final var rows = new ArrayList<String>();
+        addMarkdownChunk(chunks, lines, kinds, rows);
+        final var part = new ContentPart(List.copyOf(chunks), List.copyOf(rows), null);
+        if (turn.text().length() <= MAX_REGION_UNIT_SOURCE_CHARS
+                && turnUnitCache.size() < MAX_TURN_UNIT_CACHE_ENTRIES) {
+            final var weight = contentPartWeight(turn.text(), part);
+            if (weight <= MAX_TURN_UNIT_CACHE_WEIGHT - turnUnitCacheWeight) {
+                turnUnitCache.put(key, new CachedTurnUnit(part, weight, turnUnitFrame));
+                turnUnitCacheWeight += weight;
+            }
+        }
+        return part;
     }
 
     private void addMarkdownChunk(

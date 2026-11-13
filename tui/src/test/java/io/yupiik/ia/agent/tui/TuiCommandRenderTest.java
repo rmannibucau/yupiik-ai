@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import dev.tamboui.buffer.Buffer;
+import dev.tamboui.layout.Rect;
 import dev.tamboui.style.Color;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Text;
@@ -33,6 +35,7 @@ import dev.tamboui.tui.event.KeyModifiers;
 import dev.tamboui.tui.event.MouseButton;
 import dev.tamboui.tui.event.MouseEvent;
 import dev.tamboui.tui.event.PasteEvent;
+import dev.tamboui.widget.Widget;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
@@ -1093,6 +1096,261 @@ class TuiCommandRenderTest {
                 }
             }
             assertEquals(coldState.lastCodeBlock, state.lastCodeBlock);
+        }
+    }
+
+    @Test
+    void completeTurnsReuseChunksAcrossLargeReplayAndCumulativeStreaming() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        // 400 distinct turns fit the turn budget, but four copies make both the enclosing
+        // prose region and full frame too expensive to cache. A 256-entry LRU thrashes here.
+        final var messages = new ArrayList<String>();
+        for (var copy = 0; copy < 4; copy++) {
+            for (var i = 0; i < 400; i++) {
+                messages.add((i % 2 == 0 ? "**You**" : "**Assistant**") + "\n\n" + "turn-%03d ".formatted(i)
+                        + "word ".repeat(42));
+            }
+        }
+        final var replay = String.join("\n\n", messages);
+        assertTrue(replay.length() > 370_000, "fixture must defeat whole-region retention by weight");
+        var previous = renderTurnFrame(command, state, replay, 48);
+        assertEquals(1600, previous.chunks().size(), "one chunk per plain speaker turn");
+        final var unchanged = renderTurnFrame(command, state, replay, 48);
+        assertHistoricalChunksSame(previous, unchanged, 1600);
+
+        var streaming = replay;
+        for (var revision = 0; revision < 4; revision++) {
+            streaming += " appended-" + revision;
+            final var next = renderTurnFrame(command, state, streaming, 48);
+            assertHistoricalChunksSame(previous, next, 1599);
+            Assertions.assertNotSame(
+                    previous.chunks().getLast(),
+                    next.chunks().getLast(),
+                    "the growing final turn must not replay an earlier revision");
+            previous = next;
+        }
+
+        // An edit near the beginning must not discard the unchanged suffix or rely on a
+        // cached prefix. This also checks that identical bodies in other turns survive.
+        messages.set(5, messages.get(5) + " edited");
+        final var edited = renderTurnFrame(command, state, String.join("\n\n", messages), 48);
+        for (var i = 0; i < 1599; i++) {
+            if (i == 5) {
+                Assertions.assertNotSame(
+                        previous.chunks().get(i), edited.chunks().get(i));
+            } else {
+                Assertions.assertSame(previous.chunks().get(i), edited.chunks().get(i), "turn " + i);
+            }
+        }
+        assertTurnFrameMatchesCold(command, state, String.join("\n\n", messages), 48, edited);
+    }
+
+    @Test
+    void manySmallPersistedMessagesReplayAsOneOversizedProseRegion() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var messages = new ArrayList<Message>();
+        for (var i = 0; i < 1600; i++) {
+            messages.add(Message.assistant("A persisted **answer** with `code_value`. ".repeat(6), List.of()));
+        }
+        final var source = state.model.replay(messages);
+        assertTrue(source.length() > 400_000);
+        assertEquals(1, TuiTranscriptModel.regions(source).size(), "small messages aggregate on resume");
+        final var first = renderTurnFrame(command, state, source, 80);
+        final var unchanged = renderTurnFrame(command, state, source, 80);
+        assertHistoricalChunksSame(first, unchanged, first.chunks().size());
+        final var growing = renderTurnFrame(command, state, source + " live continuation", 80);
+        assertHistoricalChunksSame(unchanged, growing, unchanged.chunks().size() - 1);
+        assertTurnFrameMatchesCold(command, state, source + " live continuation", 80, growing);
+    }
+
+    @Test
+    void turnReusePreservesRoleBoundariesMarkdownCopyAndInvalidation() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var source = "unlabelled introduction\n\n---\n\n**You**\n\nsame **bold** _italic_ `inline` body\n\n"
+                + "**Assistant**\n\nsame **bold** _italic_ `inline` body\n\n> quoted **You** is not a speaker boundary\n\n"
+                + "| name | value |\n| --- | --- |\n| one | two |\n\n"
+                + "```java\n// **You** inside a fence\nint answer = 42;\n```\n\n"
+                + "**You**\n\nlast prompt\n\n**Assistant**\n\nstreaming answer";
+        var frame = renderTurnFrame(command, state, source, 48);
+        assertTrue(frame.lastCodeBlock().contains("int answer = 42;"));
+        Assertions.assertNotSame(
+                frame.chunks().get(1),
+                frame.chunks().get(2),
+                "equal body text does not make different roles interchangeable");
+        assertTrue(frame.rows().stream().anyMatch(row -> row.contains("unlabelled introduction")));
+        assertTrue(frame.rows().stream().anyMatch(row -> row.contains("one")));
+        assertTurnFrameMatchesCold(command, state, source, 48, frame);
+
+        frame = renderTurnFrame(command, state, source, 48);
+        state.lastCodeBlock = "another tab's code";
+        final var appended = renderTurnFrame(command, state, source + " grows", 48);
+        Assertions.assertSame(frame.chunks().getFirst(), appended.chunks().getFirst(), "reuse a complete styled turn");
+        assertEquals(frame.lastCodeBlock(), appended.lastCodeBlock(), "cached history restores code copy target");
+        // Fence splitting and its separator rows retain their existing semantics; compare
+        // output/kinds with a cold render rather than inventing different turn boundaries.
+        assertTurnFrameMatchesCold(command, state, source + " grows", 48, appended);
+
+        frame = renderTurnFrame(command, state, source, 48);
+        final var narrow = renderTurnFrame(command, state, source, 30);
+        Assertions.assertNotSame(frame.chunks().getFirst(), narrow.chunks().getFirst(), "width invalidates turns");
+        assertTurnFrameMatchesCold(command, state, source, 30, narrow);
+
+        frame = renderTurnFrame(command, state, source, 48);
+        state.model.setLabels("Human", "Agent");
+        final var relabelled = renderTurnFrame(command, state, source, 48);
+        Assertions.assertNotSame(
+                frame.chunks().getFirst(),
+                relabelled.chunks().getFirst(),
+                "marker configuration edits invalidate cached segmentation");
+        assertTurnFrameMatchesCold(command, state, source, 48, relabelled);
+
+        state.model.setLabels("You", "Assistant");
+        frame = renderTurnFrame(command, state, source, 48);
+        final var applyTheme = TuiCommand.class.getDeclaredMethod("applyTheme", String.class);
+        applyTheme.setAccessible(true);
+        applyTheme.invoke(command, "light");
+        final var light = renderTurnFrame(command, state, source, 48);
+        Assertions.assertNotSame(frame.chunks().getFirst(), light.chunks().getFirst(), "theme invalidates turns");
+        assertTurnFrameMatchesCold(command, state, source, 48, light);
+
+        final var reset = renderTurnFrame(command, state, "**Assistant**\n\nno code remains", 48);
+        Assertions.assertNull(reset.lastCodeBlock(), "history removal must release the code copy target");
+    }
+
+    @Test
+    void turnCacheRemainsBoundedWhileStreamingAndReleasesRemovedHistory() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        // Retained memory has no visible output equivalent, so inspect only the two
+        // accounting fields, not cache keys or the implementation of admission/eviction.
+        final var cacheField = TuiCommand.class.getDeclaredField("turnUnitCache");
+        cacheField.setAccessible(true);
+        final var weightField = TuiCommand.class.getDeclaredField("turnUnitCacheWeight");
+        weightField.setAccessible(true);
+        for (final var bodyLength : List.of(1, 300)) {
+            final var history = new StringBuilder();
+            for (var i = 0; i < (bodyLength == 1 ? 4300 : 1100); i++) {
+                history.append("**Assistant**\n\nentry-")
+                        .append(i)
+                        .append(' ')
+                        .append("word ".repeat(bodyLength / 5 + 1))
+                        .append("\n\n");
+            }
+            var source = history.toString();
+            var previous = renderTurnFrame(command, state, source, 48);
+            for (var revision = 0; revision < 3; revision++) {
+                final var cache = (Map<?, ?>) cacheField.get(command);
+                final var weight = ((Number) weightField.get(command)).longValue();
+                assertFalse(cache.isEmpty(), "bounded admission must still retain some turns");
+                assertTrue(cache.size() <= 4096, "entry limit exceeded: " + cache.size());
+                assertTrue(weight > 0 && weight <= 8L * 1024 * 1024, "weight limit exceeded: " + weight);
+                source += " streaming-" + revision;
+                final var next = renderTurnFrame(command, state, source, 48);
+                Assertions.assertSame(
+                        previous.chunks().getFirst(),
+                        next.chunks().getFirst(),
+                        "a saturated frame must not evict its admitted historical turns on every replay");
+                previous = next;
+            }
+            final var reset = renderTurnFrame(command, state, "**You**\n\nreplacement history", 48);
+            assertTrue(((Map<?, ?>) cacheField.get(command)).size() <= 1, "removed history must be pruned");
+            final var retainedWeight = ((Number) weightField.get(command)).longValue();
+            assertTrue(retainedWeight >= 0 && retainedWeight < 16_384, "removed history weight must be released");
+            assertTurnFrameMatchesCold(command, state, "**You**\n\nreplacement history", 48, reset);
+            clearTurnRenderCaches(command);
+            assertTrue(((Map<?, ?>) cacheField.get(command)).isEmpty(), "explicit clear must release all turns");
+            assertEquals(0L, ((Number) weightField.get(command)).longValue());
+        }
+    }
+
+    private record TurnFrame(
+            List<Object> chunks,
+            List<String> rows,
+            List<UiState.ToolTop> toolTops,
+            List<UiState.FooterLink> footerLinks,
+            List<UiState.RunHeader> runHeaders,
+            String lastCodeBlock) {}
+
+    private TurnFrame renderTurnFrame(
+            final TuiCommand command, final UiState state, final String source, final int width) throws Exception {
+        final var render = TuiCommand.class.getDeclaredMethod(
+                "contentChunks",
+                List.class,
+                String.class,
+                int.class,
+                UiState.class,
+                List.class,
+                List.class,
+                List.class,
+                List.class);
+        render.setAccessible(true);
+        final var chunks = new ArrayList<Object>();
+        final var rows = new ArrayList<String>();
+        final var toolTops = new ArrayList<UiState.ToolTop>();
+        final var footerLinks = new ArrayList<UiState.FooterLink>();
+        final var runHeaders = new ArrayList<UiState.RunHeader>();
+        render.invoke(command, chunks, source, width, state, toolTops, footerLinks, runHeaders, rows);
+        return new TurnFrame(chunks, rows, toolTops, footerLinks, runHeaders, state.lastCodeBlock);
+    }
+
+    private void assertHistoricalChunksSame(final TurnFrame before, final TurnFrame after, final int count) {
+        assertEquals(before.chunks().size(), after.chunks().size());
+        for (var i = 0; i < count; i++) {
+            Assertions.assertSame(before.chunks().get(i), after.chunks().get(i), "historical turn " + i);
+        }
+    }
+
+    private void clearTurnRenderCaches(final TuiCommand command) throws Exception {
+        final var clear = TuiCommand.class.getDeclaredMethod("clearRenderCaches");
+        clear.setAccessible(true);
+        clear.invoke(command);
+    }
+
+    private void assertTurnFrameMatchesCold(
+            final TuiCommand command, final UiState state, final String source, final int width, final TurnFrame warm)
+            throws Exception {
+        clearTurnRenderCaches(command);
+        final var cold = renderTurnFrame(command, state, source, width);
+        assertEquals(cold.rows(), warm.rows(), "cached and cold search/copy rows");
+        assertEquals(cold.toolTops(), warm.toolTops());
+        assertEquals(cold.footerLinks(), warm.footerLinks());
+        assertEquals(cold.runHeaders(), warm.runHeaders());
+        assertEquals(cold.lastCodeBlock(), warm.lastCodeBlock());
+        assertEquals(cold.chunks().size(), warm.chunks().size());
+        for (var i = 0; i < warm.chunks().size(); i++) {
+            for (final var field : List.of("height", "rowKinds", "box")) {
+                final var accessor = warm.chunks().get(i).getClass().getDeclaredMethod(field);
+                accessor.setAccessible(true);
+                final var expected = accessor.invoke(cold.chunks().get(i));
+                final var actual = accessor.invoke(warm.chunks().get(i));
+                if (actual instanceof Object[] array) {
+                    Assertions.assertArrayEquals((Object[]) expected, array, "chunk " + i + ": " + field);
+                } else {
+                    assertEquals(expected, actual, "chunk " + i + ": " + field);
+                }
+            }
+            final var widget = warm.chunks().get(i).getClass().getDeclaredMethod("widget", int.class);
+            widget.setAccessible(true);
+            final var height = warm.chunks().get(i).getClass().getDeclaredMethod("height");
+            height.setAccessible(true);
+            final var area =
+                    new Rect(0, 0, width + 2, (int) height.invoke(warm.chunks().get(i)));
+            final var expected = Buffer.empty(area);
+            final var actual = Buffer.empty(area);
+            ((Widget) widget.invoke(cold.chunks().get(i), 0)).render(area, expected);
+            ((Widget) widget.invoke(warm.chunks().get(i), 0)).render(area, actual);
+            for (var y = 0; y < area.height(); y++) {
+                for (var x = 0; x < area.width(); x++) {
+                    assertEquals(expected.get(x, y).symbol(), actual.get(x, y).symbol(), "rendered symbol");
+                    assertEquals(expected.get(x, y).style(), actual.get(x, y).style(), "rendered style");
+                    assertEquals(
+                            expected.get(x, y).isContinuation(),
+                            actual.get(x, y).isContinuation());
+                }
+            }
         }
     }
 
