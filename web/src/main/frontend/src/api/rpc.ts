@@ -6,6 +6,8 @@ export type ServerRequest = {
   id: number;
   method: string;
   params: Record<string, unknown>;
+  /** Source SSE stream, not whichever session happens to be selected on delivery. */
+  sessionId?: string;
 };
 
 type ServerRequestHandler = (request: ServerRequest, respond: (value: unknown) => void) => void;
@@ -34,10 +36,11 @@ export async function call<T>(method: string, params: Record<string, unknown> = 
  * response is posted exactly once - if every handler ran, several mounted pages would each POST
  * the same resolution back to the backend.
  */
-export function dispatchServerRequest(id: number, method: string, params: Record<string, unknown>): void {
+export function dispatchServerRequest(id: number, method: string, params: Record<string, unknown>, sessionId?: string): void {
+  const request = { id, method, params, ...(sessionId ? { sessionId } : {}) };
   const entry = handlers[handlers.length - 1];
   if (!entry) return;
-  entry.onRequest({ id, method, params }, (value) => {
+  entry.onRequest(request, (value) => {
     // resolve the backend future by POSTing the response back
     void fetch('/api/rpc', {
       method: 'POST',

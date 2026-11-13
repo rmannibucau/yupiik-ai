@@ -502,8 +502,10 @@ public class CompactionCoordinator {
      * {@code </compacted-context>} is whitespace or the {@link #DIGEST_GUIDANCE}. Anything else - a
      * tool/assistant/prose message, a quoted or inline digest, a malformed or unclosed wrapper - is an
      * ordinary event so real history is never silently dropped on an unproven coverage assumption.
+     * Display projections use the same recognition rule to omit internal digests without hiding
+     * quoted examples or changing persisted model context.
      */
-    private static boolean isDigestMessage(final Message m) {
+    public static boolean isDigestMessage(final Message m) {
         if (!"user".equals(m.role()) || !(m.content() instanceof String s)) {
             return false;
         }

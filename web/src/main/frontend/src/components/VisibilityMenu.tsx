@@ -1,16 +1,17 @@
 import { useEffect, useId, useRef, useState } from 'react';
 
-export type ToolVisibility = 'shown' | 'collapsed' | 'hidden';
+export type Visibility = 'shown' | 'collapsed' | 'hidden';
 
-const options: { value: ToolVisibility; label: string }[] = [
+const options: { value: Visibility; label: string }[] = [
   { value: 'hidden', label: 'Hidden' },
   { value: 'collapsed', label: 'Collapsed' },
   { value: 'shown', label: 'Expanded' },
 ];
 
-export function ToolVisibilityMenu({ value, onChange }: {
-  value: ToolVisibility;
-  onChange: (value: ToolVisibility) => void;
+export function VisibilityMenu({ label, value, onChange }: {
+  label: string;
+  value: Visibility;
+  onChange: (value: Visibility) => void;
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
@@ -46,7 +47,7 @@ export function ToolVisibilityMenu({ value, onChange }: {
     }
   };
 
-  return <div ref={container} className="yca-tool-visibility" onBlur={event => {
+  return <div ref={container} className="yca-visibility" onBlur={event => {
     if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
       setOpen(false);
     }
@@ -59,7 +60,7 @@ export function ToolVisibilityMenu({ value, onChange }: {
   }}>
     <button ref={trigger} type="button" className="rounded px-1.5 hover:bg-white/5"
       aria-haspopup="menu" aria-expanded={open} aria-controls={id}
-      title="Tool output visibility"
+      title={`${label} visibility`}
       onClick={() => { if (open) { close(); } else { show(); } }}
       onKeyDown={event => {
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -67,9 +68,9 @@ export function ToolVisibilityMenu({ value, onChange }: {
           show(event.key === 'ArrowDown' ? 0 : options.length - 1);
         }
       }}>
-      Tools: {options.find(option => option.value === value)?.label} <span aria-hidden="true">{'\u25be'}</span>
+      {label}: {options.find(option => option.value === value)?.label} <span aria-hidden="true">{'\u25be'}</span>
     </button>
-    <div id={id} role="menu" aria-label="Tool visibility" className="yca-tool-visibility-menu" hidden={!open}
+    <div id={id} role="menu" aria-label={`${label} visibility`} className="yca-visibility-menu" hidden={!open}
       onKeyDown={event => {
         const index = items.current.indexOf(document.activeElement as HTMLButtonElement);
         let next: number | undefined;
@@ -95,7 +96,7 @@ export function ToolVisibilityMenu({ value, onChange }: {
           close();
           onChange(option.value);
         }}>
-        <span className="yca-tool-visibility-check" aria-hidden="true">{value === option.value ? '\u2713' : ''}</span>
+        <span className="yca-visibility-check" aria-hidden="true">{value === option.value ? '\u2713' : ''}</span>
         {option.label}
       </button>)}
     </div>

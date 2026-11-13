@@ -2,11 +2,11 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ToolVisibilityMenu, type ToolVisibility } from './ToolVisibilityMenu';
+import { VisibilityMenu, type Visibility } from './VisibilityMenu';
 
 let host: HTMLDivElement;
 let root: Root;
-let onChange: ReturnType<typeof vi.fn<(value: ToolVisibility) => void>>;
+let onChange: ReturnType<typeof vi.fn<(value: Visibility) => void>>;
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -22,8 +22,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function render(value: ToolVisibility = 'collapsed') {
-  act(() => root.render(<ToolVisibilityMenu value={value} onChange={onChange} />));
+function render(value: Visibility = 'collapsed', label = 'Tools') {
+  act(() => root.render(<VisibilityMenu label={label} value={value} onChange={onChange} />));
 }
 
 function trigger(): HTMLButtonElement {
@@ -46,7 +46,12 @@ function key(element: HTMLElement, value: string) {
   act(() => element.dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true })));
 }
 
-describe('ToolVisibilityMenu', () => {
+describe('VisibilityMenu', () => {
+  it('labels the reusable thoughts control and menu', () => {
+    render('collapsed', 'Thoughts');
+    expect(trigger().textContent).toContain('Thoughts: Collapsed');
+    expect(menu().getAttribute('aria-label')).toBe('Thoughts visibility');
+  });
   it.each([
     ['hidden', 'Hidden'], ['collapsed', 'Collapsed'], ['shown', 'Expanded'],
   ] as const)('renders the server-synced %s state and selected checkmark', (value, label) => {

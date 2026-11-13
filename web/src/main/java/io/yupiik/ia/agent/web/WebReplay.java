@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.web;
 
+import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.shell.SubagentDeliveryView;
 import java.util.ArrayList;
@@ -28,9 +29,8 @@ import java.util.Map;
  * {@code EventLog} reducer understands the emitted event types: {@code user}, {@code text-delta},
  * {@code tool-started} and {@code tool-finished}.
  *
- * <p>System-role messages are skipped: the leading working-directory marker and any notice/compaction
- * markers are display-only and never reach the browser as turns (they are also filtered at the LLM
- * wire boundary upstream).</p>
+ * <p>System-role messages and whole-message user-role compaction digests are skipped: internal
+ * context must not be displayed as human conversation turns. Stored messages are left intact.</p>
  */
 final class WebReplay {
     private WebReplay() {
@@ -73,7 +73,7 @@ final class WebReplay {
         // counter is exact for what is rendered).
         int ordinal = 1;
         for (final var message : messages) {
-            if (Message.isProjectMarker(message)) {
+            if (Message.isProjectMarker(message) || CompactionCoordinator.isDigestMessage(message)) {
                 continue;
             }
             final var role = message.role();

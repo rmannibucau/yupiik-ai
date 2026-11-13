@@ -17,6 +17,9 @@ package io.yupiik.ia.agent.web;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.framework.api.ConfiguringContainer;
+import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
+import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.CliCommands;
@@ -130,6 +133,44 @@ class WebSlashCommandsTest {
                 null,
                 new ShellSession().sessionId("parent"),
                 transcript);
+    }
+
+    @Test
+    void containerInjectsCommandsWithSharedCallbacksAndWebOverrides() {
+        final var shared = commands.registry();
+        final var store = new SessionStore() {
+            @Override
+            public String create() {
+                return "container-session";
+            }
+        };
+        try (final var container = ConfiguringContainer.of()
+                        .disableAutoDiscovery(true)
+                        .register(
+                                new WebSlashCommands$FusionBean(),
+                                new ProvidedInstanceBean<>(DefaultScoped.class, SlashRegistry.class, () -> shared),
+                                new ProvidedInstanceBean<>(
+                                        DefaultScoped.class, SubagentRegistry.class, () -> subagents),
+                                new ProvidedInstanceBean<>(DefaultScoped.class, SessionStore.class, () -> store))
+                        .start();
+                final var instance = container.lookup(WebSlashCommands.class)) {
+            final var injected = instance.instance();
+            assertSame(
+                    shared.find("inspect").orElseThrow(),
+                    injected.registry().find("inspect").orElseThrow());
+            assertEquals(
+                    new ShellOutcome.Transcript("shared result"),
+                    injected.dispatch("/inspect", env).toCompletableFuture().join());
+            events.clear();
+            assertInstanceOf(
+                    ShellOutcome.None.class,
+                    injected.dispatch("/new", env).toCompletableFuture().join());
+            assertEquals("open-session", events.getFirst().data().get("command"));
+            assertEquals("container-session", events.getFirst().data().get("id"));
+            events.clear();
+            injected.dispatch("/tabs", env).toCompletableFuture().join();
+            assertEquals("tabs", events.getFirst().data().get("command"));
+        }
     }
 
     @Test

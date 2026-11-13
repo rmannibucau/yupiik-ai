@@ -1,49 +1,62 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { call } from '../api/rpc';
+import { McpServerPanel, mcpServerStatus } from '../assistant/elements';
 import { PageShell } from './PageShell';
 
-type McpStatus = { name: string; state: string }[];
+type McpStatus = { name: string; state: string; transport?: string; url?: string }[];
 
 export function McpPage() {
   const [servers, setServers] = useState<McpStatus | null>(null);
+  const [error, setError] = useState('');
+  const [resetting, setResetting] = useState(false);
+  const [expandedId, setExpandedId] = useState<string>();
+  const mounted = useRef(false);
 
-  const load = () => {
+  const load = useCallback(async () => {
     setServers(null);
-    call<McpStatus>('mcp.status', {}).then(setServers).catch(() => setServers([]));
-  };
+    setError('');
+    try {
+      const result = await call<McpStatus>('mcp.status', {});
+      if (mounted.current) { setServers(result); }
+    } catch (e) {
+      if (mounted.current) { setError(e instanceof Error ? e.message : String(e)); }
+    }
+  }, []);
 
-  useEffect(load, []);
+  useEffect(() => {
+    mounted.current = true;
+    void load();
+    return () => { mounted.current = false; };
+  }, [load]);
 
   const reset = async (name?: string) => {
-    await call('mcp.reset', name ? { name } : {});
-    load();
+    setResetting(true);
+    setError('');
+    try {
+      await call('mcp.reset', name ? { name } : {});
+      if (mounted.current) { await load(); }
+    } catch (e) {
+      if (mounted.current) { setError(e instanceof Error ? e.message : String(e)); }
+    } finally {
+      if (mounted.current) { setResetting(false); }
+    }
   };
 
   return (
-    <PageShell title="MCP servers">
-      <ul className="space-y-2">
-        {(servers ?? []).map((s) => (
-          <li
-            key={s.name}
-            className="yca-card flex items-center justify-between px-3 py-2"
-          >
-            <span>
-              <span
-                className="mr-2 inline-block h-2 w-2 rounded-full"
-                style={{ background: s.state === 'RUNNING' ? 'var(--yca-success)' : s.state === 'FAILED' ? 'var(--yca-error)' : 'var(--yca-muted)' }}
-              />
-              {s.name}
-              <span className="ml-2 text-xs" style={{ color: 'var(--yca-muted)' }}>{s.state}</span>
-            </span>
-            <button onClick={() => reset(s.name)} className="rounded border px-2 py-0.5 text-xs" style={{ borderColor: 'var(--yca-border)' }}>
-              reset
-            </button>
-          </li>
-        ))}
-        {servers && servers.length === 0 && <p style={{ color: 'var(--yca-muted)' }}>No MCP servers.</p>}
-      </ul>
-      <button onClick={() => reset()} className="mt-4 rounded border px-3 py-1" style={{ borderColor: 'var(--yca-border)' }}>
-        Reset all
+    <PageShell title="MCP servers" fullWidth>
+      {error && <p role="alert" className="mb-3 text-sm text-[var(--yca-error)]">MCP request failed: {error}</p>}
+      {!servers && !error && <p role="status" className="text-sm text-[var(--yca-muted)]">Loading...</p>}
+      {servers && <McpServerPanel
+        className="max-w-none"
+        servers={servers.map(server => ({ id: server.name, name: server.name, transport: server.transport, url: server.url, status: mcpServerStatus(server.state), stateLabel: server.state }))}
+        expandedId={expandedId}
+        onToggle={id => setExpandedId(current => current === id ? undefined : id)}
+        onReset={name => { void reset(name); }}
+        resetting={resetting}
+      />}
+      {servers?.length === 0 && <p className="mt-3 text-[var(--yca-muted)]">No MCP servers.</p>}
+      <button type="button" disabled={resetting} onClick={() => { void reset(); }} className="mt-4 rounded border border-[var(--yca-border)] px-3 py-1 disabled:opacity-50">
+        {resetting ? 'Resetting...' : 'Reset all'}
       </button>
     </PageShell>
   );

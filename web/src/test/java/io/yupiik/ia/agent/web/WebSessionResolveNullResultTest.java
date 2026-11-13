@@ -18,6 +18,8 @@ package io.yupiik.ia.agent.web;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
+import io.yupiik.fusion.httpserver.jre.JreHttpServer;
+import io.yupiik.fusion.httpserver.jre.JreHttpServerConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.jsonrpc.impl.JsonRpcMethod;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
@@ -37,6 +39,10 @@ import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import java.io.StringReader;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -48,6 +54,9 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.BeforeEach;
@@ -225,6 +234,208 @@ class WebSessionResolveNullResultTest {
         } finally {
             broker.unsubscribe("s1", subscription);
         }
+    }
+
+    @Test
+    void pendingQuestionsReplayOnlyToTheirSessionAndDisappearOnResolveOrStop() {
+        final var first = manager.attach("s1");
+        final var second = manager.attach("s2");
+        final var firstResult =
+                first.env().io().readLine("First pending question").toCompletableFuture();
+        final var secondResult =
+                second.env().io().readLine("Second pending question").toCompletableFuture();
+        final var original = new ConcurrentLinkedQueue<String>();
+        final SseBroker.SseSubscription originalTab = bytes -> original.add(new String(bytes, StandardCharsets.UTF_8));
+        manager.subscribe("s1", originalTab);
+        assertEquals(1, original.size());
+        final var request = rpcPayload(original.element());
+        final var id = String.valueOf(request.get("id"));
+        assertEquals("session.question", request.get("method"));
+        assertEquals(false, manager.resolve("s2", id, "wrong session"));
+        assertEquals(false, firstResult.isDone());
+
+        final var reconnect = new ConcurrentLinkedQueue<String>();
+        final SseBroker.SseSubscription reconnectedTab =
+                bytes -> reconnect.add(new String(bytes, StandardCharsets.UTF_8));
+        broker.unsubscribe("s1", originalTab);
+        manager.subscribe("s1", reconnectedTab);
+        assertEquals(List.copyOf(original), List.copyOf(reconnect), "replay must preserve the exact payload and id");
+        manager.subscribe("s1", bytes -> assertEquals(original.element(), new String(bytes, StandardCharsets.UTF_8)));
+        assertEquals(1, reconnect.size(), "replaying another tab must not broadcast to existing tabs");
+        assertEquals(true, manager.resolve("s1", id, "answered"));
+        assertEquals(Optional.of("answered"), firstResult.join());
+        assertEquals(false, manager.resolve("s1", id, "late answer"));
+
+        final var afterResolve = new ConcurrentLinkedQueue<String>();
+        manager.subscribe("s1", bytes -> afterResolve.add(new String(bytes, StandardCharsets.UTF_8)));
+        assertEquals(List.of(), List.copyOf(afterResolve));
+        final var other = new ConcurrentLinkedQueue<String>();
+        manager.subscribe("s2", bytes -> other.add(new String(bytes, StandardCharsets.UTF_8)));
+        assertEquals(1, other.size());
+        assertEquals(false, other.element().contains("First pending question"));
+        manager.cancel("s2");
+        assertEquals(Optional.empty(), secondResult.join());
+        final var afterCancel = new ConcurrentLinkedQueue<String>();
+        manager.subscribe("s2", bytes -> afterCancel.add(new String(bytes, StandardCharsets.UTF_8)));
+        assertEquals(List.of(), List.copyOf(afterCancel));
+        manager.close();
+    }
+
+    @Test
+    void pendingApprovalAndAskReplayAfterDisconnectAndAreRemovedOnResolutionOrInterruption() throws Exception {
+        final var session = manager.attach("s1");
+        final var live = new ConcurrentLinkedQueue<String>();
+        final SseBroker.SseSubscription tab = bytes -> live.add(new String(bytes, StandardCharsets.UTF_8));
+        manager.subscribe("s1", tab);
+        final var approval = new CompletableFuture<ApprovalGate.Result>();
+        final var approving = Thread.startVirtualThread(() -> approval.complete(
+                session.env().io().approvalGate().approve("Run?", "Detail", "exec", Map.of("command", "pwd"))));
+        try {
+            final var original = awaitFrame(live);
+            broker.unsubscribe("s1", tab);
+            final var reconnect = new ConcurrentLinkedQueue<String>();
+            manager.subscribe("s1", bytes -> reconnect.add(new String(bytes, StandardCharsets.UTF_8)));
+            assertEquals(List.of(original), List.copyOf(reconnect));
+            final var request = rpcPayload(original);
+            assertEquals("session.approval", request.get("method"));
+            assertEquals(true, manager.resolve("s1", String.valueOf(request.get("id")), "allow_once"));
+            assertEquals(ApprovalGate.Result.ALLOW_ONCE, approval.get(5, TimeUnit.SECONDS));
+        } finally {
+            approving.interrupt();
+            approving.join();
+        }
+
+        final var answer = new CompletableFuture<Map<String, Object>>();
+        final var asking = Thread.startVirtualThread(() -> answer.complete(session.runtime()
+                .feedback()
+                .ask(List.of(new Question("only", "One question?", List.of("yes", "no"), false)))));
+        try {
+            final var replay = new ConcurrentLinkedQueue<String>();
+            // Subscribe while publication may be in flight: either live or replay must deliver it.
+            manager.subscribe("s1", bytes -> replay.add(new String(bytes, StandardCharsets.UTF_8)));
+            final var request = rpcPayload(awaitFrame(replay));
+            assertEquals("session.ask", request.get("method"));
+            assertEquals(
+                    List.of(Map.of(
+                            "id",
+                            "only",
+                            "prompt",
+                            "One question?",
+                            "options",
+                            List.of("yes", "no"),
+                            "multiple",
+                            false)),
+                    ((Map<?, ?>) request.get("params")).get("questions"));
+            asking.interrupt();
+            asking.join();
+            assertEquals(Map.of("cancelled", true), answer.join());
+            final var after = new ConcurrentLinkedQueue<String>();
+            manager.subscribe("s1", bytes -> after.add(new String(bytes, StandardCharsets.UTF_8)));
+            assertEquals(List.of(), List.copyOf(after));
+            assertEquals(false, manager.resolve("s1", String.valueOf(request.get("id")), Map.of("only", "yes")));
+        } finally {
+            asking.interrupt();
+            asking.join();
+            manager.close();
+        }
+    }
+
+    @Test
+    void closingSessionDropsOutstandingRequests() {
+        final var session = manager.attach("s1");
+        final var pending = session.env().io().readLine("Closing").toCompletableFuture();
+        manager.close();
+        assertEquals(Optional.empty(), pending.join());
+        final var frames = new ConcurrentLinkedQueue<String>();
+        manager.subscribe("s1", bytes -> frames.add(new String(bytes, StandardCharsets.UTF_8)));
+        assertEquals(List.of(), List.copyOf(frames));
+    }
+
+    @Test
+    void sseBootstrapReplaysPendingRpcAfterSnapshotOnEveryConnection() throws Exception {
+        final var pending = manager.attach("s1").env().io().readLine("Survives reload");
+        try (final var client = HttpClient.newHttpClient();
+                final var server = new JreHttpServer(
+                        new JreHttpServerConfiguration(null, 0, true),
+                        List.of(new SseExchangeHandler(broker, manager::snapshotFor, 10, manager::subscribe)))) {
+            server.start();
+            final var request = HttpRequest.newBuilder(
+                            URI.create("http://127.0.0.1:" + server.port() + "/api/stream?session=s1"))
+                    .GET()
+                    .build();
+            List<String> original = null;
+            try {
+                for (int connection = 0; connection < 2; connection++) {
+                    final var response = client.send(request, HttpResponse.BodyHandlers.ofLines());
+                    assertEquals(200, response.statusCode());
+                    try (final var body = response.body()) {
+                        final var frames = body.limit(6).toList();
+                        assertEquals("event: snapshot", frames.get(0));
+                        assertEquals("event: rpc", frames.get(3));
+                        assertEquals(true, frames.get(4).contains("Survives reload"));
+                        if (original == null) {
+                            original = frames;
+                        } else {
+                            assertEquals(original, frames);
+                        }
+                    }
+                }
+            } finally {
+                broker.close();
+            }
+        } finally {
+            manager.close();
+        }
+        assertEquals(Optional.empty(), pending.toCompletableFuture().join());
+    }
+
+    @Test
+    void concurrentPublicationAndSubscriptionNeverLosePendingQuestion() throws Exception {
+        final var session = manager.attach("s1");
+        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int attempt = 0; attempt < 100; attempt++) {
+                final var start = new CountDownLatch(1);
+                final var frames = new ConcurrentLinkedQueue<String>();
+                final SseBroker.SseSubscription tab = bytes -> frames.add(new String(bytes, StandardCharsets.UTF_8));
+                final var publication = executor.submit(() -> {
+                    start.await();
+                    return session.env().io().readLine("Concurrent");
+                });
+                final var subscription = executor.submit(() -> {
+                    start.await();
+                    manager.subscribe("s1", tab);
+                    return true;
+                });
+                start.countDown();
+                final var result = publication.get(5, TimeUnit.SECONDS);
+                subscription.get(5, TimeUnit.SECONDS);
+                assertEquals(false, frames.isEmpty(), "publication must be delivered live or replayed");
+                final var request = rpcPayload(frames.element());
+                for (final var frame : frames) {
+                    assertEquals(request, rpcPayload(frame), "duplicates must retain the same id and payload");
+                }
+                manager.resolve("s1", String.valueOf(request.get("id")), "ok");
+                assertEquals(Optional.of("ok"), result.toCompletableFuture().join());
+                broker.unsubscribe("s1", tab);
+            }
+        } finally {
+            manager.close();
+        }
+    }
+
+    private Map<?, ?> rpcPayload(final String frame) {
+        return mapper.read(
+                Map.class,
+                new StringReader(frame.substring(frame.indexOf("data: ") + 6).strip()));
+    }
+
+    private String awaitFrame(final ConcurrentLinkedQueue<String> frames) throws InterruptedException {
+        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (frames.isEmpty() && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(false, frames.isEmpty(), "no RPC delivered");
+        return frames.element();
     }
 
     private static final class NoopShellRegistry extends ShellRegistry {

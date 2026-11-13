@@ -27,24 +27,33 @@ export function useSlashCompletion(text: string, cursor: number, sessionId: stri
   useEffect(() => {
     // only complete when the caret token starts with '/' (or an @agent prefix),
     // mirroring the shared CompletionEngine's prompt grammar
+    const seq = ++sequenceRef.current;
+    setSuggestion(NO_SUGGESTION);
+    // Invalidate even when leaving slash mode; an already in-flight RPC must not reopen it.
     if (!sessionId || !text.trim().startsWith('/')) {
       setSuggestion(NO_SUGGESTION);
       return;
     }
-    const seq = ++sequenceRef.current;
     const handle = setTimeout(() => {
       call<SlashSuggestion[]>('slash.complete', { text, cursor })
         .then((results) => {
           // drop stale/late responses (a newer keystroke superseded this one)
-          if (sequenceRef.current !== seq || sessionRef.current !== sessionId) return;
+          if (sequenceRef.current !== seq || sessionRef.current !== sessionId) {
+            return;
+          }
           const r = (results ?? [])[0];
           setSuggestion(r && r.items?.length ? r : NO_SUGGESTION);
         })
         .catch(() => {
-          if (sequenceRef.current === seq) setSuggestion(NO_SUGGESTION);
+          if (sequenceRef.current === seq) {
+            setSuggestion(NO_SUGGESTION);
+          }
         });
     }, 120);
-    return () => clearTimeout(handle);
+    return () => {
+      clearTimeout(handle);
+      sequenceRef.current++;
+    };
   }, [text, cursor, sessionId]);
 
   return suggestion;

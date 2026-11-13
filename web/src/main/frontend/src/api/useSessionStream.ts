@@ -125,8 +125,8 @@ const LIVENESS_STALE_MS = 45_000;
  * usage telemetry, status labels - and the UI must stay responsive):
  *  - dedup is O(1): a key {@link Set}, never a scan of the log;
  *  - the log is append-only and mutated in place: `history` + `tail` arrays are pushed to, and a
- *    single ordered view (`[...history, ...tail]`) is handed to React at most once per animation
- *    frame, never once per SSE frame.
+ *    single ordered display view (explicit earlier pages + bounded live window) is handed to React
+ *    at most once per animation frame, never once per SSE frame.
  */
 export function useSessionStream(sessionId: string | undefined) {
   const [events, setEvents] = useState<WebEvent[]>([]);
@@ -155,13 +155,17 @@ export function useSessionStream(sessionId: string | undefined) {
   // populated by the connection effect with a callable that fetches the next earlier slice of the
   // persisted history (the effect owns the in-memory event log it mutates). Kept in a ref so the
   // hook can expose a stable wrapper without re-registering on every render.
-  const loadEarlierRef = useRef<() => void>(() => {});
+  const loadEarlierRef = useRef<() => Promise<void>>(async () => {});
 
   useEffect(() => {
     sessionRef.current = sessionId;
   }, [sessionId]);
 
   useEffect(() => {
+    loadedEventsRef.current = 0;
+    totalReplayRef.current = 0;
+    liveOutCharsRef.current = 0;
+    loadEarlierRef.current = async () => {};
     if (!sessionId) {
       setEvents([]);
       setConnected(false);
@@ -173,22 +177,30 @@ export function useSessionStream(sessionId: string | undefined) {
     // arrives - the previous session's bootstrapped state must not leak onto it.
     setBootstrapped(false);
     const history: WebEvent[] = [];
+    // Explicitly requested pages are not part of the rotating live display window.
+    const earlier: WebEvent[] = [];
+    const earlierKeys = new Set<string>();
     const tail: WebEvent[] = [];
     const keys = new Set<string>();
-    let published: WebEvent[] | null = null;
+    let publishPending = false;
     // monotonic discriminator for state-carrying events (usage/status/notice) whose content fields are
     // constant across occurrences: each one is a genuine update ("latest wins"), so it must survive the
     // O(1) key dedup instead of collapsing into the first occurrence (which froze the sidebar usage bar).
     let seq = 0;
 
     const publish = () => {
-      if (published === null) {
+      if (!publishPending) {
         // one ordered view per animation frame at most; the log itself is mutated in place so a
         // pending batch never blocks the append-only fast path of the SSE listeners
-        published = history.length === 0 ? [...tail] : [...history.slice(-TAIL_LIMIT), ...tail];
+        publishPending = true;
         requestAnimationFrame(() => {
-          published = null;
-          if (!closed) setEvents(history.length === 0 ? [...tail] : [...history.slice(-TAIL_LIMIT), ...tail]);
+          publishPending = false;
+          if (!closed && sessionRef.current === sessionId) {
+            const liveWindow = [...history.slice(-TAIL_LIMIT), ...tail];
+            setEvents(earlier.length === 0 ? liveWindow : [
+              ...earlier, ...liveWindow.filter((ev) => STATE_CARRYING.has(ev.type) || !earlierKeys.has(eventKey(ev))),
+            ]);
+          }
         });
       }
     };
@@ -224,29 +236,51 @@ export function useSessionStream(sessionId: string | undefined) {
 
     // Fetches the next-earlier slice of the persisted history (tail-first snapshot pagination) and
     // PREPENDS it to the ordered log, so a long session stays browseable after the windowed snapshot.
-    const loadEarlier = async () => {
-      if (closed) return;
+    const fetchEarlier = async () => {
+      if (closed || sessionRef.current !== sessionId) {
+        return;
+      }
       try {
         const before = loadedEventsRef.current;
-        if (before <= 0) return;
+        if (before <= 0 || before >= totalReplayRef.current) {
+          return;
+        }
         const r = await call<{ events: WebEvent[]; loaded: number }>('session.loadEarlier', {
           sessionId,
           excludeFromTail: before,
         });
-        if (closed || !Array.isArray(r?.events) || r.events.length === 0) return;
+        if (closed || sessionRef.current !== sessionId || !Array.isArray(r?.events) || r.events.length === 0) {
+          return;
+        }
         // older events go at the FRONT of the log, preserving conversation order; new keys are
         // registered so a reconnect's snapshot never re-appends a just-loaded slice.
+        const page: WebEvent[] = [];
         for (const ev of r.events) {
+          const identity = eventKey(ev);
+          if (!STATE_CARRYING.has(ev.type) && earlierKeys.has(identity)) {
+            continue;
+          }
           const key = dedupKey(ev, STATE_CARRYING.has(ev.type) ? ++seq : seq);
-          if (keys.has(key)) continue;
           keys.add(key);
-          history.unshift(ev);
+          if (!STATE_CARRYING.has(ev.type)) {
+            earlierKeys.add(identity);
+          }
+          page.push(ev);
         }
+        // Prepend the page once: unshifting each event would reverse its server order.
+        earlier.unshift(...page);
         loadedEventsRef.current = typeof r.loaded === 'number' ? r.loaded : before + r.events.length;
         publish();
       } catch {
         // a failed earlier-slice fetch is non-fatal: the already-rendered tail remains, the user retries
       }
+    };
+    // Queue callers, not cursors: each RPC reads the cursor after the previous one settles.
+    // fetchEarlier absorbs errors without advancing it, so a later call can retry the same page.
+    let loadQueue = Promise.resolve();
+    const loadEarlier = (): Promise<void> => {
+      loadQueue = loadQueue.then(fetchEarlier);
+      return loadQueue;
     };
     loadEarlierRef.current = loadEarlier;
 
@@ -302,6 +336,9 @@ export function useSessionStream(sessionId: string | undefined) {
       };
 
       es.addEventListener('snapshot', (ev) => {
+        if (closed || sessionRef.current !== sessionId) {
+          return;
+        }
         try {
           const snap = JSON.parse((ev as MessageEvent).data) as {
             events?: WebEvent[];
@@ -344,6 +381,9 @@ export function useSessionStream(sessionId: string | undefined) {
         }
       });
       es.addEventListener('agent', (ev) => {
+        if (closed || sessionRef.current !== sessionId) {
+          return;
+        }
         try {
           const event = JSON.parse((ev as MessageEvent).data) as WebEvent;
           append(event);
@@ -361,7 +401,9 @@ export function useSessionStream(sessionId: string | undefined) {
             method: string;
             params: Record<string, unknown>;
           };
-          dispatchServerRequest(request.id, request.method, request.params ?? {});
+          if (!closed) {
+            dispatchServerRequest(request.id, request.method, request.params ?? {}, sessionId);
+          }
           lastEventAt = Date.now();
           deliveredContent = true;
         } catch {
@@ -411,7 +453,7 @@ export function useSessionStream(sessionId: string | undefined) {
     reconnecting,
     status,
     moreReplayExists,
-    loadEarlier: () => loadEarlierRef.current(),
+    loadEarlier: (): Promise<void> => loadEarlierRef.current(),
   };
 }
 

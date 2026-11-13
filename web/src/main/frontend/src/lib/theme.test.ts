@@ -98,7 +98,7 @@ describe('Transcript speaker and sidebar layout', () => {
 
   it('keeps metadata labels beside values and allows controls to shrink', () => {
     expect(declarations('.yca-metadata-row')).toMatchObject({
-      display: 'grid', 'grid-template-columns': '4.5rem minmax(0, 1fr)', 'min-width': '0', 'align-items': 'start',
+      display: 'grid', 'grid-template-columns': '4.5rem minmax(0, 1fr)', 'min-width': '0', 'align-items': 'center',
     });
     expect(declarations('.yca-metadata-row > dd')).toMatchObject({ margin: '0', 'min-width': '0' });
     expect(declarations('.yca-metadata-value')['overflow-wrap']).toBe('anywhere');

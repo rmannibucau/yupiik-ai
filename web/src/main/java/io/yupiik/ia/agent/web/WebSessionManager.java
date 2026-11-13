@@ -49,6 +49,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -444,15 +445,26 @@ public class WebSessionManager implements AutoCloseable {
         if (session == null || session.io == null) {
             return false;
         }
-        final var pending = session.io.pendingRequests.remove(id);
-        if (pending == null) {
+        if (!session.io.resolve(id, result)) {
             // already resolved/completed (e.g. the turn was cancelled or the request timed out):
             // not a hard error, but log it so a spurious late resolve is diagnosable.
             LOGGER.fine(() -> "resolve for unknown pending request " + id + " on session " + sessionId);
             return false;
         }
-        pending.complete(result);
         return true;
+    }
+
+    /**
+     * Registers before replaying outstanding interactive requests, so a concurrent publication is
+     * delivered live or replayed (possibly both, with the same id). Never attaches another runtime
+     * or broadcasts the replay to other tabs. The caller must enqueue its snapshot first.
+     */
+    public void subscribe(final String sessionId, final SseBroker.SseSubscription subscription) {
+        broker.subscribe(sessionId, subscription);
+        final var session = sessions.get(sessionId);
+        if (session != null) {
+            session.io.replayPending(subscription);
+        }
     }
 
     @Override
@@ -710,7 +722,10 @@ public class WebSessionManager implements AutoCloseable {
     /** {@link ShellIO} bridging interactive requests (approval/question) to JSON-RPC over SSE. */
     private final class WebShellIO implements ShellIO {
         private final ShellSession session;
-        private final ConcurrentHashMap<String, CompletableFuture<Object>> pendingRequests = new ConcurrentHashMap<>();
+        private final ReentrantLock pendingLock = new ReentrantLock();
+        private final Map<String, PendingRequest> pendingRequests = new LinkedHashMap<>();
+
+        private record PendingRequest(Map<String, Object> payload, CompletableFuture<Object> future) {}
 
         private WebShellIO(final ShellSession session) {
             this.session = session;
@@ -795,10 +810,8 @@ public class WebSessionManager implements AutoCloseable {
 
         private Object awaitRpc(final Map<String, Object> request) {
             final var id = rpcId.incrementAndGet();
-            final var future = new CompletableFuture<Object>();
-            pendingRequests.put(String.valueOf(id), future);
-            broker.pushRpc(
-                    session.sessionId(),
+            final var future = registerRpc(
+                    String.valueOf(id),
                     Map.of(
                             "jsonrpc",
                             "2.0",
@@ -819,23 +832,70 @@ public class WebSessionManager implements AutoCloseable {
                         + " min; treating as rejected");
                 return null;
             } finally {
-                pendingRequests.remove(String.valueOf(id));
+                resolve(String.valueOf(id), null);
             }
         }
 
         private CompletableFuture<Object> askRpc(final Map<String, Object> params) {
             final var id = rpcId.incrementAndGet();
-            final var future = new CompletableFuture<Object>();
-            pendingRequests.put(String.valueOf(id), future);
-            broker.pushRpc(
-                    session.sessionId(),
+            final var future = registerRpc(
+                    String.valueOf(id),
                     Map.of("jsonrpc", "2.0", "id", id, "method", "session.question", "params", params));
             return future;
         }
 
+        private CompletableFuture<Object> registerRpc(final String id, final Map<String, Object> payload) {
+            final var future = new CompletableFuture<Object>();
+            pendingLock.lock();
+            try {
+                pendingRequests.put(id, new PendingRequest(payload, future));
+                future.whenComplete((_, _) -> {
+                    pendingLock.lock();
+                    try {
+                        pendingRequests.remove(id);
+                    } finally {
+                        pendingLock.unlock();
+                    }
+                });
+                broker.pushRpc(session.sessionId(), payload);
+                return future;
+            } finally {
+                pendingLock.unlock();
+            }
+        }
+
+        private boolean resolve(final String id, final Object result) {
+            pendingLock.lock();
+            try {
+                final var pending = pendingRequests.remove(id);
+                return pending != null && pending.future().complete(result);
+            } finally {
+                pendingLock.unlock();
+            }
+        }
+
+        private void replayPending(final SseBroker.SseSubscription subscription) {
+            pendingLock.lock();
+            try {
+                for (final var pending : List.copyOf(pendingRequests.values())) {
+                    if (!pending.future().isDone()) {
+                        subscription.push(broker.rpcFrame(pending.payload()));
+                    }
+                }
+            } finally {
+                pendingLock.unlock();
+            }
+        }
+
         private void cancelAllPending() {
-            pendingRequests.values().forEach(f -> f.complete(null));
-            pendingRequests.clear();
+            pendingLock.lock();
+            try {
+                final var pending = List.copyOf(pendingRequests.values());
+                pendingRequests.clear();
+                pending.forEach(p -> p.future().complete(null));
+            } finally {
+                pendingLock.unlock();
+            }
         }
     }
 }

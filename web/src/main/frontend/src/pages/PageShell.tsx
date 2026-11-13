@@ -12,14 +12,16 @@ export function PageShell({
   subtitle,
   children,
   className = '',
+  fullWidth = false,
 }: {
   title: string;
   subtitle?: string;
   children: React.ReactNode;
   className?: string;
+  fullWidth?: boolean;
 }) {
   return (
-    <div className={`mx-auto h-full max-w-5xl overflow-y-auto p-6 text-[15px] ${className}`}>
+    <div className={`mx-auto h-full ${fullWidth ? 'w-full max-w-none' : 'max-w-5xl'} overflow-y-auto p-6 text-[15px] ${className}`}>
       <div className="yca-page-header">
         <h1>{title}</h1>
         {subtitle && (

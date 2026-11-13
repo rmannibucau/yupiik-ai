@@ -1,22 +1,27 @@
 import { ContextBar, formatQuotaReset, quotaWindowLabel } from '../components/UsageBar';
-import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { createContext, forwardRef, memo, useCallback, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router';
 import { ToolCard } from '../components/ToolCard';
-import { ToolVisibilityMenu } from '../components/ToolVisibilityMenu';
+import { VisibilityMenu, type Visibility } from '../components/VisibilityMenu';
 import { MarkdownContent } from '../components/MarkdownContent';
 import { SessionMetadata } from '../components/SessionMetadata';
-import { call, onServerRequest, type ServerRequest } from '../api/rpc';
+import { call } from '../api/rpc';
+import { SessionRequests, useInteractiveRequests, type RequestState } from '../assistant/actions';
 import { useSessionStream, type WebEvent, type SessionStatus } from '../api/useSessionStream';
 import {
-  eventsToBlocks,
   renderWindow,
   latestDrainBoundary,
   LOAD_EARLIER_CHUNK,
   type Block,
 } from '../api/eventLog';
 import { applyWebCommand } from '../api/webCommands';
-import { useSlashCompletion, applySuggestion, type SlashSuggestion } from '../api/useSlashCompletion';
+import { useSlashCompletion, applySuggestion } from '../api/useSlashCompletion';
 import { normalizeMarkdown, hasOpenInlineSpan, stripEchoedRefs } from '../lib/markdown';
+import { ComposerPrimitive, ThreadPrimitive, MessagePrimitive, useAuiState } from '@assistant-ui/react';
+import { YcaRuntime, ComposerDraft } from '../assistant/YcaRuntime';
+import { SlashPopover } from '../assistant/SlashPopover';
+import { Reasoning } from '../assistant/Reasoning';
+import { TodoList, McpServerPanel, mcpServerStatus, SubagentActivity } from '../assistant/elements';
 
 // resizable sidebar width bounds and default (px), persisted in localStorage like the theme
 const SIDEBAR_DEFAULT_WIDTH = 256; // matches the historical w-64
@@ -34,6 +39,7 @@ const PROMPT_MAX_HEIGHT_VH = 0.5; // hard ceiling: half the viewport height
 const promptMaxHeight = () => Math.min(PROMPT_MAX_HEIGHT, Math.floor(window.innerHeight * PROMPT_MAX_HEIGHT_VH));
 
 type TodoItem = { content: string; status: string };
+type McpServerInfo = { name: string; state: string; transport?: string; url?: string };
 type SidebarInfo = {
   project?: string;
   gitBranch?: string;
@@ -43,7 +49,7 @@ type SidebarInfo = {
   model?: string;
   flavor?: string;
   provider?: string;
-  mcpServers?: { name: string; state: string }[];
+  mcpServers?: McpServerInfo[];
   modelCandidates?: string[];
   providerCandidates?: string[];
 };
@@ -57,7 +63,7 @@ type SidebarMeta = {
   provider?: string;
   gitBranch?: string;
   cwd?: string;
-  mcpServers?: { name: string; state: string }[];
+  mcpServers?: McpServerInfo[];
   modelCandidates?: string[];
   providerCandidates?: string[];
 };
@@ -93,8 +99,16 @@ export function ChatPage({
   const [sending, setSending] = useState(false);
   // the real "a turn is running" signal comes from the SSE stream; combine both
   const busy = status.busy || sending;
-  const [activeIndex, setActiveIndex] = useState(0);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(() => typeof window === 'undefined' || window.innerWidth >= 768);
+  useEffect(() => {
+    const onResize = () => {
+      if (window.innerWidth < 768) {
+        setSidebarOpen(false);
+      }
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
   // persist the resizable sidebar width (px) across reloads, like the theme setting
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('yca-sidebar-width') : null;
@@ -148,6 +162,12 @@ export function ChatPage({
     });
   }, [sessionId]);
   // remove one queued prompt (oldest first index) with a confirmation; refresh the strip after.
+  useEffect(() => {
+    if (!initializing) {
+      refreshQueued();
+    }
+  }, [initializing, refreshQueued]);
+
   const removeQueued = useCallback(
     async (index: number) => {
       if (!sessionId) return;
@@ -160,10 +180,9 @@ export function ChatPage({
     [sessionId, queuedPrompts, refreshQueued],
   );
   // global tool visibility: 'shown' | 'collapsed' | 'hidden' (mirrors TUI /tool-output states)
-  const [toolVisibility, setToolVisibility] = useState<'shown' | 'collapsed' | 'hidden'>('collapsed');
-  // global thinking visibility: hide buffered thought blocks at render time (they are never dropped
-  // from the log, so re-showing restores them instantly - mirrors the TUI /thinking toggle).
-  const [thinkingVisible, setThinkingVisible] = useState(true);
+  const [toolVisibility, setToolVisibility] = useState<Visibility>('collapsed');
+  // Disclosure is display-only; /thinking still owns backend show/hide and never drops the log.
+  const [thoughtVisibility, setThoughtVisibility] = useState<Visibility>('collapsed');
   const [metrics, setMetrics] = useState({ perTurn: true, session: true, full: false });
   const [subagentsContent, setSubagentsContent] = useState<string | null>(null);
   const [subagentReference, setSubagentReference] = useState('');
@@ -178,7 +197,7 @@ export function ChatPage({
       const data = event.data ?? {};
       if (event.type === 'settings') {
         if (typeof data.showThinking === 'boolean') {
-          setThinkingVisible(data.showThinking);
+          setThoughtVisibility(current => data.showThinking ? (current === 'hidden' ? 'collapsed' : current) : 'hidden');
         }
         if (data.showToolOutput === 'shown' || data.showToolOutput === 'collapsed' || data.showToolOutput === 'hidden') {
           setToolVisibility(data.showToolOutput);
@@ -247,7 +266,7 @@ export function ChatPage({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const completionRef = useRef(completion);
   completionRef.current = completion;
-  const { pending, answer } = useInteractiveRequests(sessionId);
+  const { pending, answer, pendingCount } = useInteractiveRequests(sessionId);
 
   // Auto-focus the prompt when this chat tab opens (create-session, tab switch, deep-link) so the
   // user can type immediately without clicking. ChatPage remounts per session via App's
@@ -481,6 +500,22 @@ export function ChatPage({
     scrollToTail(tailScrolledRef.current);
   }, [events.length, follow]);
 
+  // Markdown is debounced and disclosures/fonts can reflow after the SSE render.
+  // Observe the transcript's actual size, not just event count, without re-arming Follow.
+  useEffect(() => {
+    const transcript = scrollRef.current?.firstElementChild;
+    if (!transcript) {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (followRef.current && document.visibilityState === 'visible') {
+        scrollToTail(false);
+      }
+    });
+    observer.observe(transcript);
+    return () => observer.disconnect();
+  }, [sessionId]);
+
   // Follow must be interruption-proof: the rAF-driven smooth scroll is suspended in a background tab,
   // so while hidden the live re-follows never complete and the view is stranded away from the tail.
   // When the tab becomes visible again while Follow is still ON, jump straight to the tail (instant, no
@@ -572,14 +607,19 @@ export function ChatPage({
   const resetCursor = (t: string, c: number) => {
     setPrompt(t);
     setCursor(c);
-    setActiveIndex(0);
     setCompletionDismissed(false); // typing re-opens the completion dropdown
   };
 
-  const send = async () => {
-    if (!sessionId || initializing || !prompt.trim()) return;
+  const [sendError, setSendError] = useState<string | null>(null);
+  const sendingRef = useRef(false);
+  const sendText = async (draft: string) => {
+    if (!sessionId || initializing || sendingRef.current || !draft.trim()) {
+      return;
+    }
+    sendingRef.current = true;
     setSending(true);
-    const text = prompt.trim();
+    setSendError(null);
+    const text = draft.trim();
     setPrompt('');
     setCursor(0);
     setCompletionDismissed(false);
@@ -599,7 +639,7 @@ export function ChatPage({
           setExecutingToolsOpen(true);
           setExecutingToolsContent(null);
         }
-        await call('session.slash', { id: sessionId, text }).catch(() => undefined);
+        await call('session.slash', { id: sessionId, text });
         loadSidebar();
       } else {
         await call('session.prompt', { id: sessionId, prompt: text });
@@ -607,10 +647,15 @@ export function ChatPage({
         // subsequent poll shows the pending count in the bottom bar.
         refreshQueued();
       }
+    } catch (error) {
+      setSendError(String(error));
+      setPrompt((current) => current || draft);
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   };
+  const send = () => sendText(prompt);
 
   // Issue #5: interrupt the running turn (the equivalent of the TUI's Esc / pause).
   const cancel = async () => {
@@ -669,14 +714,6 @@ export function ChatPage({
     loadSidebar();
   };
 
-  const accept = (item: string) => {
-    const applied = applySuggestion(prompt, completionRef.current, item);
-    resetCursor(applied.text, applied.cursor);
-    // Issue #8: once a completion entry is picked we close the dropdown for this keystroke
-    // so the highlighted entry doesn't linger over the (already completed) prompt.
-    setCompletionDismissed(true);
-    textareaRef.current?.focus();
-  };
 
   if (!sessionId) {
     return <div className="p-6 text-sm" style={{ color: 'var(--yca-muted)' }}>Select a session.</div>;
@@ -687,43 +724,32 @@ export function ChatPage({
   const showCompletion = completion.items.length > 0 && !completionDismissed && !initializing;
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) {
+      return;
+    }
     const items = completionRef.current.items;
     // completion is interactive only while it's actually shown (not dismissed after accept/Escape)
     const show = !completionDismissed && items.length > 0;
     if (show) {
-      if (e.key === 'Tab') {
-        e.preventDefault();
-        accept(items[activeIndex] ?? items[0]);
-        return;
-      }
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setActiveIndex((i) => (i + 1) % items.length);
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setActiveIndex((i) => (i - 1 + items.length) % items.length);
-        return;
+      if (e.key === 'Tab' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        return; // TriggerPopover owns keyboard navigation and completion selection.
       }
       if (e.key === 'Enter') {
-        const item = items[activeIndex] ?? items[0];
+        const highlighted = e.currentTarget.getAttribute('aria-activedescendant');
+        const item = (highlighted ? document.getElementById(highlighted)?.textContent : null) ?? items[0];
         // A no-op completion (the candidate is textually identical to the span it
         // would replace, e.g. a fully typed command like /editplan) must not hijack
         // Enter: there is nothing to complete, so let Enter submit the line instead
         // of swallowing the keystroke to accept the identical text.
         const applied = applySuggestion(prompt, completionRef.current, item);
         if (applied.text !== prompt) {
-          e.preventDefault();
-          accept(item);
-          return;
+          return; // TriggerPopover accepts without executing the command.
         }
       }
     }
     if (e.key === 'Escape') {
       e.preventDefault();
-      setActiveIndex(0);
-      // Issue #8: Escape fully dismisses the completion dropdown until typing resumes.
+        // Issue #8: Escape fully dismisses the completion dropdown until typing resumes.
       setCompletionDismissed(true);
       return;
     }
@@ -818,10 +844,11 @@ export function ChatPage({
   };
 
   return (
-    <div className="flex h-full flex-col">
+    <YcaRuntime events={events} busy={busy} initializing={initializing} sending={sending} onNew={sendText} onCancel={cancel}>
+    <ThreadPrimitive.Root className="flex h-full flex-col">
       {/* Merged top bar: session info (connected/mode/model), TUI-format metrics and the
           global tool-visibility + collapse-all/open-all controls. */}
-      <div className="flex items-center gap-2 border-b px-3 py-1 text-sm" style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}>
+      <div className="flex flex-wrap items-center gap-2 border-b px-3 py-1 text-sm" style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}>
         <span
           title={reconnecting ? 'connection lost - reconnecting' : connected ? 'connected' : 'disconnected'}
           style={{ color: connected ? (reconnecting ? 'var(--yca-warning)' : 'var(--yca-success)') : 'var(--yca-error)' }}
@@ -850,18 +877,14 @@ export function ChatPage({
         >
           {follow ? '● Follow' : '○ Follow'}
         </button>
-        <ToolVisibilityMenu key={sessionId} value={toolVisibility} onChange={value => {
+        <VisibilityMenu label="Tools" key={`tools-${sessionId}`} value={toolVisibility} onChange={value => {
           const command = { hidden: 'hide', collapsed: 'collapse', shown: 'show' }[value];
           void call('session.slash', { id: sessionId, text: `/tool-output ${command}` }).catch(() => undefined);
         }} />
-        {/* global thinking visibility: hide/show buffered thought blocks (mirrors TUI /thinking) */}
-        <button
-          onClick={() => call('session.slash', { id: sessionId, text: `/thinking ${thinkingVisible ? 'hide' : 'show'}` }).catch(() => undefined)}
-          className="rounded px-1.5 hover:bg-white/5"
-          title={thinkingVisible ? 'Hide thinking blocks' : 'Show thinking blocks'}
-        >
-          {thinkingVisible ? '▾ thoughts' : '▸ thoughts'}
-        </button>
+        <VisibilityMenu label="Thoughts" key={`thoughts-${sessionId}`} value={thoughtVisibility} onChange={value => {
+          setThoughtVisibility(value);
+          void call('session.slash', { id: sessionId, text: `/thinking ${value === 'hidden' ? 'hide' : 'show'}` }).catch(() => undefined);
+        }} />
         <div className="mx-1 h-3 w-px" style={{ background: 'var(--yca-border)' }} />
         <TurnMetrics status={status} settings={metrics} />
         <button
@@ -887,8 +910,12 @@ export function ChatPage({
         </div>
       )}
       <div className="flex flex-1 overflow-hidden">
-        <div
+        <ThreadPrimitive.Viewport
           ref={scrollRef}
+          autoScroll={false}
+          scrollToBottomOnRunStart={false}
+          scrollToBottomOnInitialize={false}
+          scrollToBottomOnThreadSwitch={false}
           onScroll={onScroll}
           onWheel={markUserScroll}
           onTouchMove={markUserScroll}
@@ -897,12 +924,12 @@ export function ChatPage({
         >
           <EventLog
             ref={eventLogRef}
-            events={events}
             toolVisibility={toolVisibility}
-            thinkingVisible={thinkingVisible}
+              thoughtVisibility={thoughtVisibility}
             windowBlocks={windowBlocks}
             hasServerHistory={moreReplayExists}
             onLoadServerEarlier={loadServerEarlier}
+            onPauseFollow={() => { followRef.current = false; setFollow(false); }}
           />
           {initializing && (
             // Full-pane, blocking "restoring session" veil while the persisted snapshot is still being
@@ -942,7 +969,7 @@ export function ChatPage({
               ↓ latest
             </button>
           )}
-        </div>
+        </ThreadPrimitive.Viewport>
         {sidebarOpen && (
           <div className="flex shrink-0" style={{ width: sidebarWidth }}>
             {/* horizontal resize handle on the sidebar's left edge */}
@@ -976,7 +1003,7 @@ export function ChatPage({
       </div>
       {/* bottom bar kept for live agent status + feedback (thinking/calling/working spinners) */}
       <StatusBar status={status} busy={busy} initializing={initializing} btw={btw} onOpenBtw={() => setBtwOpen(true)} onClearBtw={clearBtw} />
-      <RequestModal request={pending} onAnswer={answer as (id: number, value: unknown) => void} />
+      <SessionRequests request={pending} onAnswer={answer} pendingCount={pendingCount} />
       {btwOpen && <BtwModal btw={btw} onClose={() => setBtwOpen(false)} onRetry={retryBtw} />}
       {helpOpen && <HelpModal content={helpContent} onClose={() => setHelpOpen(false)} />}
       {subagentsContent !== null && (
@@ -1006,39 +1033,16 @@ export function ChatPage({
       {executingToolsOpen && (
         <ExecutingToolsModal content={executingToolsContent} onClose={() => setExecutingToolsOpen(false)} />
       )}
-      <div className="border-t p-3" style={{ borderColor: 'var(--yca-border)' }}>
+      <ComposerPrimitive.TriggerPopoverRoot>
+      <ComposerPrimitive.Root onSubmit={(event) => { event.preventDefault(); void send(); }} className="border-t p-3" style={{ borderColor: 'var(--yca-border)' }}>
+        <ComposerDraft text={prompt} />
+        {sendError && <div role="alert" className="mb-2 text-sm" style={{ color: 'var(--yca-error)' }}>{sendError}</div>}
         <div className="relative">
-          {showCompletion && (
-            <div
-              className="absolute bottom-full left-0 z-10 mb-1 w-full max-w-md overflow-hidden rounded border shadow-lg"
-              style={{ background: 'var(--yca-panel)', borderColor: 'var(--yca-border)' }}
-            >
-              {/* Issue #7: surface the completion group label (commands/models/providers/...) so the
-                  parent command is obvious, e.g. the model list offered by /model. */}
-              {completion.label && (
-                <div
-                  className="border-b px-3 py-1 text-xs font-bold uppercase"
-                  style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}
-                >
-                  {completion.label}
-                </div>
-              )}
-              {completion.items.map((item, i) => (
-                <button
-                  key={item}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    accept(item);
-                  }}
-                  className={`block w-full truncate px-3 py-1 text-left text-sm ${
-                    i === activeIndex ? 'bg-white/10' : ''
-                  }`}
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
-          )}
+          <SlashPopover text={prompt} cursor={cursor} suggestion={completion} visible={showCompletion}
+            inputRef={textareaRef} onAccept={(text, position) => {
+              resetCursor(text, position);
+              setCompletionDismissed(true);
+            }} />
           {queuedCount > 0 && (
             <div
               className="mb-1 space-y-1 rounded border px-2 py-1 text-xs"
@@ -1060,6 +1064,7 @@ export function ChatPage({
                         {i + 1}. {p}
                       </span>
                       <button
+                        type="button"
                         onClick={() => removeQueued(i)}
                         className="shrink-0 rounded px-1 hover:bg-white/10"
                         title="Remove this queued prompt"
@@ -1073,7 +1078,7 @@ export function ChatPage({
             </div>
           )}
           <div className="flex gap-2 items-start">
-            <div className="flex min-w-0 flex-1 flex-col" style={promptWidth > 0 ? { width: promptWidth, flex: '0 0 auto' } : undefined}>
+            <div className="flex min-w-0 flex-1 flex-col" style={promptWidth > 0 ? { width: promptWidth, maxWidth: 'calc(100% - 6rem)', flex: '0 0 auto' } : undefined}>
               {/* vertical resize handle on the prompt input's top edge: a full-width strip above the
                   textarea. Dragging up grows the input; 0 height (never dragged) keeps the natural
                   auto height of rows={2}. */}
@@ -1091,7 +1096,11 @@ export function ChatPage({
                   style={{ width: 5, marginRight: -1, background: 'transparent' }}
                   title="Drag to resize the prompt input"
                 />
-                <textarea
+                <ComposerPrimitive.Input
+                  submitMode="none"
+                  cancelOnEscape={false}
+                  unstable_focusOnRunStart={false}
+                  unstable_focusOnScrollToBottom={false}
                   ref={textareaRef}
                   value={prompt}
                   onChange={(e) => resetCursor(e.target.value, e.target.selectionStart ?? e.target.value.length)}
@@ -1111,6 +1120,7 @@ export function ChatPage({
             </div>
             <div className="flex flex-col gap-2">
               <button
+                type="button"
                 onClick={send}
                 // Send stays enabled while a turn runs so an additional prompt is queued (never a
                 // concurrent turn); it is disabled while the session boots (snapshot not delivered)
@@ -1124,14 +1134,14 @@ export function ChatPage({
               {busy ? (
                 // Issue #5: a persistent interrupt button for the whole running turn (driven by the
                 // SSE busy flag, not the transient send RPC), matching the TUI's Esc / pause.
-                <button onClick={cancel} className="rounded border px-4 py-1 text-sm" style={{ borderColor: 'var(--yca-accent)', color: 'var(--yca-accent)' }}>
+                <button type="button" onClick={cancel} className="rounded border px-4 py-1 text-sm" style={{ borderColor: 'var(--yca-accent)', color: 'var(--yca-accent)' }}>
                   ■ Stop
                 </button>
               ) : (
                 // Issue #9: explicitly continue a resumed/paused session instead of auto-running
                 // into an unresolved approval the moment the tab opens.
                 events.length > 0 && (
-                  <button onClick={resume} disabled={sending} className="rounded border px-4 py-1 text-sm disabled:opacity-40" style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-text)' }}>
+                  <button type="button" onClick={resume} disabled={sending} className="rounded border px-4 py-1 text-sm disabled:opacity-40" style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-text)' }}>
                     ⟳ Resume
                   </button>
                 )
@@ -1139,8 +1149,10 @@ export function ChatPage({
             </div>
           </div>
         </div>
-      </div>
-    </div>
+      </ComposerPrimitive.Root>
+      </ComposerPrimitive.TriggerPopoverRoot>
+    </ThreadPrimitive.Root>
+    </YcaRuntime>
   );
 }
 
@@ -1385,6 +1397,10 @@ function Sidebar({
   onSetProvider: (provider: string) => void;
   onSetPermissions: (mode: string) => void;
 }) {
+  const [expandedServerId, setExpandedServerId] = useState<string>();
+  const currentTodo = sidebar.todos.find(todo => todo.status === 'in_progress') ?? sidebar.todos.find(todo => todo.status === 'pending');
+  const doneTodos = sidebar.todos.filter(todo => todo.status === 'completed').length;
+  const collapsedTodoText = currentTodo ? currentTodo.content : todoSummary ?? (doneTodos > 0 ? 'All done' : 'No active tasks');
   return (
     <div className="space-y-3">
       <SessionMetadata
@@ -1487,71 +1503,44 @@ function Sidebar({
             </span>
           </button>
           {!serversCollapsed && (
-            <ul className="space-y-1">
-              {sidebar.mcpServers.map((s) => (
-                <li key={s.name} className="flex items-center gap-1.5 text-sm" style={{ color: 'var(--yca-text)' }}>
-                  <span
-                    className="inline-block h-1.5 w-1.5 rounded-full"
-                    style={{
-                      background:
-                        s.state === 'FAILED' ? 'var(--yca-error)' : s.state === 'ENABLED' ? 'var(--yca-success)' : 'var(--yca-muted)',
-                    }}
-                  />
-                  <span className="truncate">{s.name}</span>
-                  <span className="ml-auto text-xs" style={{ color: 'var(--yca-muted)' }}>{s.state.toLowerCase()}</span>
-                </li>
-              ))}
-            </ul>
+            <McpServerPanel className="max-w-none" expandedId={expandedServerId} onToggle={id => setExpandedServerId(current => current === id ? undefined : id)} servers={sidebar.mcpServers.map((server) => ({
+              id: server.name, name: server.name, stateLabel: server.state.toLowerCase(),
+              transport: server.transport, url: server.url, status: mcpServerStatus(server.state),
+            }))} />
           )}
         </div>
       )}
       <div>
         <button
+          type="button"
           onClick={onToggleTodos}
-          className="mb-1 flex w-full items-center gap-1 text-xs font-bold uppercase"
+          aria-expanded={!todosCollapsed}
+          className="mb-1 flex w-full min-w-0 items-center gap-2 text-left text-xs font-bold uppercase"
           style={{ color: 'var(--yca-muted)' }}
           title={todosCollapsed ? 'Expand todos' : 'Collapse todos'}
         >
-          <span>{todosCollapsed ? '▸' : '▾'}</span>
-          <span>Todos</span>
+          <span aria-hidden="true" className="shrink-0">{todosCollapsed ? '▸' : '▾'}</span>
+          <span className="shrink-0">Todos</span>
+          {todosCollapsed && sidebar.todos.length > 0 && (
+            <span data-slot="todo-collapsed-summary" className="min-w-0 flex-1 truncate text-xs font-normal normal-case" title={collapsedTodoText}>
+              {currentTodo?.status === 'in_progress' && <span aria-hidden="true" className="mr-1 inline-block size-1.5 rounded-full bg-[var(--yca-accent)] align-middle" />}
+              {collapsedTodoText}
+            </span>
+          )}
           {sidebar.todos.length > 0 && (
-            <span className="ml-auto rounded px-1 text-xs" style={{ background: 'var(--yca-panel-2)' }}>
-              {sidebar.todos.filter((t) => t.status === 'completed').length}/{sidebar.todos.length}
+            <span className="ml-auto shrink-0 rounded px-1 text-xs tabular-nums" style={{ background: 'var(--yca-panel-2)' }}>
+              {doneTodos}/{sidebar.todos.length}
             </span>
           )}
         </button>
-        {todosCollapsed && sidebar.todos.length > 0 && (
-          (() => {
-            // collapsed summary: prefer the "current" item (A), else the diff of the last change (B),
-            // else a done/total count fallback - so a collapsed panel is never just a bare badge.
-            const current =
-              sidebar.todos.find((t) => t.status === 'in_progress') ??
-              sidebar.todos.find((t) => t.status === 'pending');
-            const done = sidebar.todos.filter((t) => t.status === 'completed').length;
-            let text: string;
-            if (current) text = `${todoGlyph(current.status)} ${current.content}`;
-            else if (todoSummary) text = todoSummary;
-            else text = done > 0 ? `${done}/${sidebar.todos.length} done` : `${sidebar.todos.length} pending`;
-            return (
-              <div
-                className="mb-1 flex items-start gap-1.5 truncate text-sm"
-                style={{ color: 'var(--yca-muted)' }}
-                title={text}
-              >
-                <span>{text}</span>
-              </div>
-            );
-          })()
-        )}
         {!todosCollapsed &&
           (sidebar.todos.length === 0 ? (
             <div className="text-sm" style={{ color: 'var(--yca-muted)' }}>No todos.</div>
           ) : (
-            <ul className="space-y-1">
-              {sidebar.todos.map((t, i) => (
-                <TodoRow key={i} todo={t} />
-              ))}
-            </ul>
+            <TodoList items={sidebar.todos.map((todo, index) => ({
+              id: `${index}:${todo.content}`, text: todo.content,
+              status: todo.status === 'in_progress' ? 'active' : todo.status === 'completed' ? 'done' : todo.status === 'cancelled' ? 'cancelled' : 'pending',
+            }))} />
           ))}
       </div>
     </div>
@@ -1609,76 +1598,122 @@ export function latestTranscriptMessage(events: ReadonlyArray<{ type: string; me
   return null;
 }
 
-/** TUI tristate checkbox: [ ] pending / [>] in_progress / [x] completed / [-] cancelled. */
-function TodoRow({ todo }: { todo: TodoItem }) {
-  const status = todo.status || 'pending';
-  const isDone = status === 'completed' || status === 'cancelled';
-  // checkbox glyph + color per status, mirroring the TUI [ ]/[>]/[x]/[-]
-  const glyph = todoGlyph(status);
-  const color =
-    status === 'in_progress'
-      ? 'var(--yca-warning)'
-      : status === 'completed'
-      ? 'var(--yca-success)'
-      : status === 'cancelled'
-      ? 'var(--yca-muted)'
-      : 'var(--yca-text)';
-  return (
-    <li className="flex items-start gap-1.5 text-sm">
-      <span className="shrink-0 leading-4" style={{ color }} title={status}>
-        {glyph}
-      </span>
-      <span
-        style={{
-          color: isDone ? 'var(--yca-muted)' : 'var(--yca-text)',
-          textDecoration: isDone ? 'line-through' : 'none',
-        }}
-      >
-        {todo.content}
-      </span>
-    </li>
-  );
-}
-
 export type EventLogHandle = { loadEarlier: () => void; canLoadEarlier: () => boolean };
+const GlobalToolCollapse = createContext(true);
+const GlobalThoughtCollapse = createContext(true);
+const DisclosureOverrides = createContext<Map<string, unknown> | null>(null);
+const MESSAGE_COMPONENTS = { Message: RuntimeMessage };
+const PART_COMPONENTS = { Text: RuntimeBlockPart, Reasoning: RuntimeBlockPart, tools: { Fallback: RuntimeBlockPart } };
 
-const EventLog = memo(
+export const EventLog = memo(
   forwardRef<
     EventLogHandle,
     {
-      events: WebEvent[];
       toolVisibility: 'shown' | 'collapsed' | 'hidden';
-      thinkingVisible: boolean;
+      thoughtVisibility: Visibility;
       windowBlocks: number;
       hasServerHistory: boolean;
-      onLoadServerEarlier: () => void;
+      onLoadServerEarlier: () => void | Promise<void>;
+      onPauseFollow: () => void;
     }
   >(
     function EventLog(
-      { events, toolVisibility, thinkingVisible, windowBlocks, hasServerHistory, onLoadServerEarlier },
+      { toolVisibility, thoughtVisibility, windowBlocks, hasServerHistory, onLoadServerEarlier, onPauseFollow },
       ref,
     ) {
-      // reducer is pure and O(events); it runs once per rAF-batched events array, and the blocks are
-      // memoized below so a scrolling/pagination re-render never re-derives the whole conversation.
-      const blocks = useMemo(() => eventsToBlocks(events), [events]);
+      // The runtime can add a synthetic empty assistant placeholder while running. YCA's
+      // status bar owns that state; it is not a persisted event and must not enter pagination.
+      const allMessages = useAuiState((state) => state.thread.messages);
+      const messages = useMemo(() => allMessages.filter((message) => message.metadata.custom.ycaBlock), [allMessages]);
+      const blocks = useMemo(() => messages.map((message) => message.metadata.custom.ycaBlock as Block), [messages]);
+      const rootRef = useRef<HTMLDivElement>(null);
+      const disclosureOverrides = useRef(new Map<string, unknown>());
+      useEffect(() => {
+        const present = new Set(messages.map((message) => message.id));
+        for (const key of disclosureOverrides.current.keys()) {
+          if (!present.has(key)) {
+            disclosureOverrides.current.delete(key);
+          }
+        }
+      }, [messages]);
+      const anchorRef = useRef<{ viewport: HTMLElement; node: HTMLElement | null; offset: number; height: number; top: number; pending: boolean } | null>(null);
+      const anchorTimer = useRef(0);
+      const restoreAnchor = useCallback(() => {
+        const anchor = anchorRef.current;
+        if (!anchor) {
+          return;
+        }
+        const delta = anchor.node?.isConnected
+          ? anchor.node.getBoundingClientRect().top - anchor.offset
+          : anchor.top + anchor.viewport.scrollHeight - anchor.height - anchor.viewport.scrollTop;
+        if (delta !== 0) {
+          anchor.viewport.scrollTop += delta;
+        }
+        if (!anchor.pending) {
+          window.clearTimeout(anchorTimer.current);
+          anchorTimer.current = window.setTimeout(() => { anchorRef.current = null; }, 250);
+        }
+      }, []);
+      useEffect(() => {
+        const node = rootRef.current;
+        const viewport = node?.parentElement;
+        if (!node || !viewport) {
+          return;
+        }
+        const cancelAnchor = () => { anchorRef.current = null; };
+        const observer = new ResizeObserver(restoreAnchor);
+        observer.observe(node);
+        viewport.addEventListener('wheel', cancelAnchor);
+        viewport.addEventListener('touchmove', cancelAnchor);
+        viewport.addEventListener('keydown', cancelAnchor);
+        return () => {
+          observer.disconnect();
+          window.clearTimeout(anchorTimer.current);
+          viewport.removeEventListener('wheel', cancelAnchor);
+          viewport.removeEventListener('touchmove', cancelAnchor);
+          viewport.removeEventListener('keydown', cancelAnchor);
+        };
+      }, [restoreAnchor]);
       // pagination: the tail (windowBlocks) is always rendered; "load earlier" grows the
       // window backward in LOAD_EARLIER_CHUNK steps (block boundaries, so tool cards stay atomic).
       const [loadedBlocks, setLoadedBlocks] = useState(windowBlocks);
       useEffect(() => {
         setLoadedBlocks((n) => Math.max(n, windowBlocks));
-      }, [events.length, windowBlocks]);
+      }, [messages.length, windowBlocks]);
       const requested = Math.max(loadedBlocks, windowBlocks);
       const { start, extended } = renderWindow(blocks, requested);
       // "load earlier" first pulls the next slice from the server (tail-first snapshot pagination) when
       // more persisted history exists, falling back to growing the local render window over what is already
       // loaded once the server has nothing left to give.
-      const loadEarlier = useCallback(() => {
-        if (hasServerHistory) {
-          onLoadServerEarlier();
-        } else {
-          setLoadedBlocks((n) => n + LOAD_EARLIER_CHUNK);
+      const loadEarlier = useCallback(async () => {
+        if (anchorRef.current?.pending) {
+          return;
         }
-      }, [hasServerHistory, onLoadServerEarlier]);
+        onPauseFollow();
+        const viewport = rootRef.current?.parentElement;
+        window.clearTimeout(anchorTimer.current);
+        if (viewport) {
+          const node = [...rootRef.current!.querySelectorAll<HTMLElement>('[data-yca-message-id]')]
+            .find((element) => element.getBoundingClientRect().bottom >= viewport.getBoundingClientRect().top) ?? null;
+          anchorRef.current = { viewport, node, offset: node?.getBoundingClientRect().top ?? 0,
+            height: viewport.scrollHeight, top: viewport.scrollTop, pending: true };
+        }
+        // Reveal locally buffered blocks before fetching another server page.
+        setLoadedBlocks((n) => n + LOAD_EARLIER_CHUNK);
+        try {
+          if (!extended && hasServerHistory) {
+            await onLoadServerEarlier();
+          }
+        } finally {
+          if (anchorRef.current) {
+            anchorRef.current.pending = false;
+          }
+          restoreAnchor();
+        }
+      }, [hasServerHistory, extended, messages, onLoadServerEarlier, onPauseFollow, restoreAnchor]);
+      useLayoutEffect(() => {
+        restoreAnchor();
+      }, [messages, loadedBlocks, restoreAnchor]);
       // expose the pagination controls so the scroll container can auto-load-early when the user
       // scrolls back to the top (else a long conversation stops at a hard wall mid-history).
       useImperativeHandle(
@@ -1692,29 +1727,55 @@ const EventLog = memo(
       // thinking blocks are filtered at render time (never dropped from the log) so toggling back
       // restores them instantly - mirrors the TUI /thinking toggle. The log-driven pagination/keys
       // stay unchanged so tool-card atomicity and the "load earlier" window are untouched.
-      const visibleBlocks = blocks.slice(start).filter((b) =>
-        (thinkingVisible || b.kind !== 'thought') && (toolVisibility !== 'hidden' || b.kind !== 'tool'));
+      const visibleMessages = messages.slice(start).filter((message) => {
+        const block = message.metadata.custom.ycaBlock as Block;
+        return (thoughtVisibility !== 'hidden' || block.kind !== 'thought') && (toolVisibility !== 'hidden' || block.kind !== 'tool');
+      });
       return (
-        <div className="space-y-2">
+        <DisclosureOverrides.Provider value={disclosureOverrides.current}>
+        <GlobalToolCollapse.Provider value={toolVisibility === 'collapsed'}>
+        <GlobalThoughtCollapse.Provider value={thoughtVisibility === 'collapsed'}>
+        <div ref={rootRef} className="space-y-2">
           {(extended || hasServerHistory) && (
             <button onClick={loadEarlier} className="rounded border px-2 py-1 text-sm hover:bg-white/5" style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}>
               ↑ Load earlier ({start} blocks)
             </button>
           )}
-          {visibleBlocks.map((b, i) => (
-            <BlockView key={start + i} block={b} globalCollapsed={toolVisibility === 'collapsed'} />
+          {visibleMessages.map((message) => (
+            <ThreadPrimitive.Unstable_MessageById key={message.id} messageId={message.id}
+              components={MESSAGE_COMPONENTS} />
           ))}
       {blocks.length === 0 && (
         <p className="text-sm" style={{ color: 'var(--yca-muted)' }}>No messages yet.</p>
       )}
     </div>
+    </GlobalThoughtCollapse.Provider>
+    </GlobalToolCollapse.Provider>
+    </DisclosureOverrides.Provider>
   );
 }));
 
+function RuntimeMessage() {
+  const block = useAuiState((state) => state.message.metadata.custom.ycaBlock as Block | undefined);
+  const id = useAuiState((state) => state.message.id);
+  if (!block) {
+    return null;
+  }
+  return <MessagePrimitive.Root data-yca-kind={block.kind} data-yca-message-id={id}><MessagePrimitive.Parts components={PART_COMPONENTS} /></MessagePrimitive.Root>;
+}
+function RuntimeBlockPart() {
+  const block = useAuiState((state) => state.message.metadata.custom.ycaBlock as Block);
+  const globalCollapsed = useContext(GlobalToolCollapse);
+  return <BlockView block={block} globalCollapsed={globalCollapsed} />;
+}
+
 const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: Block; globalCollapsed: boolean }) {
+  const thoughtsCollapsed = useContext(GlobalThoughtCollapse);
   // per-card override on top of the global show/collapse-all header switch (tools are collapsed by
   // default, matching the TUI's default tool-output posture). null = follow the global toggle.
-  const [userOverride, setUserOverride] = useState<'expanded' | 'collapsed' | null>(null);
+  const overrides = useContext(DisclosureOverrides);
+  const [userOverride, setUserOverride] = useState<'expanded' | 'collapsed' | null>(() =>
+    (block.id ? overrides?.get(block.id) as 'expanded' | 'collapsed' | undefined : undefined) ?? null);
   const running = block.kind === 'tool' && block.state === 'running';
   // a running tool with live output auto-expands regardless of the global collapse posture so the
   // streamed stdout is visible as it arrives (the user can still collapse it via the per-card
@@ -1728,54 +1789,29 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
       ? false
       : globalCollapsed
     : false;
-  const toggleCard = () => setUserOverride((o) => (collapsed ? 'expanded' : o === 'expanded' ? 'collapsed' : 'collapsed'));
+  const changeOverride = (open: boolean) => {
+    const value = open ? 'expanded' : 'collapsed';
+    if (block.id) {
+      overrides?.set(block.id, value);
+    }
+    setUserOverride(value);
+  };
+  const toggleCard = () => changeOverride(collapsed);
   if (block.kind === 'subagent') {
-    const running = block.state === 'running';
-    const failed = block.state === 'failed';
-    const cancelled = block.state === 'cancelled';
-    const borderColor = running
-      ? 'var(--yca-accent)'
-      : failed
-      ? 'var(--yca-error)'
-      : cancelled
-      ? 'var(--yca-muted)'
-      : 'var(--yca-border)';
-    return (
-      <div
-        className="rounded border px-3 py-1 text-[15px]"
-        style={{ borderColor, background: 'var(--yca-panel)', borderRadius: 'var(--yca-radius-sm)' }}
-      >
-        <div className="mb-1 flex items-center gap-2">
-          <span className="font-mono text-sm" style={{ color: 'var(--yca-accent)' }}>subagent</span>
-          <span className="font-mono text-sm">{block.name}</span>
-          <span
-            className="rounded px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wide"
-            style={{
-              color: running ? 'var(--yca-accent)' : failed ? 'var(--yca-error)' : cancelled ? 'var(--yca-muted)' : 'var(--yca-success)',
-              background: 'var(--yca-panel)',
-            }}
-          >
-            {block.state}
-          </span>
-          {block.model ? (
-            <span className="text-xs" style={{ color: 'var(--yca-muted)' }}>model: {block.model}</span>
-          ) : null}
-        </div>
-        {running ? (
-          block.task ? (
-            <div className="text-[13px] opacity-70" style={{ color: 'var(--yca-muted)' }}>{block.task}</div>
-          ) : null
-        ) : block.summary ? (
-          <Markdown content={block.summary} writing={false} />
-        ) : null}
-      </div>
-    );
+    return <div>
+      <SubagentActivity agents={[{
+        id: block.subagentId, name: block.name, model: block.model,
+        state: block.state === 'running' ? 'working' : block.state === 'failed' ? 'failed' : block.state === 'cancelled' ? 'waiting' : 'done',
+        label: block.state, description: block.state === 'running' ? block.task : undefined,
+      }]} />
+      {block.summary && <Markdown content={block.summary} writing={false} />}
+    </div>;
   }
   if (block.kind === 'thought') {
     return (
-      <div className="rounded border-l-2 px-3 py-1 text-[15px] opacity-60" style={{ borderColor: 'var(--yca-muted)', borderRadius: 'var(--yca-radius-sm)' }}>
+      <Reasoning streaming={block.writing === true} manualOpen={userOverride === null ? !thoughtsCollapsed : userOverride === 'expanded'} onManualOpenChange={changeOverride}>
         <Markdown content={block.content} writing={block.writing} variant="thought" />
-      </div>
+      </Reasoning>
     );
   }
   if (block.kind === 'user') {
@@ -1853,6 +1889,7 @@ function useDebouncedMarkdown(content: string, writing: boolean): string {
   // keep the latest incoming content for the immediate flush (setStable below never reads a stale closure)
   const latest = useRef(content);
   latest.current = content;
+  const heldSince = useRef<number | null>(null);
 
   useEffect(() => {
     if (!writing) {
@@ -1860,21 +1897,29 @@ function useDebouncedMarkdown(content: string, writing: boolean): string {
       window.clearTimeout(timer.current);
       window.clearTimeout(capTimer.current);
       setStable(content);
+      heldSince.current = null;
       return;
     }
     // still streaming: re-arm the debounce and the cap against the newest fragment, cancelling prior ones.
     window.clearTimeout(timer.current);
     window.clearTimeout(capTimer.current);
     const cur = latest.current;
+    heldSince.current ??= Date.now();
+    const flush = () => {
+      setStable(latest.current);
+      heldSince.current = null;
+    };
     if (!hasOpenInlineSpan(cur)) {
       // backticks balanced (no inline span mid-stream): render once the burst pauses (~60ms), as before.
-      timer.current = window.setTimeout(() => setStable(cur), 60);
+      timer.current = window.setTimeout(flush, 60);
     } else {
       // an inline-code span is still open (its closer hasn't streamed yet): hold the last balanced
       // render so no inverted/mis-paired span is ever drawn; the cap timer force-renders the latest
       // if the model stalls mid-span, so the UI never lags the stream by more than the cap.
-      capTimer.current = window.setTimeout(() => setStable(cur), INLINE_SPAN_HOLD_CAP_MS);
     }
+    // A maximum interval, not a resettable debounce: sustained streams must paint too.
+    const maxHold = hasOpenInlineSpan(cur) ? INLINE_SPAN_HOLD_CAP_MS : 200;
+    capTimer.current = window.setTimeout(flush, Math.max(0, maxHold - (Date.now() - heldSince.current)));
     return () => {
       window.clearTimeout(timer.current);
       window.clearTimeout(capTimer.current);
@@ -1901,268 +1946,6 @@ function Markdown({ content, writing = false, variant = 'assistant' }: {
   // block, so the strip catches it exactly like the core ConversationTranscript.markdown scrub.
   const src = normalizeMarkdown(stripEchoedRefs(useDebouncedMarkdown(content, writing) || ''));
   return <MarkdownContent content={src} variant={variant} />;
-}
-
-type RequestState = {
-  id: number;
-  method: string;
-  params: Record<string, unknown>;
-} | null;
-
-/**
- * Listens for server-initiated approval/ask/question RPC frames over SSE and lets
- * the UI answer them. The backend WebSessionManager awaits these to unblock a tool
- * approval or a feedback round, so an unanswered frame makes the running turn hang.
- */
-function useInteractiveRequests(sessionId: string | undefined) {
-  const [pending, setPending] = useState<RequestState>(null);
-  useEffect(() => {
-    if (!sessionId) return;
-    return onServerRequest((request, respond) => {
-      if (request.method === 'session.approval' || request.method === 'session.ask' || request.method === 'session.question') {
-        setPending({ id: request.id, method: request.method, params: request.params ?? {} });
-      } else {
-        respond(null);
-      }
-    });
-  }, [sessionId]);
-  const answer = useCallback(
-    (requestId: number, value: unknown) => {
-      void call('session.resolve', { id: sessionId, requestId: String(requestId), result: value })
-        .catch(() => {})
-        .finally(() => setPending(null));
-    },
-    [sessionId],
-  );
-  return { pending, answer };
-}
-
-function RequestModal({
-  request,
-  onAnswer,
-}: {
-  request: RequestState;
-  onAnswer: (id: number, value: unknown) => void;
-}) {
-  const [selections, setSelections] = useState<Record<string, string | boolean>>({});
-  useEffect(() => {
-    setSelections({});
-  }, [request?.id]);
-  if (!request) return null;
-  const isAsk = request.method === 'session.ask' || request.method === 'session.question';
-  const params = request.params as Record<string, unknown>;
-  const questions = (params.questions as { id?: string; prompt?: string; options?: string[]; multiple?: boolean }[]) ?? [];
-  // a "picker" is a single-choice question carrying top-level `prompt` + `options` (used by the
-  // slash commands /model, /provider, /agent, /resume via WebShellIO.pick). Render it as one choice list.
-  const isPicker = isAsk && questions.length === 0 && Array.isArray(params.options);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-      onClick={(e) => e.stopPropagation()}
-    >
-      <div
-        className="w-full max-w-md rounded-lg border p-4 shadow-xl"
-        style={{ borderColor: 'var(--yca-border)', background: 'var(--yca-panel-2)' }}
-      >
-        {isAsk && !isPicker ? (
-          <>
-            <div className="mb-2 text-sm font-semibold" style={{ color: 'var(--yca-text)' }}>
-              {questions.length > 0 ? (questions[0].prompt ?? 'Question') : 'Question'}
-            </div>
-            {questions.map((q) => {
-              const opts = q.options ?? [];
-              const ownKey = `${q.id}::own`;
-              const textKey = `${q.id}::text`;
-              const ownChecked = selections[ownKey] === true;
-              const ownText = (selections[textKey] as string) ?? '';
-              return (
-                <div key={q.id} className="mb-2">
-                  <div className="mb-1 text-xs" style={{ color: 'var(--yca-muted)' }}>
-                    {q.prompt}
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    {opts.map((opt) => (
-                      <label key={opt} className="flex items-center gap-2 text-xs" style={{ color: 'var(--yca-text)' }}>
-                        <input
-                          type={q.multiple ? 'checkbox' : 'radio'}
-                          name={`q_${q.id}`}
-                          checked={selections[`${q.id}:${opt}`] === true}
-                          onChange={() =>
-                            setSelections((s) => {
-                              const key = `${q.id}:${opt}`;
-                              if (q.multiple) return { ...s, [key]: !s[key] };
-                              // radio: reset other options AND the own-answer radio for this question
-                              const next: Record<string, string | boolean> = {};
-                              Object.entries(s).forEach(([k, v]) => {
-                                if (!k.startsWith(`${q.id}:`)) next[k] = v;
-                              });
-                              next[key] = true;
-                              return next;
-                            })
-                          }
-                        />
-                        {opt}
-                      </label>
-                    ))}
-                    {/* own-answer slot, mirroring the TUI's 'Type your own answer...' entry */}
-                    <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--yca-text)' }}>
-                      <input
-                        type={q.multiple ? 'checkbox' : 'radio'}
-                        name={`q_${q.id}`}
-                        checked={ownChecked}
-                        onChange={() => {
-                          if (q.multiple) {
-                            setSelections((s) => ({ ...s, [ownKey]: !s[ownKey] }));
-                          } else {
-                            // radio: clear options and toggle the own-answer radio
-                            const next: Record<string, string | boolean> = {};
-                            Object.entries(selections).forEach(([k, v]) => {
-                              if (!k.startsWith(`${q.id}:`)) next[k] = v;
-                            });
-                            next[ownKey] = !ownChecked;
-                            setSelections(next);
-                          }
-                        }}
-                      />
-                      <span style={ownChecked ? { color: 'var(--yca-accent)' } : undefined}>
-                        ✎ Type your own answer...
-                      </span>
-                    </label>
-                  </div>
-                  <textarea
-                    className="mt-1 w-full rounded border px-2 py-1 text-xs"
-                    style={{
-                      borderColor: 'var(--yca-border)',
-                      background: 'var(--yca-panel)',
-                      color: 'var(--yca-text)',
-                    }}
-                    rows={2}
-                    placeholder="Type your own answer..."
-                    value={ownText}
-                    onChange={(e) => setSelections((s) => ({ ...s, [textKey]: e.target.value }))}
-                  />
-                </div>
-              );
-            })}
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                className="rounded border px-3 py-1 text-xs"
-                style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}
-                onClick={() => onAnswer(request.id, null)}
-              >
-                Cancel
-              </button>
-              <button
-                className="rounded border px-3 py-1 text-xs"
-                style={{ borderColor: 'var(--yca-primary)', color: 'var(--yca-primary)' }}
-                onClick={() => {
-                  const answers: Record<string, unknown> = {};
-                  questions.forEach((q) => {
-                    const opts = q.options ?? [];
-                    const ownChecked = selections[`${q.id}::own`] === true;
-                    const ownText = ((selections[`${q.id}::text`] as string) ?? '').trim();
-                    if (q.multiple) {
-                      const picked = opts.filter((opt) => selections[`${q.id}:${opt}`] === true);
-                      if (ownChecked && ownText) picked.push(ownText);
-                      answers[q.id ?? ''] = picked;
-                    } else {
-                      answers[q.id ?? ''] =
-                        ownChecked && ownText
-                          ? ownText
-                          : opts.length === 0
-                            ? ownText
-                            : opts.find((opt) => selections[`${q.id}:${opt}`] === true) ?? '';
-                    }
-                  });
-                  const value = questions.length === 1 ? answers[questions[0].id ?? ''] : answers;
-                  onAnswer(request.id, value);
-                }}
-              >
-                Submit
-              </button>
-            </div>
-          </>
-        ) : isPicker ? (
-          <>
-            <div className="mb-2 text-sm font-semibold" style={{ color: 'var(--yca-text)' }}>
-              {(params.prompt as string) || 'Select an option'}
-            </div>
-            <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
-              {(params.options as string[]).map((opt) => (
-                <label key={opt} className="flex items-center gap-2 text-xs" style={{ color: 'var(--yca-text)' }}>
-                  <input
-                    type="radio"
-                    name="picker"
-                    checked={selections['picker'] === opt}
-                    onChange={() => setSelections((s) => ({ ...s, picker: opt }))}
-                  />
-                  {opt}
-                </label>
-              ))}
-            </div>
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                className="rounded border px-3 py-1 text-xs"
-                style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}
-                onClick={() => onAnswer(request.id, null)}
-              >
-                Cancel
-              </button>
-              <button
-                className="rounded border px-3 py-1 text-xs"
-                style={{ borderColor: 'var(--yca-primary)', color: 'var(--yca-primary)' }}
-                disabled={!selections['picker']}
-                onClick={() => onAnswer(request.id, selections['picker'])}
-              >
-                Select
-              </button>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="mb-1 text-sm font-semibold" style={{ color: 'var(--yca-text)' }}>
-              Tool approval
-            </div>
-            <div className="mb-1 text-xs" style={{ color: 'var(--yca-muted)' }}>
-              {(params.title as string) || 'Approve this tool call?'}
-            </div>
-            {(params.detail as string) && (
-              <div className="mb-1 whitespace-pre-wrap text-xs" style={{ color: 'var(--yca-text)' }}>
-                {(params.detail as string).slice(0, 600)}
-              </div>
-            )}
-            <div className="mb-3 font-mono text-xs" style={{ color: 'var(--yca-primary)' }}>
-              {(params.tool as string) || ''}
-            </div>
-            <div className="flex justify-end gap-2">
-              <button
-                className="rounded border px-3 py-1 text-xs"
-                style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}
-                onClick={() => onAnswer(request.id, 'deny')}
-              >
-                Deny
-              </button>
-              <button
-                className="rounded border px-3 py-1 text-xs"
-                style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-text)' }}
-                onClick={() => onAnswer(request.id, 'allow_once')}
-              >
-                Allow once
-              </button>
-              <button
-                className="rounded border px-3 py-1 text-xs"
-                style={{ borderColor: 'var(--yca-accent)', color: 'var(--yca-primary)' }}
-                onClick={() => onAnswer(request.id, 'allow_session')}
-              >
-                Allow session
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-    </div>
-  );
 }
 
 /**

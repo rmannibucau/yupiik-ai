@@ -38,6 +38,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -99,13 +101,11 @@ class SseExchangeHandlerTest {
     }
 
     private JreHttpServer start(
-            final SseBroker broker,
-            final int windowBlocks,
-            final java.util.function.Function<String, List<WebEventDto>> snapshotSource) {
+            final SseBroker broker, final int windowBlocks, final Function<String, List<WebEventDto>> snapshotSource) {
         this.broker = broker;
         final var instance = new JreHttpServer(
                 new JreHttpServerConfiguration(null, 0, true),
-                List.of(new SseExchangeHandler(broker, snapshotSource, windowBlocks)));
+                List.of(new SseExchangeHandler(broker, snapshotSource, windowBlocks, broker::subscribe)));
         instance.start();
         server = instance;
         return instance;
@@ -141,6 +141,39 @@ class SseExchangeHandlerTest {
         reader.setDaemon(true);
         reader.start();
         return lines;
+    }
+
+    @Test
+    void replacingADisconnectedSubscriptionDoesNotLoseTheNewTab(final JsonMapper mapper) throws Exception {
+        final var broker = new SseBroker(mapper);
+        try (final var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int attempt = 0; attempt < 100; attempt++) {
+                final SseBroker.SseSubscription oldTab = _ -> {};
+                final var frames = new ConcurrentLinkedQueue<String>();
+                final SseBroker.SseSubscription newTab =
+                        bytes -> frames.add(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+                broker.subscribe("s1", oldTab);
+                final var start = new CountDownLatch(1);
+                final var disconnect = executor.submit(() -> {
+                    start.await();
+                    broker.unsubscribe("s1", oldTab);
+                    return true;
+                });
+                final var connect = executor.submit(() -> {
+                    start.await();
+                    broker.subscribe("s1", newTab);
+                    return true;
+                });
+                start.countDown();
+                disconnect.get(5, TimeUnit.SECONDS);
+                connect.get(5, TimeUnit.SECONDS);
+                broker.pushRpc("s1", Map.of("id", attempt));
+                assertEquals(1, frames.size(), "new tab must stay registered when the old tab disconnects");
+                broker.unsubscribe("s1", newTab);
+            }
+        } finally {
+            broker.close();
+        }
     }
 
     @Test
@@ -492,8 +525,7 @@ class SseExchangeHandlerTest {
         return List.copyOf(frames);
     }
 
-    private static void await(
-            final java.util.function.BooleanSupplier condition, final long timeout, final TimeUnit unit)
+    private static void await(final BooleanSupplier condition, final long timeout, final TimeUnit unit)
             throws InterruptedException {
         final var deadline = System.nanoTime() + unit.toNanos(timeout);
         while (!condition.getAsBoolean() && System.nanoTime() < deadline) {

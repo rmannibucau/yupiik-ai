@@ -80,7 +80,8 @@ public class WebCommand implements Runnable, AutoCloseable {
         restoreSessions.sessions(conf.session());
         final var endpoints = List.of(
                 new JsonRpcEndpoint(jsonRpc, mapper, "/api/rpc", true),
-                new SseExchangeHandler(broker, sessionManager::snapshotFor, conf.windowBlocks()),
+                new SseExchangeHandler(
+                        broker, sessionManager::snapshotFor, conf.windowBlocks(), sessionManager::subscribe),
                 new StaticAssetsExchangeHandler());
         // when access logging is enabled the logger becomes the single dispatcher in front of the
         // real endpoints: it replicates the JRE matching and logs one CLF line per request

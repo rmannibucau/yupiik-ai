@@ -107,19 +107,6 @@ export function SessionMetadata({
       <div className="yca-metadata-row">
         <dt><label htmlFor={`${id}-permissions`}>Permissions</label></dt>
         <dd className="yca-metadata-edit">
-          <span
-            aria-hidden="true"
-            className="inline-block h-2 w-2 shrink-0 rounded-full"
-            style={{
-              background: permissionMode === 'yolo'
-                ? 'var(--yca-yolo)'
-                : permissionMode === 'auto_edit'
-                ? 'var(--yca-success)'
-                : permissionMode === 'ask'
-                ? 'var(--yca-plan)'
-                : 'var(--yca-muted)',
-            }}
-          />
           <select
             id={`${id}-permissions`}
             className="yca-metadata-control"
@@ -135,6 +122,19 @@ export function SessionMetadata({
             <option value="auto_edit">auto_edit</option>
             <option value="yolo">yolo</option>
           </select>
+          <span
+            aria-hidden="true"
+            className="inline-block h-2 w-2 shrink-0 rounded-full"
+            style={{
+              background: permissionMode === 'yolo'
+                ? 'var(--yca-yolo)'
+                : permissionMode === 'auto_edit'
+                ? 'var(--yca-success)'
+                : permissionMode === 'ask'
+                ? 'var(--yca-plan)'
+                : 'var(--yca-muted)',
+            }}
+          />
         </dd>
       </div>
     </dl>

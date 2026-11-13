@@ -15,7 +15,7 @@
  */
 package io.yupiik.ia.agent.web;
 
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.CliCommands;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
@@ -39,7 +39,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.function.BiFunction;
 
 /** Web overrides precede shared handlers; the resulting registry also drives help and completion. */
-@ApplicationScoped
+@DefaultScoped
 public class WebSlashCommands {
     private final SlashRegistry registry;
 

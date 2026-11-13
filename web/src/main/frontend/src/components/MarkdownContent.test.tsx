@@ -29,10 +29,10 @@ describe('MarkdownContent', () => {
   });
 
   it('defaults to a document root and supports every presentation variant', () => {
-    expect(render('Hello')).toBe('<div class="aui-md" data-variant="document"><p>Hello</p></div>');
+    expect(render('Hello')).toBe('<div data-variant="document" class="aui-md"><p>Hello</p></div>');
     for (const variant of ['user', 'assistant', 'document', 'thought'] as const) {
       expect(renderToStaticMarkup(<MarkdownContent content="Hello" variant={variant} />))
-        .toContain(`<div class="aui-md" data-variant="${variant}">`);
+        .toContain(`<div data-variant="${variant}" class="aui-md">`);
     }
   });
 

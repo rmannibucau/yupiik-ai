@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -58,6 +59,7 @@ public class SseExchangeHandler implements Endpoint {
 
     private final SseBroker broker;
     private final Function<String, List<WebEventDto>> snapshotSource;
+    private final BiConsumer<String, SseBroker.SseSubscription> subscriptionRegistrar;
     private final int windowBlocks;
 
     /**
@@ -68,11 +70,16 @@ public class SseExchangeHandler implements Endpoint {
      *               older history is fetched on demand via the session.loadEarlier JSON-RPC so a large
      *               session loads tail-first (transcript pagination window) instead of shipping its whole
      *               history in one SSE frame
+     * @param subscriptionRegistrar registers the connection and replays outstanding interactive requests
      */
     public SseExchangeHandler(
-            final SseBroker broker, final Function<String, List<WebEventDto>> snapshotSource, final int windowBlocks) {
+            final SseBroker broker,
+            final Function<String, List<WebEventDto>> snapshotSource,
+            final int windowBlocks,
+            final BiConsumer<String, SseBroker.SseSubscription> subscriptionRegistrar) {
         this.broker = broker;
         this.snapshotSource = snapshotSource;
+        this.subscriptionRegistrar = subscriptionRegistrar;
         this.windowBlocks = Math.max(1, windowBlocks);
     }
 
@@ -251,7 +258,7 @@ public class SseExchangeHandler implements Endpoint {
             // can never be left open-but-silent (which surfaced to the browser as an endless "Loading
             // conversation…" when the snapshot generation threw after onSubscribe).
             subscription.push(broker.snapshotFrame(snapshotPayload(sessionId)));
-            broker.subscribe(sessionId, subscription);
+            subscriptionRegistrar.accept(sessionId, subscription);
         }
 
         /** Builds the tail-first snapshot payload: the last {@code windowBlocks} events plus a cursor hint. */

@@ -7,6 +7,60 @@ function ev(partial: Partial<WebEvent> & { type: string; sessionId: string }): W
 }
 
 describe('eventsToBlocks', () => {
+  it('keeps default IDs deterministic across reconstruction and coalesced replay', () => {
+    const events = [
+      ev({ type: 'user', sessionId: 's1', message: 'dummy prompt' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'dummy ' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'answer' }),
+      ev({ type: 'tool-started', sessionId: 's1', message: 'inspect', data: { args: '{}', ordinal: 1 } }),
+    ];
+    const blocks = eventsToBlocks(events);
+    expect(eventsToBlocks(JSON.parse(JSON.stringify(events)))).toEqual(blocks);
+    const replayed = eventsToBlocks([
+      events[0], ev({ type: 'text-delta', sessionId: 's1', message: 'dummy answer' }),
+      { ...events[3], data: { args: '{}', ordinal: 73 } },
+    ]);
+    expect(replayed.map((block) => block.id)).toEqual(blocks.map((block) => block.id));
+    const turn = JSON.stringify(['user\u0000s1\u0000\u0000dummy prompt\u0000\u0000\u0000', 0]);
+    expect(blocks[0].id).toBe(JSON.stringify(['yca', 's1', turn, 'user']));
+    const prepended = eventsToBlocks([
+      ev({ type: 'user', sessionId: 's1', message: 'dummy prompt' }), ...events,
+    ]);
+    expect(prepended.slice(1).map((block) => block.id)).toEqual(blocks.map((block) => block.id));
+  });
+
+  it('allows a projector to supply IDs only for blocks that originate in the visible log', () => {
+    const events = [
+      ev({ type: 'user', sessionId: 's1', message: 'cleared' }),
+      ev({ type: 'web-command', sessionId: 's1', data: { command: 'clear' } }),
+      ev({ type: 'user', sessionId: 's1', message: 'dummy' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'one' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'two' }),
+      ev({ type: 'turn-done', sessionId: 's1', message: 'onetwo' }),
+    ];
+    const origins: WebEvent[] = [];
+    const blocks = eventsToBlocks(events, (event, kind) => {
+      origins.push(event);
+      return `${kind}:${origins.length}`;
+    });
+    expect(origins).toEqual([events[2], events[3]]);
+    expect(blocks.map((block) => block.id)).toEqual(['user:1', 'text:2']);
+    expect(blocks.map(({ id: _id, ...block }) => block)).toEqual(
+      eventsToBlocks(events).map(({ id: _id, ...block }) => block),
+    );
+  });
+
+  it('settles each stream kind when another kind takes over', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'thinking-delta', sessionId: 's1', message: 'thought' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'answer' }),
+      ev({ type: 'thinking-delta', sessionId: 's1', message: 'next thought' }),
+      ev({ type: 'turn-cancelled', sessionId: 's1' }),
+    ]);
+    expect(blocks.slice(0, 3)).toMatchObject([
+      { kind: 'thought', writing: false }, { kind: 'text', writing: false }, { kind: 'thought', writing: false },
+    ]);
+  });
   it('accumulates text-delta events into a single assistant block', () => {
     const blocks = eventsToBlocks([
       ev({ type: 'user', sessionId: 's1', message: 'hi' }),

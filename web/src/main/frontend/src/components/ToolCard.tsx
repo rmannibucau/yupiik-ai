@@ -1,4 +1,6 @@
-import { memo, useId, useMemo, useState, type ReactNode } from 'react';
+import { memo, useId, useMemo, useState } from 'react';
+import { ToolCall, ToolDisclosure } from '../assistant/tools/ToolCall';
+import { DiffViewer } from '../assistant/tools/DiffViewer';
 import type { Block } from '../api/eventLog';
 import { isToolVisuallyFailed } from '../lib/toolPresentation';
 import { guessPathLanguage } from '../lib/toolOutput';
@@ -30,9 +32,7 @@ export function ProgressiveText({ text, label, language, diff = false }: {
   const startsAtLine = window.start === 0 || text[window.start - 1] === '\n';
   return <div className="yca-tool-text">
     {text.length === 0 ? <p className="yca-tool-muted">Empty string (0 characters)</p> : (
-      diff ? <pre id={id} tabIndex={0} role="region" className="yca-code-block yca-tool-diff" aria-label={label}><code>{window.text.split('\n').map((line, index, lines) =>
-        <span key={index} className={index === 0 && !startsAtLine ? undefined : line.startsWith('+') ? 'yca-diff-add' : line.startsWith('-') ? 'yca-diff-remove' : line.startsWith('@@') ? 'yca-diff-hunk' : undefined}>{line}{index < lines.length - 1 ? '\n' : ''}</span>,
-      )}</code></pre> : <div id={id} tabIndex={0} role="region" aria-label={label}><CodeBlock code={window.text} language={language} className="yca-tool-code" /></div>
+      diff ? <DiffViewer id={id} tabIndex={0} role="region" className="yca-code-block yca-tool-diff" aria-label={label} text={window.text} startsAtLine={startsAtLine} /> : <div id={id} tabIndex={0} role="region" aria-label={label}><CodeBlock code={window.text} language={language} className="yca-tool-code" /></div>
     )}
     {text.length > TEXT_PAGE_SIZE && <div className="yca-tool-paging">
       <button type="button" disabled={window.start === 0} aria-label={`Show previous ${label}`} aria-controls={id} onClick={() => setPage(Math.max(0, Math.floor(window.start / TEXT_PAGE_SIZE) - 1))}>Show previous</button>
@@ -40,14 +40,6 @@ export function ProgressiveText({ text, label, language, diff = false }: {
       <button type="button" disabled={!window.more} aria-label={`Show more ${label}`} aria-controls={id} onClick={() => setPage(Math.floor(window.start / TEXT_PAGE_SIZE) + 1)}>Show more</button>
     </div>}
   </div>;
-}
-
-function Disclosure({ label, children }: { label: string; children: ReactNode }) {
-  const [open, setOpen] = useState(false);
-  return <details className="yca-tool-disclosure" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary>{label}</summary>
-    {open && children}
-  </details>;
 }
 
 function ExactText({ label, text, language }: { label: string; text: string; language?: string }) {
@@ -113,7 +105,6 @@ function RequestDetails({ name, raw }: { name: string; raw?: string }) {
 export const ToolCard = memo(function ToolCard({ block, collapsed, onToggle }: {
   block: ToolBlock; collapsed: boolean; onToggle: () => void;
 }) {
-  const id = useId();
   const failed = isToolVisuallyFailed(block);
   const status = block.state === 'running' ? 'working' : block.state === 'interrupted' ? 'interrupted' : block.pending ? 'pending' : failed ? 'failed' : 'completed';
   const summary = useMemo(() => summarizeToolArgs(block.name, block.args), [block.name, block.args]);
@@ -122,24 +113,16 @@ export const ToolCard = memo(function ToolCard({ block, collapsed, onToggle }: {
   const presentation = useMemo(() => presentToolOutput(block.name, output, block.args), [block.name, output, block.args]);
   const final = block.state === 'done' && !block.pending;
   const resultLabel = isBuiltin(block.name) ? RESULT_LABELS[block.name] : 'External tool output';
-  return <div className={`yca-tool-card yca-tool-${status}`}>
-    <button type="button" className="yca-tool-header" onClick={onToggle} aria-expanded={!collapsed} aria-controls={id} title={collapsed ? 'Expand tool details' : 'Collapse tool details'}>
-      <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
-      <span className="yca-tool-status">{status}</span>
-      <span className="yca-tool-name">{block.name}</span>
-      {summary && <span className="yca-tool-summary" title={summary}>{summary}</span>}
-    </button>
-    <div id={id} hidden={collapsed}>
-      {!collapsed && <div className="yca-tool-body">
-        <section aria-label="Tool request"><h4>Request</h4><RequestDetails name={block.name} raw={block.args} /></section>
-        <section aria-label="Tool result"><h4>{final ? 'Result' : 'Result preview'} <span className="yca-tool-muted">{resultLabel}</span></h4>
-          {!final && <p className="yca-tool-muted">{block.state === 'interrupted' ? 'Execution interrupted; output may be incomplete.' : block.pending ? 'Still pending; this is not a final result.' : 'Running; output may be incomplete.'}</p>}
-          {failed && <p className="yca-tool-warning">Tool failed. The request above is intent, not confirmation that changes were applied.</p>}
-          {output !== '' ? <ProgressiveText label={resultLabel} text={presentation.text} language={presentation.language} diff={presentation.diff} /> : <p className="yca-tool-muted">{block.output !== undefined ? 'Empty output.' : 'No output available.'}</p>}
-        </section>
-        <Disclosure label="Raw arguments"><ProgressiveText label="Raw arguments" text={block.args ?? 'Arguments unavailable in this event.'} /></Disclosure>
-        <Disclosure label="Raw output"><ProgressiveText label="Raw output" text={presentation.raw} /></Disclosure>
-      </div>}
-    </div>
-  </div>;
+  return <ToolCall label={block.name} query={summary} status={status} open={!collapsed} onOpenChange={onToggle}
+    request={<RequestDetails name={block.name} raw={block.args} />}
+    result={<>
+      <h4>{final ? 'Result' : 'Result preview'} <span className="yca-tool-muted">{resultLabel}</span></h4>
+      {!final && <p className="yca-tool-muted">{block.state === 'interrupted' ? 'Execution interrupted; output may be incomplete.' : block.pending ? 'Still pending; this is not a final result.' : 'Running; output may be incomplete.'}</p>}
+      {failed && <p className="yca-tool-warning">Tool failed. The request above is intent, not confirmation that changes were applied.</p>}
+      {output !== '' ? <ProgressiveText label={resultLabel} text={presentation.text} language={presentation.language} diff={presentation.diff} /> : <p className="yca-tool-muted">{block.output !== undefined ? 'Empty output.' : 'No output available.'}</p>}
+    </>}
+  >
+    <ToolDisclosure label="Raw arguments"><ProgressiveText label="Raw arguments" text={block.args ?? 'Arguments unavailable in this event.'} /></ToolDisclosure>
+    <ToolDisclosure label="Raw output"><ProgressiveText label="Raw output" text={presentation.raw} /></ToolDisclosure>
+  </ToolCall>;
 });

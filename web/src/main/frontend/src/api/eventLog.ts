@@ -1,11 +1,11 @@
-import type { WebEvent } from './useSessionStream';
+import { eventKey, type WebEvent } from './useSessionStream';
 
 /**
  * The transcript blocks derived from the raw SSE event log. Pure data: the same events always
  * produce the same blocks, which is what makes the reducer unit-testable (temporary vitest) and
  * cheap to re-run per render batch (it is O(events), and events arrive rAF-batched).
  */
-export type Block =
+export type Block = { id?: string } & (
   | {
       // 'notice' is a standalone server-emitted transcript fragment (e.g. the Codex authorize URL)
       // rendered as its own block; it is never merged with streaming text-delta or overwritten by
@@ -51,9 +51,53 @@ export type Block =
       // the final report summary
       summary?: string;
       model?: string;
-    };
+    });
 
 const EMPTY_TOOL_STACK: number[] = [];
+
+/**
+ * Display identity only. The DTO has no timestamp, sequence or persisted event ID. Anchor streams
+ * to their user event, not their growing text (replay can replace many deltas with one full delta).
+ * Count identical user origins from the right so loading older identical prompts does not rename
+ * the visible suffix. Within a turn, count each originating block, never delta events or array slots.
+ * These are deterministic snapshot IDs, not stable identities across edits to the event window.
+ * A stateful UI projector can reconcile user origins while leaving this pure default unchanged.
+ */
+function blockIds(events: WebEvent[]): (event: WebEvent, kind: Block['kind']) => string {
+  const users = new Map<string, number>();
+  for (const event of events) {
+    if (event.type === 'user') {
+      const key = eventKey(event);
+      users.set(key, (users.get(key) ?? 0) + 1);
+    }
+  }
+  let turn = '';
+  const occurrences = new Map<string, number>();
+  return (event, kind) => {
+    if (kind === 'user') {
+      const key = eventKey(event);
+      const occurrence = users.get(key)! - 1;
+      users.set(key, occurrence);
+      const origin = JSON.stringify([key, occurrence]);
+      turn = origin;
+      return JSON.stringify(['yca', event.sessionId, turn, 'user']);
+    }
+    // Tool ordinals are reconstructed session-wide by WebReplay, unlike live turn ordinals.
+    // The original name/arguments survive both representations. Neither results nor stdout belong
+    // in identity. Sub-agent IDs also survive a replay containing only the completed event.
+    const origin = kind === 'tool'
+      ? [event.data?.toolCallId ?? null, event.message ?? '', event.data?.args ?? '']
+      : kind === 'subagent'
+        ? [event.subagentId ?? '']
+        : kind === 'text' || kind === 'thought'
+          ? []
+          : [eventKey(event)];
+    const key = JSON.stringify(['yca', event.sessionId, kind === 'subagent' ? '' : turn, kind, origin]);
+    const occurrence = occurrences.get(key) ?? 0;
+    occurrences.set(key, occurrence + 1);
+    return JSON.stringify([key, occurrence]);
+  };
+}
 
 /**
  * Terminal tool-state marker used when a turn boundary (cancelled/done/error) leaves a tool card still
@@ -164,14 +208,17 @@ function collapseReplayDuplicate(blocks: Block[], runningTools: Map<string, numb
  * ConversationTranscript's runningTools: BOTH tool-stream and tool-finished bind to the most
  * recently started card with that tool name, so they can never "finish" the wrong card (which
  * previously left cards stuck in the 'running' state).
+ * The optional idFor supplies display-only identities in stateful projectors;
+ * without it, IDs remain a deterministic function of this snapshot alone.
  */
-export function eventsToBlocks(events: WebEvent[]): Block[] {
+export function eventsToBlocks(events: WebEvent[], idFor?: (event: WebEvent, kind: Block['kind']) => string): Block[] {
   // /clear clears the visible conversation, not the persisted session or its usage counters.
   const cleared = events.findLastIndex((event) => event.type === 'web-command' && event.data?.command === 'clear');
   if (cleared >= 0) {
     events = events.slice(cleared + 1);
   }
   const blocks: Block[] = [];
+  idFor ??= blockIds(events);
   const runningTools = new Map<string, number[]>();
   // Any event that is not a streaming delta marks the end of the current stream burst, so the trailing
   // text/thought block(s) are no longer "writing" and renderers may debounce-flush them.
@@ -202,6 +249,9 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
   for (const ev of events) {
     const last = blocks[blocks.length - 1];
     if (ev.type === 'text-delta') {
+      if (last?.kind === 'thought') {
+        last.writing = false;
+      }
       if (last?.kind === 'text') {
         last.content += ev.message ?? '';
         last.writing = true;
@@ -213,15 +263,18 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
         const msg = ev.message ?? '';
         const collapsed = collapseReplayDuplicate(blocks, runningTools, msg);
         if (!collapsed) {
-          blocks.push({ kind: 'text', content: msg, writing: true });
+          blocks.push({ id: idFor(ev, 'text'), kind: 'text', content: msg, writing: true });
         }
       }
     } else if (ev.type === 'thinking-delta') {
+      if (last?.kind === 'text') {
+        last.writing = false;
+      }
       if (last?.kind === 'thought') {
         last.content += ev.message ?? '';
         last.writing = true;
       } else {
-        blocks.push({ kind: 'thought', content: ev.message ?? '', writing: true });
+        blocks.push({ id: idFor(ev, 'thought'), kind: 'thought', content: ev.message ?? '', writing: true });
       }
     } else if (ev.type === 'tool-started') {
       settle();
@@ -230,6 +283,7 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
       const ord = ev.data?.ordinal;
       const args = typeof ev.data?.args === 'string' && ev.data.args.trim() ? ev.data.args : undefined;
       blocks.push({
+        id: idFor(ev, 'tool'),
         kind: 'tool',
         name,
         content: '',
@@ -275,6 +329,7 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
     } else if (ev.type === 'subagent-started') {
       settle();
       blocks.push({
+        id: idFor(ev, 'subagent'),
         kind: 'subagent',
         state: 'running',
         subagentId: ev.subagentId ?? '',
@@ -308,6 +363,7 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
         if (model) b.model = model;
       } else {
         blocks.push({
+          id: idFor(ev, 'subagent'),
           kind: 'subagent',
           state: finalState,
           subagentId: id,
@@ -318,7 +374,7 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
       }
     } else if (ev.type === 'user') {
       settle();
-      blocks.push({ kind: 'user', content: ev.message ?? '' });
+      blocks.push({ id: idFor(ev, 'user'), kind: 'user', content: ev.message ?? '' });
     } else if (ev.type === 'transcript') {
       // A server-emitted standalone fragment (e.g. the Codex authorize URL pushed through
       // WebShellFrontend.transcript during login). It becomes its own 'notice' block so it is never
@@ -331,7 +387,7 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
         settle();
       } else {
         settle();
-        blocks.push({ kind: 'notice', content: ev.message ?? '' });
+        blocks.push({ id: idFor(ev, 'notice'), kind: 'notice', content: ev.message ?? '' });
       }
     } else if (ev.type === 'btw') {
       // /btw answers live in the status bar pill + modal (folded from the same log by foldStatus),
@@ -340,7 +396,7 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
     } else if (ev.type === 'error') {
       settle();
       settleInterrupted();
-      blocks.push({ kind: 'error', content: ev.message ?? '', state: 'done' });
+      blocks.push({ id: idFor(ev, 'error'), kind: 'error', content: ev.message ?? '', state: 'done' });
     } else if (ev.type === 'turn-done') {
       settle();
       settleInterrupted();
@@ -361,7 +417,7 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
           }
           // else cur.startsWith(ev.message): streamed is fuller (clipped reply) -> keep it
         } else {
-          blocks.push({ kind: 'text', content: ev.message ?? '' });
+          blocks.push({ id: idFor(ev, 'text'), kind: 'text', content: ev.message ?? '' });
         }
       }
     } else if (ev.type === 'turn-cancelled') {

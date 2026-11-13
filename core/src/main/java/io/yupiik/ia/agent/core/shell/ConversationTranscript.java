@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.ContextMeasurement;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -1181,6 +1182,9 @@ public class ConversationTranscript {
         final var start = transcript.length();
         final var toolNamesByCallId = Message.toolNames(history);
         for (final var message : history) {
+            if (CompactionCoordinator.isDigestMessage(message)) {
+                continue; // Model context only, not a human turn in the display transcript.
+            }
             switch (message.role()) {
                 case "user" -> {
                     final var delivery = SubagentDeliveryView.parse(String.valueOf(message.content()));

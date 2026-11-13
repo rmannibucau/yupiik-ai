@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { call } from '../api/rpc';
+import { MemoryChips } from '../assistant/elements';
 import { PageShell } from './PageShell';
 
 type MemoryResult = {
@@ -18,16 +19,19 @@ type ScopeState = {
 };
 
 function placeholder(content: string, exists: boolean): string {
-  if (content) return content;
+  if (content) { return content; }
   return exists ? '(no facts yet)' : '(file not found)';
 }
 
 function Scope({ title, state }: { title: string; state: ScopeState }) {
   return (
-    <div>
-      <div className="mb-1 text-xs" style={{ color: 'var(--yca-muted)' }}>
-        {title}
-      </div>
+    <section aria-label={`${title} memory`} className="min-w-0">
+      <h2 className="mb-2 text-sm font-medium">{title}</h2>
+      <MemoryChips
+        className="mb-2 max-w-none"
+        label="Memory file"
+        chips={[{ id: title, text: state.exists ? 'File exists' : 'File not found', change: 'existing' }]}
+      />
       {state.path && (
         <div
           className="mb-1 truncate font-mono text-[11px]"
@@ -38,12 +42,13 @@ function Scope({ title, state }: { title: string; state: ScopeState }) {
         </div>
       )}
       <pre
+        aria-label={`${title} raw memory`}
         className="whitespace-pre-wrap rounded border p-3"
         style={{ borderColor: 'var(--yca-border)', background: 'var(--yca-panel)' }}
       >
         {placeholder(state.content, state.exists)}
       </pre>
-    </div>
+    </section>
   );
 }
 

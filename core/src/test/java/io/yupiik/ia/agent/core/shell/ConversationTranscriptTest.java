@@ -810,6 +810,44 @@ class ConversationTranscriptTest {
     }
 
     @Test
+    void replayOmitsInternalCompactionDigestsWithoutChangingModelHistory() {
+        final var digest = "<compacted-context>\n## Objective\nInternal history\n</compacted-context>";
+        final var guidance = """
+                When a compacted context is provided, treat it as historical state.
+                Do not reload, reconstruct, or repeat actions already described in it.
+                Continue from the state it represents; only call tools when needed for the current task.""";
+        for (final var text : List.of(digest, digest + "\n\n" + guidance, digest + "\n  ")) {
+            final var message = Message.user(text);
+            final var history = List.of(message, Message.user("continue"), Message.assistant("answer", null));
+            final var transcript = new ConversationTranscript();
+            final var md = transcript.replay(history);
+
+            assertEquals("\n\n---\n\n**You**\n\ncontinue\n\n\n---\n\n**Assistant**\n\nanswer\n", md);
+            assertEquals(md, transcript.transcript().toString());
+            assertEquals(3, history.size());
+            assertEquals("user", message.role());
+            assertEquals(text, message.content());
+        }
+    }
+
+    @Test
+    void replayKeepsQuotedMalformedAndAssistantCompactionText() {
+        final var digest = "<compacted-context>\nInternal history\n</compacted-context>";
+        for (final var text : List.of(
+                "Example: " + digest,
+                "```xml\n" + digest + "\n```",
+                digest + "\nWhy is this shown?",
+                "<compacted-context>\nunclosed example")) {
+            final var transcript = new ConversationTranscript();
+            assertEquals("\n\n---\n\n**You**\n\n" + text + '\n', transcript.replay(List.of(Message.user(text))));
+        }
+        final var transcript = new ConversationTranscript();
+        assertEquals(
+                "\n\n---\n\n**Assistant**\n\n" + digest + '\n',
+                transcript.replay(List.of(Message.assistant(digest, null))));
+    }
+
+    @Test
     void replayDisplaysSubagentDeliveriesWithoutChangingStoredMessages() {
         final var summary = "## Conclusion\n\n**Reviewed** the code.\n\n```java\nclass Review {}\n```\n";
         for (final var state : List.of("completed", "failed", "cancelled")) {

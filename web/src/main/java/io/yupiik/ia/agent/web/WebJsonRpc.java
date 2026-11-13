@@ -37,6 +37,7 @@ import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -473,9 +474,7 @@ public class WebJsonRpc {
                 gitBranchOf(dir),
                 lowerEnum(info.agentMode()),
                 lowerEnum(info.permissionMode()),
-                mcpManager.serverStatuses().stream()
-                        .map(s -> new SessionMetadataDto.McpStateDto(s.name(), String.valueOf(s.state())))
-                        .toList(),
+                mcpStatus(),
                 modelsOf(chatClient, chatSettings),
                 providersOf(providerManager));
     }
@@ -587,8 +586,53 @@ public class WebJsonRpc {
     @JsonRpc(value = "mcp.status", documentation = "Lists the MCP servers and their connection state.")
     public List<McpDto> mcpStatus() {
         return mcpManager.serverStatuses().stream()
-                .map(s -> new McpDto(s.name(), String.valueOf(s.state())))
+                .map(s -> {
+                    if ("yca".equals(s.name())
+                            && configuration.tools().builtin().enabled()) {
+                        return new McpDto(s.name(), String.valueOf(s.state()), "in-process", null);
+                    }
+                    final var server =
+                            configuration.mcp() == null || configuration.mcp().servers() == null
+                                    ? null
+                                    : configuration.mcp().servers().stream()
+                                            .filter(candidate -> s.name().equals(candidate.name()))
+                                            .findFirst()
+                                            .orElse(null);
+                    final var http = server != null
+                            && server.url() != null
+                            && !server.url().isBlank();
+                    final var transport = http
+                            ? "http"
+                            : server != null
+                                            && server.command() != null
+                                            && !server.command().isBlank()
+                                    ? "stdio"
+                                    : null;
+                    return new McpDto(
+                            s.name(), String.valueOf(s.state()), transport, http ? displayMcpUrl(server.url()) : null);
+                })
                 .toList();
+    }
+
+    // Never return raw configuration on parse failure, nor authentication material in user-info,
+    // query parameters or fragments. Keep the configured raw path (including percent encoding).
+    private static String displayMcpUrl(final String url) {
+        try {
+            final var uri = URI.create(url);
+            if (uri.getHost() == null
+                    || !("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))) {
+                return null;
+            }
+            final var authority = uri.getRawAuthority();
+            return uri.getScheme() + "://"
+                    + (uri.getRawUserInfo() == null ? "" : "[redacted]@")
+                    + authority.substring(authority.lastIndexOf('@') + 1)
+                    + (uri.getRawPath() == null ? "" : uri.getRawPath())
+                    + (uri.getRawQuery() == null ? "" : "?[redacted]")
+                    + (uri.getRawFragment() == null ? "" : "#[redacted]");
+        } catch (final IllegalArgumentException e) {
+            return null;
+        }
     }
 
     @JsonRpc(value = "mcp.reset", documentation = "Resets one MCP server (or all when no name is given).")
@@ -898,7 +942,7 @@ public class WebJsonRpc {
     public record CodeGraphHits(List<Map<String, Object>> hits) {}
 
     @JsonModel
-    public record McpDto(String name, String state) {}
+    public record McpDto(String name, String state, String transport, String url) {}
 
     @JsonModel
     public record SlashCommandCatalog(String name, String command, String usage, String group, String description) {}
@@ -922,10 +966,7 @@ public class WebJsonRpc {
             String gitBranch,
             String mode,
             String permissionMode,
-            List<McpStateDto> mcpServers,
+            List<McpDto> mcpServers,
             List<String> modelCandidates,
-            List<String> providerCandidates) {
-        @JsonModel
-        public record McpStateDto(String name, String state) {}
-    }
+            List<String> providerCandidates) {}
 }

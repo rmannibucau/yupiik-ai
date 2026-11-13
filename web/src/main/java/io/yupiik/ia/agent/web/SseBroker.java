@@ -51,24 +51,29 @@ public class SseBroker {
 
     /** Registers a subscription to receive frames of {@code sessionId}. */
     public void subscribe(final String sessionId, final SseSubscription subscription) {
-        subscriptions(sessionId).add(subscription);
+        subscriptions.compute(sessionId, (_, existing) -> {
+            final var bySession = existing == null ? ConcurrentHashMap.<SseSubscription>newKeySet() : existing;
+            bySession.add(subscription);
+            return bySession;
+        });
     }
 
     /** Removes a subscription; drops the empty per-session set. */
     public void unsubscribe(final String sessionId, final SseSubscription subscription) {
-        final var bySession = subscriptions.get(sessionId);
-        if (bySession == null) {
-            return;
-        }
-        bySession.remove(subscription);
-        if (bySession.isEmpty()) {
-            subscriptions.remove(sessionId, bySession);
-        }
+        subscriptions.computeIfPresent(sessionId, (_, bySession) -> {
+            bySession.remove(subscription);
+            return bySession.isEmpty() ? null : bySession;
+        });
     }
 
     /** Broadcasts a JSON-RPC server-initiated request (approval or question) to a session. */
     public void pushRpc(final String sessionId, final Object request) {
         broadcastRaw(sessionId, frame("rpc", request), false);
+    }
+
+    /** Encodes an outstanding RPC for replay to a single reconnecting subscription. */
+    public byte[] rpcFrame(final Object request) {
+        return frame("rpc", request).getBytes(StandardCharsets.UTF_8);
     }
 
     /** Writes a live {@code snapshot} frame carrying the session bootstrap payload. */
@@ -211,12 +216,7 @@ public class SseBroker {
                 }
             } catch (final RuntimeException e) {
                 // a dead subscription: drop it and keep the others alive
-                bySession.remove(subscriber);
-                if (bySession.isEmpty()) {
-                    // no live subscriber left for this session: drop the (now empty) set too, so a
-                    // session closed by a dead tab does not linger in the subscriptions map forever
-                    subscriptions.remove(sessionId, bySession);
-                }
+                unsubscribe(sessionId, subscriber);
             }
         }
     }

@@ -126,5 +126,6 @@ describe('SessionMetadata', () => {
     expect(permissions).toContain(`<option value="${permissionMode}" selected="">`);
     expect(permissions).toContain(`background:var(--yca-${color})`);
     expect(permissions).toContain('aria-hidden="true"');
+    expect(permissions).toMatch(/<dd class="yca-metadata-edit"><select[^>]*>.*<\/select><span aria-hidden="true"[^>]*><\/span><\/dd>$/);
   });
 });

@@ -1,4 +1,5 @@
 import React from 'react';
+import { makePrismLightSyntaxHighlighter } from '@assistant-ui/react-syntax-highlighter';
 import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter';
 import java from 'react-syntax-highlighter/dist/esm/languages/prism/java';
 import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript';
@@ -46,6 +47,10 @@ SyntaxHighlighter.registerLanguage('adoc', asciidoc);
 SyntaxHighlighter.registerLanguage('markdown', markdown);
 SyntaxHighlighter.registerLanguage('md', markdown);
 
+// The assistant-ui factory delegates tokenization to the registered PrismLight
+// instance and lets callers supply the actual pre/code elements (no nested pre).
+const Highlight = makePrismLightSyntaxHighlighter({ useInlineStyles: false });
+
 export function CodeBlock({ code, language, className }: {
   code: string;
   language?: string;
@@ -58,11 +63,13 @@ export function CodeBlock({ code, language, className }: {
     return <pre className={preClassName}><code className={codeClassName}>{code}</code></pre>;
   }
   return (
-    <SyntaxHighlighter
+    <Highlight
       language={grammar}
-      useInlineStyles={false}
-      className={preClassName}
-      codeTagProps={{ className: codeClassName }}
-    >{code}</SyntaxHighlighter>
+      code={code}
+      components={{
+        Pre: ({ node, className: ignoredClassName, ...props }) => <pre {...props} className={preClassName} />,
+        Code: ({ node, className: ignoredClassName, ...props }) => <code {...props} className={codeClassName} />,
+      }}
+    />
   );
 }
