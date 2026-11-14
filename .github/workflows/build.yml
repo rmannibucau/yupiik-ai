@@ -42,3 +42,7 @@ jobs:
             **/target/failsafe-reports/**
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Summarize Java tests
+        if: always()
+        run: java .github/test-reports/SurefireReport.java
