@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.configuration;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
+import io.yupiik.ia.agent.core.llm.ChatRoutes;
 import java.util.List;
 import java.util.Map;
 
@@ -181,7 +182,7 @@ public record ProviderConfiguration(
     public String resolveApiKey() {
         if (api == ApiFlavor.OPENCODE_FREE
                 || (api == null || api == ApiFlavor.AUTO)
-                        && io.yupiik.ia.agent.core.llm.ChatRoutes.detectFlavor(baseUrl) == ApiFlavor.OPENCODE_FREE) {
+                        && ChatRoutes.detectFlavor(baseUrl) == ApiFlavor.OPENCODE_FREE) {
             return "public";
         }
         if (apiKey != null && !apiKey.isBlank()) {

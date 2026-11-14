@@ -70,7 +70,7 @@ The examples use module-only invocation after the pipeline has installed its rea
 [cols="1,2,2,2",options="header"]
 |===
 |Individual profile |Base property (default) |Target property (default) |Runtime
-|`image-dispatcher` |`github-bot.dispatcher.base-image` (`ossyupiik/java-docker:25.0.5-alpine3.24-docker29.9.2`, pinned by multi-platform index digest) |`github-bot.dispatcher.image` (`yca-github-dispatcher:local`) |`CliLauncher`, UID/GID 10001, `HOME=/tmp`
+|`image-dispatcher` |`github-bot.dispatcher.base-image` (`ossyupiik/java-docker:25.0.5.0.3-zulu-debian12-docker29.9.2`, pinned by multi-platform index digest) |`github-bot.dispatcher.image` (`yca-github-dispatcher:local`) |`CliLauncher`, UID/GID 10001, `HOME=/tmp`
 |`image-agent` |`github-bot.agent.base-image` (required; no default) |`github-bot.agent.image` (`yca-github-agent:local`) |`CliLauncher`, UID/GID 10001, `HOME=/attempt/storage`
 |`image-egress` |`github-bot.egress.base-image` (`eclipse-temurin:25-jre`) |`github-bot.egress.image` (`yca-egress:local`) |`EgressGateway`, UID/GID 65532, `-Xmx128m`
 |===
@@ -117,8 +117,8 @@ The Kubernetes dispatcher uses the same dispatcher image: Fusion's embedded clie
 Jib generates direct Java entrypoints and runtime classpaths from module classes and runtime dependencies, independently of the shaded fat JAR used for host execution.
 No Dockerfile, shell wrapper or fixed in-image JAR path is needed.
 
-The dispatcher inherits Docker CLI 29.9.2 at `/usr/bin/docker` from `ossyupiik/java-docker:25.0.5-alpine3.24-docker29.9.2`, with no Docker daemon or agent development toolchain.
-The default base is pinned to the multi-platform index digest `sha256:1ff6f05991dfddd87092a64c2be460a601504c307c92fbd9c367a118ddc7ea3d`, covering Linux AMD64 and ARM64.
+The dispatcher inherits a Zulu Java 25.0.5.0.3 glibc JRE and Docker CLI 29.9.2 at `/usr/bin/docker` from `ossyupiik/java-docker:25.0.5.0.3-zulu-debian12-docker29.9.2`, with no Docker daemon or agent development toolchain.
+The default base is pinned to the multi-platform index digest `sha256:d0bfa246a761a066971942bbecc42ae0c7af315bf7660c319c4ad700a409cef2`, covering Linux AMD64 and ARM64.
 Maven does not download, extract or stage a Docker CLI archive.
 
 All image profiles use `github-bot.image.architecture`, defaulting to `amd64`; set `-Dgithub-bot.image.architecture=arm64` for an ARM64 image.
@@ -158,8 +158,9 @@ A strict-review preflight checks the prepared workspace before fetching reposito
 An incompatible runtime produces a `runtime-preflight` failure with a safe summary and, when private diagnostic capture succeeds, an actionable private exception message.
 Listing, inspection and other operations do not run this strict-review preflight.
 
-WARNING: The Temurin Alpine dispatcher base listed above does not provide the required secure directory handles in the tested runtime and must be overridden for strict reviews.
-Use a vetted, capability-tested Java 25 runtime and pin its immutable digest; a glibc-based Zulu JRE is a candidate, but neither its vendor nor glibc alone guarantees this capability on every filesystem provider.
+The default Zulu/glibc dispatcher base passed secure-directory tests on tmpfs and writable bind mounts on native AMD64 and ARM64 runners.
+WARNING: The earlier Temurin Alpine dispatcher base does not provide the required secure directory handles in the tested runtime and must not be used for strict reviews.
+Retain an immutable digest pin and verify the actual dispatcher image and deployment filesystem; neither the Java vendor nor glibc alone guarantees this capability on every filesystem provider.
 
 After building the actual dispatcher image, run the offline container regression against that image:
 
