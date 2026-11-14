@@ -30,12 +30,14 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -77,6 +79,13 @@ class JreAccessLoggerTest {
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
+    }
+
+    @AfterAll
+    static void closeClient() {
+        if (client != null) {
+            client.close();
+        }
     }
 
     @AfterEach
@@ -126,7 +135,7 @@ class JreAccessLoggerTest {
 
             @Override
             public CompletionStage<Response> handle(final Request request) {
-                return java.util.concurrent.CompletableFuture.completedFuture(Response.of()
+                return CompletableFuture.completedFuture(Response.of()
                         .status(200)
                         .header("content-length", body.getBytes(StandardCharsets.UTF_8).length)
                         .body(body)
@@ -145,7 +154,7 @@ class JreAccessLoggerTest {
 
             @Override
             public CompletionStage<Response> handle(final Request request) {
-                return java.util.concurrent.CompletableFuture.completedFuture(Response.of()
+                return CompletableFuture.completedFuture(Response.of()
                         .status(200)
                         .header("content-type", "text/event-stream")
                         .body("data: ping\n\n")

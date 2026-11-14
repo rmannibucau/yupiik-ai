@@ -40,6 +40,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -67,6 +68,13 @@ class SseExchangeHandlerTest {
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
+    }
+
+    @AfterAll
+    static void closeClient() {
+        if (client != null) {
+            client.close();
+        }
     }
 
     @AfterEach
@@ -337,7 +345,6 @@ class SseExchangeHandlerTest {
                 .filter(l -> l.startsWith("event: agent"))
                 .count();
         final int floor = threads * per / 2; // robust lower bound regardless of interleaving
-        s.close();
         assertTrue(
                 agentFrames >= floor,
                 "connection must survive concurrent push and deliver most frames, got " + agentFrames

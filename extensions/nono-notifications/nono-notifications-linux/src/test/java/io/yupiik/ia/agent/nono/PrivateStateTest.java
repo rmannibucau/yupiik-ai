@@ -57,34 +57,30 @@ class PrivateStateTest {
     @AfterEach
     void removeTemporaryHome() throws Exception {
         // Only test-owned temporary storage; Files.walk does not follow symbolic links.
-        try (final var paths = Files.walk(home)) {
-            for (final var path : paths.sorted(Comparator.reverseOrder()).toList()) {
-                Files.delete(path);
-            }
-        }
+        removeTree(home);
     }
 
     @ParameterizedTest(name = "{0}")
     @ValueSource(
             strings = {
-                "defaultResolutionPermissionsAndIdempotentClose",
-                "explicitPathIsManagedButMustBeFreshWithExistingParent",
-                "sameJvmConcurrentLaunchRemainsLive",
-                "concurrentStartupSerializesCreationAndRecovery",
+                "defaultResolutionPermissionsAndIdempotentClose,"
+                        + "explicitPathIsManagedButMustBeFreshWithExistingParent,"
+                        + "sameJvmConcurrentLaunchRemainsLive,"
+                        + "concurrentStartupSerializesCreationAndRecovery,"
+                        + "publishFailureCleansPartialSecretsAndReleasesResources",
+                "rejectsInsecureParentsAndSymlinkAncestors,"
+                        + "defaultDoesNotTakeOverExistingNonPrivateDirectory,"
+                        + "startupNamesEachInsecureDefaultDirectoryAndPreservesCause,"
+                        + "coordinationFailureDoesNotCreateLaunchOrFollowLink",
                 "insecureGeneratedFilesBlockCleanupAndReleaseLiveLock",
                 "realProcessLiveLockAndCrashRecovery",
-                "unknownTreesAndSymlinksAreNeverDeletedOrFollowed",
-                "rejectsInsecureParentsAndSymlinkAncestors",
-                "defaultDoesNotTakeOverExistingNonPrivateDirectory",
-                "startupNamesEachInsecureDefaultDirectoryAndPreservesCause",
-                "publishFailureCleansPartialSecretsAndReleasesResources",
-                "coordinationFailureDoesNotCreateLaunchOrFollowLink"
+                "unknownTreesAndSymlinksAreNeverDeletedOrFollowed"
             })
     void isolatedHomeScenario(final String scenario) throws Exception {
         final var output = privateFile(home.resolve("scenario.log"), "");
         final var process = new ProcessBuilder(
                         Path.of(System.getProperty("java.home"), "bin/java").toString(),
-                        "-Duser.home=" + home,
+                        "-Duser.home=" + home.resolve(".private-state-test-home"),
                         "-cp",
                         System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
                         Scenario.class.getName(),
@@ -94,7 +90,9 @@ class PrivateStateTest {
                 .start();
         try {
             process.getOutputStream().close();
-            assertTrue(process.waitFor(30, TimeUnit.SECONDS), "Scenario timed out: " + scenario);
+            assertTrue(
+                    process.waitFor(30L * scenario.split(",").length, TimeUnit.SECONDS),
+                    "Scenarios timed out: " + scenario);
             assertEquals(0, process.exitValue(), Files.readString(output));
         } finally {
             final var descendants = process.descendants().toList();
@@ -117,7 +115,20 @@ class PrivateStateTest {
             if (!scenario.home.getFileName().toString().startsWith(".private-state-test-")) {
                 throw new IllegalStateException("A fresh test-owned home is required");
             }
-            Scenario.class.getDeclaredMethod(args[0]).invoke(scenario);
+            // Share JVM startup, not storage. Never mutate user.home, even in this child.
+            // Cases that intentionally retain state/resources or exercise process crashes run alone.
+            for (final var name : args[0].split(",")) {
+                Files.createDirectory(
+                        scenario.home,
+                        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+                System.out.println("Starting scenario: " + name);
+                try {
+                    Scenario.class.getDeclaredMethod(name).invoke(scenario);
+                    System.out.println("Passed scenario: " + name);
+                } finally {
+                    removeTree(scenario.home);
+                }
+            }
         }
 
         private void defaultResolutionPermissionsAndIdempotentClose() throws Exception {
@@ -386,6 +397,14 @@ class PrivateStateTest {
 
     private static JsonMapperImpl mapper() {
         return new JsonMapperImpl(List.of(), key -> Optional.empty());
+    }
+
+    private static void removeTree(final Path directory) throws IOException {
+        try (final var paths = Files.walk(directory)) {
+            for (final var path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                Files.delete(path);
+            }
+        }
     }
 
     private static Path privateFile(final Path path, final String value) throws Exception {

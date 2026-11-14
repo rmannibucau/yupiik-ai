@@ -2102,7 +2102,16 @@ class TuiCommandRenderTest {
         frontend.onEvent(
                 new AgentEvent.Status("NOTICEHEAD\n" + "line of detail\n".repeat(30) + "NOTICETAIL", sessionId));
         awaitText("NOTICEHEAD");
-        Thread.sleep(5_100); // status-strip TTL, followed by a repaint on opening the modal
+        // Age the fixture on the UI thread instead of sleeping through the status-strip TTL.
+        final var tabManagerField = TuiCommand.class.getDeclaredField("tabManager");
+        tabManagerField.setAccessible(true);
+        final var tabs = (TabManager) tabManagerField.get(command);
+        tuiRef.get().runLater(() -> {
+            final var state = tabs.active();
+            state.notificationShownAt = System.currentTimeMillis() - 5_100;
+            state.dirty = true;
+        });
+        awaitTextGone("NOTICEHEAD");
         tuiRef.get().dispatch(KeyEvent.ofChar('i', KeyModifiers.ALT));
         awaitText("notification");
         awaitText("NOTICEHEAD");

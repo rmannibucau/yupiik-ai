@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.http.server.spi.Endpoint;
 import io.yupiik.fusion.httpserver.jre.JreHttpServer;
 import io.yupiik.fusion.httpserver.jre.JreHttpServerConfiguration;
 import java.net.URI;
@@ -28,6 +29,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -46,6 +48,13 @@ class StaticAssetsExchangeHandlerTest {
                 .build();
     }
 
+    @AfterAll
+    static void closeClient() {
+        if (client != null) {
+            client.close();
+        }
+    }
+
     @AfterEach
     void stop() {
         if (server != null) {
@@ -53,7 +62,7 @@ class StaticAssetsExchangeHandlerTest {
         }
     }
 
-    private JreHttpServer start(final io.yupiik.fusion.http.server.spi.Endpoint... endpoints) {
+    private JreHttpServer start(final Endpoint... endpoints) {
         final var instance = new JreHttpServer(new JreHttpServerConfiguration(null, 0, true), List.of(endpoints));
         instance.start();
         server = instance;

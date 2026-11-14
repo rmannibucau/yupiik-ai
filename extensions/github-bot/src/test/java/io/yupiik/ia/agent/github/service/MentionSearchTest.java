@@ -49,6 +49,8 @@ import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 class MentionSearchTest {
     private static final MentionSearchClient.Kind ISSUE = MentionSearchClient.Kind.ISSUE;
@@ -409,32 +411,71 @@ class MentionSearchTest {
         }
     }
 
-    @Test
-    void leafAndTreeCapsFallBackWithoutDroppingRepositories() throws Exception {
+    @ParameterizedTest(name = "{0} leaves, {1} tree nodes")
+    @CsvSource({"256,256", "256,511"})
+    void leafAndTreeCapsFallBackWithoutDroppingRepositories(final int leafCount, final int treeSize) throws Exception {
         try (final var stub = new Stub()) {
             final var selected =
-                    IntStream.range(0, 257).mapToObj(i -> "o/r" + i).toList();
+                    IntStream.range(0, leafCount + 1).mapToObj(i -> "o/r" + i).toList();
+            // Start from the durable boundary, not 511 repetitions of the already-tested split path.
+            // Keep all real transport, validation, fallback and restart behavior under test.
+            stub.service("bot", "org:o", NOW).poll(selected, ISSUE, 0, repos -> fail("No request budget"));
+            final var prefix = stub.prefix();
+            final var template = stub.state();
+            final int firstActive = treeSize - leafCount;
+            stub.store.transaction(state -> {
+                final var cursors = state.cursors();
+                for (int id = 0; id < treeSize; id++) {
+                    final var leafPrefix = prefix + "leaf/" + id + "/";
+                    template.forEach((key, value) -> {
+                        if (key.startsWith(prefix + "leaf/0/")) {
+                            cursors.put(leafPrefix + key.substring((prefix + "leaf/0/").length()), value);
+                        }
+                    });
+                    final int index = id - firstActive;
+                    cursors.put(leafPrefix + "status", index < 0 ? "split" : "search");
+                    if (index >= 0) {
+                        cursors.remove(leafPrefix + "scope");
+                        cursors.put(
+                                leafPrefix + "reposCSV",
+                                index == 0 ? selected.get(0) + "," + selected.get(1) : selected.get(index + 1));
+                    }
+                }
+                cursors.put(prefix + "nextId", Integer.toString(treeSize));
+                cursors.put(
+                        prefix + "active",
+                        String.join(
+                                ",",
+                                IntStream.range(firstActive, treeSize)
+                                        .mapToObj(Integer::toString)
+                                        .toList()));
+                return null;
+            });
             stub.respond(request -> page(1000, null, List.of()));
-            final var covered = new HashSet<String>();
             final var fallbackCalls = new ArrayList<List<String>>();
-            stub.service("bot", "org:o", Instant.ofEpochSecond(1)).poll(selected, ISSUE, 600, repos -> {
-                covered.addAll(repos);
+            stub.service("bot", "org:o", NOW).poll(selected, ISSUE, 1, repos -> {
                 fallbackCalls.add(repos);
                 return 0;
             });
+            assertEquals(List.of(selected.subList(0, 2)), fallbackCalls);
+            assertEquals(Integer.toString(treeSize), stub.field("nextId"));
+            assertEquals(leafCount, stub.field("active").split(",").length);
+            assertEquals("directfallback", stub.field("leaf/" + firstActive + "/status"));
+            assertEquals(1, stub.requests.size());
+            final var covered = new HashSet<String>();
+            final var persisted = stub.state();
+            for (int id = firstActive; id < treeSize; id++) {
+                covered.addAll(List.of(
+                        persisted.get(prefix + "leaf/" + id + "/reposCSV").split(",")));
+            }
             assertEquals(new HashSet<>(selected), covered);
-            assertEquals(256, fallbackCalls.size());
-            assertEquals("511", stub.field("nextId"));
-            assertEquals(256, stub.field("active").split(",").length);
-            assertEquals(511, stub.requests.size());
-            final int before = stub.requests.size();
-            final var replayed = new HashSet<String>();
-            stub.service("bot", "org:o", NOW).poll(selected, ISSUE, 1, repos -> {
-                replayed.addAll(repos);
+            fallbackCalls.clear();
+            stub.service("bot", "org:o", NOW).poll(selected, ISSUE, 0, repos -> {
+                fallbackCalls.add(repos);
                 return 0;
             });
-            assertEquals(before, stub.requests.size());
-            assertEquals(covered, replayed);
+            assertEquals(1, stub.requests.size(), "Restart must reuse persistent fallback without a request");
+            assertEquals(List.of(selected.subList(0, 2)), fallbackCalls);
         }
     }
 
