@@ -25,15 +25,9 @@ jobs:
           maven-version: '4.0.0-rc-7'
           java-version: '25'
           java-distribution: temurin
-          # full history + pin to the PR head commit
+          # full history for all branches (including origin/main for spotless) + pin to the PR head commit
           checkout-fetch-depth: '0'
           checkout-ref: ${{ github.event.pull_request.head.sha }}
-
-      # checkout on a pull_request event only populates the merge ref (refs/pull/N/merge),
-      # so refs/remotes/origin/main is still absent and spotless ratchetFrom would fail
-      # with "No such reference 'origin/main'". Cheap with fetch-depth: 0 (objects present).
-      - name: Populate origin/main for spotless ratchet
-        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
 
       - name: Build
         run: mvn ${MAVEN_ARGS} verify
