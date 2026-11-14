@@ -65,7 +65,7 @@ public record ProviderListConfiguration(
         @Property(
                 defaultValue = "-1",
                 documentation =
-                        "Convenience shorthand for the default provider context window (used only when no providers are listed). Zero or negative auto-detects it from the provider /v1/models vendor extensions, caches it one day per provider and model and falls back to 128000.")
+                        "Convenience shorthand for the default provider context window (used only when no providers are listed). Zero or negative auto-detects it from the provider /v1/models vendor extensions, caches it one day per provider and model and falls back to 32000.")
         int contextWindow,
 
         @Property(

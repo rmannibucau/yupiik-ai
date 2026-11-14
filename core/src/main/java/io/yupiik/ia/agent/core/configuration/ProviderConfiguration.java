@@ -54,7 +54,7 @@ public record ProviderConfiguration(
         @Property(
                 defaultValue = "-1",
                 documentation =
-                        "Context window size in tokens, used by the usage gauges and thresholds. Zero or negative (the default) auto-detects it from the provider /v1/models vendor extensions (context_window, model_context_window, context_length, top_provider.context_length, max_model_len, max_input_tokens, llama.cpp meta.n_ctx, or meta.n_ctx_train when smaller than the default), caches it one day per provider and model under the storage home and falls back to 128000. Detected values are totals (prompt + completion combined): the usable input budget subtracts the declared output cap (per-model behavior.outputTokens, outputTokens or the detected top_provider.max_completion_tokens/max_tokens) and falls back to a min(20000, window/4) reserve when no cap is declared.")
+                        "Context window size in tokens, used by the usage gauges and thresholds. Zero or negative (the default) auto-detects it from the provider /v1/models vendor extensions (context_window, model_context_window, context_length, top_provider.context_length, max_model_len, max_input_tokens, llama.cpp meta.n_ctx, or meta.n_ctx_train when smaller than the default), caches it one day per provider and model under the storage home and falls back to 32000. Detected values are totals (prompt + completion combined): the usable input budget subtracts the declared output cap (per-model behavior.outputTokens, outputTokens or the detected top_provider.max_completion_tokens/max_tokens) and falls back to a min(20000, window/4) reserve when no cap is declared.")
         int contextWindow,
 
         @Property(

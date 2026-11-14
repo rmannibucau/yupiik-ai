@@ -1,14 +1,21 @@
 = Built-in tools
-:minisite-breadcrumb: Home[index.html] > Features > Built-in tools
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Built-in tools
 :minisite-nav-prev-link: streaming.html
 :minisite-nav-prev-label: Streaming output and reasoning
 :minisite-nav-next-link: mcp.html
 :minisite-nav-next-label: MCP support
 
-yca ships a set of tools the agent can call to inspect and edit a codebase:
-read/write/edit files, directory listing, glob, grep, running `bash`, a todo
-list, and a memory store.
+yca's built-in tools let the agent inspect and edit files, search a codebase, run commands, track todos and write durable memory.
 
-This page is the *curated overview* of what the tools do. The exhaustive
-reference - every tool with its description, read-only status and JSON schema -
-is generated from the running binary on the xref:../tools.adoc[Tools] page.
+== Choose a tool
+
+* Inspect files with read, directory listing, glob and grep tools.
+* Apply changes with writing, editing and patch tools.
+* Run builds and other commands with `bash`.
+* Track work with xref:todo-guidance.adoc[todos] and save cross-session facts in xref:memory.adoc[memory].
+
+The generated xref:../tools.adoc[Tools reference] lists every tool's description, read-only status and JSON schema.
+It is generated from the running binary.
+
+Availability depends on configuration, the active mode and the agent profile.
+See xref:permissions.adoc[Permission modes] before enabling unattended tool execution.

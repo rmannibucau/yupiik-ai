@@ -70,7 +70,7 @@
           <includeProvidedScope>true</includeProvidedScope>
           <customScripts><![CDATA[
 <style>
-/* mermaid diagrams: the renderer emits a bare <pre class="mermaid"> (roles are
+/* mermaid diagrams: the renderer emits a bare pre.mermaid (roles are
    dropped by visitMermaid), so center diagrams and let them take the full
    available width via a global rule on the pre and its svg. */
 pre.mermaid {
@@ -91,49 +91,6 @@ pre.mermaid svg {
 /* definition-list terms (generated option/command references) */
 dt.hdlist1 { font-weight: 600; }
 </style>
-<script>
-// Mermaid diagrams ([mermaid] blocks render to <pre class="mermaid">). The
-// asciidoc renderer only injects its mermaid CDN auto-run script when it emits
-// a full document; the minisite renders body-only (noheader=true ->
-// contentOnly=true), so beforeBodyEnd() is skipped and we must load and run
-// mermaid ourselves here.
-(function () {
-  if (!document.querySelector('pre.mermaid')) { return; } // no diagram on this page
-  function runMermaid() {
-    if (!window.mermaid) { return; }
-    try {
-      var theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default';
-      mermaid.initialize({ startOnLoad: false, theme: theme, securityLevel: 'loose' });
-      var blocks = document.querySelectorAll('pre.mermaid');
-      Array.prototype.forEach.call(blocks, function (el) {
-        // the minisite theme injects a copy button into every <pre>; it must not
-        // become part of the diagram text mermaid parses.
-        Array.prototype.slice.call(el.querySelectorAll('button.copy-code-button')).forEach(function (b) { b.remove(); });
-        // first pass: keep the pristine diagram source so the theme toggle can re-render.
-        // mermaid replaces the node content with the rendered <svg>, so restore the
-        // original text before mermaid.run or it would parse the SVG markup as a diagram.
-        if (!el.__mermaidSource) { el.__mermaidSource = el.textContent; }
-        el.textContent = el.__mermaidSource;
-        el.removeAttribute('data-processed');
-      });
-      mermaid.run({ nodes: Array.prototype.slice.call(blocks) }).catch(function (e) { console.warn('mermaid render error', e); });
-    } catch (e) { console.warn('mermaid init error', e); }
-  }
-  function loadMermaid() {
-    if (window.mermaid) { runMermaid(); return; }
-    var s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/mermaid@12.2.0/dist/mermaid.min.js';
-    s.integrity = 'sha256-qKam+AWwdKgmGiglyG+ZyAVKyzs19Qu34kpPnyw8O58=';
-    s.crossOrigin = 'anonymous';
-    s.onload = runMermaid;
-    s.onerror = function () { console.warn('could not load mermaid'); };
-    document.head.appendChild(s);
-  }
-  loadMermaid();
-  var toggle = document.getElementById('theme-toggle');
-  if (toggle) { toggle.addEventListener('click', function () { setTimeout(runMermaid, 0); }); }
-})();
-</script>
 ]]></customScripts>
           <preActions>
             <preAction>

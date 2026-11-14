@@ -8,62 +8,75 @@
 :minisite-nav-next-link: cli/index.html
 :minisite-nav-next-label: All commands
 
-yca exposes a single agent core through three interactive frontends plus
-automation-oriented commands. The `cli`, `tui` and `web` commands each start a
-session in front of the same agent - same prompts, same tools, same slash
-commands, same session store:
+yca exposes the same agent through plain-terminal, full-screen and browser interfaces.
+Use the command directory below to open the *generated reference* for arguments, options and defaults.
 
-* `cli` is a plain-terminal REPL: streamed ANSI-colored output, sessions, todos,
-  approval/feedback gates and slash commands. `Ctrl-C` while a turn runs opens an
-  interrupt menu (`1`/`cancel` = cancel the current turn and stay in the REPL,
-  `2`/`exit` = quit); when idle, a second `Ctrl-C` within 2s quits, and `Ctrl-D`
-  exits as well. Cancelling is cooperative: the LLM stream stops within ~100ms,
-  in-flight `bash`/`web_fetch` tools are killed, and a pending compaction/retry
-  is aborted at its next checkpoint - the transcript is not marked as an error.
-* `tui` is a full-screen interface (TamboUI): markdown transcript, token gauges,
-  a thinking stream, approval modals and an editable plan (`/editplan`).
-* `web` serves a browser frontend (plus the JSON-RPC/SSE API behind it) on the
-  configured host and port, opening the browser on start by default. The UI
-  keeps one tab per session with the same sidebar as the terminals: model,
-  provider, mode, todos, working directory, git branch, a context usage bar and
-  the provider usage/quota gauges. Slash commands are dispatched through the
-  same server-side path as the terminal frontends, and `web --session a --session
-  b` restores the given sessions in their own tabs on boot.
+== Command directory
 
-For automation, `run` executes a single headless prompt and prints the result on
-stdout. `completion bash` generates the bash completion script. `code-graph-index`
-builds a binary xref:features/code-graph-index.adoc[code graph index] from a jar
-for fast symbol lookups.
+* xref:cli/index.adoc[All generated CLI commands and options]
+* xref:github-bot/index.adoc#cli-commands[GitHub bot commands: poll, list, worker and maintenance]
 
-The `cli` and `tui` prompts and the transcript speaker labels are Handlebars
-templates (`yca.prompt.template`, `yca.labels.*`); both engines expose the
-`systemProperty` helper (`{{systemProperty "user.name" "You"}}`: 1 argument =
-key rendered empty when absent, 2 arguments add the default). Speaker labels
-are UI-only: the LLM keeps its hardcoded `user`/`assistant` roles.
+[cols="1,1,3",options="header"]
+|===
+|Module |Command reference |Use it to
+|Core |xref:cli/cli.adoc[`yca cli`] |Start the plain-terminal interactive session.
+|Core |xref:cli/run.adoc[`yca run`] |Execute one headless prompt and write the answer to stdout.
+|Core |xref:cli/code-graph-index.adoc[`yca code-graph-index`] |Build a binary code graph index from a JAR.
+|Core |xref:cli/completion-bash.adoc[`yca completion bash`] |Generate a Bash completion script.
+|TUI |xref:cli/tui.adoc[`yca tui`] |Start the full-screen terminal interface.
+|Web |xref:cli/web.adoc[`yca web`] |Serve the browser interface and its JSON-RPC/SSE API.
+|===
 
-The complete generated reference for every command and its options (including
-`cli.*`, `tui.*`, `web.*` and `run.*`) is on the xref:cli/index.adoc[All commands]
-page: xref:cli/cli.adoc[cli], xref:cli/tui.adoc[tui], xref:cli/web.adoc[web],
-xref:cli/run.adoc[run], xref:cli/completion-bash.adoc[completion bash] and
-xref:cli/code-graph-index.adoc[code-graph-index].
+These links point to build-generated pages, not a second handwritten option reference.
+For provider and shared agent settings, see xref:configuration.adoc[Configuration].
 
-Example:
+== Run your first prompt
+
+This example uses the JVM distribution from a local build:
 
 [source,bash,subs="attributes+"]
 ----
-export OPENAI_API_KEY=sk-...
+export OPENAI_API_KEY='<your-api-key>'
 java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-{project_version}-fatjar.jar \
   run --prompt "explain the pom.xml" --yca-provider-model gpt-5-mini
 ----
 
-TIP: The structural code graph (enabled by default) uses the `javac` API and
-therefore needs a JDK (not a plain JRE).
+TIP: The structural code graph is enabled by default and uses the `javac` API, so use a JDK rather than a plain JRE.
+
+== Choose an interactive interface
+
+All three interfaces share the same prompts, tools, slash commands and session store.
+See xref:features/ui.adoc[Interactive UI and headless mode] for a tour.
+
+* `cli` streams ANSI-colored output in a plain terminal, with approval and feedback prompts.
+* `tui` provides a full-screen transcript, token gauges, thinking output, approval modals and an editable plan (`/editplan`).
+* `web` opens a browser by default and keeps a tab per session, with model, provider, mode, todos, working directory, git branch and usage gauges.
+
+In `cli`, press `Ctrl-C` during a turn to open the interrupt menu: `1` or `cancel` cancels the turn; `2` or `exit` quits.
+When idle, press `Ctrl-C` twice within two seconds, or use `Ctrl-D`, to quit.
+
+Cancellation is cooperative.
+The LLM stream stops within about 100 ms; in-flight `bash` and `web_fetch` tools are killed, and compaction or retry stops at its next checkpoint.
+A cancelled transcript is not marked as an error.
+
+In `web`, slash commands use the same server-side dispatch as the terminals.
+Use `web --session a --session b` to restore sessions in separate tabs.
+
+The `cli` and `tui` prompts and speaker labels use Handlebars templates (`yca.prompt.template`, `yca.labels.*`).
+See xref:features/prompt.adoc[Prompt templates] for customization.
+Both engines expose `systemProperty`: `{{systemProperty "user.name" "You"}}` uses a default, while the one-argument form renders empty when absent.
+
+Speaker labels affect only the interface.
+The LLM still receives the fixed `user` and `assistant` roles.
 
 == CLI and headless tool presentation
 
 The `cli` and `run` frontends identify tool invocations by their actual tool name and execution ordinal, for example `#12 read` or `#13 bash`.
 Legacy events without an ordinal retain a name-only header.
-Requests are separate from streamed output and final results; `started`, `done`, `failed` and `pending` describe the lifecycle rather than inferring failure from unfinished work.
+
+Requests are separate from streamed output and final results.
+The labels `started`, `done`, `failed` and `pending` describe the lifecycle; unfinished work is not automatically a failure.
+
 Requested edits and patches are previews, not proof that a change was applied.
 An `edit_file` preview preserves replacement whitespace and indicates single-match or all-match scope; `apply_patch` retains paths and hunks for either supported patch dialect.
 A `write_file` request shows the supplied content, not an invented old/new filesystem diff.
@@ -80,11 +93,15 @@ A pending result is not a failure.
 For `cli`, compact verbosity bounds request and result previews and marks omitted lines.
 Verbose verbosity displays complete requested details and tool output; raw verbosity retains raw request arguments and output.
 Details preserve string newlines and whitespace, and external tools fall back to nested, pretty-printed JSON.
-Streamed output is tracked independently per invocation and actor; a final result is suppressed only where it exactly repeats the already displayed prefix, so additional diagnostics remain visible.
+
+Streamed output is tracked independently per invocation and actor.
+The final result is suppressed only when it exactly repeats the already displayed prefix, so additional diagnostics remain visible.
 
 For `run`, `--show-tool-output shown|collapsed|hidden` controls the same visibility states, with `collapsed` as the default.
 Tool activity and failure diagnostics use logging, not stdout; stdout remains the answer stream for scripts and pipelines.
-Shown live tool output is buffered into complete lines, with an unfinished trailing fragment flushed at completion or turn end without trimming whitespace.
+
+Shown live tool output is buffered into complete lines.
+An unfinished trailing fragment is flushed at completion or turn end without trimming whitespace.
 These presentation settings do not change execution, exit status, or metrics collection.
 
 == Launch options

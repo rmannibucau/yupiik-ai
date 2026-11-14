@@ -1,19 +1,19 @@
 = Hooks & events
-:minisite-breadcrumb: Home[index.html] > Features > Hooks & events
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Hooks & events
 :minisite-nav-prev-link: prefix-cache.html
 :minisite-nav-prev-label: Provider prefix cache
 :minisite-nav-next-link: agents.html
 :minisite-nav-next-label: Custom agents
 
-yca can run external programs at defined points of a coding session, called *hooks*. A hook receives the event
-payload (a JSON `@JsonModel` on stdin) and may reply with a JSON decision on stdout. Hooks give you policing,
-injection and observability without changing the agent: for example vet every `bash` command, block a prompt, or
-run a formatter after a tool call.
+Use hooks to run external programs at defined points in a coding session.
+A hook receives a JSON event on stdin and can return a JSON decision on stdout.
+For example, it can vet a bash command, reject a prompt or run a formatter after a tool call.
 
 == The callback contract
 
-Each hook is an external program configured under `yca.hooks.<EventId>`. When the event fires yca runs every
-registered callback concurrently on virtual threads (never the UI thread) and pipes the input payload on stdin:
+Configure callbacks for an event using its simple class name, such as `ToolUsePreEvent`.
+When the event fires, yca runs its registered callbacks concurrently on virtual threads, never on the UI thread.
+Each callback receives one JSON `@JsonModel` payload:
 
 [source,json]
 ----
@@ -34,35 +34,36 @@ registered callback concurrently on virtual threads (never the UI thread) and pi
   "toolUseId": "call-1"                      <5>
 }
 ----
-<.> The payload is a single JSON object piped to the callback's stdin.
-<.> `eventContext` is the shared context embedded in every hook payload (see `EventContext` below).
-<.> `toolName` is the tool id - a `bash` call is just `toolName == "bash"`.
-<.> `toolInput` is the raw tool arguments as the agent provided them.
-<.> `toolUseId` ties the callback to the unique tool call.
+<.> One JSON object is piped to stdin.
+<.> `eventContext` is shared by all event payloads; see `EventContext` in the event reference.
+<.> `toolName` identifies the tool.
+<.> `toolInput` contains the arguments supplied by the agent.
+<.> `toolUseId` identifies this unique call.
 
-The callback prints an optional decision on stdout (a single JSON object):
+Return an optional decision as one JSON object:
 
 [source,json]
 ----
-{                               <1>
-  "decision": "forbid",         <2>
-  "reason": "blocked by policy" <3>
+{
+  "decision": "forbid",
+  "reason": "blocked by policy"
 }
 ----
-<.> Optional decision printed on stdout; empty stdout means noop.
-<.> `forbid` blocks the action, `allow` lets it proceed.
-<.> `reason` surfaces as the denial when forbidding.
 
-The outcome rules are strict:
+[options="header"]
+|===
+|Callback result |Effect
+|Empty stdout after `strip()` |No decision; no action by this callback.
+|Valid JSON and exit `0` |Response fields apply.
+|Invalid JSON, nonzero exit or timeout |An error is logged and no decision applies.
+|===
 
-- **empty stdout** (after `strip()`) → no action (noop);
-- **valid JSON** on exit `0` → the fields apply (`forbid` blocks the action, `allow` lets it proceed, `context`
-  appends free text for the model on prompt/turn events);
-- **invalid JSON**, a **non-zero exit** or a **timeout** → the callback raises an error (logged, no decision
-  applies). Only valid JSON or empty output are "ok".
+`HookResponse` has optional `decision` (`allow` or `forbid`), `reason`, and `context` fields.
+`forbid` blocks the action and surfaces the reason.
+`context` adds free text for the model on prompt/turn events.
 
-A `HookResponse` has three optional fields: `decision` (`allow`/`forbid`), `reason` (shown when forbidding) and
-`context` (free text added for the model). See <<_events>> below for each event's input payload.
+WARNING: A callback error is not a `forbid` decision.
+Do not rely on a failing process or malformed output to enforce a denial policy.
 
 == Configuration
 
@@ -70,33 +71,32 @@ A `HookResponse` has three optional fields: `decision` (`allow`/`forbid`), `reas
 ----
 yca:
   hooks:
-    - event: ToolUsePreEvent        # the event id (simple class name)
-      command: ["node", "/repo/.yca/pre-tool.js"]   # List<String>; CLI form splits on ","
-      timeoutSeconds: -1                            # <=0 inherits the event's budget
+    - event: ToolUsePreEvent
+      command: ["node", "/repo/.yca/pre-tool.js"]
+      timeoutSeconds: -1
     - event: UserPromptSubmit
       command: ["sh", "/repo/.yca/vet-prompt.sh"]
 ----
 
-`command` is a `List<String>`; on the CLI the default separator is `,`, overridable with the fusion `sep=` prefix
-(eg. `sep=|cmd|node|.yca/pre.js`) when a separator must appear inside an argument. `timeoutSeconds <= 0` inherits
-the triggering event's budget (a bash call's `timeout_seconds`, else a sane default).
+`command` is a list of argv strings.
+The CLI splits it on commas by default; use Fusion's `sep=` prefix when arguments need another separator, for example `sep=|cmd|node|.yca/pre.js`.
+`timeoutSeconds <= 0` inherits the event budget: the bash call's `timeout_seconds` when available, otherwise a default budget.
 
 == Sample scripts
 
-A `bash` command vetting hook that blocks `rm`:
+This `ToolUsePreEvent` example blocks commands beginning with `rm`:
 
 [source,sh]
 ----
 #!/bin/sh
-# receives the ToolUsePreEvent payload on stdin, blocks rm commands
 command=$(jq -r '.toolInput.command // empty' 2>/dev/null)
 case "$command" in
   rm*) echo '{"decision":"forbid","reason":"rm is not allowed"}'; exit 0 ;;
-  *)   exit 0 ;;                      # empty/absent output => no action, command proceeds
+  *)   exit 0 ;;
 esac
 ----
 
-A prompt vetting hook that only lets themed prompts through (forbid otherwise):
+This prompt example rejects text containing `rm` or `--force`:
 
 [source,sh]
 ----
@@ -108,29 +108,30 @@ case "$prompt" in
 esac
 ----
 
-A `PostToolUse`-style notifier would print nothing and exit `0` — it only runs, observing the payload.
+These are deliberately simple string checks, not shell parsing or a security boundary.
+Use xref:permissions.adoc[permission rules] and xref:sandboxes.adoc[external isolation] for broader controls.
+An observation-only notifier can print nothing and exit `0`.
 
 == Events
 
-The following events are hookable (key = event id, the class simple name). The input is the `@JsonModel` payload
-piped on stdin; the output decision schema is the `HookResponse` described above.
+The generated registry below is authoritative for supported event ids and payloads.
+Only listed events emit hook callbacks; responses use the `HookResponse` contract above.
 
 include::content/_partials/generated/events.adoc[]
 
 == Event id as configuration key
 
-Each event is configured with `yca.hooks.<EventId>` using the event's simple class name — eg.
-`yca.hooks.ToolUsePreEvent`, `yca.hooks.UserPromptSubmit`. The generated list above is the authoritative registry:
-only events listed there emit a `yca.hooks.*` callback.
+Use the event's simple class name, such as `ToolUsePreEvent` or `UserPromptSubmit`, in the hook configuration.
+The `yca.hooks.<EventId>` notation refers to that event selection; the YAML example shows the list form.
+Check the generated registry rather than assuming a similarly named event exists.
 
 == Threading & cancellation
 
-Callbacks run concurrently on virtual threads and each subprocess is tracked, so canceling a turn kills the
-callback trees. Blocking events (those that can forbid an action) wait for their callbacks before the action
-proceeds, but the UI is never blocked — the agent turn thread joins while the TUI keeps rendering.
+Callbacks run concurrently, and their subprocess trees are tracked.
+Canceling a turn kills those trees.
+Blocking events wait for callbacks before proceeding, but only the agent turn thread waits; the TUI keeps rendering.
 
 == Scope
 
-The following Claude-hook concepts have **no yca equivalent** and are not supported: agent teams
-(`TeammateIdle`), git worktrees (`WorktreeCreate/Remove`), elicitation (`Elicitation`), one-time `Setup`, and
-in-session `ConfigChange` (configuration is read at boot).
+The following Claude-hook concepts have no yca equivalent: agent teams (`TeammateIdle`), git worktrees (`WorktreeCreate/Remove`), elicitation (`Elicitation`), one-time `Setup`, and in-session `ConfigChange`.
+Configuration is read at boot.

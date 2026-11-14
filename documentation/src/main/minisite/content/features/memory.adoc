@@ -1,13 +1,19 @@
 = Memory
-:minisite-breadcrumb: Home[index.html] > Features > Memory
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Memory
 :minisite-nav-prev-link: compaction.html
 :minisite-nav-prev-label: Compaction and compression
 :minisite-nav-next-link: sessions.html
 :minisite-nav-next-label: Sessions and memory
 
-yca keeps a durable, cross-session memory so preferences and project decisions
-survive individual conversations. This page explains how memory is *written*,
-how it is *selected* into the model context, and how to tune it.
+yca stores durable preferences and project decisions across sessions.
+Facts are written to plain Markdown files and selected into the prompt when a session starts or resumes.
+
+* Save a fact immediately with `memory_write`.
+* Inspect stored memory with `/memory`, or request project-memory compaction with `/memory compact`.
+* Disable extraction and injection with `memory.enabled=false`.
+
+IMPORTANT: Memory files update live, but the current session's prompt snapshot is frozen.
+New or edited facts enter the prompt only in a new session or after resume.
 
 == Overview
 
@@ -32,17 +38,14 @@ how it is *selected* into the model context, and how to tune it.
                                        └──►              NOT rewrite it (never re-read)
 ....
 
-Memory lives in two scopes, persisted as markdown bullet lists:
+Memory has two scopes:
 
-* *Global* (`~/.yupiik/coding-agent/memory/MEMORY.md`) - durable user
-  preferences and cross-project rules ("always use tabs", "never edit
-  generated files").
-* *Project* (`<project>/.yca/memory/MEMORY.md`) - project-specific decisions
-  and knowledge.
+* *Global*: `~/.yupiik/coding-agent/memory/MEMORY.md`, for user preferences and cross-project rules.
+* *Project*: `<project>/.yca/memory/MEMORY.md`, for project decisions and knowledge.
 
-Both files share the same simple format:
+Both use Markdown bullet lists:
 
-[source]
+[source,markdown]
 ----
 # Memory
 
@@ -57,117 +60,95 @@ Durable facts, decisions and preferences. One bullet per line.
 
 === Automatic extraction (default)
 
-At the end of a turn, `MemoryExtractor` asks the model to distill the
-conversation into at most 3 durable facts:
+When extraction is due after a turn, `MemoryExtractor` asks the model for at most three durable facts.
+Each fact has text and a target scope:
 
 [source,json]
 ----
 {
   "facts": [
-    { "text": "...", "scope": "global" | "project" }  <1>
+    { "text": "Prefer focused regression tests.", "scope": "project" }
   ]
 }
 ----
-<.> Each fact pairs free text with a target scope (`global` or `project`); memory is stored per scope.
 
+`scope` can be `global` or `project`.
 Extraction is:
 
-* *idle* - runs asynchronously while yca waits for the next input, never
-  blocking a turn,
-* *best-effort* - failures are silent (memory is never corrupted),
-* *throttled* - at least `memory.extractMinChars` (default 1000) characters of
-  *new* text must accumulate before another extraction costs an LLM call,
-* *deduplicated* - the watermark prevents re-processing already extracted
-  excerpts, and `MemoryStore.append` skips exact duplicates,
-* *live* - extracted facts are written directly to `MEMORY.md`
-  (`MemoryStore.append`), crash-safe and immediately durable. Because the
-  prompt's `<memory>` section is a session-frozen snapshot that is never
-  re-read mid-session, this file write does not rewrite what the current
-  session sees; the facts become visible to the <em>next</em> session (or a
-  resume) which rebuilds the snapshot.
+* *Idle*: asynchronous work while yca waits for input, rather than a blocking part of the turn.
+* *Best-effort*: failure does not corrupt memory; warnings identify the failed phase.
+* *Throttled*: at least `memory.extractMinChars` new characters (default `1000`) must accumulate before another extraction call.
+* *Deduplicated*: a watermark avoids reprocessing excerpts, and `MemoryStore.append` skips exact duplicates.
+* *Live*: extracted facts are written directly and durably to `MEMORY.md`, without rebuilding the current prompt snapshot.
 
-The extraction cadence (how often an extraction LLM call runs) is governed by
-`memory.mode`:
+Choose extraction cadence with `memory.mode`:
 
-* `FULL` - the every-N-turns cadence plus the todo-completion flush (N =
-  `memory.extractEveryTurns`, default 3). Best when the memory model is a
-  distinct, cheap model.
-* `LAZY` - extract only when all todos are done (nothing pending) or at session
-  close. Best when extraction runs on the session's own expensive model.
-* `AUTO` (default) - pick per the routing: the memory model resolving to the
-  same model as the current turn selects `LAZY`, a distinct/cheaper memory
-  model selects `FULL`.
+[options="header"]
+|===
+|Mode |Cadence
+|`FULL` |Every `memory.extractEveryTurns` turns (default `3`), plus a todo-completion flush; useful with a distinct cheap model.
+|`LAZY` |When all todos are done or at session close; useful when extraction shares the expensive session model.
+|`AUTO` (default) |Use `LAZY` when the resolved memory model matches the current model, otherwise `FULL`.
+|===
+
+See xref:sessions.adoc#_extraction_input_and_lifecycle[Extraction input and lifecycle] for input filtering, watermarks and nonblocking close behavior.
+A cadence checkpoint does not guarantee a remote extraction finishes before process exit.
 
 === Manual write
 
-The `memory_write` tool persists a fact immediately:
+`memory_write` persists a fact immediately:
 
-[source]
+[source,text]
 ----
 memory_write(fact: "The build uses Java 21.", scope: "project")
 ----
 
+This example stores a project fact; it does not change the running Java version or current prompt snapshot.
+
 === Near-duplicate replacement
 
-`append` detects that a new bullet *supersedes* an existing one (normalized
-token Dice similarity >= 0.8 with at least 4 shared tokens). The old wording is
-replaced, not duplicated - so reformulations do not accumulate.
+`append` replaces an existing bullet when normalized token Dice similarity is at least `0.8` with at least four shared tokens.
+Reformulations therefore replace old wording instead of accumulating.
 
 === Deterministic cap
 
-Each scope is capped at `memory.maxLines` (default 200) bullets. Beyond it,
-the *oldest* bullets are dropped on write. This is a cheap, model-free floor
-that prevents unbounded growth even when the LLM-based compaction is disabled
-or below its size threshold.
+Each scope keeps at most `memory.maxLines` bullets (default `200`).
+Writes beyond the cap drop the oldest bullets without calling a model.
+This remains effective when LLM compaction is disabled or below its size threshold.
 
 === LLM compaction (optional)
 
-When the project file grows past 64 KB, `MemoryCompactor` can rewrite it with a
-compact model: near-duplicates are merged, superseded and one-off facts are
-dropped. A backup (`MEMORY.md.bak`) is kept, and rewrites reducing the file by
-less than 20% are discarded. Enabled with `memory.compactEnabled` (default
-true) - this is the *quality* counterpart of the deterministic cap (which
-bounds size even when no model call is wanted).
+When the project file exceeds 64 KB, `MemoryCompactor` can merge near-duplicates and drop superseded or one-off facts using a compact model.
+It runs automatically at most once per session; `/memory compact` requests it manually.
+It keeps `MEMORY.md.bak` and discards rewrites that reduce size by less than `20%`.
+`memory.compactEnabled` defaults to `true`.
+Unlike the deterministic cap, this quality pass costs a model call.
 
 [[choosing-the-memory-model]]
 === Choosing the memory model
 
-The memory write path uses a dedicated background model, configured through
-`yca.model.memory` (same shape as `model.compact` and `model.prune`: an object
-whose `name` is the model on this background path, plus optional sampling and
-output tuning). When `name` is blank it falls back to the compact model, then
-to the session provider model. A `$<provider>/<model>` reference pins it to a
-specific provider - handy for running memory extraction on a cheap local model
-(eg. llama.cpp) while the main conversation uses a remote provider.
+The memory path uses `yca.model.memory`, an object containing `name` and optional sampling/output tuning.
+It has the same shape as `model.compact` and the accepted legacy `model.prune` setting.
+A blank memory `name` falls back to the compact model, then the session provider/model.
+Use `$<provider>/<model>` to pin another provider.
 
-The *cheapest and fastest* configuration routes memory to a small model via a
-per-provider `backgroundModelOverrides.memory` (same shape as the global
-`yca.model.memory`), so each provider chooses its own in-house summarizer without
-touching the main model.
+A per-provider `backgroundModelOverrides.memory` takes precedence over global memory tuning.
+It lets each foreground provider select a local or inexpensive background model without changing the main conversation.
 
 === Running memory on a local model (llama.cpp)
 
-Memory extraction is a short, low-stakes call, so it is a good candidate to
-offload to an in-house LLM. As an example, the local setup below serves a
-1.7 B model with llama.cpp on a modest laptop GPU:
+Memory extraction can be offloaded to a local model.
+The following recorded setup served a 1.7 B model on a laptop GPU:
 
-[cols="1,3", options="header"]
+[cols="1,3",options="header"]
 |===
-| Component | Value
-
-| GPU
-| NVIDIA GeForce GTX 1650 Ti Mobile (Max-Q Design), 4096 MiB VRAM, 35 W TDP
-
-| llama.cpp
-| `0.4.1-dev` (build 11011, commit aa39d7a3e), Clang 19.1.7, Linux x86_64
-
-| Model
-| `unsloth/Qwen3-1.7B-GGUF:Q4_K_M` (28 layers, 2048 hidden, native ctx 40960)
+|Component |Recorded setup
+|GPU |NVIDIA GeForce GTX 1650 Ti Mobile (Max-Q Design), 4096 MiB VRAM, 35 W TDP.
+|llama.cpp |`0.4.1-dev`, build 11011, commit aa39d7a3e, Clang 19.1.7, Linux x86_64.
+|Model |`unsloth/Qwen3-1.7B-GGUF:Q4_K_M`, 28 layers, 2048 hidden, native context 40960.
 |===
 
-Serve it on port 8080 with the full model on the GPU, a 32 K context backed by
-a quantized KV cache (that is what makes 32 K fit in 4 GiB), flash attention
-on for speed, and one parallel slot:
+Serve it on port 8080 with all layers on the GPU, one parallel slot, a 32 K context, quantized KV cache and flash attention:
 
 [source,sh]
 ----
@@ -178,13 +159,11 @@ llama serve -hf unsloth/Qwen3-1.7B-GGUF:Q4_K_M \
   --host 127.0.0.1 --port 8080
 ----
 
-`-ngl 28` keeps every layer on the GPU (the Q4 weights are ~1.1 GB); `parallel 1`
-halves the KV cache; the `q8_0` KV quant + `flash-attn` keep 32 K context
-inside the 4 GiB budget at roughly 70 tokens/s.
+`-ngl 28` keeps every layer on the GPU; the Q4 weights are about 1.1 GB.
+One parallel slot and a quantized KV cache reduce memory demand, while flash attention improves throughput.
+This setup fit 32 K context in 4 GiB at roughly 70 tokens/s; results vary by build and hardware.
 
-Point the *memory* background path at that server while leaving the main
-session provider untouched, by declaring the local backend as an extra provider
-and pinning `model.memory.name` to it with `$local/<model>`:
+Declare the local backend, then route only memory to it:
 
 [source,json]
 ----
@@ -213,22 +192,17 @@ and pinning `model.memory.name` to it with `$local/<model>`:
 }
 ----
 
-Set `contextWindow` to the served `--ctx-size` (32768) so the usage gauges and
-the pruning/compaction thresholds match what llama.cpp can actually hold.
-Sampling mirrors the Qwen3 recommendations (`temperature` 0.6, `top_p` 0.95,
-`top_k` 20) and `max_tokens` bounds a single extraction. When the local backend
-does not support the structured `{"facts":[...]}` schema, `MemoryExtractor`
-automatically falls back to a plain compression snippet, so memory is never
-lost.
+Set `contextWindow` to the served `--ctx-size`, not the model's larger native capacity.
+The example uses Qwen3 sampling values `temperature=0.6`, `top_p=0.95`, and `top_k=20`; `max_tokens` bounds one extraction.
+If the backend rejects structured facts, extraction falls back to a plain compression snippet.
+The fallback improves compatibility but can also fail; it is not a guarantee of a saved fact.
 
 == Selecting memory into context
 
-At the start of a session, yca injects a `<memory>` section into the system
-prompt, capped at `memory.maxChars` (default 2000) characters. It is built once
-and never re-read mid-session, so the prefix stays byte-stable and provider
-prompt caches keep hitting:
+At session start, yca builds a `<memory>` section in the system prompt, capped by `memory.maxChars` (default `2000`).
+It is built once, not reranked or reread on every turn:
 
-[source]
+[source,text]
 ----
 <memory>
 <global>
@@ -243,163 +217,77 @@ prompt caches keep hitting:
 
 === Ranking
 
-Both scopes are ranked with a *BM25-lite* scorer against a query built from the
-latest user turn **plus** the current todo list, so durable facts relevant to
-the active plan surface even when the last message is terse.
+BM25-lite ranks both scopes against the latest user turn plus the current todo list.
+This helps a terse opening prompt retain facts relevant to the active plan.
+Selection fills the budget in three steps:
 
-The selection is *greedy and scope-fair*:
-
-1. fill global with its top entries up to 50% of the budget,
-2. fill project with its top entries up to the other 50%,
-3. spill the remaining budget to whichever scope has the most relevant
-   leftovers (global first - directives are usually higher value).
+. Global entries receive up to `50%`.
+. Project entries receive up to `50%`.
+. Remaining capacity spills to relevant leftovers, global first.
 
 === Why plain markdown + BM25-lite (not a vector store)
 
-Memory holds a small, curated, metadata-rich set of durable directives, so the
-read side is deliberately *model-free*: a pure token scorer, fast and with no
-extra dependency. A vector store (eg. Lucene + an embedding model) is a
-heavier alternative that only pays off if memory ever grows into large,
-unstructured transcripts.
+Memory is a small set of durable directives, not a transcript archive.
+Lexical ranking keeps retrieval model-free and avoids another dependency.
 
-[cols="1,3,3", options="header"]
+[cols="1,3,3",options="header"]
 |===
-| | yca memory (current) | Vector store (eg. Lucene + embeddings)
-
-| Retrieval
-| BM25-lite lexical relevance against the prompt (plus the todo list); `p` / `@path` / topic metadata folded in
-| ANN vector similarity over embedded bullets (eg. Lucene `KnnFloatVectorField`)
-
-| Model needed
-| *Read/rank: none* - pure in-memory token scoring; *write/extract:* a cheap LLM (or none with manual `memory_write`)
-| an embedding model for both read and write (eg. on-device ONNX `all-MiniLM-L6-v2`, ~90 MB) plus the Lucene index
-
-| Storage
-| two plain `MEMORY.md` markdown files - human-editable, git-diffable/mergeable
-| opaque Lucene segment directories plus persisted vectors; schema changes need a reindex
-
-| Dependencies / footprint
-| JDK only, negligible memory
-| `lucene-core` + ONNX runtime + model on disk and in RAM
-
-| Latency
-| read = cached token hash, sub-ms; write = atomic append
-| first-call ONNX model load, then ms-level ANN; per-write embedding inference
-
-| Match strength
-| strong for exact / keyword and `@path`-anchored directives
-| strong for broad semantic topics; can miss exact-code directives
+|Aspect |Current memory |Vector-store alternative
+|Retrieval |BM25-lite against prompt/todos, with `p`, `@path` and topic metadata. |ANN similarity over embedded bullets, such as Lucene `KnnFloatVectorField`.
+|Models |None for reading; extraction uses an LLM, or manual `memory_write` uses none. |Embedding model for reading and writing, such as ONNX `all-MiniLM-L6-v2` (about 90 MB).
+|Storage |Two human-editable, diffable Markdown files. |Index segments and vectors; schema changes can need reindexing.
+|Dependencies |JDK only, negligible extra memory. |For example, `lucene-core`, ONNX runtime and a loaded model.
+|Latency |Cached token hashes, sub-millisecond ranking and atomic writes. |Initial model loading, millisecond-level ANN queries and per-write inference.
+|Matching |Exact keywords and `@path` directives. |Broader semantic topics, with a risk of missing exact-code directives.
 |===
 
-The only model-dependent part (fact extraction) deliberately runs on a cheap,
-fast model pinned per provider (`yca.model.memory` / `backgroundModelOverrides.memory`,
-see <<choosing-the-memory-model>>), so reading memory never costs an LLM call.
+Reading memory never costs an LLM call.
+Extraction can use a cheap model selected as described in <<choosing-the-memory-model>>.
 
 === Recency tie-break
 
-Global facts are append-only: the newest durable facts sit at the tail of the
-file, which head-bounded selection used to starve. The ranker applies a small
-recency multiplier (at most +10%, tie-break only) to global bullets, so a
-recently appended fact wins against an equally-relevant older one without
-letting recency override relevance.
+New global facts normally sit at the file's tail.
+The ranker applies at most a `+10%` recency multiplier as a tie-break, favoring recent facts without letting recency override relevance.
 
 === No-query fallback
 
-When there is no ranking signal (a context dump, a resumed session, a bare
-prompt), global keeps its head and project its head, capped at half the budget
-each - deterministic and bounded.
+Without a ranking signal, selection takes the head of each scope, bounded to half the budget each.
+This covers cases such as a context dump, resume or bare prompt.
 
 === Durable-directive floor
 
-Global memory is never fully dropped: even when no global bullet matches the
-query, the established head of the global file is still injected (up to
-2/3 of the global half-budget). Relevance trims the stale tail, not the core
-directives.
+Even if no global bullet matches, the established global head still receives up to two-thirds of the global half-budget.
+Relevance trims stale tail entries rather than dropping all core directives.
 
 === Frozen prompt snapshot, live files
 
-The durable `<memory>` section is computed *once per session* from `MEMORY.md`
-and cached as the session's prompt snapshot - the current session never re-reads
-the files, so the system prefix stays byte-stable and provider prompt caches
-keep hitting across every turn. Writing `MEMORY.md` (global or project)
-mid-session is always allowed; it just never rewrites the snapshot. A fresh
-session (or a resume) rebuilds the snapshot from the now-current files.
+`memory_write`, extraction and manual edits can update files during a session.
+None rebuilds the current `<memory>` snapshot.
+A new session or resume selects from the updated files.
 
-Because each *turn already contains the conversation* the facts were mined
-from, there is no need to surface a newly-written fact back into the prompt:
-the model that is about to answer has it in context. Memory writes are
-therefore *live on disk, but invisible to the current session's snapshot* -
-they are picked up read-only by the <em>next</em> session:
-
-* `memory_write` and automatic extraction both persist directly to `MEMORY.md`
-  immediately (`MemoryStore.append`), crash-safe and durable.
-* The current session keeps its frozen `<memory>` snapshot unaffected, so the
-  provider cache key (system + user prefix) stays byte-identical for the whole
-  session.
-
-The trade-off is that a fact written mid-session is not reflected in the
-current session's prompt - only in the next session's (or a resume's) snapshot.
-That is exactly what keeps the prefix cache hit; if a fact matters right away,
-the conversation it came from already carries it.
+This stabilizes the prefix for xref:prefix-cache.adoc[provider caching], but cannot guarantee a cache hit.
+If a fact matters now, include it in the current conversation instead of relying on memory to reinject it.
 
 == Configuration reference
 
-[cols="2,1,2,2", options="header"]
+[cols="2,1,1,3",options="header"]
 |===
-| Property | Default | Scope | Meaning
-
-| `memory.mode`
-| `AUTO`
-| extraction
-| Extraction cadence: `FULL` (every-N-turns + todo flush), `LAZY` (only when
-  todos are done or at session close), `AUTO` (pick by whether the memory
-  model == current model).
-
-| `memory.enabled`
-| `true`
-| both
-| Enable extraction and injection.
-
-| `memory.maxChars`
-| `2000`
-| context
-| Max chars of memory injected in the system prompt (built once per session).
-
-| `memory.maxRatio`
-| `0.2`
-| context
-| Memory budget is `min(maxChars, systemPromptCap * maxRatio)`; 0 = plain
-  maxChars. Auto-disables memory below 1000 chars budget.
-
-| `memory.maxLines`
-| `200`
-| store
-| Deterministic per-scope cap; older bullets dropped on write.
-
-| `memory.extractMinChars`
-| `1000`
-| extraction
-| Min new text before an extraction runs.
-
-| `memory.compactEnabled`
-| `true`
-| store
-| LLM rewrite of the project file past 64 KB (>= 20% reduction kept).
+|Property |Default |Scope |Meaning
+|`memory.mode` |`AUTO` |Extraction |`FULL`, `LAZY`, or routing-based cadence.
+|`memory.enabled` |`true` |Both |Enable extraction and injection.
+|`memory.maxChars` |`2000` |Context |Maximum characters in the session-start snapshot.
+|`memory.maxRatio` |`0.2` |Context |Budget is `min(maxChars, systemPromptCap * maxRatio)`; `0` uses plain `maxChars`.
+|`memory.maxLines` |`200` |Store |Per-scope bullet cap; oldest entries are dropped on write.
+|`memory.extractMinChars` |`1000` |Extraction |Minimum new text before another extraction call.
+|`memory.compactEnabled` |`true` |Store |Model rewrite of a project file above 64 KB, retained only for at least `20%` reduction.
 |===
+
+When the resolved memory budget is below `1000` characters, injection is automatically disabled and extraction is skipped.
+The relative budget uses the resolved provider/model-aware system-prompt cap.
 
 == Tips
 
-* Memory is *ranked*, not dumped: with `maxChars=2000` the model sees the
-  facts most relevant to the session start, not the oldest 2000 chars. If a
-  relevant fact does not surface, enrich the todo list (it is part of the
-  ranking query) or write it with `memory_write` right before it matters.
-
-* `memory.maxLines` bounds the file with no model cost; `compactEnabled` keeps
-  the file *clean* with a model cost. Both default on.
-
-* The memory files are plain markdown - they can be edited by hand. The current
-  session keeps its frozen prefix (it never re-reads mid-session); an external
-  edit is picked up by the *next* session's prefix build.
-
-* To disable memory entirely: `memory.enabled=false` (extraction is skipped
-  too, nothing is written).
+* Keep facts and the todo list clear before the next snapshot is built; ranking is not continuous.
+* `memory.maxLines` bounds size without a model call; `compactEnabled` improves quality with a model call.
+* Edit the Markdown files by hand when needed, then start or resume a session to load the changes.
+* Set `memory.enabled=false` to skip extraction and injection entirely; no automatic memory write runs.

@@ -1,25 +1,27 @@
 = Output optimization
-:minisite-breadcrumb: Home[index.html] > Features > Output optimization
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Output optimization
 :minisite-nav-prev-link: sessions.html
 :minisite-nav-prev-label: Sessions and memory
 :minisite-nav-next-link: provider-tuning.html
 :minisite-nav-next-label: Provider tuning
 
-Tool-heavy workflows can drown the model in verbose output. yca compacts the
-output of common commands (maven, gradle, git, gh, npm, prettier, ls/find/grep,
-tsc/eslint, kubectl/docker and JSON-producing tools) before it enters the model
-context, keeping only what matters.
+Output optimization reduces verbose command results before they enter model context.
+It handles common build, version-control, search, JavaScript, container and JSON-producing commands.
+This is separate from xref:ui.adoc[UI truncation] and xref:compaction.adoc[conversation compaction].
 
-The compaction is pluggable: you can register your own `OutputProcessor`
-implementations to compact other tools.
+Register an `OutputProcessor` implementation to support another command family.
 
-## Processors
+++++
+<span id="_processors"></span>
+++++
 
-Each processor targets a family of commands and is applied, in `order()`, to the
-successful output of the `bash` tool only (tools with their own truncation such
-as `read_file`/`grep` are left alone). A processor only replaces the output when
-it actually shrinks it by at least `yca.optimize.minReductionPercent`
-(default 10%).
+[[processors]]
+[[_processors]]
+== Processors
+
+Processors run in `order()` on successful bash output only.
+Tools with their own truncation, such as `read_file` and `grep`, are left alone.
+A processor replaces output only when it reduces size by at least `yca.optimize.minReductionPercent` (default `10%`).
 
 | Processor | Commands | What it does |
 |-----------|----------|--------------|
@@ -36,24 +38,22 @@ it actually shrinks it by at least `yca.optimize.minReductionPercent`
 | `JsonOutputProcessor` | `kubectl -o json`, `docker inspect`, `gh api`, `aws` | Parses JSON (fusion `JsonMapper`), projects essential fields; non-JSON passes through to the generic processor |
 | `GenericOutputProcessor` | fallback | Head+tail truncation, blank-line collapsing |
 
-## Configuration
+[[configuration]]
+[[_configuration]]
+== Configuration
 
 `yca.optimize.*`:
 
 - `enabled` (default `true`): master switch.
 - `genericMaxLines` (default `400`): lines kept by the generic fallback.
 - `maxEntries` (default `20`): file/test/rule entries kept by the processors.
-- `minReductionPercent` (default `10`): minimum size reduction for a processor
-  result to replace the original output.
-- `disabled` (default empty): processor or tool names to disable globally
-  (loose matching, same as the granted command prefix matching).
-- `toolOutputs.<tool>.enabled` (default `true`): per-processor switch; a
-  disabled processor behaves as an identity (passthrough) implementation, so
-  the output is left untouched and no processor error can surface. The per-tool
-  entries also carry the processor-specific tuning (`git.maxBlobBytes`, ...).
+- `minReductionPercent` (default `10`): minimum size reduction before replacement.
+- `disabled` (default empty): globally disabled processor/tool names, with loose granted-command-prefix matching.
+- `toolOutputs.<tool>.enabled` (default `true`): per-processor switch.
+A disabled processor passes output through unchanged and cannot raise a processor error.
+Per-tool entries also hold specific tuning, such as `git.maxBlobBytes`.
 
-Example configuration disabling the JS processor and capping the filesystem
-processor entries:
+For example, disable the JS processor and cap filesystem entries:
 
 ```json
 {
@@ -69,17 +69,21 @@ processor entries:
 }
 ```
 
-## Raw file content (`git show <rev>:<path>`)
+++++
+<span id="_raw_file_content_git_show_revpath"></span>
+++++
 
-`git show <rev>:<path>` prints a raw blob, not a commit diff. The git processor
-detects this by checking the output (no `diff --git` header - never by scanning
-the command for `:`, which would misroute drive-relative paths or `-S 'a:b'`
-values) and passes it through byte-identical: compacting every read window to
-8 lines + `...` made the model re-read the same file in tiny slices.
+[[raw-file-content-git-show-revpath]]
+[[_raw_file_content_git_show_rev_path]]
+== Raw file content (`git show <rev>:<path>`)
 
-Huge blobs are windowed: below the budget the whole file is passed through;
-above it, a head cut at the last line boundary is returned with a recovery
-hint. The budget is configurable:
+`git show <rev>:<path>` prints a raw blob, not a commit diff.
+The processor detects it from output without a `diff --git` header, not from a colon in argv that could instead be a drive-relative path or `-S 'a:b'` value.
+Blobs within budget pass through byte-identical.
+Earlier eight-line truncation caused repeated tiny reads, so blobs use a separate window budget.
+
+Above budget, the processor returns a head window ending at a line boundary and a recovery hint.
+Configure the budget with:
 
 ```json
 {
@@ -93,33 +97,36 @@ hint. The budget is configurable:
 }
 ```
 
-Set `maxBlobBytes` to `0` to disable windowing and always pass blobs through
-byte-identical.
+Set `maxBlobBytes=0` to disable windowing and always pass blobs through byte-identical.
 
-## Alignment with permissions
+[[alignment-with-permissions]]
+[[_alignment_with_permissions]]
+== Alignment with permissions
 
-The read-only bash families of `yca.permissions.bash.rules` are the same
-commands the processors compact (`ls`, `find`, `grep`, `rg`, `git diff/log/show`,
-`gh pr view`, `kubectl get`, `docker ps`, ...), so the plan mode sees both the
-same pre-approved commands and the same compacted shapes.
+Optimization and approval are independent.
+Many processors handle commands also covered by read-only bash rules, such as `ls`, `find`, `grep`, and `git diff`.
+A processor does not grant permission to run a command.
+See xref:permissions.adoc[Permission modes] for the actual rules in plan and build modes.
 
-## Saved-token counter
+[[saved-token-counter]]
+[[_saved_token_counter]]
+== Saved-token counter
 
-Every accepted reduction is counted per session: `/metrics` (and the TUI status
-bar when session totals are shown) reports `optimized N outputs ~X chars (~Y tok
-est) saved`. The token figure is an estimate at ~4 chars/token (the same
-heuristic yca uses for context estimation), not a provider-billed value, so
-treat it as an upper bound on the savings from output compaction.
+Every accepted reduction is counted per session.
+`/metrics`, and the TUI status bar when totals are shown, report `optimized N outputs ~X chars (~Y tok est) saved`.
+The token counter uses roughly four characters per token, not provider billing data or the full calibrated context estimator.
+Use it as an approximate comparison, not a guaranteed token or cost saving.
 
-## Output style
+[[output-style]]
+[[_output_style]]
+== Output style
 
-yca does not ship a built-in "terse answer" or caveman-style output-verbosity
-knob. The measured savings from such prompt-level rules are marginal (the
-auto-scout24 ecosystem's own numbers put a caveman-style skill at ~3% output
-tokens against a plain "answer concisely", with prompt overhead that can make it
-net-negative), and the same gentler effect is already available for free by
-putting an `## Output style` block in `AGENTS.md` (or a `CLAUDE.md`), which yca
-loads into the system prompt:
+yca has no built-in terse-answer verbosity switch.
+For concise replies, add an output-style rule to `AGENTS.md` or `CLAUDE.md`, which yca loads into the system prompt.
+Prompt-level verbosity rules also add input tokens, so measure their net effect rather than assuming shorter output always saves cost.
+The auto-scout24 ecosystem reported about `3%` output-token savings from a caveman-style skill compared with a plain request to answer concisely.
+That is an external, workload-specific observation; prompt overhead can outweigh the reduction.
+For example:
 
 ```md
 ## Output style
@@ -128,5 +135,4 @@ loads into the system prompt:
 - For research questions, answer in 10 lines or fewer unless I ask for depth.
 ```
 
-The bulk of token savings in a real session lives on the *input* side -- the
-compact output processors above -- not in the agent's own prose.
+For tool-heavy sessions, reducing verbose input is often more useful than imposing terse assistant prose.

@@ -1,168 +1,99 @@
 = Provider prefix cache
-:minisite-breadcrumb: Home[index.html] > Features > Provider prefix cache
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Provider prefix cache
 :minisite-nav-prev-link: reliability.html
 :minisite-nav-prev-label: Reliability
 :minisite-nav-next-link: hooks.html
 :minisite-nav-next-label: Hooks & events
 
-Most OpenAI-compatible backends cache the KV state of a request prefix and
-reuse it for later requests that share the same leading tokens. A hit costs a
-fraction of a full re-process (and on metered providers, a fraction of the
-price), so yca is built to keep that reusable prefix **byte-identical across
-every request of a session**.
+Many providers reuse cached computation when requests share the same leading tokens.
+A hit can reduce processing time and input cost, depending on the provider.
+yca separates stable instructions from changing session state to improve reuse.
+
+Cache availability, eviction, routing and billing remain provider-controlled.
+No client-side layout guarantees a hit on every request.
 
 == How providers cache
 
-[cols="1,2,3",opts=headers]
+[cols="1,2,3",options="header"]
 |===
-|Backend
-|Mechanism
-|What breaks it
-
-|SGLang (RadixAttention)
-|Automatic KV-cache reuse over a radix tree of token prefixes; hits can be partial.
-|Any divergence in the serialized token prefix; page-size (block) alignment; landing on a worker that does not hold the prefix.
-
-|vLLM (Automatic Prefix Caching)
-|Reuses KV blocks for matching token prefixes; non-matching suffixes are reprocessed.
-|A change (or an inserted note) early in the conversation reduces the shared token prefix; tokenizer/chat-template drift; cache eviction and scheduling.
-
-|OpenAI
-|Automatic prompt caching on supported models, with eligible cache boundaries.
-|Changing early instructions, the tools array, or message serialization reduces the reusable cached prefix.
-
-|Anthropic
-|Explicit `cache_control` breakpoints.
-|Changing content before a breakpoint invalidates reuse of that breakpoint's prefix.
-
-|Google Gemini
-|Implicit caching on supported models plus explicit context caching.
-|Changing the request prefix reduces implicit reuse; explicit cached content must stay stable.
+|Backend |Mechanism |What reduces reuse
+|SGLang (RadixAttention) |Automatic reuse over a radix tree of token prefixes, including partial hits. |Prefix divergence, page/block alignment, or routing to a worker without the prefix.
+|vLLM (Automatic Prefix Caching) |Reuse matching KV blocks and reprocess unmatched suffixes. |Early content changes, tokenizer/chat-template drift, eviction and scheduling.
+|OpenAI |Automatic caching on supported models with eligible boundaries. |Changes to early instructions, tools or serialization.
+|Anthropic |Explicit `cache_control` breakpoints. |Changes before a breakpoint.
+|Google Gemini |Implicit caching on supported models and explicit context caching. |Prefix changes or changes to explicitly cached content.
 |===
-
-The common rule across all of them:
 
 [quote]
-Keep the reusable prefix identical across requests. Put dynamic instructions and
-user-specific content afterward.
-
-yca targets that rule structurally, so the guarantees below apply to any of
-these backends.
+Keep reusable content identical and put dynamic instructions afterward.
 
 == What yca guarantees
 
-* **Stable head.** The system prompt and the tools array are serialized in a
-  fixed order with fixed fields; nothing in them varies per round-trip. The
-  tools schema, `tool_choice`, `max_tokens` and the other request parameters
-  are identical for every call of a session, because some providers re-key the
-  cache when the *whole request header* changes, not just the messages.
-* **Append-only conversation.** Messages are only ever appended between
-  round-trips. yca never rewrites, reorders or trims a message that was already
-  sent - a mid-conversation edit of an earlier message would invalidate every
-  cached block after the edit point.
-* **No system messages mid-conversation.** The `system` role appears exactly
-  once, as the first message. Injection-style helpers must not append `system`
-  messages into the flow: on several backends (verified on SGLang-served
-  deepseek endpoints) a trailing or interleaved `system` message deserializes
-  the prompt differently and drops the cache back to the static prefix
-  (~2k tokens), even though the bytes before the note are unchanged. The same
-  note carried as a `user` or `assistant` message keeps the cache intact.
-* **Notes ride at the tail.** When yca must tell the model something
-  mid-session (for example that a file it read earlier has changed on disk),
-  the note is folded into the tool result of the very action that caused it -
-  after the stable prefix, inside brand-new content - so the cached part is
-  unaffected and no extra message enters the flow.
+* *Stable head*: static instructions and tools use stable serialization while mode, routing and tool selection remain unchanged.
+Memory uses a session-frozen snapshot rather than rereading files each turn.
+* *Append-only normal flow*: new messages follow prior content rather than editing old results merely to add notices.
+Compression, pruning and compaction deliberately change effective history and can invalidate later cached blocks.
+* *No injected system notes in normal flow*: volatile guidance follows the stable head without introducing a second system-role note.
+On an observed SGLang-served DeepSeek endpoint, interleaved/trailing system notes reduced reuse to the static prefix (about 2k tokens), while user/assistant notes preserved the earlier prefix.
+* *Tail notes*: a stale-read notice is folded into the result of the write that caused it.
+It adds new content rather than rewriting an earlier result or adding another message.
 
 == Session affinity and cache-key routing
 
-Structural stability alone is not enough for backends that also route by request
-identity: the ChatGPT/Codex edge, SGLang's session-aware radix cache and several
-caching gateways keep a per-session cache only when every request of the session
-carries the same, stable identity. yca addresses that with a session-affinity
-capability (see `capabilities.openai.sessionId` in
-<<configuration.adoc,Provider configuration>>): it derives one stable, session-scoped
-UUID from the local transcript id and emits it under every configured key.
+Stable content is not enough for a backend that also routes by request identity.
+The ChatGPT/Codex edge, session-aware SGLang routing and some gateways need a consistent affinity value.
+`capabilities.openai.sessionId` derives a session-scoped UUID from the local transcript id and emits it under configured keys.
+See xref:../configuration.adoc[Provider configuration].
 
-[cols="1,2,2",opts=headers]
+Changing mode, provider, model, variant, tools or request options may change cache identity.
+Background calls have their own request shapes; do not expect them to share foreground caches.
+
+[cols="1,1,3",options="header"]
 |===
-|Key
-|Where it is emitted
-|Purpose / notes
-
-|`prompt_cache_key`
-|Responses body field
-|The identity itself; on models before GPT-5.6 it drives cache routing, on GPT-5.6+
-it separates cache accounting. Never names a header.
-
-|`session-id`
-|HTTP header
-|The affinity signal the ChatGPT/Codex edge actually keys on; the codex flavor
-default. A caller-supplied header for the same name wins over the derived value.
-
-|`x-session-id`
-|HTTP header
-|The portable alias used by the openai-responses flavor default. The underscore
-form `session_id`, while valid per the HTTP token rules, is rejected by hardened
-Envoy (`headers_with_underscores_action`) and nginx (`underscores_in_headers off`)
-gateways, so the hyphenated `x-session-id` is the safer default for Responses-
-flavored providers sitting behind such proxies.
-
-|`x-client-request-id`
-|HTTP header (per-request)
-|Emitted when `capabilities.openai.xClientRequestIdEnabled` is `true`: a fresh
-UUID on every request (the Codex CLI's per-thread request marker), not the stable
-session value.
+|Key |Location |Purpose
+|`prompt_cache_key` |Responses body |Session identity; drives routing before GPT-5.6 and separates accounting on GPT-5.6+; never names a header.
+|`session-id` |HTTP header |Default affinity header for the Codex flavor; an explicitly supplied same-name header wins.
+|`x-session-id` |HTTP header |Default portable alias for the openai-responses flavor.
+|`x-client-request-id` |HTTP header |Fresh UUID per request when `capabilities.openai.xClientRequestIdEnabled=true`, not the stable session value.
 |===
 
-The emission rules are unconditional:
+The underscore form `session_id` is a valid HTTP token but can be rejected by hardened Envoy (`headers_with_underscores_action`) or nginx (`underscores_in_headers off`) configurations.
+The hyphenated `x-session-id` avoids that compatibility issue for Responses gateways.
 
-* one session-scoped UUID per session, byte-hashed from the transcript id - stable
-  across the round-trips of a session, and different from any other session;
-* the `prompt_cache_key` entry is emitted as the Responses body field; every other
-  entry names an HTTP header carrying the same value;
-* an empty `enabledKeys` list (or a request with no session id) emits nothing;
-* an explicitly configured caller header for a header entry name always wins over
-  the derived value.
+Emission follows these rules:
 
-NOTE: the body and header identity use the same value, so a backend that keys on
-either (or both) sees one coherent session. See
-<<#_extending_yca_without_breaking_the_cache,Extending yca without breaking the cache>>
-for how to verify a routing change did not collapse the cached prefix.
+* One UUID is byte-hashed from each transcript id, stable across its round-trips and distinct across sessions.
+* `prompt_cache_key` names the Responses body field; every other configured key names an HTTP header carrying the same session value.
+* Empty `enabledKeys`, or no session id, emits nothing.
+* An explicit caller header overrides the derived value for that header name.
+
+Body and header affinity therefore identify one coherent session.
+Use the verification recipe below when changing routing.
 
 == The stale-read note as a case study
 
-When a `write_file`/`edit_file` invalidates the content of an earlier
-`read_file`, yca flags the stale paths. Three designs were considered:
+When `write_file` or `edit_file` invalidates an earlier `read_file`, yca flags stale paths.
+Three designs illustrate the cache trade-off:
 
-* Rewriting the earlier `read_file` result in place (replacing it with a bare
-  marker) - this edits a message in the cached prefix, so every later block
-  misses. Rejected.
-* Appending the note as a separate message - append-only, but the note must
-  then ride as a `user` message: measured on an SGLang-served deepseek
-  endpoint, the same note as a `system` message deterministically drops the
-  cache to the static prefix (~2k tokens) on every stale-read transition, while
-  a `user` note keeps it. Workable, but still adds a message to the flow.
-* Folding the note into the write tool's **own result** (shipped) - the write
-  result is brand-new content that round, so announcing "wrote X; note: /a.txt
-  is now stale, re-read it" costs zero cache tokens and injects no extra
-  message at all. This is the design yca ships: the tool-result message is
-  composed once at emission time, never rewritten afterwards.
+* *Rewrite the old read result*: rejected because it changes the cached prefix and invalidates later blocks.
+* *Append a separate note*: workable as a user message, but adds another message.
+The observed SGLang system-note regression described above made a system-role note unsuitable.
+* *Fold the note into the write result*: the shipped approach.
+A result such as "wrote X; note: /a.txt is now stale, re-read it" is new content composed once at emission, preserving earlier bytes.
+It still adds input tokens, but does not itself rewrite cached history.
 
 == Extending yca without breaking the cache
 
-If you add code that mutates the outgoing request list, keep the invariant:
+When extending request construction:
 
-. Serialize the system prompt and tools once and reuse them.
-. Append messages; never rewrite, reorder or delete sent ones.
-. Use only `user`/`assistant`/`tool` roles after the head; never a second
-  `system` message.
-. Keep per-request option fields (`max_tokens`, `tool_choice`, ...) constant
-  across a session.
-. When checking results, compare *cached-token counts* reported by the provider
-  (usage blocks), not latency: page-aligned partial hits and cold worker caches
-  make wall time misleading.
+. Reuse the serialized static system prompt and tool schema.
+. Append ordinary messages rather than rewriting history just to add guidance.
+. Treat intentional compression, pruning or compaction as a cache-invalidating boundary.
+. Use user/assistant/tool notes after the head rather than another system message.
+. Keep options such as `max_tokens` and `tool_choice` stable when behavior does not require a change.
+. Compare provider-reported cached-token counts, not just latency.
+Page alignment and cold workers make wall time misleading.
 
-A one-shot verification recipe when in doubt: send request A twice, then A plus
-the appended note twice, then diff the cached-token counts of the second send
-of each pair. If the appended-note variant shows a cached count collapsing to
-the static-prefix size, the note is being carried in a cache-hostile way.
+To check a note, send request A twice, then A plus the appended note twice.
+Compare cached-token counts from the second send of each pair.
+If the note variant collapses to static-prefix reuse, investigate its role and serialization before attributing the result to latency or model behavior.

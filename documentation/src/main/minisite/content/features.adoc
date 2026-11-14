@@ -1,355 +1,68 @@
 = Features
 :minisite-index: 50
 :minisite-index-title: Features
-:minisite-index-description: What yca does out of the box: interactive UI, tools, context management, sessions and more.
+:minisite-index-description: Choose an interface, control agent actions, manage context and connect tools.
 :minisite-index-icon: layer-group
 :minisite-keywords: features, tools, sessions, context, mcp, agents, permissions, sandbox, hooks
 :minisite-breadcrumb: Home[index.html] > Features
 :minisite-nav-next-link: features/modes.html
 :minisite-nav-next-label: Plan and build modes
 
-yca is a terminal coding agent backed by any OpenAI-compatible endpoint.
+yca is a coding agent with terminal, browser and headless interfaces.
+Choose a task below, or open the xref:cli.adoc[command directory] to find a command and its generated options.
 
-++++
-<div class="row">
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-terminal"></i>
-          </span>
-          <span class="card-title-text">Interactive UI and headless mode</span>
-        </h4>
-        <div class="card-text">
-          A full-screen TUI, a plain-terminal REPL and a one-shot headless run command.
-        </div>
-        <a title="Interactive UI and headless mode" class="card-link-mask" href="features/ui.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-stream"></i>
-          </span>
-          <span class="card-title-text">Streaming output and reasoning</span>
-        </h4>
-        <div class="card-text">
-          Tokens stream in as they arrive, with reasoning deltas surfaced separately.
-        </div>
-        <a title="Streaming output and reasoning" class="card-link-mask" href="features/streaming.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-tools"></i>
-          </span>
-          <span class="card-title-text">Built-in tools</span>
-        </h4>
-        <div class="card-text">
-          Read/write/edit files, listing, glob, grep, bash, todos and memory.
-        </div>
-        <a title="Built-in tools" class="card-link-mask" href="features/tools.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-plug"></i>
-          </span>
-          <span class="card-title-text">MCP support</span>
-        </h4>
-        <div class="card-text">
-          Local MCP server plus remote stdio and streamable HTTP servers merged into one registry.
-        </div>
-        <a title="MCP support" class="card-link-mask" href="features/mcp.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-compress-arrows-alt"></i>
-          </span>
-          <span class="card-title-text">Output optimization</span>
-        </h4>
-        <div class="card-text">
-          rtk-style compaction of maven, gradle, git, gh, npm and prettier output.
-        </div>
-        <a title="Output optimization" class="card-link-mask" href="features/output.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-tachometer-alt"></i>
-          </span>
-          <span class="card-title-text">Context management</span>
-        </h4>
-        <div class="card-text">
-          Usage gauges with threshold-based pruning and compaction, optionally on a smaller model.
-        </div>
-        <a title="Context management" class="card-link-mask" href="features/context.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-history"></i>
-          </span>
-          <span class="card-title-text">Sessions and memory</span>
-        </h4>
-        <div class="card-text">
-          Resumable JSONL sessions, todos, and global and per-project auto memory.
-        </div>
-        <a title="Sessions and memory" class="card-link-mask" href="features/sessions.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h5 class="card-title"><a href="features/memory.html">Memory pipeline</a></h5>
-        <div class="card-text">
-          How durable facts are written, ranked and injected: scopes, BM25 selection, budget and the per-session diff.
-        </div>
-        <a title="Memory" class="card-link-mask" href="features/memory.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-user-shield"></i>
-          </span>
-          <span class="card-title-text">Permission modes</span>
-        </h4>
-        <div class="card-text">
-          ask, auto_edit and yolo modes with allow/deny glob lists.
-        </div>
-        <a title="Permission modes" class="card-link-mask" href="features/permissions.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-shield-halved"></i>
-          </span>
-          <span class="card-title-text">External sandboxing</span>
-        </h4>
-        <div class="card-text">
-          Wrapping the whole yca process in nono or AgentFS, or giving it an isx machine of its own, for kernel-level isolation and copy-on-write.
-        </div>
-        <a title="External sandboxing" class="card-link-mask" href="features/sandboxes.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card card-body h-100 category-default">
-      <div class="card-body">
-        <h4 class="card-title">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-link"></i>
-          </span>
-          <span class="card-title-text">Hooks &amp; events</span>
-        </h4>
-        <div class="card-text">
-          External-program callbacks bound to events (pre-tool, prompt submit, ...).
-        </div>
-        <a title="Hooks & events" class="card-link-mask" href="features/hooks.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-code-branch"></i>
-          </span>
-          <span class="card-title-text">Plan and build modes</span>
-        </h4>
-        <div class="card-text">
-          build uses every tool; plan is read-only and records steps as pending todos.
-        </div>
-        <a title="Plan and build modes" class="card-link-mask" href="features/modes.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-heartbeat"></i>
-          </span>
-          <span class="card-title-text">MCP server health</span>
-        </h4>
-        <div class="card-text">
-          TUI sidebar status dots for the built-in and remote MCP servers.
-        </div>
-        <a title="MCP server health" class="card-link-mask" href="features/health.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-shield-alt"></i>
-          </span>
-          <span class="card-title-text">Reliability</span>
-        </h4>
-        <div class="card-text">
-          Rate limiting, retries and concurrency limits for LLM calls.
-        </div>
-        <a title="Reliability" class="card-link-mask" href="features/reliability.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-bolt"></i>
-          </span>
-          <span class="card-title-text">Provider prefix cache</span>
-        </h4>
-        <div class="card-text">
-          How yca keeps the request prefix byte-stable so provider prompt caching hits.
-        </div>
-        <a title="Provider prefix cache" class="card-link-mask" href="features/prefix-cache.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-list-check"></i>
-          </span>
-          <span class="card-title-text">Todo and plan guidance</span>
-        </h4>
-        <div class="card-text">
-          How strongly the model keeps the todo list current, tunable per provider.
-        </div>
-        <a title="Todo and plan guidance" class="card-link-mask" href="features/todo-guidance.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-robot"></i>
-          </span>
-          <span class="card-title-text">Custom agents</span>
-        </h4>
-        <div class="card-text">
-          Named prompts on top of the base system prompt, selected with --agent, /agent or @name.
-        </div>
-        <a title="Custom agents" class="card-link-mask" href="features/agents.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-terminal"></i>
-          </span>
-          <span class="card-title-text">Prompt templates</span>
-        </h4>
-        <div class="card-text">
-          Handlebars templates for the interactive CLI prompt, with placeholders and color helpers.
-        </div>
-        <a title="Prompt templates" class="card-link-mask" href="features/prompt.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-sitemap"></i>
-          </span>
-          <span class="card-title-text">Structural code graph</span>
-        </h4>
-        <div class="card-text">
-          A symbol-level project map with code_check_graph and code_trace_calls tools and a doc tree.
-        </div>
-        <a title="Structural code graph" class="card-link-mask" href="features/code-graph.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h4 class="card-title mb-3">
-          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
-            <i class="fas fa-memory"></i>
-          </span>
-          <span class="card-title-text">Maven repository knowledge</span>
-        </h4>
-        <div class="card-text">
-          Index the local Maven repository so the agent never rediscovers library usage.
-        </div>
-        <a title="Maven repository knowledge" class="card-link-mask" href="features/maven-knowledge.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h5 class="card-title"><a href="features/provider-tuning.html">Provider tuning</a></h5>
-        <div class="card-text">
-          Reasoning effort, output budget, variants and the per-family implicit defaults - with the opencode wire parity reference.
-        </div>
-        <a title="Provider tuning" class="card-link-mask" href="features/provider-tuning.html"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-lg-4 py-3">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h5 class="card-title"><a href="features/custom-headers.html">Custom headers</a></h5>
-        <div class="card-text">
-          Implement a custom handlebars helper to inject your own authentication or request headers.
-        </div>
-        <a title="Custom headers" class="card-link-mask" href="features/custom-headers.html"></a>
-      </div>
-    </div>
-  </div>
-</div>
-++++
+== Start working
 
-All options are documented in xref:configuration.adoc[Configuration].
+[cols="1,3",options="header"]
+|===
+|Guide |What you will learn
+|xref:features/ui.adoc[Interfaces and headless mode] |Choose between `cli`, `tui`, `web` and `run`.
+|xref:features/modes.adoc[Plan and build modes] |Explore read-only before making changes.
+|xref:features/streaming.adoc[Streaming and reasoning] |Read responses and reasoning as they arrive.
+|xref:features/prompt.adoc[Prompt templates] |Customize the terminal prompt and labels.
+|xref:features/todo-guidance.adoc[Todo and plan guidance] |Tune how the agent tracks work.
+|===
+
+== Control access and execution
+
+Permission checks and process isolation solve different problems.
+Start with permissions, then choose an external sandbox when you need OS-level isolation.
+
+* xref:features/permissions.adoc[Permissions]: approval modes and allow/deny rules.
+* xref:features/sandboxes.adoc[External sandboxes]: nono, AgentFS and dedicated isx machines.
+* xref:features/iteration-guards.adoc[Iteration guards]: stop runaway loops and repeated exploration.
+* xref:features/agents.adoc[Custom agents]: named prompts and sub-agent routing.
+* xref:features/hooks.adoc[Hooks and events]: connect external programs to agent events.
+
+For repository automation, see the xref:github-bot/index.adoc[GitHub bot guides and commands].
+
+== Keep long sessions useful
+
+[cols="1,3",options="header"]
+|===
+|Guide |What you will learn
+|xref:features/context.adoc[Context management] |Understand usage gauges and when context is reduced.
+|xref:features/compaction.adoc[Compression and compaction] |Choose what to summarize and recover from context pressure.
+|xref:features/sessions.adoc[Sessions] |Resume conversations and manage saved state.
+|xref:features/memory.adoc[Memory] |Retain durable facts across sessions.
+|xref:features/output.adoc[Output optimization] |Reduce noisy command output without losing useful diagnostics.
+|xref:features/prefix-cache.adoc[Provider prefix cache] |Keep request prefixes stable for provider caching.
+|===
+
+== Connect tools and project knowledge
+
+* xref:features/tools.adoc[Built-in tools] explains the available capabilities; xref:tools.adoc[Tools reference] lists generated tool details.
+* xref:features/mcp.adoc[MCP support] connects local and remote tool servers.
+* xref:features/health.adoc[MCP server health] helps diagnose disconnected servers.
+* xref:features/code-graph.adoc[Structural code graph] maps project symbols and their relationships.
+* xref:features/code-graph-index.adoc[Binary code graph index] explains the index format and JAR indexing.
+* xref:features/maven-knowledge.adoc[Maven repository knowledge] reuses dependency documentation and source knowledge.
+
+== Configure a model provider
+
+Start with xref:configuration.adoc[Configuration] for setup and the generated option reference.
+Then use the focused guides when you need more control:
+
+* xref:features/provider-tuning.adoc[Provider tuning]: reasoning effort, output budgets and variants.
+* xref:features/custom-headers.adoc[Custom headers]: authentication helpers and secret handling.
+* xref:features/opencode-free.adoc[OpenCode free provider]: provider-specific setup and limitations.

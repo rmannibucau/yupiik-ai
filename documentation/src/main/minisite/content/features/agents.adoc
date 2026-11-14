@@ -1,29 +1,24 @@
 = Custom agents
-:minisite-breadcrumb: Home[index.html] > Features > Custom agents
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Custom agents
 :minisite-nav-prev-link: hooks.html
 :minisite-nav-prev-label: Hooks & events
 :minisite-nav-next-link: todo-guidance.html
 :minisite-nav-next-label: Todo and plan guidance
 
-`yca.agents` defines named agents. Each is mostly a prompt whose instructions
-are injected on top of the base system prompt (rules, tools, environment,
-project context, skills and memory stay untouched).
-
-An agent is selected on `run` with `--agent <name>`, in the TUI with
-`/agent <name>` (persistent until `/new`), or per-turn by prefixing a prompt
-with `@<name> `.
+Define named agents under `yca.agents` to reuse instructions, restrict tools or select a specialist model.
+Agent instructions are added to the base system prompt; rules, tools, environment, project context, skills and memory remain in place.
 
 == Defining agents
 
-`yca.agents` is a list of named profiles. The `prompt` is inline text, or a file
-path whose content is loaded when it expands to an existing regular file (for
-example `prompt=~/.yupiik/coding-agent/agents/reviewer.md`). The optional `tools`
-list restricts the profile to those tool names; omitting it leaves the normal
-session and permission rules in force. Set `description` to a short purpose and
-delegation hint for catalog discovery; keep detailed instructions in `prompt`.
-An optional `model` uses the same object as background model tuning: `name` is
-the model id or `$provider/model` route, and the remaining fields tune requests
-made by that agent. When absent, the agent uses the current contextual model.
+Each profile has a name and prompt.
+The prompt can be inline text or a path that expands to an existing regular file, such as `~/.yupiik/coding-agent/agents/reviewer.md`.
+
+* `description` supplies a short purpose and delegation hint for catalog discovery.
+Keep detailed instructions in `prompt`.
+* `tools` restricts the profile to named tools.
+Omitting it leaves normal session and permission restrictions in force.
+* `model` uses the background-model tuning object: `name` is a model id or `$provider/model` route, and other fields tune that agent's requests.
+Without it, the agent uses the current contextual model.
 
 .Example configuration.json
 [source,json]
@@ -36,36 +31,35 @@ made by that agent. When absent, the agent uses the current contextual model.
 }
 ----
 
+Select a profile with `run --agent <name>`, TUI `/agent <name>` (persistent until `/new`), or a per-turn `@<name> ` prompt prefix.
+
 == Sub-agent model routing
 
-A sub-agent spawned with `spawn_subagent model=<reference>` runs on the model
-(and provider) named by the reference. `$<provider>/<model>` routes explicitly;
-a bare name is pinned to whichever configured provider declares it, then to the
-spawning session's provider, then to the process default provider. Model choice
-precedence is: explicit spawn `model`, selected profile's `model.name`, provider
-`defaultSubagentModel`, then the inherited contextual model. A configured profile
-model also applies when that profile is selected for a normal run. Profile model
-configuration is temporary to that run and does not replace the session's
-contextual selection.
+A `spawn_subagent model=<reference>` request selects its model in this order:
 
-Resolution reuses the same `$provider/model` machinery as background model
-references, so specialists can use a cheaper model or a different provider.
-The resolved model of a running/recently-completed sub-agent is surfaced in the
-`/subagents` overlay when a reference was requested.
+. Explicit spawn `model`.
+. Selected profile's `model.name`.
+. Provider `defaultSubagentModel`.
+. Inherited contextual model.
+
+`$<provider>/<model>` pins the provider explicitly.
+A bare model name first resolves to a configured provider declaring it, then the spawning session's provider, then the process default.
+The same routing machinery serves background-model references.
+
+A profile's model also applies to a normal run using that profile.
+The selection is temporary to the run and does not replace the session's contextual model.
+When a model reference was requested, `/subagents` shows the resolved model in list rows and detail transcripts for running or recently completed children.
 
 == Discovering profiles and models
 
-The `list_subagent_options` tool searches agent profiles and configured model
-routes on demand. It accepts `kind` (`agents`, `models`, or `all`), a substring
-`query`, a provider filter, and pagination (`offset` and `limit`). The tool
-schema contains no profile or model list; results are returned only when called,
-with 20 entries by default and a hard maximum of 50 per page. Profile prompts
-are never returned, and descriptions are capped at 300 characters. Model
-results include configured provider model ids and provider defaults; the tool
-does not query live provider catalogs.
+Use `list_subagent_options` to search profiles and configured routes on demand.
+It accepts `kind` (`agents`, `models`, or `all`), a substring `query`, provider filter, and `offset` / `limit` pagination.
+The default page has 20 entries; the hard maximum is 50.
+Descriptions are capped at 300 characters, and profile prompts are never returned.
 
-Optional catalog and routing ceilings are configured under
-`yca.tools.spawnSubagent`:
+The schema contains no embedded catalog.
+Model results include configured model ids and provider defaults, not a live provider catalog.
+Optional discovery and routing restrictions live under `yca.tools.spawnSubagent`:
 
 [source,json]
 ----
@@ -80,36 +74,28 @@ Optional catalog and routing ceilings are configured under
 }
 ----
 
-Empty or omitted allowlists leave that choice unrestricted. Restrictions filter
-catalog results and are checked again when a spawn request is made.
-
-The resolved model of a running/recently-completed sub-agent is surfaced in the
-`/subagents` overlay (list rows and the detail transcript) when a reference was
-requested.
+Empty or omitted allowlists leave that choice unrestricted.
+Restrictions filter discovery results and are checked again on spawn.
 
 == Sub-agent run limits and tools
 
-`spawn_subagent` accepts an optional `agent` profile, a `tools` allowlist, and
-`max_turns`. The requested tools are intersected with the profile's tool list
-when both are present, and are enforced both in the child model's tool schema
-and again before tool execution. An empty `tools` list allows no tools. Unknown
-profile names or unavailable requested tools fail the child run. Sub-agents use
-separate permission grants; their approval prompts still appear in the parent
-session. Parent permission restrictions remain in force.
+`spawn_subagent` accepts an optional `agent` profile, `tools` allowlist and `max_turns`.
+When both a requested tool list and profile list exist, their intersection is enforced in the child schema and again before execution.
+An explicitly empty requested `tools` list allows no tools.
+Unknown profiles or unavailable requested tools fail the child run.
 
-`max_turns` counts model round-trips. A positive per-spawn value sets an upper
-bound; a non-positive or omitted `max_turns` disables the per-spawn override so
-the configured `yca.subagents.maxIterations` and applicable provider/model
-iteration cap apply. The effective limit is the lowest of the per-spawn value,
-configured `yca.subagents.maxIterations`, and applicable provider/model
-iteration cap. Nested sub-agents are disabled.
+Children have separate permission grants, but their approval prompts appear in the parent session.
+Parent permission restrictions remain in force, and nested subagents are disabled.
 
-Sub-agent admission enforces two independent limits. `yca.subagents.maxConcurrent`
-bounds how many sub-agents one session may keep in flight. Independently, each
-provider's `maxConcurrent` (or the global `yca.llm.maxConcurrent` fallback)
-reserves one slot for the main session: a provider with `maxConcurrent=1` cannot
-run sub-agents at all, and a provider with `N > 1` runs at most `N-1` concurrent
-sub-agents process-wide (the shared per-provider gates of
-xref:features/reliability.adoc[Concurrency limiting] back this accounting, so an
-account-wide file-lease budget keeps the same `N-1` rule across processes). When a spawn is refused, `spawn_subagent` returns a hint
-naming the limiting factor (the session cap or the target provider's cap).
+`max_turns` counts model round-trips.
+A positive value sets a per-spawn ceiling; a nonpositive or omitted value leaves that override disabled.
+The effective limit is the lowest applicable positive limit from the spawn, `yca.subagents.maxIterations`, and provider/model iteration cap.
+
+Two independent admission limits apply:
+
+* `yca.subagents.maxConcurrent` limits children in flight for one session.
+* Provider `maxConcurrent`, or global `yca.llm.maxConcurrent`, reserves one slot for foreground work.
+A bound of `1` permits no subagents on that provider; a bound of `N > 1` permits at most `N-1` concurrent children process-wide.
+
+The shared xref:reliability.adoc[concurrency gates] also enforce that reservation with account-wide file leases when enabled.
+A refused spawn identifies whether the session cap or target provider cap was reached.

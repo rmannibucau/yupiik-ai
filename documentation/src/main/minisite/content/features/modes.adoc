@@ -1,19 +1,29 @@
 = Plan and build modes
-:minisite-breadcrumb: Home[index.html] > Features > Plan and build modes
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Plan and build modes
 :minisite-nav-next-link: permissions.html
 :minisite-nav-next-label: Permission modes
 
-yca access modes shape how the agent works:
+Use `plan` to inspect a codebase and agree on an approach before making changes.
+Switch to `build` to apply the work.
 
-* `plan` (the default) is read-only: it inspects the codebase and records its
-  approach as pending todos instead of making changes;
-* `build` makes every tool available; entering `build` from `plan` also defaults
-  the session approval mode to `auto_edit` (edits apply silently, bash still
-  follows its rules or the gate).
+[options="header"]
+|===
+|Mode |Behavior
+|`plan` (default) |Read-only planning; the model records its approach as pending todos rather than editing files.
+|`build` |Makes build tools available, subject to configured restrictions and permission checks.
+|===
 
-The active mode can be switched at runtime with `/mode`, or set headlessly with
-`--yca-run-mode build|plan` on `run`. In `plan` mode read-only tools and the
-plan-resolved bash rules run without prompting, write tools follow the
-permission mode (denied without an interactive gate), and `write_todo` records
-the planned steps; switching back to `build` seeds the todo
-list from the last plan when the model did not record it itself.
+== Switch modes
+
+Use `/mode` during an interactive session.
+For headless work, pass `--yca-run-mode build` or `--yca-run-mode plan` to `run`.
+
+Entering `build` from `plan` sets the session's approval mode to `auto_edit`.
+File edits then apply without prompting, while bash commands still follow their rules or reach the approval gate.
+If the model did not record todos, switching to build seeds the list from the last plan.
+
+In plan mode, read-only tools and plan-resolved bash rules run without prompting.
+File-mutating tools are hidden from the model; other gated actions follow the permission rules and are refused without an interactive approval path.
+
+The plan/build axis is separate from xref:permissions.adoc[permission modes].
+Neither is an OS isolation boundary; use xref:sandboxes.adoc[external sandboxing] when process-level confinement is required.

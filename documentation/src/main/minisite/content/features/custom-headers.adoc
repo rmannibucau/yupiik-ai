@@ -1,15 +1,19 @@
 = Custom headers
-:minisite-breadcrumb: Home[index.html] > Features > Custom headers
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Custom headers
 :minisite-nav-prev-link: provider-tuning.html
 :minisite-nav-prev-label: Provider tuning
 
-A provider authenticates with HTTP headers. Besides the built-in header helpers
-(`{{exec ...}}` and the Codex `{{codexAuth}}` family - see
-xref:configuration.adoc[Configuration]) you can register your own handlebars
-helper to compute request headers, typically to inject a custom authentication
-scheme.
+A provider authenticates with HTTP headers.
+Use the built-in helpers (`{{exec ...}}` and the Codex `{{codexAuth}}` family) or register a custom Handlebars helper for another authentication scheme.
+See xref:../configuration.adoc[Configuration] for built-in header options.
 
-## The `CustomDynamicHeaderTemplateHelper` SPI
+++++
+<span id="_the_customdynamicheadertemplatehelper_spi"></span>
+++++
+
+[[the-customdynamicheadertemplatehelper-spi]]
+[[_the_customdynamicheadertemplatehelper_spi]]
+== The `CustomDynamicHeaderTemplateHelper` SPI
 
 A custom helper is an `@ApplicationScoped` bean implementing
 `io.yupiik.ia.agent.core.llm.CustomDynamicHeaderTemplateHelper`, a
@@ -56,13 +60,17 @@ empty value skips the header. Throwing a runtime exception fails the render and
 the request is not sent, so a misconfigured helper surfaces loudly instead of
 silently sending a broken header.
 
-## Wiring and rendering
+[[wiring-and-rendering]]
+[[_wiring_and_rendering]]
+== Wiring and rendering
 
 The bean is discovered by the agent container (classpath scanning of the Fusion
 CDI beans) and injected into the provider header renderer, so no manual
 registration is needed.
 
-## Reference the helper from a provider
+[[reference-the-helper-from-a-provider]]
+[[_reference_the_helper_from_a_provider]]
+== Reference the helper from a provider
 
 Use the helper name inside a `dynamicHeaders` value, exactly like the built-in
 ones:
@@ -77,7 +85,7 @@ ones:
         "baseUrl": "https://gateway.example.com/v1",
         "api": "completions",
         "dynamicHeaders": {
-          "authorization": "Bearer {{myAuth \"my-provider\"}}",
+          "authorization": "{{myAuth \"my-provider\"}}",
           "x-tenant": "acme"
         }
       }
@@ -91,7 +99,9 @@ or a short-lived token) stays fresh without manual reconfiguration. A dynamic
 header named `authorization` overrides the default `apiKey` header for that
 provider.
 
-## The `mavenServerPassword` helper
+[[the-mavenserverpassword-helper]]
+[[_the_mavenserverpassword_helper]]
+== The `mavenServerPassword` helper
 
 yca ships a built-in helper, `{{mavenServerPassword "serverId"}}`, that resolves a
 credential from your Maven `settings.xml` and uses it to build a request header.
@@ -135,7 +145,13 @@ password as a bearer token:
 }
 ----
 
-### Point it at an isolated, fake Maven tree
+++++
+<span id="_point_it_at_an_isolated_fake_maven_tree"></span>
+++++
+
+[[point-it-at-an-isolated-fake-maven-tree]]
+[[_point_it_at_an_isolated_fake_maven_tree]]
+=== Point it at an isolated, fake Maven tree
 
 You do not need to reuse your real `~/.m2`. To keep gateway credentials out of
 your everyday Maven setup, point the helper (and the redaction) at a dedicated
@@ -194,10 +210,12 @@ master file) out of version control and restrict its permissions; the helper and
 the redactor read it only to decipher in memory and never persist the plaintext.
 
 The same `yca.secrets.maven.*` settings feed the wire redactor
-(xref:configuration.adoc[Configuration]), so the ciphertext and the deciphered
+(xref:../configuration.adoc[Configuration]), so the ciphertext and the deciphered
 value are also scrubbed from any conversation context that might mention them.
 
-### Other secrets in `settings.xml`
+[[other-secrets-in-settingsxml]]
+[[_other_secrets_in_settings_xml]]
+=== Other secrets in `settings.xml`
 
 Beyond server passwords, the redactor harvests two more secret families from the
 configured `settings.xml`:
@@ -222,12 +240,13 @@ Both are opt-out via the corresponding `yca.secrets.*` lists: empty the list
 you do not want (for example `profilePropertyNames=[]` to stop treating
 `gpg.keyname` as a secret).
 
-Note that harvested values still respect the global `yca.secrets.minValueLength`
-floor (default 8): a very short value - for example a `gpg.passphrase` of
-`xxxxxx` - is below the floor and is left untouched. Raise `minValueLength` in
-your config if you need to redact such short passphrases.
+Harvested values still respect `yca.secrets.minValueLength` (default `8`).
+A six-character value such as `xxxxxx` is below that floor and is left untouched.
+Lower the floor if you need to redact shorter values, considering the risk of over-redacting common text.
 
-## YCA configuration files
+[[yca-configuration-files]]
+[[_yca_configuration_files]]
+== YCA configuration files
 
 The redactor also harvests secrets from the YCA `configuration.json` files - both
 the project-local `<workingDir>/.yca/configuration.json` and the global
@@ -256,7 +275,9 @@ The registry harvests files at startup and registers credentials obtained by the
 Previously registered values remain protected after rotation, including across subsequent scans.
 Changes made externally to an auth file are picked up on the next scan or when the application reads that file from disk; an already cached session is not automatically reloaded.
 
-## Cloud provider credential files
+[[cloud-provider-credential-files]]
+[[_cloud_provider_credential_files]]
+== Cloud provider credential files
 
 The redactor can harvest long-lived credentials from the well-known cloud
 provider files, configured per provider via `locations`:
@@ -271,7 +292,6 @@ provider files, configured per provider via `locations`:
   standard long-lived static credential file exists, so nothing is scanned unless
   you add a path that holds one.
 
-Only static, long-lived secret keys are harvested. Short-lived token caches (the
-AWS SSO cache, Azure MSAL / access-token JSON) and the SQLite gcloud
-`credentials.db` / `access_tokens.db` are not scanned by default - add their path
-to the relevant `locations` if you want them covered.
+Short-lived caches such as AWS SSO and Azure MSAL/access-token JSON, and gcloud SQLite `credentials.db` / `access_tokens.db`, are not scanned by default.
+An added location must use a format supported by that provider's scanner; adding a SQLite path does not by itself make its contents readable.
+Redaction is a best-effort safeguard, not a substitute for restricting access to credential files.

@@ -1,41 +1,43 @@
 = Todo and plan guidance
-:minisite-breadcrumb: Home[index.html] > Features > Todo and plan guidance
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Todo and plan guidance
 :minisite-nav-prev-link: agents.html
 :minisite-nav-prev-label: Custom agents
 :minisite-nav-next-link: iteration-guards.html
 :minisite-nav-next-label: Iteration guards
 
-The `write_todo` tool is the single way the model records and updates the todo
-list, replacing it entirely on each call. yca treats todos the way opencode does:
-as a voluntary, self-reported progress mechanism, not a hard gate. In `plan`
-mode the model records its plan as pending todos; on the switch to `build` the
-todos are seeded from the plan when empty. Nothing fails a turn for missing or
-stale todos.
+The model records progress with `write_todo`, which replaces the entire list on each call.
+Todos are self-reported progress, not a hard execution gate: missing or stale items do not themselves fail a turn.
 
-A todo item carries one of four statuses: `pending`, `in_progress`, `completed`
-or `cancelled`. The plain-text rendering marks them `[ ]`, `[> ]`, `[x]` and
-`[-]`, and the edit-plan file uses `[ ]`, `[>]`, `[x]` and `[~]`. `completed` and
-`cancelled` items are the progress history: the guidance orders the model to keep
-them in the list until the user asks to clear it, so a list never loses what was
-already done or dropped.
+In plan mode, the model records proposed steps as pending items.
+Entering build seeds an empty todo list from the plan when needed.
 
-What differs from provider to provider is how strongly the model is pushed toward
-using the list. This mirrors opencode, whose prompt injects a demanding
-"Task Management" section only for some model families (for example Anthropic's
-*"Use this tool VERY frequently... It is critical that you mark todos as completed
-as soon as you are done"*) while leaving more permissive families to opt in.
+== Track status without losing history
 
-yca makes this tunable per provider through `yca.provider.<id>.prompt.todo`:
+[options="header"]
+|===
+|Status |Plain-text marker |Edit-plan marker
+|`pending` |`[ ]` |`[ ]`
+|`in_progress` |`[> ]` |`[>]`
+|`completed` |`[x]` |`[x]`
+|`cancelled` |`[-]` |`[~]`
+|===
 
-[cols="1,3",opts="headers"]
+Guidance tells the model to retain completed and cancelled items until the user asks to clear them.
+They preserve the record of completed work and scope decisions.
+
+== Tune guidance
+
+Set `yca.provider.<id>.prompt.todo` to control how strongly a provider's prompt encourages todo updates.
+
+[cols="1,3",options="header"]
 |===
 |Value |Effect
-|`auto` (default) |Detects the model family from the provider `baseUrl` and injects a matching guidance block; when the family is unknown it falls back to the OpenAI wording.
-|any other non-empty string |Injected verbatim into the system prompt as the todo-guidance appendix, opencode-style.
-|empty or `false` |Disables the extra guidance entirely; only the base prompt rules about `write_todo` remain.
+|`auto` (default) |Detects the model family from the provider `baseUrl` and selects matching guidance; unknown families use OpenAI wording.
+|Other nonempty string |Adds that text verbatim as the todo-guidance appendix.
+|Empty or `false` |Disables extra guidance while retaining base `write_todo` rules.
 |===
 
-For example, to override the guidance text for a provider:
+For example:
 
 [source,properties]
 ----
@@ -43,83 +45,39 @@ yca.provider.anthropic.baseUrl=https://api.anthropic.com
 yca.provider.anthropic.prompt.todo=Use write_todo every few steps to reflect current progress.
 ----
 
-To apply the same wording to every provider, set the global fallback instead: it
-is used for the providers leaving `prompt.todo` at `auto` (or unset), and each
-provider that sets its own value keeps it. The semantics are the same (a verbatim
-appendix, or `false` to disable).
+Use `yca.todos.guidance` as a global fallback for providers whose `prompt.todo` is `auto` or unset.
+Provider-specific values still win.
+The global value also accepts verbatim text or `false`:
 
 [source,properties]
 ----
 yca.todos.guidance=Use write_todo every few steps to reflect current progress.
 ----
 
-The resolved block is appended as a `<todo-guidance>` section in both `plan` and
-`build` modes. Leaving it at `auto` is the right choice for most setups: Anthropic
-and Google model families get their stronger wording automatically, anything else
-gets the balanced OpenAI guidance.
+The resolved text is appended as `<todo-guidance>` in both modes.
+With `auto`, Anthropic and Google families get stronger instructions; other families get balanced OpenAI guidance.
+This is prompt guidance, not enforcement that the model will update the list.
 
-In `plan` mode the canned blocks are swapped for a plan variant. Where the build
-wording pushes completion tracking (mark completed as soon as done, keep one or
-several `in_progress`, work the queue), the plan variant pushes keeping the list
-in sync with the discussion: every item stays `pending` - statuses only advance
-in build mode - and whenever a follow-up message changes the plan (scope, steps,
-approach, trade-offs) the model must update the list with `write_todo` in the
-same turn so it always mirrors the latest agreed plan.
+== Keep plan follow-ups in sync
 
-New items sent to `write_todo` in `plan` mode are normalized: an `in_progress`
-or `completed` status on a new item is written back as `pending` (the update
-still succeeds and the tool reports the normalization), while a `cancelled` new
-item is kept as-is because it encodes a scope decision ("we will not do X").
-Items already advanced in a previous build session keep their status, so a
-plan/build switch never loses real progress.
+Plan mode uses a planning variant of the canned guidance rather than build completion-tracking wording.
+It tells the model to update todos in the same turn whenever discussion changes scope, steps, approach or trade-offs.
+The mode tail and each volatile `<session-state>` reminder reinforce that instruction.
 
-The same message is reinforced twice per turn in `plan` mode. First in the
-mode tail of the system prompt, which orders recording the plan with `write_todo`
-and re-syncing on discussion changes. Second as a per-request reminder in the
-volatile `<session-state>` tail - "if this turn changes the plan, call write_todo
-to sync the todo list before answering" - re-rendered at every request, so it is
-the freshest instruction the model sees. Together they make plan follow-ups
-update the todo list instead of only replying in prose.
+New `in_progress` or `completed` items submitted in plan mode are normalized to `pending`.
+The update succeeds and reports the normalization.
+New `cancelled` items remain cancelled because they encode a scope decision.
+Items advanced during an earlier build keep their status across mode switches.
 
-== Never ending a turn with open todos
+[[never-ending-a-turn-with-open-todos]]
+[[_never_ending_a_turn_with_open_todos]]
+== Continue unfinished build work
 
-Some model families (qwen and relatives are the usual suspects) are quite willing
-to stop mid-implementation: they run a couple of steps, write a progress report
-and end their turn even though the todo list still holds pending items. When that
-happens the loop emits a warning notice ("model ended its turn (finish_reason=...)
-with N/M todos still unfinished") and waits for you to send `continue`.
+A model can stop after a progress report while todos remain open.
+Normally, the loop warns that the model ended with `N/M` todos unfinished and waits for you to send `continue`.
 
-`yca.todos.continueOnUnfinished` closes that loop: instead of returning, the turn
-asks the model to carry on with the next unfinished todo, up to
-`yca.todos.maxContinues` continuations. Each continuation starts a fresh iteration
-window: `yca.llm.maxIterations` bounds one continuation loop, not the whole turn, so
-a long implementation is bounded by `maxContinues` rather than by a single iteration
-window. Each continuation logs an informational notice; once the budget is spent the
-usual warning notice is emitted again and the turn ends as before. From the second
-continuation on the instruction also asks the model to change strategy (or to state
-what blocks it) instead of repeating its progress report, and
-`yca.todos.continuePrompt` replaces the built-in instruction if you want to word it
-yourself.
-
-For capable, agentic models (codex, deepseek-r1, ...) there is a complementary
-*round gate* tuned per model: `behavior.turnContinuesOnTextEnd=true`. It is the
-Codex-style "a turn continues as long as there is unfinished work" semantics - a
-text-only reply that leaves the todo list unfinished re-asks the model to act on
-the next item instead of ending the turn and waiting for `continue`, bounded by
-the iteration window (not by `yca.todos.maxContinues`). Unlike
-`continueOnUnfinished`, it is per model/provider and explicit-only (it defaults
-to off for every model). Small models such as qwen should keep it off and rely on
-`yca.todos.continueOnUnfinished` instead. See
-`iteration-guards.adoc`'s *Model tuning by family* section for the JSON samples.
-
-The same continuation is attempted before giving up on the other mid-turn stops:
-when a whole iteration window is spent on tool calls (`yca.llm.maxIterations`
-reached), and when an empty completion (`yca.llm.emptyCompletionRetriesMax`) or a
-truncation (`yca.llm.continueOnTruncation`) exhausts its own retry budget, the loop
-continues the pending todos instead of ending the turn with an error. Empty-completion
-and truncation retry budgets count consecutive stuck replies only: any tool round or
-real (non-blank, non-truncated) text reply in between resets them, so a long turn
-never gives up because of scattered empty or truncated replies.
+Enable `yca.todos.continueOnUnfinished` to ask the model to work on the next unfinished item instead.
+The default is off.
 
 [source,properties]
 ----
@@ -128,18 +86,36 @@ yca.todos.maxContinues=25
 yca.todos.continuePrompt=Do not summarize: continue with the next unfinished todo now.
 ----
 
-It is off by default, and deliberately conservative when on:
+Each continuation starts a fresh iteration window bounded by `yca.llm.maxIterations`.
+The entire sequence is bounded by `maxContinues`.
+Each continuation logs a notice; after the budget is exhausted, the usual unfinished-todo warning returns and the turn ends.
+From the second continuation, the default instruction asks the model to change strategy or explain its blocker rather than repeat a progress report.
+`continuePrompt` replaces that instruction.
 
-- only in `build` mode, and only in a turn that already ran tools;
-- never for a sub-agent, which reports its own todo list back to its parent;
-- never in a turn carrying a prompt you typed while the loop was running: the model just answered that message, so its text-only end is not the "stopped too early" case;
-- never past `maxContinues`, so a model stuck in a loop cannot spin forever.
+Auto-continuation is deliberately limited:
 
-Related resilience knob: `yca.llm.emptyCompletionRetriesMax` (default 2). When a provider
-returns an empty completion (no content and no tool call, for example a local model
-that emitted reasoning then stopped), the loop retries the request up to that budget.
-The retry runs before the todo auto-continue check, so while retries remain an empty
-completion is never misread as a deliberate "stopped mid-implementation" end; once the
-budget is exhausted and todos are still unfinished the turn falls through to the todo
-continuation (when enabled) instead of ending with a blank answer. Setting it to 0
-disables the retry.
+* Only build turns that have already executed tools qualify.
+* Subagents do not qualify; they report their own todo state to the parent.
+* A turn that received a user prompt while running does not qualify, because a text reply may be a valid response to that prompt.
+* `maxContinues` always limits this mechanism.
+
+The same continuation can recover an exhausted tool-iteration window or exhausted empty-completion/truncation retries while todos remain pending.
+Empty and truncated response budgets count consecutive stuck replies only.
+A tool round or real, nonblank, nontruncated text resets those retry budgets.
+
+=== Per-model round gate
+
+`behavior.turnContinuesOnTextEnd=true` is a separate, explicit per-model/provider option.
+A text-only response with unfinished todos re-asks the model to act within the current iteration window.
+It does not use `yca.todos.maxContinues` or reset the window.
+The option is off for every model by default; there is no automatic capable-model detection.
+
+Small models should generally retain a positive iteration cap and use bounded todo auto-continuation instead.
+See xref:iteration-guards.adoc#_model_tuning_by_family[Model tuning by family] for examples and the interaction between these limits.
+
+=== Empty-completion retries
+
+`yca.llm.emptyCompletionRetriesMax` defaults to `2`; `0` disables retries.
+A completion with neither content nor tool calls is retried before checking todo auto-continuation.
+After those retries are exhausted, an eligible unfinished todo list can continue instead of returning a blank answer.
+See xref:iteration-guards.adoc[Iteration guards] for the broader stop and recovery rules.

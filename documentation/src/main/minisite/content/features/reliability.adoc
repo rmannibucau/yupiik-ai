@@ -1,121 +1,94 @@
 = Reliability
-:minisite-breadcrumb: Home[index.html] > Features > Reliability
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Reliability
 :minisite-nav-prev-link: provider-tuning.html
 :minisite-nav-prev-label: Provider tuning
 :minisite-nav-next-link: prefix-cache.html
 :minisite-nav-next-label: Provider prefix cache
 
-Model calls are protected against transient failures: yca applies rate
-limiting, automatic retries and concurrency limits so bursts and API hiccups do
-not break a session.
+yca applies rate limits, retries and concurrency gates to model calls.
+These reduce transient failures; they cannot make an unavailable provider reliable or remove account limits.
 
 == Concurrency limiting
 
-A provider account (or API key) only serves a bounded number of concurrent
-requests; beyond it the provider answers `429 concurrency_limit_exceeded` and
-burns the caller's quota on retries.
+Set provider `maxConcurrent` to stay within the account's concurrent-request budget.
+Requests above that budget can receive `429 concurrency_limit_exceeded`, and repeated retries add load without progress.
 
-yca caps the in-flight requests of a provider with a concurrency gate: one
-permit per request attempt, returned as soon as the answer (or the failure) is
-in - never held during a retry backoff, so a retrying caller does not keep a
-slot the other callers of the budget need.
+Each attempt acquires one permit and returns it when the response or failure arrives.
+Retry backoff never holds a permit, leaving capacity available to other callers.
 
 === Per-process budget (default)
 
-By default each yca process owns one in-memory gate per provider, with a strict
-FIFO admission: waiters are served in arrival order and a newcomer never barges
-a slot a queued caller was about to get. The gate is shared by every client of
-the provider in the process - the main conversations and the `/btw` side
-questions - so a side question cannot exceed the budget.
+Each process shares one provider gate across foreground conversations and `/btw` calls.
+Admission is strictly FIFO: newcomers cannot take a queued caller's slot.
 
-The cap is the per-provider `maxConcurrent` when it is strictly positive,
-otherwise `yca.llm.maxConcurrent`.
-A provider `maxConcurrent` of `0` defers to `yca.llm.maxConcurrent`.
-With neither value set, shared gates start unbounded and a provider-announced limit narrows the gate for all clients.
+A strictly positive provider `maxConcurrent` wins over `yca.llm.maxConcurrent`.
+A provider value of `0` defers to the global value.
+With neither bound set, the gate starts unbounded and narrows if the provider announces a limit.
 
-When no limit is configured, the first `429 concurrency_limit_exceeded` response creates a gate bounded by the announced `"limit": N`.
-Shared provider gates retain learned narrowing for their lifetime so one client's cooldown cannot widen another client's budget.
-Private library gates relax back to the configured cap (or to no bound) after `concurrencyAdaptationMs`.
+The first `429 concurrency_limit_exceeded` containing `"limit": N` supplies a learned bound.
+Shared provider gates retain learned narrowing for their lifetime; one client's cooldown cannot widen another client's budget.
+Private library gates can relax to the configured cap, or to unbounded, after `concurrencyAdaptationMs`.
 
-An admission is bounded: a request which cannot get a slot within
-`yca.llm.concurrencyAcquireTimeoutMs` (default 5 minutes) fails with a
-`ConcurrencySlotTimeoutException` instead of hanging forever on a saturated
-budget - another process holding every lease, or a suspended one. That failure
-is deliberately its own type: a saturated budget is not a flaky transport read,
-so it is not retried (retrying would multiply the admission deadline by the
-attempt count while the provider is asking yca to slow down).
+A caller waits at most `yca.llm.concurrencyAcquireTimeoutMs` (default five minutes) for admission.
+Exhaustion raises `ConcurrencySlotTimeoutException`, not a transport timeout.
+It is not retried, avoiding multiplication of the admission deadline while capacity remains saturated.
 
-The uncontended admission runs on the caller's thread; only a wait is moved to
-a virtual thread, so a slot holder never starts the next request from its own
-thread.
+Uncontended admission runs on the caller's thread.
+Only waiting moves to a virtual thread, so a slot holder does not run the next request on its own thread.
 
 === Account-wide budget (file leases)
 
-Several yca sessions on the same machine talk to the same account, so
-per-process gates multiply the concurrency the provider actually sees: three
-sessions at `maxConcurrent = 2` issue six concurrent requests against a budget
-of two.
+Per-process caps do not coordinate multiple processes by themselves.
+Three processes each capped at two can otherwise send six concurrent requests to the same account.
 
-When a provider opts into `capabilities.concurrency.useFileLock` _and_ a
-strictly positive bound is configured (the provider's `maxConcurrent` or the
-global `yca.llm.maxConcurrent`), the budget of that provider is shared across
-every yca process of the machine through file leases under the storage home
-(`llm-concurrency/<providerId>`): each grant holds an exclusive OS record lock
-on one `slot-N.lock` file, so two processes cannot hold the same slot. Record
-locks are released by the kernel when their holder dies, so a killed or crashed
-session never leaves a slot stranded.
+Enable `capabilities.concurrency.useFileLock` with a strictly positive provider or global bound to share capacity across processes on one machine.
+Each attempt holds an exclusive OS record lock on one `llm-concurrency/<providerId>/slot-N.lock` file under the storage home.
+The kernel releases locks when a process dies, avoiding stranded leases.
 
-Record locks are reliable on a local POSIX filesystem only. On NFS/CIFS they
-may be ignored or coalesced by the client, so the leases only coordinate the
-processes of one machine sharing one storage home - and when the filesystem
-refuses them, the gate degrades to a per-process budget (logged once as a
-warning, also exposed through the gate) instead of failing requests.
+WARNING: Use a local POSIX filesystem for these leases.
+NFS/CIFS clients can ignore or coalesce record locks.
+If locking is refused, yca warns once and falls back to per-process capacity rather than failing requests.
+The gate also exposes that fallback state.
 
-The slot files are never deleted (a recreated file would be a different lock
-domain, hence a slot which looks free while it is still leased). The
-`llm-concurrency` directory is safe to remove while no yca process runs.
+Slot files are never deleted during operation: recreating a file would create a new lock domain while an older lease could still be held.
+Remove `llm-concurrency` only while no yca process is running.
 
-A capacity learned from a `429` is persisted in a sibling `capacity` file with a 24-hour time-to-live, so a restart seeds the gate with the last known limit instead of burning another `429` to rediscover it.
-Concurrent writers retain the smallest unexpired learned value and publish it atomically.
-Only a learned value is persisted; a local capacity update does not erase what a peer learned.
+A learned `429` capacity is stored atomically in a sibling `capacity` file with a 24-hour lifetime.
+Concurrent writers retain the smallest unexpired learned value.
+Only learned values are persisted; a local capacity update does not erase a peer's observation.
+Restarting can therefore use the last known bound rather than rediscover it through another `429`.
 
-Reconciliation is best effort: a `capacity` file written after a process started is not re-read by that process for admission.
-Use the same provider id, storage home and configured bound in all processes that share an account.
-Different ids do not coordinate even when they use the same API key, and unsafe directory ids are mapped to a SHA-256 directory name.
-A learned lower bound is not an instantaneous machine-wide guarantee: peers may still use their previous bound and existing requests are never preempted.
+Cross-process reconciliation is best-effort.
+A process does not reread capacity files written after its startup for admission.
+Existing requests are not preempted, and peers may still use an older bound.
+A newly learned lower limit is not an instantaneous machine-wide guarantee.
+
+Use the same provider id, storage home and configured bound in processes sharing an account.
+Different ids do not coordinate even with the same API key.
+Unsafe provider directory ids are mapped to SHA-256 names.
 
 === Bounded waits and cancellation
 
-Queued callers observe the wait through the same pause notifications as
-throttling and backoffs, and an abandoned turn (interrupt, tab close) gives up
-its place in the queue instead of parking for nothing.
+Queue waits use the same pause notifications as rate throttling and retry backoff.
+Interrupting a turn or closing a tab cancels its queued admission rather than leaving it waiting.
 
 == Turn loop guards
 
-A single turn can run many LLM round-trips. Iteration bounds (the per-window
-cap, the exploration-plateau guard and the persisted stop notices) follow a
-per-model / per-provider / global cascade and are covered in detail in
-xref:features/iteration-guards.adoc[Iteration guards].
+Per-window iteration caps, exploration-plateau guards and persisted stop notices bound repeated agent work.
+They resolve per model, then provider, then globally.
+See xref:iteration-guards.adoc[Iteration guards] for configuration and continuation behavior.
 
 == Spawned processes
 
-Every subprocess yca starts (the `bash` tool, stdio MCP servers, the Maven
-`dependency:list` resolver, clipboard helpers) is tracked by the shared
-`ProcessService` so a running command can always be stopped as a _tree_ and no
-subprocess outlives the JVM:
+The shared `ProcessService` tracks bash commands, stdio MCP servers, Maven `dependency:list`, clipboard helpers and other subprocesses.
+Normal cancellation and shutdown stop tracked process trees rather than only their leaders:
 
-* Cancelling a turn, a tool call or a bash timeout disposes the whole process
-  tree (`ProcessHandle.descendants()` first, then the leader), so orphaned
-  foreground children (`mvn`, `npm`, a `sleep … & wait` script) are reaped too,
-  not just the direct shell.
-* Closing is two-phase: at shutdown every tracked tree is killed first, then all
-  of them are awaited with a single shared deadline (`onExit()` +
-  `CompletableFuture.allOf`), so the total wait is the slowest single reap, not
-  a per-process sum.
-* The disposal runs on the container `@Destroy`, i.e. at the end of every
-  command (fusion's `CliAwaiter`) and, when fusion's launcher hook is enabled
-  (`fusion.launcher.useHook=true`), on raw JVM exit too - so a Ctrl-C
-  force-exit or `SIGTERM` still reaps tracked processes. With the hook off,
-  graceful exits (normal command return, the cooperative Ctrl-C path) still run
-  the container close; a hard `kill -9` cannot run any code, so nothing can
-  clean up in that case.
+* Turn/tool cancellation and bash timeouts dispose descendants first, then the leader, using `ProcessHandle.descendants()`.
+This also reaps foreground children such as Maven, npm or a `sleep ... & wait` shell.
+* Shutdown kills all tracked trees first, then awaits all exits against one shared deadline using `onExit()` and `CompletableFuture.allOf`.
+The total wait is not a per-process sum.
+* Container `@Destroy` disposal runs at command completion through Fusion's `CliAwaiter`.
+With `fusion.launcher.useHook=true`, raw JVM exit also runs cleanup, including force-exit Ctrl-C and `SIGTERM` paths.
+
+With the launcher hook disabled, graceful command return and cooperative Ctrl-C still close the container.
+A hard `kill -9` cannot run cleanup code and cannot guarantee child-process disposal.

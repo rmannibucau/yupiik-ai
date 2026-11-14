@@ -2,23 +2,49 @@
 :minisite-index: 650
 :minisite-index-title: GitHub bot
 :minisite-index-description: Polling, durable tasks and isolated headless execution.
+:minisite-breadcrumb: Home[../index.html] > GitHub bot
+:minisite-nav-next-link: simple-setup.html
+:minisite-nav-next-label: Simple, functional Linux/Docker setup
 
-The experimental `extensions/github-bot` module is a JVM-only GitHub polling application built on YCA core, without the terminal UI dependencies.
+The `extensions/github-bot` module is a JVM-only GitHub polling application built on YCA core, without the terminal UI dependencies.
 It has no inbound webhook endpoint.
 
 WARNING: This is an initial implementation, not the complete production architecture.
-The CLI supports repository discovery and filters, PAT/App host authentication, immutable user-ID authorization, polling and durable task operations.
-Docker, Nono and Kubernetes execution are integrated through the worker, with strict host publication or separately provisioned agent credentials, and verified task-branch pull requests or native head-pinned reviews before reporting success.
-The strict Docker review/help/solve path has live acceptance evidence; that does not establish every backend's isolation or blanket production readiness.
 Do not deploy unattended production solving before validating permissions and recovery in a disposable repository.
+
+The CLI discovers repositories, filters requests and stores durable tasks.
+It supports PAT or GitHub App authentication and authorizes users by immutable numeric ID.
+
+Workers execute tasks through Docker, Nono or Kubernetes.
+Choose strict host publication or separately provisioned agent credentials.
+Success requires a verified task-branch pull request or a native review pinned to the PR head.
+
+[[cli-commands]]
+== Generated command reference
+
+The bot exposes separate finite one-shot commands, instead of one action-option command.
+Use the generated pages for the exact options and defaults of each command, and the generated CLI index for the full tree.
+
+* xref:../cli/github-bot-poll.adoc[`github bot poll`] - scan repositories and enqueue authorized tasks.
+* xref:../cli/github-bot-list.adoc[`github bot list`] - list queued tasks with filters.
+* xref:../cli/github-bot-show.adoc[`github bot show`] - inspect a task, including optional private diagnostics.
+* xref:../cli/github-bot-create.adoc[`github bot create`] - create a trusted operator task.
+* xref:../cli/github-bot-worker.adoc[`github bot worker`] - run at most one eligible task.
+* xref:../cli/github-bot-retry.adoc[`github bot retry`] - retry an eligible unpublished failed task.
+* xref:../cli/github-bot-delete.adoc[`github bot delete`] - delete an inactive task.
+* xref:../cli/github-bot-purge.adoc[`github bot purge`] - remove clean terminal tasks older than a retention age.
+* xref:../cli/github-bot-cleanup.adoc[`github bot cleanup`] - remove old unreferenced prepared-only attempts.
+
+See the xref:../cli/index.adoc[generated CLI index] for the full command tree.
+There is no handwritten option reference; use the generated metadata for supported options and defaults.
 
 == Start with the simple, functional setup
 
 TIP: xref:simple-setup.adoc[Follow the step-by-step Linux/Docker deployment guide] for a complete single-server setup: build, SSH transfer, service account, GitHub permissions, private configuration, manual acceptance and optional systemd scheduling.
+
 This is a real deployment path using the strict Docker workflow tested live, not a mock or a collection of disconnected configuration examples.
 It deliberately uses one worker, a PAT, an existing provider configuration and a separately owned verified fork.
 It leaves unrestricted Docker egress explicit and does not require Nono or Kubernetes.
-Start here if you want that simple case; use the references below for other backends, enforced egress and configuration details.
 
 * xref:installation.adoc[Bare-metal Docker and Nono walkthrough]
 * xref:configuration.adoc[Configuration and CLI]
@@ -28,31 +54,58 @@ Start here if you want that simple case; use the references below for other back
 
 == Current contracts
 
+=== Authorization and polling
+
 An empty authorization list denies all polling.
 Authorization uses immutable numeric GitHub user IDs, not mutable login names.
+
 Issue bodies, issue comments and review comments are scanned independently.
-Task-marked bot output is never parsed as an invocation, including native review summaries and inline findings, even when the publishing account differs from the configured mention login.
+Task-marked bot output is never parsed as an invocation.
+This includes native review summaries and inline findings, even if the publishing account differs from the configured mention login.
+
 Help examples use inline code so copying the example text alone does not invoke the bot.
+
+=== Reviews, solves and Discussions
+
 Successful reviews finish with the native review itself; no additional comment announces that a review was published.
 Solve responses link the verified new pull request back to the originating issue or enabled Discussion thread.
-Discussion polling is opt-in with `poll.discussions.enabled=false` by default; bodies, top-level comments and replies support `help` and `solve`, not `review`.
+
+Discussion polling is opt-in with `poll.discussions.enabled=false` by default.
+Bodies, top-level comments and replies support `help` and `solve`, not `review`.
 Discussion access uses GraphQL and requires host Discussions read permission for polling and write permission for responses.
+
+=== Durable state and recovery
+
 Invocation receipts survive task deletion, so overlapping scans do not recreate deleted tasks.
 A scan hitting its page budget does not advance its completed watermark.
 State updates use short sidecar-lock transactions and atomic replacement; agent execution never holds the store lock.
-Structured result files are required; a URL appearing in a transcript is not accepted as proof of success.
+
+Structured result files are required.
+A URL appearing in a transcript is not accepted as proof of success.
 Ambiguous publication remains pending reconciliation rather than triggering model re-execution.
 
 The default `maxRetries=2` means an initial execution plus two retries, not two attempts total.
 CLI commands are finite one-shot operations; scheduling is external.
 
-== Validation status and version 0 limits
+[[_validation_status_and_version_0_limits]]
+== Validation history and version 0 limits
 
-A disposable private-repository Docker run has demonstrated strict private review publication, Discussions help routing for bodies/comments/replies, and strict solve-to-PR through a verified separately owned fork.
+This section is the centralized validation overview for the whole module.
+Each page links here instead of repeating possibly stale validation claims.
+
+A disposable private-repository Docker run has demonstrated strict private review publication, Discussions help routing for bodies, comments and replies, and strict solve-to-PR through a verified separately owned fork.
 The published solve sources were independently fetched, compiled and tested; repeated polling and completed-task execution created no duplicate PR or response.
+
 A separate live acknowledgement-loss check on 2026-11-12 killed the worker after GitHub accepted a native review and before the response reached the worker; restart reconciled one review without another comment or model execution.
 That check covers publication acknowledgement loss only, not an execution-time crash or every remote mutation window.
-This evidence covers the strict host-published workflow, not the separate credentialed-agent git/gh workflow, Nono, Kubernetes or enforced egress.
-The recorded bot-module suite passed 229 tests with no failures or errors and three skips; a prior broader core suite had exploration-plateau failures, so no blanket green whole-reactor claim is made.
+
+This evidence covers the strict host-published Docker workflow.
+The remaining unvalidated deployment paths include the separate credentialed-agent git/gh workflow, Nono, Kubernetes and enforced egress.
+They require deployment-specific validation in a disposable repository.
+The demonstrated strict solve and Discussion cases do not establish recovery across every remote mutation window.
+
+The recorded bot-module suite passed 229 tests with no failures or errors and three skips.
+A prior broader core suite had exploration-plateau failures, so no blanket green whole-reactor claim is made.
+
 Version 0 still requires external scheduling, operator-managed retained state and fail-closed operator reconciliation for uncertain writes.
 See xref:security.adoc[security and recovery] and xref:configuration.adoc[Discussion scan and completion contracts] before enabling additional workflows.

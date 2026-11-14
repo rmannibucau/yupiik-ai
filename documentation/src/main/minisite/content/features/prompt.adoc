@@ -1,22 +1,24 @@
 = Prompt templates
-:minisite-breadcrumb: Home[index.html] > Features > Prompt templates
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Prompt templates
 :minisite-nav-prev-link: iteration-guards.html
 :minisite-nav-prev-label: Iteration guards
 :minisite-nav-next-link: health.html
 :minisite-nav-next-label: MCP server health
 
-The interactive CLI prompt is rendered from a Handlebars template controlled by
-`yca.prompt.template` (see xref:../configuration.adoc[Configuration]).
+Set `yca.prompt.template` to customize the interactive CLI's input prompt with Handlebars.
+This changes the terminal prompt, not the instructions sent to the model.
+See xref:../configuration.adoc[Configuration] for the setting and color options.
 
-By default the built-in template is used:
+== Customize the default prompt
+
+The built-in template is:
 
 [source,handlebars]
 ----
 [{{#if (eq mode "plan")}}{{lookup colors "accent"}}{{else}}{{lookup colors "success"}}{{/if}}{{{mode}}}{{lookup colors "reset"}}@{{lookup colors "model"}}{{{modelName}}}{{lookup colors "reset"}}]{{#if permission}} ({{#if (eq permission "auto")}}{{lookup colors "warning"}}{{else}}{{lookup colors "status"}}{{/if}}{{{permission}}}{{lookup colors "reset"}}){{/if}}{{#if agent}} [{{{agent}}}]{{/if}} {{#if (lte model.contextPercentage 30)}}{{lookup colors "dim"}}{{else if (lte model.contextPercentage 70)}}{{lookup colors "warning"}}{{else}}{{lookup colors "error"}}{{/if}}{{{model.contextPercentage}}}%{{lookup colors "reset"}}> 
 ----
 
-which renders, for a build in `yolo` mode with a `reviewer` agent and the context
-at 42%:
+For a build in `yolo` mode with a `reviewer` agent and `42%` context usage, it renders:
 
 [source,text]
 ----
@@ -34,7 +36,7 @@ characters fall back to the default color; when color is disabled the lookup
 renders empty.
 The optional agent badge only appears when a custom agent is active and the
 permission segment only when a permission mode is set.
-The context percent is colored dim below 30, warning below 70 and error above.
+The template uses dim color through `30%`, warning through `70%`, and error above `70%`.
 
 == Placeholders
 
@@ -62,11 +64,9 @@ The context percent is colored dim below 30, warning below 70 and error above.
 
 |`model.contextTokens`
 |number
-|Estimated tokens currently in context; `0` until the first turn. The `~` in
-the TUI sidebar marks this as an estimate; when the provider has reported usage
-at least once the sidebar adds a `last real` row with the exact provider-billed
-`prompt_tokens` of the last anchored request (its absence means the estimate is
-heuristic only).
+|Effective context tokens; `0` until the first turn.
+Provider observations anchor later estimates, but unsent additions remain estimated.
+See xref:context.adoc[Context management] for measurement sources and hover details.
 
 |`model.contextWindow`
 |number

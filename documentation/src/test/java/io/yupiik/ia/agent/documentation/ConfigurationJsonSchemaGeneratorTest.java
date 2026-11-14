@@ -65,6 +65,17 @@ class ConfigurationJsonSchemaGeneratorTest {
             assertFalse(map(schema.get("properties")).containsKey("github"));
             assertFalse(defs.keySet().stream().anyMatch(key -> key.toString().contains("GithubBot")));
             final var yca = map(map(map(schema.get("properties")).get("yca")).get("properties"));
+            final var provider = resolve(defs, map(yca.get("provider")));
+            assertTrue(map(map(provider.get("properties")).get("contextWindow"))
+                    .get("description")
+                    .toString()
+                    .contains("falls back to 32000"));
+            final var providers = map(map(provider.get("properties")).get("providers"));
+            final var entry = resolve(defs, map(providers.get("items")));
+            assertTrue(map(map(entry.get("properties")).get("contextWindow"))
+                    .get("description")
+                    .toString()
+                    .contains("falls back to 32000"));
             final var tui = resolve(defs, map(yca.get("tui")));
             final var properties = map(tui.get("properties"));
             assertTrue(properties.containsKey("accent"));

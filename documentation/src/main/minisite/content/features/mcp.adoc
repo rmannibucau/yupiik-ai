@@ -1,22 +1,18 @@
 = MCP support
-:minisite-breadcrumb: Home[index.html] > Features > MCP support
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > MCP support
 :minisite-nav-prev-link: tools.html
 :minisite-nav-prev-label: Built-in tools
 :minisite-nav-next-link: context.html
 :minisite-nav-next-label: Context management
 
-Built-in yca tools are exposed as a local MCP server, so any MCP-compatible
-client can reuse them.
+Use MCP to connect external tools to yca or reuse yca's built-in tools from an MCP-compatible client.
 
-Remote MCP servers (over stdio and streamable HTTP) are merged into the same
-tool registry, so the agent can call local and remote tools uniformly while the
-TUI sidebar shows each server's health status.
+== Connect and inspect servers
 
-Just like MCP servers, all yca built-in tools are exposed through the `yca`
-server in the same registry.
+Remote servers can use stdio or streamable HTTP.
+Their tools share one registry with the built-in `yca` server, so the agent calls local and remote tools through the same interface.
+The TUI sidebar shows xref:health.adoc[server health].
 
-[NOTE]
-Sometimes a server collapses in a half-open state (its subprocess died, a
-streamable HTTP connection went stale): use `/mcp status` to check each server
-and `/mcp reset [server]` to reconnect a single server or all of them without
-restarting the session. Both commands are available in the CLI and the TUI.
+If a subprocess dies or an HTTP connection becomes stale, use `/mcp status` to inspect the servers.
+Use `/mcp reset [server]` to reconnect one server, or omit the name to reconnect all servers without restarting the session.
+Both commands are available in the CLI and TUI.

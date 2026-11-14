@@ -1,9 +1,13 @@
 = OpenCode free inference
-:minisite-breadcrumb: Home[index.html] > Features > OpenCode free inference
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > OpenCode free inference
 
 WARNING: OpenCode restricts free-model availability and can reject third-party requests even when the same model works in OpenCode.
 This compatibility implementation is not endorsed by OpenCode and does not guarantee inference access.
 Use a supported paid endpoint when reliable third-party access is required.
+
+Use this provider flavor only if you accept its experimental transport and access limits.
+It uses a dedicated custom TLS implementation, not the ordinary YCA HTTP transport.
+The configuration below selects the flavor; the later sections describe compatibility, ownership and security constraints.
 
 == Configuration
 
@@ -96,6 +100,10 @@ Record and handshake sizes and record counts are bounded.
 Closing the transport immediately closes its socket to interrupt I/O rather than waiting to send a TLS close alert.
 
 == Verification and current access limitation
+
+The checks described here are historical implementation evidence, not a claim that access was revalidated for this documentation edit.
+Local tests validate protocol behavior without spending inference quota.
+Live success remains model-, account- and endpoint-dependent.
 
 Normal tests use local TLS servers and mock SSE responses, without inference quota consumption.
 They cover progressive delivery and demand, cancellation, deadlines, HTTP framing, decompression, tool-call/result serialization, and trust/hostname rejection.

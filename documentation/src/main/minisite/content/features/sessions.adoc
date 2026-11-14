@@ -1,204 +1,157 @@
 = Sessions and memory
-:minisite-breadcrumb: Home[index.html] > Features > Sessions and memory
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Sessions and memory
 :minisite-nav-prev-link: memory.html
 :minisite-nav-prev-label: Memory
 :minisite-nav-next-link: output.html
 :minisite-nav-next-label: Output optimization
 
-Sessions are recorded as JSONL transcripts that can be resumed later. Each
-session keeps a todo list and advances it as the work progresses.
+Resume a session to continue its conversation, todo list and editable plan.
+yca records sessions as JSONL transcripts.
+Durable cross-session facts are managed separately by xref:memory.adoc[Memory].
 
 [mermaid]
 ....
 graph LR
-    P["user prompt"] --> L["agent turn loop"]
-    L --> T["tool calls"]
+    P["User prompt"] --> L["Agent turn loop"]
+    L --> T["Tool calls"]
     T -->|result| L
-    L -->|non-blank reply| H["end-of-turn hook"]
-    H --> M["memory extraction (async, idle)"]
-    L --> X["turn completes"]
+    L -->|nonblank reply| H["End-of-turn hook"]
+    H --> M["Memory extraction when due, async"]
+    L --> X["Turn completes"]
     X --> P
-    L -.context full.-> C["prune / compact"]
+    L -.capacity guard.-> C["Core compaction"]
     C --> L
 ....
 
-Every shell can be launched directly on an existing session: `run --session
-<id>`, `cli --session <id>` and `tui --session <id>` (or `--context <file>` to
-name the session from a JSONL file). Inside the TUI, `/resume <id>` switches
-tab to another session and `go` resumes the last turn.
+== Resume a session
 
-Each session owns one folder under the storage root:
-`~/.yupiik/coding-agent/sessions/<id>/` with `<id>.jsonl` (the transcript,
-gzipped to `<id>.jsonl.gz` when aged), `todos.json`, `plan.md` (the editable
-plan of the `/editplan` flow) and `snapshot.snap` (the retained context
-summaries), so removing a session deletes a single directory. The legacy flat
-layout (`sessions/<id>.jsonl`, root `todos-<key>.json`,
-`plans/<title>-<id>.plan.md`, `snapshots/<id>.snap`) remains readable as a
-read-only fallback; nothing is migrated or moved.
+Start any shell on an existing session with `run --session <id>`, `cli --session <id>`, or `tui --session <id>`.
+Alternatively, use `--context <file>` to name the session from a JSONL file.
+In the TUI, `/resume <id>` switches to another session and `go` resumes its last turn.
+
+Each session has a directory under `~/.yupiik/coding-agent/sessions/<id>/`:
+
+[options="header"]
+|===
+|File |Contents
+|`<id>.jsonl` |Transcript; aged transcripts become `<id>.jsonl.gz` and remain resumable.
+|`todos.json` |Todo list.
+|`plan.md` |Editable plan used by `/editplan`.
+|`snapshot.snap` |Retained context summaries.
+|===
+
+Removing a session removes this directory.
+The old flat paths remain readable as a read-only fallback: `sessions/<id>.jsonl`, root `todos-<key>.json`, `plans/<title>-<id>.plan.md`, and `snapshots/<id>.snap`.
+They are not migrated or moved.
 
 == Session housekeeping
 
-At every startup (and periodically while a shell runs) yca sweeps the session
-storage:
+At startup and periodically while a shell runs, yca sweeps session storage:
 
-- *Expired sessions* are deleted once their last write is older than
-  `yca.sessions.retentionDays` (0 deletes unconditionally, negative disables
-  retention). Retention is about *abandoned* sessions: the session resolved for
-  the current process, and every session written in the last 24 hours, is never
-  deleted on age, so a long-lived background session is not dropped while it is
-  still being appended to.
-- *Empty sessions* (a transcript holding nothing more than the initial user
-  prompt, or nothing at all) are deleted on the same sweep - an empty session is
-  always disposable, whatever its age.
-- *Aged sessions* are gzipped once their last write is older than
-  `yca.sessions.compressDays` (their `.jsonl.gz` stays readable and resumable).
+* *Expired sessions* are removed after `yca.sessions.retentionDays` since their last write.
+`0` requests unconditional age deletion; a negative value disables retention.
+The current process's resolved session and sessions written within the last 24 hours are protected from age deletion.
+* *Empty sessions* are removed regardless of age.
+A transcript containing only the initial user prompt is considered empty.
+* *Aged transcripts* are gzipped after `yca.sessions.compressDays` since their last write.
+The compressed transcript remains readable and resumable.
 
-Sessions are append-only: a `replace` (compaction/prune flush) first writes a
-`.bak` sibling and refuses to overwrite a session that holds content with an
-empty history, so a transient storage read error can never wipe a good
-transcript. Entry timestamps are preserved across a `replace`.
+Normal session writes append entries.
+A `replace` operation, such as a compaction/prune flush, first writes a `.bak` sibling and preserves entry timestamps.
+It refuses to overwrite a nonempty session with an empty history, protecting against a transient read error erasing a valid transcript.
 
 == Per-tab provider and model
 
-The provider and the model are *per session*: in the TUI every tab selects its
-own via `/provider` and `/model` without affecting the others, and in the CLI
-the single session owns them. A session without an explicit selection falls
-back to the process default provider (`yca.provider.defaultProvider` or the
-first configured one - see
-link:../configuration.html#_providers[Providers]) and that provider's default
-model, so two tabs start on the same default and diverge as soon as one of them
-picks another provider/model. Switching the provider of a session resets its
-model/variant/sampling selection (those are provider-scoped); `/model default`
-restores the provider default. The variant of the active model is selected per
-session with `/variant`, which is contextual to the current model: `/variant`
-lists the current model's variants (plus the implicit `default`) to pick from,
-and `/variant <name>` (or `/variant default`) switches the variant directly
-without touching the model - `/variant default` restores the provider-configured
-default variant when the model declares one, else the implicit default. Every
-LLM call a session triggers - turns,
-sub-agents, compaction, memory extraction, plan seeding, indexing it asks for -
-uses that session's provider/model, resolved lazily at call time. The only
-process-default path left is genuinely session-less startup work (the
-deterministic maven dependency scan and the model completion prefetch before
-the first tab exists).
+In the TUI, `/provider` and `/model` affect only the current session tab.
+The CLI's single session owns its selection in the same way.
+Without an explicit selection, the session uses `yca.provider.defaultProvider` or the first configured provider and its default model.
+See xref:../configuration.adoc#_providers[Providers].
+
+Switching providers resets the session's model, variant and sampling selection because those settings are provider-scoped.
+`/model default` restores the provider's default model.
+
+Use `/variant` to list variants for the current model, including the implicit `default`.
+`/variant <name>` changes the variant without changing models.
+`/variant default` restores the configured default variant when one exists, otherwise the implicit default.
+
+Session-triggered calls resolve routing lazily from that session: foreground turns, subagents, compaction, memory extraction, plan seeding and requested indexing.
+Dedicated background-model overrides and explicit subagent routes can select another model.
+See xref:agents.adoc[Custom agents], xref:compaction.adoc[Compaction and compression], and xref:memory.adoc[Memory] for their precedence rules.
+Only session-less startup work uses the process default, including deterministic Maven dependency scanning and model-completion prefetch before the first tab exists.
 
 == Per-tab mode badge and hover tooltip
 
-Because the mode can differ per session (a tab can run in `build` while another
-stays in `plan`), the tab bar shows a per-tab mode badge: a small `▪` for
-`plan` and `◆` for `build`, tinted with that session's mode color (the warning
-tone for plan, the accent tone for build) - including for background tabs, so
-the mode of every open session is visible at a glance without switching to it.
-The same badge and mode label appear in the `/tabs` overlay next to the full
-session title.
+Each tab shows its own mode badge, including background tabs: `▪` for `plan` in the warning color and `◆` for `build` in the accent color.
+The `/tabs` overlay shows the same badge, mode and full title.
 
-When the mouse hovers a tab, the full session title is displayed as a small
-floating tooltip under the tab strip, so titles truncated by the bar remain
-reachable; it disappears as soon as the pointer leaves the bar (or on click /
-scroll). This relies on mouse-motion tracking (`?1003h`), which most modern
-terminals support; terminals without it simply never show the tooltip.
+Hover over a tab to show its full title below the tab strip.
+The tooltip disappears when the pointer leaves, or on click or scroll.
+It requires mouse-motion tracking (`?1003h`); terminals without that support do not show it.
 
 == Turn-end notifications
 
-By default yca is silent when a turn completes, but it can send an OS
-notification once a top-level turn ends so you are alerted when the agent has
-stopped working (e.g. you switched away while a long task ran). Enable it with
-`yca.notifications.enabled` (`false` by default):
+Set `yca.notifications.enabled=true` to receive an OS notification when a top-level turn stops.
+The default is `false`.
 
-[source,sh]
-....
+[source,properties]
+----
 yca.notifications.enabled=true
-....
+----
 
-When enabled, a best-effort, asynchronous notification is fired at the end of
-each top-level turn (sub-agents are covered by the parent turn and do not each
-notify). It carries the session title, the provider and model used, whether the
-turn ended on a real reply (success) or not (failure), and a shortened excerpt
-of the last assistant reply. Notifications never fail or slow the turn: any
-delivery error is swallowed and the delivery runs off the turn thread.
+Notifications run asynchronously and are best-effort: delivery errors neither fail nor delay the turn.
+Subagents are covered by the parent notification rather than notifying separately.
+The notification includes the session title, provider/model, success or failure, and a shortened excerpt of the last assistant reply.
+Success means the turn ended with a real reply, not that the work was independently verified.
 
-The built-in integration uses the desktop notification tool per OS
-(`notify-send` on Linux, `osascript display notification` on macOS,
-`powershell.exe` on Windows). To use your own program instead, set
-`yca.notifications.command` to the command and its arguments; the payload is
-then passed exclusively through environment variables:
+The default integration uses `notify-send` on Linux, `osascript display notification` on macOS, or `powershell.exe` on Windows.
+To use another program, configure its command and arguments:
 
-[source,sh]
-....
+[source,properties]
+----
 yca.notifications.command=my-notifier,--flag
-....
+----
 
-The custom command receives `YCA_NOTIFICATION_SESSION`,
-`YCA_NOTIFICATION_TITLE`, `YCA_NOTIFICATION_MODEL`,
-`YCA_NOTIFICATION_PROVIDER`, `YCA_NOTIFICATION_SUCCESS` (`true`/`false`) and
-`YCA_NOTIFICATION_BODY`. Both the built-in sink and a custom command always
-receive these variables.
+The payload is passed only through environment variables, for both built-in and custom commands:
 
-A memory store is maintained automatically at both the global and per-project
-levels, letting yca remember recurring facts across sessions.
+* `YCA_NOTIFICATION_SESSION`
+* `YCA_NOTIFICATION_TITLE`
+* `YCA_NOTIFICATION_MODEL`
+* `YCA_NOTIFICATION_PROVIDER`
+* `YCA_NOTIFICATION_SUCCESS` (`true` or `false`)
+* `YCA_NOTIFICATION_BODY`
 
-Memory hygiene is built in:
+== Memory across sessions
 
-- *Fuzzy deduplication*: a reformulated fact (token overlap above a threshold)
-  replaces the previous bullet instead of stacking, so reworded decisions never
-  grow the file.
-- *Relative injection budget*: the memory section is capped at
-  `yca.memory.maxRatio` (default `0.2`) of the resolved system prompt budget
-  (provider/model aware, `min(maxChars, cap * ratio)`); when the resolved
-  budget falls below 1000 characters the section is auto-disabled and
-  extraction is skipped, so a small context window never wastes tokens on
-  low-value memory.
-- *Periodic compaction*: when the project file grows past 64 KB (and at most
-  once per session), the compact model rewrites it - merging near-duplicates,
-  dropping superseded one-off observations - keeping a `MEMORY.md.bak` backup
-  and discarding rewrites that reduce the file by less than 20%.
-  `/memory compact` runs it manually, `/memory` shows sizes, bullet counts and
-  the last compaction.
-- *Structured extraction*: durable facts are extracted through a strict JSON
-  Schema (JSON mode); on the Anthropic wire the schema is normalized to the
-  subset the API accepts (unsupported constraints move into the field
-  `description`, every object gains `additionalProperties: false`) and an
-  existing `output_config` (e.g. an effort level) is preserved. When a
-  provider rejects the schema (e.g. `json was malformed`) the rejection is
-  remembered per provider/model/schema and yca degrades to a plain
-  compression snippet so memory is still saved. Failures surface a warning
-  naming the failing phase (`memory extraction (structured facts)`,
-  `memory extraction (fallback snippet)` or `memory compaction`) followed by
-  the technical detail and, for compaction, the `/memory compact` retry hint.
-- *Bounded extraction cost*: the end-of-turn extraction runs asynchronously
-  the moment a turn ends - while the app sits idle waiting for the next user
-  input - and only when at least `yca.memory.extractMinChars` (default 1000)
-  characters of *new* (not yet extracted) user/assistant text accumulated -
-  chit-chat does not cost a call. It fires only when the turn ended on a real
-  (non-blank) model reply: empty completions, hard stops and failures leave
-  nothing durable to mine. The model input contains only the durable signal:
-  user and assistant text messages (oldest first, newest 20), excluding tool
-  calls and tool results, the system prompt, compaction/prune digests and the
-  volatile `<session-state>` tail, capped at ~12 KB (assistant messages are
-  dropped oldest-first before any user message when the cap binds). A
-  per-session watermark records how far extraction got, so the hook never
-  re-processes what was already extracted.
-- *No extraction at session close*: because the end-of-turn hook already
-  covered the delta while the app was idle (the user is still reading the
-  answer), closing a tab, ending a headless run or quitting the TUI never
-  blocks on the memory call - the close paths are unconditional and the
-  watermark makes a close-time forced pass a no-op, so a short session keeps
-  its facts and `exit` stays instant. There is no shutdown hook and no
-  startup recovery: an abrupt JVM exit (SIGTERM, Ctrl-C, SIGKILL) loses at
-  most the delta accumulated since the last end-of-turn hook (a few seconds
-  of conversation when the user quits right after an answer), and memory
-  deduplication makes re-extraction on resume harmless. Sub-agents never run
-  extraction: durable facts discovered there surface through the parent
-  conversation, and explicit `memory_write` calls from a sub-agent already
-  persist directly.
-- *Self-describing provider failures*: a response that cannot be decoded is
-  reported with its dialect, endpoint, HTTP status, content-type and a body
-  excerpt (never a bare parser message), and an error envelope received with
-  a 2xx status is raised instead of being read as an empty completion. Some
-  Anthropic-compatible gateways (e.g. Azure AI Foundry) answer a
-  non-streaming request with an SSE body despite `"stream": false`: yca
-  detects that content-type and reconstructs the completion from the frames,
-  so background calls (memory extraction, compaction, todo seeding) keep
-  working on such gateways. The reconstructed usage carries the same
-  `output_tokens_details.thinking_tokens` reasoning breakdown the streaming
-  path does.
+See xref:memory.adoc[Memory] for storage paths, extraction cadence, ranking, budgets, deduplication and frozen prompt snapshots.
+`/memory` shows sizes, bullet counts and the last compaction; `/memory compact` requests project-memory compaction.
+The details below explain how extraction interacts with session lifecycle and provider compatibility.
+
+=== Extraction input and lifecycle
+
+End-of-turn extraction runs asynchronously while the application is idle, subject to the selected memory cadence and minimum new-text budget.
+A real, nonblank assistant reply is required; empty completions, hard stops and failures do not provide an extraction checkpoint.
+
+The extractor uses user and assistant text, oldest first, from the newest 20 eligible messages.
+It excludes tool calls/results, the system prompt, compaction/prune digests and volatile `<session-state>` data.
+Input is capped at about 12 KB; assistant text is dropped oldest-first before user text when the cap binds.
+A per-session watermark avoids processing the same material twice.
+
+Close paths do not wait for a remote memory call, and there is no shutdown hook or startup recovery for an unfinished extraction.
+An abrupt JVM exit can lose the delta not yet saved by extraction.
+On resume, deduplication makes re-extraction of already saved facts harmless.
+Subagents do not run automatic extraction; their durable findings reach the parent conversation, while explicit `memory_write` calls persist directly.
+
+=== Structured extraction and provider failures
+
+Structured extraction requests a strict JSON schema.
+On the Anthropic wire, unsupported constraints move into field descriptions, each object gets `additionalProperties: false`, and existing `output_config` settings are preserved.
+If a provider rejects the schema, that rejection is remembered per provider/model/schema and extraction falls back to a plain compression snippet.
+Warnings identify `memory extraction (structured facts)`, `memory extraction (fallback snippet)`, or `memory compaction`, followed by technical detail.
+Compaction warnings include the `/memory compact` retry hint.
+
+Undecodable provider responses report the dialect, endpoint, HTTP status, content type and a body excerpt rather than a bare parser error.
+A 2xx error envelope is raised as an error, not accepted as an empty completion.
+If an Anthropic-compatible gateway returns SSE despite `"stream": false`, yca reconstructs the buffered completion from frames.
+This also supports background compaction and todo seeding, including the `output_tokens_details.thinking_tokens` usage breakdown.
+
+include::content/_partials/mermaid.js.adoc[]

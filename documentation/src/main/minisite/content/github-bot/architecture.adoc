@@ -1,12 +1,19 @@
 = GitHub bot architecture
+:minisite-breadcrumb: Home[../index.html] > GitHub bot > Architecture
+:minisite-nav-prev-link: installation.html
+:minisite-nav-prev-label: Bare-metal Docker and Nono walkthrough
+:minisite-nav-next-link: security.html
+:minisite-nav-next-label: Security and recovery
 
 The bot is a finite CLI dispatcher: an external scheduler invokes polling and worker commands.
 Polling never calls a model, and execution never holds the durable queue lock while doing network or executor work.
 
+For the centralized validation overview and which workflows were actually validated, see xref:index.adoc[validation history and version 0 limits].
+
 == Components and trust boundaries
 
 [mermaid]
-----
+....
 flowchart TB
     Scheduler[External scheduler or operator] --> Commands[command: poll / worker / queue operations]
     Config[configuration: shared GitHub and executor settings] --> Commands
@@ -25,18 +32,20 @@ flowchart TB
     Publish --> Client
     Client <--> GitHub[GitHub API]
     Worker --> Audit[Identifier-only local audit]
-----
+....
 
 The host owns credentials, authorization, task correlation, publication destinations and durable write intents.
 Repository text, issue and Discussion content, patches, tool output and agent results are untrusted data.
+
 In strict mode, the agent has no GitHub credentials; the host stages bounded context and publishes independently validated results.
 The optional credentialed-agent workflow has a different trust boundary and must be configured explicitly.
+
 See xref:security.adoc[security and recovery] and xref:egress.adoc[egress limitations] before deploying.
 
 == Polling sequence
 
 [mermaid]
-----
+....
 sequenceDiagram
     participant CLI as Poll command
     participant Poll as Poller
@@ -57,9 +66,9 @@ sequenceDiagram
         Note over Optional,API: Disabled repository Discussions are logged and skipped
     end
     Optional->>Store: Commit receipts, tasks and independent cursors
-    Note over API: Shared pacing and rate-limit cooldown; mutations are never replayed
+    Note over API: Shared pacing and rate-limit cooldown - mutations are never replayed
     Poll-->>CLI: Number of newly enqueued tasks
-----
+....
 
 Receipts survive task deletion, so overlap scans do not recreate old invocations.
 Each feed maintains its own cursor, and incomplete scans do not advance completed watermarks.
@@ -68,7 +77,7 @@ Authentication and transport failures still fail the scan; only an explicit repo
 == Execution and publication sequence
 
 [mermaid]
-----
+....
 sequenceDiagram
     participant CLI as Worker command
     participant Worker as Worker
@@ -97,7 +106,7 @@ sequenceDiagram
     Publisher-->>Worker: Verified publication URL
     Worker->>Store: Mark done or failed
     Worker->>Context: Remove retained attempt data
-----
+....
 
 Native reviews are the final response, not followed by a second announcement comment.
 Strict solve publication validates proposed file changes against a pinned base and creates Git objects and the task branch on the host.
@@ -105,7 +114,7 @@ Strict solve publication validates proposed file changes against a pinned base a
 == Crash recovery
 
 [mermaid]
-----
+....
 sequenceDiagram
     participant Worker as Restarted worker
     participant Store as Durable task state
@@ -125,13 +134,13 @@ sequenceDiagram
             Publisher-->>Worker: Existing publication URL
             Worker->>Store: Complete without re-executing agent
         else Uncertain write without verified match
-            Publisher-->>Worker: Fail closed; preserve evidence for operator
+            Publisher-->>Worker: Fail closed - preserve evidence for operator
         end
     else Terminal task retained an attempt
         Worker->>Executor: Clean stopped private runtime state where required
         Worker->>Store: Clear attempt reference after filesystem cleanup
     end
-----
+....
 
 An intent is not proof that a remote write succeeded, nor permission to repeat it.
 Ambiguous writes retain recovery evidence and require reconciliation rather than another model run.
@@ -150,3 +159,5 @@ Ambiguous writes retain recovery evidence and require reconciliation rather than
 |`model` |Generated-codec task, result and configuration-file contracts.
 |`store` |Typed transaction mutations, queue persistence, cursors and receipts.
 |===
+
+include::content/_partials/mermaid.js.adoc[]

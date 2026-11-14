@@ -1,35 +1,26 @@
 = Iteration guards: exploration plateaus and window caps
-:minisite-breadcrumb: Home[index.html] > Features > Iteration guards
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Iteration guards
 :minisite-nav-prev-link: todo-guidance.html
 :minisite-nav-prev-label: Todo and plan guidance
 :minisite-nav-next-link: prompt.html
 :minisite-nav-next-label: Prompt templates
 
-The agent loop bounds how long a single turn can run and stops models that spin
-without making progress. Three guards cooperate, split by what they cover:
+Use iteration guards to bound a turn and stop repeated work without new information.
+Three guards cover different cases:
 
-* the *doom-loop* guard refuses repeated identical *state-changing/bash* calls
-  that keep returning the same already-known result;
-* the *exploration-plateau* guard stops *read-only* rounds that keep re-covering
-  files/results the turn already read, even when every call signature is
-  different (added for flash-class models such as `deepseek-v4-flash`, whose
-  native style is one small novel tool call per round);
-* the *no-progress* guard (plus the turn-level output tombstone) is the backstop
-  for any round, read or not, that repeats known output without new information.
+* *Doom-loop*: refuses repeated identical state-changing/bash calls that keep returning the same result.
+* *Exploration plateau*: stops read-only rounds that revisit already delivered files or results, even with different arguments.
+* *No progress*: uses known-output tracking as a backstop for any round that returns no new information.
 
-Each guard is configured with a three-level cascade: per-model
-(`yca.provider.<id>.models[i].behavior.*`) wins over per-provider
-(`yca.provider.<id>.tuning.*`) wins over the global default (`yca.llm.*` for the
-plateau, `yca.tools.*` for the doom-loop).
+Each guard resolves configuration from per-model `behavior`, then per-provider `tuning`, then global defaults.
+Global plateau keys use `yca.llm.*`; doom-loop keys use `yca.tools.*`.
+The examples below show scoped overrides.
 
 == Exploration plateau
 
-A read-only tool round re-covering only *already-seen* files/results is not
-progress: the model explores the same targets with slightly different queries
-(different `offset`, `limit`, grep pattern or bash fingerprint) instead of
-learning something new. After `plateauRounds` consecutive such rounds the turn
-stops with an *Exploration plateau* error, instead of burning the whole
-iteration window on redundant reads.
+A read-only round is not progress when it only revisits delivered files or results.
+Different offsets, limits or call signatures do not make already delivered content new.
+After `plateauRounds` consecutive plateau rounds, the turn stops with an *Exploration plateau* error rather than spending the whole window on redundant reads.
 
 What counts as "already seen" is per turn and keyed by:
 
@@ -57,16 +48,12 @@ The nudge-only mode is explicit-only - set it per model/provider, never as the i
 
 == Feedback before the stop
 
-With the built-in default (`plateauFeedback=nudge_2`) the model gets **one
-chance to adapt** before the hard stop: when the plateau streak reaches
-`limit-2` a strategy-change user message is injected ("Stop re-reading: use the
-information you already collected, batch any remaining independent reads or
-searches into a single reply..."). If the model then reads new files or writes,
-the streak resets and the turn continues; if it keeps re-reading, the turn is
-stopped at the limit exactly as without the nudge. `nudge_1` sends the same
-nudge later (at `limit-1`, for models that profit from a last-minute hint);
-`none` disables the feedback entirely and the turn is hard-stopped at the limit
-with no model feedback (the pre-existing behavior).
+The default `plateauFeedback=nudge_2` gives the model one chance to adapt before a hard stop.
+At `limit-2`, a user-role instruction asks it to stop rereading, use collected information and batch remaining independent reads.
+New coverage or a write resets the streak; continued rereading stops at the limit.
+
+* `nudge_1` sends the same feedback later, at `limit-1`.
+* `none` disables feedback but keeps the hard stop.
 
 In nudge-only mode (a negative `plateauRounds`) the feedback fires when the streak reaches the absolute value of the limit, at most once per turn, but no hard stop ever follows.
 `plateauFeedback=none` suppresses this nudge too, so nudge-only mode with feedback disabled neither nudges nor hard-stops.
@@ -100,15 +87,10 @@ yca.provider.<id>.models.0.behavior.plateauRounds=-1
 
 == Doom-loop guard
 
-The *doom-loop* guard refuses repeated identical *state-changing/bash* tool calls
-that keep returning the exact same already-known result, so a model spinning on
-one command cannot burn the whole turn on duplicate information. Read-only
-tools are deliberately *not* covered: they are owned by the exploration-plateau
-guard (semantic re-coverage), so a read is never signature-refused here - only a
-repeated state-changing call can trip the doom-loop breaker.
+The doom-loop guard refuses repeated identical state-changing/bash calls that keep returning known output.
+Read-only tools belong to the exploration-plateau guard, not this signature-based breaker.
 
-An execution counts toward the guard only when the same tool + the same
-normalized arguments **succeeded *and* produced identical output**.
+An execution counts only when the same tool and normalized arguments succeeded and produced identical output.
 
 Key semantics:
 
@@ -175,28 +157,20 @@ yca.provider.<id>.models.0.behavior.maxIterations=500
 yca.provider.<id>.models.0.behavior.maxIterations=-1
 ----
 
-A negative value makes the window **unbounded**: the turn runs until it
-genuinely ends (the model finishes, a plateau/no-progress guard stops it, the
-context overflows, or the turn is cancelled), bounded only by those other
-guards - there is no iteration budget. This pairs naturally with the round gate
-(`behavior.turnContinuesOnTextEnd=true`) for capable models: a text-only end
-keeps re-asking until the work is done, and the unbounded window means the turn
-is never cut off mid-run by an iteration cap. Use it with capable models you
-trust to finish; small/flash models that can spin should keep a positive cap.
+A negative value removes the iteration-window budget.
+The model can still finish, other guards can stop it, capacity can overflow, and the user can cancel it.
+With `behavior.turnContinuesOnTextEnd=true`, unfinished todos can keep text-only responses from ending the turn.
+Use an unbounded window only when you accept that risk; keep a positive cap for models prone to spinning.
 
-Sub-agents inherit the same provider/model resolution, so a per-model cap applies
-to them too - a positive sub-agent window cap always bounds a sub-agent's window
-even when its model sets `maxIterations < 0`.
+Subagents inherit provider/model resolution.
+A positive subagent window cap still bounds a child even when its model sets `maxIterations < 0`.
 
 == Persisted stop notices
 
-When the loop stops on an exhausted window (or on an exploration plateau), a
-display-only notice is appended to the session with role `system` - for example
-`Maximum iterations reached (250): turn stopped; resume starts a fresh window.`
-These entries are *never* sent to the LLM (they are filtered out of the working
-history) but are rendered in the transcript on replay, so a capped turn no
-longer looks like one seamless run. Resuming after such a notice emits an
-informational "resuming after an iteration-cap stop" notice.
+An exhausted window or exploration plateau appends a display-only system-role stop notice to the session.
+For example: `Maximum iterations reached (250): turn stopped; resume starts a fresh window.`
+These entries appear on replay but are filtered from model input.
+Resuming after a cap also emits an informational notice, making the boundary visible instead of presenting one seamless run.
 
 == Model tuning by family
 
@@ -232,9 +206,8 @@ model**: without it, a text-only end with unfinished todos surfaces the
 "capable" models and no global default change - you opt each model/provider in.
 ====
 
-The samples below are JSON (the provider/model `behavior` block maps to
-`yca.provider.<id>.providers[i].models[j].behavior` in the flat configuration
-scheme).
+The samples below are JSON fragments containing provider/model `behavior` blocks.
+In indexed flat configuration, those blocks live under `yca.provider.providers[i].models[j].behavior`.
 
 *Small model - todo auto-continue, no round gate, plateau hard-stop:*
 

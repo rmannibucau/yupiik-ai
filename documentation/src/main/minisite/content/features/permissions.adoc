@@ -1,43 +1,41 @@
 = Permission modes
-:minisite-breadcrumb: Home[index.html] > Features > Permission modes
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Permission modes
 :minisite-nav-prev-link: modes.html
 :minisite-nav-prev-label: Plan and build modes
 :minisite-nav-next-link: sandboxes.html
 :minisite-nav-next-label: External sandboxing (nono, AgentFS, isx)
 
-yca gates tool calls behind configurable permission modes:
+Choose how yca asks for approval before executing tools:
 
-* `ask` prompts before each call that touches the system;
-* `auto_edit` allows file edits without prompting;
-* `yolo` (also spelled `all`) bypasses permission checks and allows all calls.
+* `ask` prompts for actions that need approval.
+* `auto_edit` allows file edits without prompting; other mutable actions still reach the gate unless a rule allows them.
+* `yolo` (alias `all`) bypasses approval prompts, but not deny rules.
 
-Allow/deny glob lists refine what the agent may touch in any mode: entries are
-tool names (`bash`) or command patterns (`rm *`, `bash:rm -rf *`) matched
-against every segment of a compound command, and a command is only allowed when
-all its segments pass. Deny entries win over everything else.
-Plan mode additionally hides the file-mutating tools (`edit_file`, `write_file`,
-`apply_patch`) from the tool list the model sees, so plan turns cannot build.
+Allow/deny glob lists apply in every mode.
+Entries can be tool names (`bash`) or command patterns (`rm *`, `bash:rm -rf *`).
+Each segment of a compound command must pass, and deny rules take precedence.
 
-Every tool call is resolved through the same gate - mode first, then the
-allow/deny lists and the read-only bash rules, with deny winning everywhere
-(`yolo` included):
+Plan mode also hides file-mutating tools (`edit_file`, `write_file`, `apply_patch`) from the model.
+See xref:modes.adoc[Plan and build modes] for this separate axis.
+
+IMPORTANT: Approval is not isolation.
+An approved command runs with the process's privileges; use xref:sandboxes.adoc[external sandboxing] to confine it.
+
+The diagram summarizes the approval path after a tool is available in the active mode:
 
 [mermaid]
 ....
 graph TD
-    C[Tool call] --> M{Mode}
-    M -->|read-only tool| O[allowed silently]
-    M -->|yolo| D{Deny list / bash deny?}
-    D -->|yes| DENY[blocked]
-    D -->|no| O[allowed silently]
-    M -->|auto_edit| E{"file edit\nbash command?"}
-    E -->|file edit| A{Allow list?}
-    E -->|bash| R{"Bash read-only rules?\nall segments match"}
-    M -->|ask| G[prompt user]
-    A -->|yes| O
-    A -->|no| G
+    C[Tool call] --> D{Denied by policy?}
+    D -->|yes| DENY[Blocked]
+    D -->|no| A{Allow list or session grant?}
+    A -->|yes| O[Allowed silently]
+    A -->|no| R{Read-only tool or matching bash rules?}
     R -->|yes| O
-    R -->|no| D
+    R -->|no| M{Permission mode}
+    M -->|yolo| O
+    M -->|auto_edit file edit| O
+    M -->|ask or other auto_edit action| G[Approval gate]
     G -->|allow| O
     G -->|deny| DENY
 ....
@@ -60,7 +58,7 @@ graph TD
 |Edit (prompted in `ask`) |`write_file`, `edit_file`, `apply_patch`, `maven_repository_knowledge`
 |Bash (prompted in `ask` and `auto_edit`) |`bash`, e.g. running `mvn install`, `rm -rf target` or `docker run -p 80:80 nginx`
 |Read-only (never prompted) |`read_file`, `grep`, `glob`, `list_dir`, `read_symbol`, the `code_*` tools, `skill`, `webfetch`, `websearch`, `maven_knowledge_content`
-|Agent (never prompted) |`write_todo`, `ask_user`, `manage_context`, `memory_write`, `spawn_subagent`, `check_subagents`
+|Agent (never prompted) |`write_todo`, `ask_user`, `compress`, `memory_write`, `spawn_subagent`, `check_subagents`
 |Read-only bash rules (never prompted) |`git status`, `git diff`, `ls`, `grep`, `sed -n`, ... (see <<_bash_command_rules,Bash command rules>>)
 |MCP (read-only calls never prompted, others follow the mode) |`<server>_<tool>`
 |===
@@ -188,3 +186,5 @@ TIP: the same rule can be set with flat properties, e.g.
 environment variable.
 
 See xref:../configuration.adoc[Configuration] for the permission options.
+
+include::content/_partials/mermaid.js.adoc[]

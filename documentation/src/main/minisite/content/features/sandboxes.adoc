@@ -1,44 +1,32 @@
 = External sandboxing (nono, AgentFS, isx)
-:minisite-breadcrumb: Home[index.html] > Features > External sandboxing (nono, AgentFS, isx)
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > External sandboxing (nono, AgentFS, isx)
 :minisite-nav-prev-link: permissions.html
 :minisite-nav-prev-label: Permission modes
 :minisite-nav-next-link: ui.html
 :minisite-nav-next-label: Interactive UI and headless mode
 :minisite-keywords: sandbox, nono, agentfs, isx, isolation, landlock, seatbelt, copy-on-write, incus, kvm
 
-IMPORTANT: In every command below, `yca` is a shorthand for whichever entry point
-you run: the Java fatjar (`java -jar yca-bin-...-fatjar.jar ...`) or the optional
-native binary. Replace it with your actual command — for example
-`java -jar yca-bin-1.0.0-fatjar.jar tui` — or, if `yca` is already on your `PATH`
-(native binary), run it as shown. The sandbox wrappers (`nono`/`agentfs`) and isx
-do not care how yca is launched; they wrap or contain the process either way.
+Use an external sandbox when approved tools must still be confined.
+yca's xref:permissions.adoc[permission modes] control consent, not OS isolation.
+An approved `bash` command normally runs with your user privileges, filesystem access and network access.
 
-yca's own xref:permissions.adoc[permission modes] are a *consent* gate: they decide
-whether the model is allowed to ask for a tool call. They are not an isolation
-boundary — approve a `bash` command in `yolo` and that process runs with your real
-user privileges against your real filesystem, `~/.ssh`, and the real network.
+IMPORTANT: `yca` below means a real executable or explicit Java/fatjar command, not a shell alias or function.
+For example, replace `yca tui` with `java -jar /path/to/yca-bin-1.0.0-fatjar.jar tui` when using the fatjar.
+The experimental approval-companion recipe uses separate protected host and sandbox installations.
 
-When you need kernel-level enforcement — least privilege *even after* an approval —
-wrap the whole yca process in an external sandbox. Three tools cover three
-different models, and each models isolation differently:
+== Choose a sandbox
 
-* *nono* is a security boundary: a CLI that runs any command in an OS-enforced
-  sandbox (Landlock on Linux, Seatbelt on macOS, a ptrace fallback on WSL2),
-  with path-level allow/deny, automatic credential blocking, network control and
-  rollback. It *confines the process* that already runs on your machine.
-* *AgentFS* is a state and audit layer: a SQLite-backed copy-on-write filesystem.
-  `agentfs run` wraps a command so every write lands in a delta database and the
-  host tree is never modified, with `diff` and `timeline` to review before
-  applying. It *snapshots the writes* to your tree.
-* *isx* gives the agent a machine of its own: a full Linux workstation (Incus
-  system container or KVM VM) that your host cannot touch, so it works in `yolo`
-  without your credentials ever entering it. It *removes the host from reach*
-  entirely.
+* *nono* confines a process tree with OS-enforced policy: Landlock on Linux, Seatbelt on macOS, and a ptrace fallback on WSL2.
+It provides path grants, credential protections, network controls and optional rollback.
+* *AgentFS* records filesystem changes in a SQLite-backed copy-on-write layer.
+Use `diff` and `timeline` to review the delta before applying changes.
+It is a state/audit layer, not a replacement for network or credential isolation.
+* *isx* runs the agent in a separate Linux workstation, using an Incus system container or KVM VM.
+Templates, disposable branches and a host-side credential proxy separate the work environment from host files and raw credentials.
+The actual boundary still depends on the selected runtime, mounts and proxy policy.
 
-They complement (not replace) yca's permission modes: keep `ask`/`auto_edit` for
-consent and use one of these for isolation. They also complement each other —
-nono answers "how do I run this safely?", AgentFS answers "what happened and what
-is the state?", isx answers "where can the agent just own everything?".
+Keep `ask` or `auto_edit` when human consent is still required.
+Use sandbox policy to enforce limits even after approval.
 
 == Three isolation models at a glance
 
@@ -46,7 +34,7 @@ is the state?", isx answers "where can the agent just own everything?".
 |===
 | |yca permission modes |nono |AgentFS |isx
 |Layer |application consent |kernel (Landlock/Seatbelt) |filesystem COW (FUSE/NFS) |system container / KVM VM
-|Protects against |model acting without approval |any process touching denied paths/credentials |host filesystem mutation |anything the agent does (host is unreachable)
+|Protects against |unapproved tool actions |access outside effective path/network grants |writes to the overlaid base tree |access outside the configured container/VM and proxy boundary
 |Scope |tool call |whole process tree |write path |whole machine (init, fs, network, processes)
 |Isolation mechanism |allow/deny string matching |irreversible kernel policy at exec |copy-on-write overlay onto a SQLite delta |CoW container/VM on a storage pool + host-side MITM credential proxy
 |Reverses writes |no |opt-in (`--rollback`) |yes (`diff` before materializing) |dispose the branch, re-branch clean
@@ -55,25 +43,23 @@ is the state?", isx answers "where can the agent just own everything?".
 
 Decide which fits your threat model:
 
+[options="header"]
 |===
 |If you need ... |use ...
 |Path-level allow/deny, credential blocking, network control around yca |nono
 |To review every change before it touches your repo, and revert at will |AgentFS
-|Full autonomy with zero credential exposure, on a disposable machine |isx
+|Disposable work environment with host-side credential injection |isx
 |Both isolation *and* reversibility (expert, defense in depth) |nono + AgentFS
 |===
 
-WARNING: Running nono and AgentFS together is genuine defense-in-depth, but it
-stacks two kernel/FUSE enforcement layers and the add-ed friction. Prefer one as
-the primary boundary; combine only when you have a concrete reason. isx is a
-different bet — it *replaces* the boundary with a disposable machine rather than
-layering more rules, so mixing it with nono is usually pointless.
+WARNING: Combining nono and AgentFS adds policy and filesystem complexity.
+Choose one primary boundary and combine them only for a specific isolation and review need.
+An isx container or VM is a different deployment model, not proof that all additional controls are unnecessary.
 
 == Sandboxing yca with nono
 
-nono ships prebuilt profiles for Claude Code, Codex, OpenCode and OpenClaw, but
-has no yca profile in its registry. Sync yca with raw capability flags — or fork
-one of the built-in profiles into a custom one for repeatable runs.
+nono has profiles for other coding agents but no yca registry profile.
+Use explicit capabilities or adapt a reviewed profile for repeatable runs.
 
 Install:
 
@@ -82,10 +68,10 @@ Install:
 curl -fsSL https://nono.sh/install.sh | sh
 ----
 
-Grant yca the working directory for read/write and `/tmp/yca` as its scratch
-space. nono still blocks `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`,
-shell rc files, `~/.npmrc` and `~/.git-credentials` by default, even though the
-parent directory is allowed:
+The examples grant the checkout and scratch directory.
+They demonstrate containment flags, not a complete provider-ready policy: YCA also needs narrowly scoped runtime/configuration access and writable session storage.
+Do not grant HOME or another broad parent to make startup succeed.
+On Linux, a nested deny cannot carve a protected child out of a granted parent.
 
 [source,bash]
 ----
@@ -114,9 +100,8 @@ nono attach <session-id>
 nono stop <session-id>
 ----
 
-NOTE: yca has no client/server split, so there is no `--standalone` equivalent to
-worry about — the whole agent runs in the sandboxed process tree, unlike OpenCode 2
-which needs `--standalone` for full containment.
+NOTE: Launch the whole yca process inside the sandbox so its child processes share the boundary.
+The commands above do not configure the experimental host approval companion below.
 
 === Experimental Linux approval companion
 
@@ -128,6 +113,8 @@ These are nono capability approvals, not YCA's own tool-consent prompts; changin
 ==== Quick start
 
 This is a manual two-terminal workflow for Linux and stock nono 0.81.0, not a launcher.
+Follow this workflow in order before consulting the detailed reference sections below.
+The later native-launch example is an alternative, not a second session to start alongside it.
 Install nono, jq, Zenity (normally `/usr/bin/zenity`) or an action-capable `notify-send`, a Java 25 JDK, and a YCA distribution containing `nono serve` before starting.
 Use a working graphical desktop session for the host companion and a real terminal for attachment.
 The commands below use explicit Java/fatjar argv; a shell alias or function named `yca` cannot be executed after `nono run --`.
@@ -564,10 +551,9 @@ An approval may return an open file descriptor, establish a connection, or execu
 It rotates after approximately 1 MiB into a single `decisions.previous.jsonl` backup and is not a complete or cryptographically authenticated access log; early rejections need not produce audit entries.
 `NotificationSink` is an SPI wired to a no-op in `serve`; there is no full lifecycle notification stream or automatic session-exit/failure supervision.
 
-No wrapper or launcher is delivered here.
-A future wrapper would have to validate effective grants and receiver reachability, protect installed companion code/configuration, start and monitor fresh private companion state, merge/validate profiles without losing stock protections, and preserve trust enforcement.
-It would also need to select the project, launch detached, resolve the exact named session, attach without corrupting the PTY, collect the real exit status, stop the sandbox on companion failure, and clean state only after termination.
-These remain operator responsibilities, not guarantees of this companion.
+The operator remains responsible for effective grants, receiver reachability, protected installation paths, profile merging, trust checks and session lifecycle.
+The companion does not launch or supervise the sandbox, collect its exit status, or stop it on companion failure.
+Use the workflow above to resolve the exact session, preserve the PTY, verify termination and clean up only afterward.
 
 The distribution fatjar and native executable passed the stock-nono PTY fixture on IPv4 and IPv6 loopback, including protected credentials and graceful cleanup.
 Historical validation included stock filesystem allow/deny/timeout and transport-failure probes, a real Zenity Allow exchange, and packaged JVM/native PTY fixtures over IPv4 and IPv6.
@@ -583,9 +569,9 @@ No production-readiness or automatic policy-isolation guarantee is claimed.
 
 == Sandboxing yca with AgentFS
 
-`agentfs run` runs yca inside a copy-on-write sandbox: reads are scoped to the
-working tree, writes land in the delta database, and the real filesystem is never
-modified.
+`agentfs run` puts the working tree behind a copy-on-write filesystem.
+Writes to that tree land in the delta database instead of changing the base tree.
+Review explicit grants separately; this does not make all host files or credentials inaccessible.
 
 Install:
 
@@ -614,11 +600,11 @@ agentfs timeline doc-fixes
 The durable review workflow stays standard git: once yca finishes, ask it to branch,
 commit and push, then review the diff and create the PR manually.
 
-IMPORTANT: AgentFS does not block `~/.ssh`, `~/.aws` and friends by default the way
-nono does. Its isolation is copy-on-write of the *base tree* plus `--allow` grants;
-grant the least you need and rely on yca's own `yca.permissions.deny` for
-credential paths. Use `--no-default-allows` (Linux) to drop the default allowed dirs
-(which include `/tmp` on macOS) when you want a stricter baseline.
+IMPORTANT: AgentFS does not automatically block credential paths such as `~/.ssh` or `~/.aws`.
+Limit the base tree and `--allow` grants; use `--no-default-allows` on Linux for a stricter baseline.
+Default allows include `/tmp` on macOS.
+yca deny rules provide additional tool policy, not OS-level protection against a process reading credentials.
+Use a separate security boundary when credential confidentiality is required.
 
 == AgentFS over MCP (optional)
 
@@ -661,11 +647,9 @@ only when you specifically want to drive the sandboxed files through tools.
 
 == Sandboxing yca with isx
 
-*isx* (https://isx.run/) gives the agent the opposite answer to the two tools
-above: instead of confining a process or snapshotting your tree, it gives yca a
-*laptop of its own* — a full Linux workstation that your real machine can never
-touch, because it is a separate system. On it, yca is not being watched by your
-kernel, your files, or your credentials. It has nothing worth stealing.
+https://isx.run/[isx] gives the agent a separate Linux work environment rather than access to your normal workstation.
+Keep host files unmounted and use the credential proxy instead of copying real keys into the environment.
+An Incus system container shares the host kernel; a KVM VM adds a separate kernel boundary.
 
 === The underlying mechanism
 
@@ -680,7 +664,7 @@ An isx sandbox is a real machine, not an application container:
 * Everything runs on a copy-on-write storage pool (btrfs/zfs/lvm), which powers
   the cheap branching below.
 
-That is what makes it safe enough for the punchline at the end of this section.
+Review the runtime and proxy boundary before allowing unattended work.
 
 === Copy-on-write branches and templates
 
@@ -701,27 +685,21 @@ second — discarding the tainted machine instead of repairing it.
 
 === No credential ever enters the environment
 
-Keys and tokens never land inside the container in any form. A host-side MITM
-proxy is the mechanism: bridge-level DNS overrides plus a custom CA make the
-container transparently route the intercepted domains (your LLM endpoint,
-`github.com`, and so on) through the proxy, which terminates TLS, injects the real
-authentication headers upstream, and forwards it. Inside, `yca`, `git`, `gh` and
-`curl` work unmodified, but they only ever see placeholder values
-(`sk-ant-placeholder`) that cannot authenticate against anything real. The
-injection happens entirely outside the sandbox's trust boundary.
+The intended credential flow uses a host-side MITM proxy.
+Bridge-level DNS overrides and a custom CA route configured domains through it.
+The proxy terminates TLS and injects real authentication headers upstream, outside the sandbox.
+Inside, `yca`, `git`, `gh` and `curl` use placeholder values such as `sk-ant-placeholder`.
+This keeps raw keys out of that configured flow; it does not make authenticated upstream actions harmless or prevent exposure of data deliberately placed in the sandbox.
 
 ```shell
 isx account add claude     # real credential lives on the host, never in the box
 isx branch fix-auth --from tpl-yca
 ```
 
-Because the container holds nothing worth stealing, you get to do the one thing
-this page has repeatedly warned against. Yes — run yca in `yolo`. On a disposable
-machine that holds no credentials, `yolo` has all the weight of a gentle
-suggestion: the agent can do whatever it likes, and the blast radius is a branch
-you will destroy anyway. Every `ask`-mode warning above is for *your* machine,
-where an approved command runs with your privileges. isx is the exception that
-proves the rule — go wild, that machine is the point.
+You can choose `yolo` for disposable branches when that matches your threat model.
+First review mounted data, egress, proxy-authorized actions and any credentials added outside the intended flow.
+Disposability makes local rollback easier; it does not undo remote writes, pushes or data disclosure.
+Keep approvals when those effects still require consent.
 
 === Get the work back as commits, not a mount
 
@@ -760,16 +738,12 @@ rebase/sign on your host instead of expecting signed commits from the sandbox.
 |Auditing |nono audit trail |`agentfs timeline` |git history via `isx://` remote |yca transcript/sessions
 |===
 
-IMPORTANT: strict network blocking (`--block-net`, or an Allow-list that does not
-include your model endpoint) stops yca from reaching the LLM provider. Two options:
-allow-list the exact endpoint, or keep network open and rely on nono's or isx's
-credential injection so keys never enter the sandbox. Plan this before you wrap, or
-the run fails at the first model call.
+IMPORTANT: Blocking all network access also blocks ordinary cloud-model requests.
+Allow only the required endpoints or configure a reviewed credential-injecting proxy.
+Network access alone does not provide credential injection; passing a key directly to YCA exposes it inside the sandbox.
 
-TIP: Keep yca's permission mode at `ask` (at most `auto_edit`) under nono or
-AgentFS — the point is *consent then isolation*. Under isx that falls away: the
-machine is disposable and holds no credentials, so `yolo` stops being the risky
-choice and becomes the obvious one.
+TIP: Keep `ask` or `auto_edit` when you want consent as well as isolation.
+Use `yolo` only after reviewing the sandbox's local and remote authority, including on disposable machines.
 
 == Platform and stability notes
 
@@ -791,5 +765,4 @@ choice and becomes the obvious one.
 * xref:modes.adoc[Plan and build modes] — the orthogonal read-only/build axis.
 * xref:mcp.adoc[MCP support] — wiring `agentfs serve mcp` into the tool registry.
 * xref:../configuration.adoc[Configuration] — `yca.permissions.*` and `mcps` keys.
-* isx documentation ((https://isx.run/)) — templates, credential accounts and the
-  `isx mcp` delegation server for running branches from an agent.
+* https://isx.run/[isx documentation] - templates, credential accounts and the `isx mcp` delegation server.

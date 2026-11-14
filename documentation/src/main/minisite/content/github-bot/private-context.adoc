@@ -1,13 +1,19 @@
 = Strict-mode private source and host publication
+:minisite-breadcrumb: Home[../index.html] > GitHub bot > Strict-mode private source and host publication
+:minisite-nav-prev-link: kubernetes.html
+:minisite-nav-prev-label: Kubernetes dispatcher and agent Job walkthrough
 
 `GithubPrivateContext` provides a host-only, one-shot source export for credential-free pull request reviews.
 It is not a Git clone or a credential proxy.
 The worker uses it for opt-in review source and automatically for credential-free strict solves.
 
+For the centralized validation overview, see xref:index.adoc[validation history and version 0 limits].
+
 == Host integration
 
 The host must exclusively own a fresh attempt directory and must stage both snapshots before exposing that directory to any agent or executor.
 The attempt and its ancestors must be real directories, not symbolic links.
+
 Use the same host-owned `GitHubClient` and domain-codec-enabled JSON mapper for both operations.
 The caller retains ownership of the client and its token provider.
 
@@ -19,16 +25,20 @@ final var source = new GithubPrivateContext(github, json).stage(task, attempt);
 
 The source API accepts only a `review` task with a validated `repository` and positive integral `number` matching `workspace/github-context.json`.
 It reads the immutable head SHA from that host snapshot, not from task URLs, branch names or a later PR response.
+
 It requests `/repos/{repository}/git/commits/{headSha}`, the returned root tree with `?recursive=1`, and validated blob SHA endpoints within that same repository.
 Remote URLs and download links are never used as request targets.
+
 A fork head must be available through those upstream object endpoints; missing objects or insufficient host permissions fail staging rather than falling back to another repository or arbitrary URL.
 The host must still detect stale heads when publishing review findings.
 
 The completed export consists of `workspace/repository/` and `workspace/github-source.json`.
 The manifest records the repository, PR number, immutable head/root-tree SHAs, complete regular-file list and decoded byte count.
 The head SHA matches the context snapshot used for review metadata.
+
 The export has no `.git` directory, credentials, Git configuration, history or remotes.
 No shell commands, credential helpers or authenticated Git processes are used.
+
 Regular source bytes are preserved, including binary files; executable files are exported as ordinary non-executable files.
 All repository text remains untrusted task data.
 
@@ -45,16 +55,23 @@ All repository text remains untrusted task data.
 |Source path length / segment length / depth |1,024 characters / 255 characters / 32 segments
 |===
 
-Truncated trees, pagination, malformed fields, inconsistent object identities, invalid base64, decoded-size mismatches and Git blob SHA-1 mismatches fail staging.
-Symlinks, gitlinks/submodules, special file modes, absolute paths, traversal, backslashes, control characters, `.git` segments, platform-reserved path segments and case-folded duplicate paths are refused.
+Staging refuses the following input:
+
+* Truncated trees, pagination, malformed fields and inconsistent object identities.
+* Invalid base64, decoded-size mismatches and Git blob SHA-1 mismatches.
+* Symlinks, gitlinks/submodules and special file modes.
+* Absolute paths, traversal, backslashes, control characters, `.git` segments, platform-reserved path segments and case-folded duplicate paths.
+
 Existing source or manifest destinations are never reused or overwritten.
 All fetch and content checks finish before source files are written, and publication failures remove owned partial output.
 The source snapshot is complete within these bounds or staging fails; it does not silently omit files to fit the budget.
+
 Git LFS pointers remain pointer files; LFS objects and submodule contents are not fetched.
 
 The shared `GitHubClient` cancels responses exceeding 8 MiB of actual received bytes before buffering the excess, for both fixed-length and chunked responses.
 The cumulative source budgets above are separate decoded/re-encoded staging budgets, not limits on total JVM allocation during JSON parsing.
 The host should retain its existing trusted-API, network and process resource restrictions.
+
 No concurrent agent access or hostile local directory replacement is supported while staging; this is a pre-execution host operation, not a race-safe filesystem broker.
 Source and manifest publication are not a single filesystem transaction; executors must only start after `stage` returns successfully.
 
@@ -62,6 +79,7 @@ Source and manifest publication are not a single filesystem transaction; executo
 
 The strict-mode prompt describes the source manifest when present and directs agents to report insufficient supplied context rather than inventing private access.
 This source API itself supplies no GitHub credentials or source credentials.
+
 Local HTTP stub tests exercise endpoint pinning, host-only authentication, binary integrity, file and byte limits, unsafe paths, symbolic-link destinations, malformed responses and cleanup without Docker or live GitHub credentials.
 
 Enable with `github bot worker --worker-agentCommenting false --worker-privateSource true`.
@@ -72,13 +90,18 @@ Do not combine private-source staging with the anonymous clone cache, because bo
 
 Strict reviews also have an attempt-scoped, read-only filesystem mailbox at `workspace/github-broker/`.
 It works through the already-mounted attempt volume and requires no listener, network route, or bearer secret in the agent.
+
 The agent atomically creates `requests/N.json`, where N is an unused integer from 0 to 31, and waits until `responses/N.json` parses as complete JSON.
 Each request is at most 4 KiB and has the shape `{"operation":"files","page":1}`.
-Operations are `pull`, `files`, `reviews`, `reviewComments`, and `issueComments`; pages are 1 through 10, with only page 1 valid for `pull`.
-All endpoints are constructed locally for the authorized task repository and pull request; arbitrary URLs, repositories, methods, and mutations are not accepted.
+
+Operations are `pull`, `files`, `reviews`, `reviewComments` and `issueComments`; pages are 1 through 10, with only page 1 valid for `pull`.
+All endpoints are constructed locally for the authorized task repository and pull request; arbitrary URLs, repositories, methods and mutations are not accepted.
+
 Responses expose only selected context fields, at most 4 MiB per response and 16 MiB per attempt, and remain untrusted task data.
+
 The broker uses pinned secure directory handles and never follows request or response symlinks, overwrites existing responses, or reuses slots.
 Filesystems without secure directory handles fail closed; validate this prerequisite for the deployment PVC/filesystem.
+
 Shutdown interrupts the host request and requires confirmed broker-thread termination before normal completion.
 
 == Credential-free solves
@@ -86,21 +109,40 @@ Shutdown interrupts the host request and requires confirmed broker-thread termin
 Set `--worker-agentCommenting false --worker-forkOwner YOUR_ORGANIZATION` to use host-owned solve publication.
 The host token needs repository contents read permission, contents write permission to the verified fork, and pull-request write permission upstream.
 The fork must exist unless organization provisioning is explicitly enabled.
-Private upstream repositories are supported within the same bounded source-export contract when the host has the required read access and can verify the fork; agent-side private checkout credentials are not required in strict mode.
+
+Private upstream repositories are supported within the same bounded source-export contract when the host has the required read access and can verify the fork.
+Agent-side private checkout credentials are not required in strict mode.
+
 An enabled Discussion solve uses this existing strict-solve workflow and links the verified PR back to its originating Discussion thread; Discussion review is not supported.
+
+=== Source and result contract
+
 The host pins the upstream default branch and SHA before launch, exports its bounded source, and writes `workspace/github-solve.json`.
 Neither agent nor fork credentials enter the executor.
 The agent returns `strictSolve` in its schema-version-1 result, with the exact `baseSha`, a title/body, and complete replacement files encoded as base64 or explicit deletions.
+
 The host accepts at most 100 changes, 1 MiB per decoded file and 4 MiB decoded total; the structured result file is capped at 6 MiB.
+
 All backends request the core completion guard for `taskId,summary|failure` with a 6 MiB ceiling and one same-session repair continuation capped at three iterations.
 Numeric `schemaVersion:1` remains required by the host, not by the generic nonblank-string field list.
-This structural check neither replaces host validation nor adds a worker retry; non-strict-solve results remain subject to the host's narrower 1,000,000 byte limit.
+
+This structural check neither replaces host validation nor adds a worker retry.
+Non-strict-solve results remain subject to the host's narrower 1,000,000 byte limit.
+
+=== Publication and recovery limits
+
 The host validates paths and base identity, creates Git objects and a task-specific branch through the GitHub API, and creates the PR itself.
-It never runs agent-supplied Git commands, hooks, or credentials on the dispatcher.
+It never runs agent-supplied Git commands, hooks or credentials on the dispatcher.
+
 Publication stages use durable task state and fail closed after uncertain writes rather than automatically repeating a PR creation.
 Operator reconciliation may be necessary after a crash between an intent and its write.
+
 The current publisher requires credentials supporting `GET /user` and validates GitHub.com PR URLs; GitHub Enterprise publication and installation-token author discovery are not implemented.
-File deletion requires a JSON mapper that emits explicit `sha:null` tree entries; otherwise deletion is refused before any POST rather than silently becoming a no-op.
+
+File deletion requires a JSON mapper that emits explicit `sha:null` tree entries.
+Otherwise deletion is refused before any POST rather than silently becoming a no-op.
+
 This bounded workflow deliberately does not support arbitrary large repositories, submodules, LFS downloads, symlinks, or arbitrary branch updates.
-Live GitHub permissions, object readiness, and crash reconciliation must still be exercised with deployment credentials before production release.
-The recorded live native-review acknowledgement-loss check does not validate strict-solve Git-object/branch/PR mutations or Discussion reply recovery.
+
+Live GitHub permissions, object readiness and crash reconciliation must still be exercised with deployment credentials before production release.
+The recorded live native-review acknowledgement-loss check does not validate strict-solve Git-object/branch/PR mutations or Discussion reply recovery; see xref:index.adoc[validation history and version 0 limits].
