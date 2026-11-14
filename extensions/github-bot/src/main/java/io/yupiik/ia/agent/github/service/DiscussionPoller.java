@@ -18,7 +18,6 @@ package io.yupiik.ia.agent.github.service;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
-import io.yupiik.ia.agent.github.command.PollCommand;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
 import io.yupiik.ia.agent.github.model.TaskKind;
@@ -58,7 +57,6 @@ public class DiscussionPoller {
     private static final Pattern REPOSITORY_NAME = Pattern.compile("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+");
     private static final ConcurrentHashMap<Path, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
     private final GithubBotConfiguration conf;
-    private final PollOptions options;
     private final TaskStore store;
     private final GitHubClient github;
     private final Clock clock;
@@ -68,7 +66,6 @@ public class DiscussionPoller {
 
     public DiscussionPoller(
             final GithubBotConfiguration conf,
-            final PollCommand.Options commandOptions,
             final TaskStore store,
             final GitHubClient github,
             final Clock clock,
@@ -76,7 +73,6 @@ public class DiscussionPoller {
             final TeamAuthorization authorization,
             final DiscussionClient discussions) {
         this.conf = conf;
-        this.options = commandOptions == null ? null : commandOptions.poll();
         this.store = store;
         this.github = github;
         this.clock = clock;
@@ -85,7 +81,7 @@ public class DiscussionPoller {
         this.discussions = discussions;
     }
 
-    public int poll(final List<String> repos) {
+    public int poll(final List<String> repos, final PollOptions options) {
         if (!options.discussions().enabled()) {
             return 0;
         }
@@ -127,14 +123,14 @@ public class DiscussionPoller {
                     LOGGER.info(() -> "Discussions are not enabled for " + repo + "; skipping discussion polling");
                     continue;
                 }
-                discover(repo);
+                discover(repo, options);
                 for (final var id : known(repo + "/discussion:known/")) {
                     final var discussion = discussions.discussion(id);
                     validateRepository(repo, discussion);
                     created += enqueue(discussion, null, since, allowed, authorization, batch);
-                    created += comments(discussion, since, allowed, authorization, batch);
+                    created += comments(discussion, since, allowed, authorization, batch, options);
                     for (final var commentId : known(repo + "/discussion:threads/" + id + "/")) {
-                        created += replies(discussion, commentId, since, allowed, authorization, batch);
+                        created += replies(discussion, commentId, since, allowed, authorization, batch, options);
                     }
                 }
             }
@@ -146,10 +142,10 @@ public class DiscussionPoller {
         }
     }
 
-    private void discover(final String repo) {
+    private void discover(final String repo, final PollOptions options) {
         final var key = repo + "/discussion:discovery";
         String after = continuation(key);
-        for (int pageNumber = 0; pageNumber < budget(); pageNumber++) {
+        for (int pageNumber = 0; pageNumber < budget(options); pageNumber++) {
             final var page = discussions.discussions(repo, after);
             for (final var discussion : page.nodes()) {
                 validateRepository(repo, discussion);
@@ -173,11 +169,12 @@ public class DiscussionPoller {
             final Instant since,
             final Set<String> allowed,
             final TeamAuthorization authorization,
-            final String batch) {
+            final String batch,
+            final PollOptions options) {
         final var key = discussion.repository() + "/discussion:comments/" + discussion.id();
         String after = continuation(key);
         int created = 0;
-        for (int pageNumber = 0; pageNumber < budget(); pageNumber++) {
+        for (int pageNumber = 0; pageNumber < budget(options); pageNumber++) {
             final var page = discussions.comments(discussion.id(), after);
             for (final var comment : page.nodes()) {
                 discussion.validate(comment, null);
@@ -209,11 +206,12 @@ public class DiscussionPoller {
             final Instant since,
             final Set<String> allowed,
             final TeamAuthorization authorization,
-            final String batch) {
+            final String batch,
+            final PollOptions options) {
         final var key = discussion.repository() + "/discussion:replies/" + commentId;
         String after = continuation(key);
         int created = 0;
-        for (int pageNumber = 0; pageNumber < budget(); pageNumber++) {
+        for (int pageNumber = 0; pageNumber < budget(options); pageNumber++) {
             final var page = discussions.replies(commentId, after);
             for (final var reply : page.nodes()) {
                 discussion.validate(reply, commentId);
@@ -314,7 +312,7 @@ public class DiscussionPoller {
                 .toList());
     }
 
-    private int budget() {
+    private int budget(final PollOptions options) {
         return Math.min(options.pageBudget(), 20);
     }
 

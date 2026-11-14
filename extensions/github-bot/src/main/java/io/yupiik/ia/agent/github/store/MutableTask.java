@@ -69,6 +69,7 @@ public final class MutableTask {
     private SolvePublication strictSolvePublication;
     private List<Run> runs;
     private AgentResult result;
+    private TaskDocument.FailureDetail lastFailure;
     private Map<String, Object> recovery;
 
     public MutableTask(final TaskDocument document) {
@@ -114,6 +115,7 @@ public final class MutableTask {
         this.strictSolvePublication = document.strictSolvePublication();
         this.runs = document.runs();
         this.result = document.result();
+        this.lastFailure = document.lastFailure();
         this.recovery = document.recovery();
     }
 
@@ -121,7 +123,7 @@ public final class MutableTask {
         return new MutableTask(new TaskDocument(
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null));
+                null, null, null, null, null, null, null, null, null, null));
     }
 
     public TaskDocument document() {
@@ -168,7 +170,16 @@ public final class MutableTask {
                 strictSolvePublication,
                 runs,
                 result,
+                lastFailure,
                 recovery);
+    }
+
+    public TaskDocument.FailureDetail lastFailure() {
+        return lastFailure;
+    }
+
+    public void lastFailure(final TaskDocument.FailureDetail value) {
+        lastFailure = value;
     }
 
     public String id() {

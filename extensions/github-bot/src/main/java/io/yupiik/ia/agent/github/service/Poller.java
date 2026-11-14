@@ -18,7 +18,6 @@ package io.yupiik.ia.agent.github.service;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.client.MentionSearchClient;
-import io.yupiik.ia.agent.github.command.PollCommand;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
 import io.yupiik.ia.agent.github.model.TaskKind;
@@ -62,7 +61,6 @@ public class Poller {
     private static final Logger LOGGER = Logger.getLogger(Poller.class.getName());
     private static final ConcurrentHashMap<Path, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
     private final GithubBotConfiguration conf;
-    private final PollOptions options;
     private final TaskStore store;
     private final GitHubClient github;
     private final Clock clock;
@@ -75,7 +73,6 @@ public class Poller {
     /** The optional audit sink is shared with the review-summary poller. */
     public Poller(
             final GithubBotConfiguration conf,
-            final PollCommand.Options commandOptions,
             final TaskStore store,
             final GitHubClient github,
             final Clock clock,
@@ -85,7 +82,6 @@ public class Poller {
             final DiscussionPoller discussions,
             final RepositoryDiscovery discovery) {
         this.conf = conf;
-        this.options = commandOptions == null ? null : commandOptions.poll();
         this.store = store;
         this.github = github;
         this.clock = clock;
@@ -96,7 +92,7 @@ public class Poller {
         this.discovery = discovery;
     }
 
-    public int poll() {
+    public int poll(final PollOptions options) {
         if (options.pageBudget() <= 0) {
             throw new IllegalArgumentException("Positive page budget required");
         }
@@ -107,7 +103,7 @@ public class Poller {
         try (final var channel = FileChannel.open(
                         path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
                 final var lock = channel.lock()) {
-            return measured("total", this::scan);
+            return measured("total", () -> scan(options));
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         } finally {
@@ -137,7 +133,7 @@ public class Poller {
         return discovery.repositories();
     }
 
-    private int scan() {
+    private int scan(final PollOptions options) {
         final Set<String> allowed = Arrays.stream(conf.authorization().userIds().split(","))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
@@ -151,7 +147,7 @@ public class Poller {
                 + " discussionsEnabled=" + options.discussions().enabled()
                 + " searchEnabled=" + options.search().enabled());
         if (!options.search().enabled()) {
-            return direct(selected, allowed);
+            return direct(options, selected, allowed);
         }
 
         // A quiet search must not move the initial lower bound to the time of the first later hit.
@@ -166,7 +162,7 @@ public class Poller {
             }
             return null;
         });
-        final var key = reconciliationKey(selected);
+        final var key = reconciliationKey(options, selected);
         final var reconcile = store.transaction(state -> {
             final var completed = state.cursors().get(key + ":completed");
             return state.cursors().containsKey(key + ":running")
@@ -182,8 +178,9 @@ public class Poller {
                 state.cursors().putIfAbsent(key + ":running", started.toString());
                 return null;
             });
-            final var created = direct(selected, allowed);
-            if (pending(selected, false).isEmpty() && pending(selected, true).isEmpty()) {
+            final var created = direct(options, selected, allowed);
+            if (pending(options, selected, false).isEmpty()
+                    && pending(options, selected, true).isEmpty()) {
                 store.transaction(state -> {
                     state.cursors().put(key + ":completed", clock.instant().toString());
                     state.cursors().remove(key + ":running");
@@ -192,26 +189,26 @@ public class Poller {
             }
             return created;
         }
-        return search(selected, allowed);
+        return search(options, selected, allowed);
     }
 
-    private int direct(final List<String> selected, final Set<String> allowed) {
-        final var created = measured("mentions", () -> scanMentions(selected, allowed));
-        return measured("reviews-and-discussions", () -> scanOptional(selected, created));
+    private int direct(final PollOptions options, final List<String> selected, final Set<String> allowed) {
+        final var created = measured("mentions", () -> scanMentions(options, selected, allowed));
+        return measured("reviews-and-discussions", () -> scanOptional(options, selected, created));
     }
 
-    private int search(final List<String> selected, final Set<String> allowed) {
+    private int search(final PollOptions options, final List<String> selected, final Set<String> allowed) {
         final var search = new MentionSearch(conf, store, github, clock);
         final var visited = new HashSet<String>();
         final var issueCreated = measured("search-mentions-and-reviews", () -> {
             // Acknowledged candidate pages can leave independent feed/review continuations. Resume
             // those first, even if the parent has since disappeared from search or was edited.
-            int created = scanIssueCandidates(pending(selected, false), allowed, visited);
+            int created = scanIssueCandidates(options, pending(options, selected, false), allowed, visited);
             created += search.poll(
                     selected,
                     MentionSearchClient.Kind.ISSUE,
                     options.pageBudget(),
-                    repos -> scanIssueCandidates(repos, allowed, visited));
+                    repos -> scanIssueCandidates(options, repos, allowed, visited));
             return created;
         });
         if (!options.discussions().enabled()) {
@@ -220,32 +217,37 @@ public class Poller {
         return issueCreated
                 + measured("search-discussions", () -> {
                     final var discussionVisited = new HashSet<String>();
-                    int created = scanDiscussionCandidates(pending(selected, true), discussionVisited);
+                    int created =
+                            scanDiscussionCandidates(options, pending(options, selected, true), discussionVisited);
                     created += search.poll(
                             selected,
                             MentionSearchClient.Kind.DISCUSSION,
                             options.pageBudget(),
-                            repos -> scanDiscussionCandidates(repos, discussionVisited));
+                            repos -> scanDiscussionCandidates(options, repos, discussionVisited));
                     return created;
                 });
     }
 
     private int scanIssueCandidates(
-            final List<String> candidates, final Set<String> allowed, final Set<String> visited) {
+            final PollOptions options,
+            final List<String> candidates,
+            final Set<String> allowed,
+            final Set<String> visited) {
         final var selected = candidates.stream().filter(visited::add).toList();
         if (selected.isEmpty()) {
             return 0;
         }
-        final var created = scanMentions(selected, allowed);
-        return created + (options.reviews().enabled() ? reviews.poll(selected) : 0);
+        final var created = scanMentions(options, selected, allowed);
+        return created + (options.reviews().enabled() ? reviews.poll(selected, options) : 0);
     }
 
-    private int scanDiscussionCandidates(final List<String> candidates, final Set<String> visited) {
+    private int scanDiscussionCandidates(
+            final PollOptions options, final List<String> candidates, final Set<String> visited) {
         final var selected = candidates.stream().filter(visited::add).toList();
-        return selected.isEmpty() ? 0 : discussions.poll(selected);
+        return selected.isEmpty() ? 0 : discussions.poll(selected, options);
     }
 
-    private List<String> pending(final List<String> selected, final boolean discussion) {
+    private List<String> pending(final PollOptions options, final List<String> selected, final boolean discussion) {
         if (discussion && !options.discussions().enabled()) {
             return List.of();
         }
@@ -265,7 +267,7 @@ public class Poller {
                 .toList());
     }
 
-    private String reconciliationKey(final List<String> selected) {
+    private String reconciliationKey(final PollOptions options, final List<String> selected) {
         final var scope = conf.api() + "\n" + conf.login().toLowerCase(Locale.ROOT) + "\n"
                 + options.reviews().enabled() + ":" + options.discussions().enabled() + "\n"
                 + selected.stream()
@@ -283,12 +285,13 @@ public class Poller {
         }
     }
 
-    private int scanMentions(final List<String> selected, final Set<String> allowed) {
+    private int scanMentions(final PollOptions options, final List<String> selected, final Set<String> allowed) {
         final var batch = UUID.randomUUID().toString();
-        return PollingTasks.sum(options.parallelism(), selected, repo -> scanMentions(repo, allowed, batch));
+        return PollingTasks.sum(options.parallelism(), selected, repo -> scanMentions(options, repo, allowed, batch));
     }
 
-    private int scanMentions(final String repo, final Set<String> allowed, final String batch) {
+    private int scanMentions(
+            final PollOptions options, final String repo, final Set<String> allowed, final String batch) {
         int created = 0;
         for (final var endpoint : List.of("issues", "issues/comments", "pulls/comments")) {
             final var key = repo + "/" + endpoint;
@@ -410,11 +413,12 @@ public class Poller {
         return created;
     }
 
-    private int scanOptional(final List<String> selected, final int created) {
+    private int scanOptional(final PollOptions options, final List<String> selected, final int created) {
         try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var reviewScan = executor.submit(() -> options.reviews().enabled() ? reviews.poll(selected) : 0);
+            final var reviewScan =
+                    executor.submit(() -> options.reviews().enabled() ? reviews.poll(selected, options) : 0);
             final var discussionScan =
-                    executor.submit(() -> options.discussions().enabled() ? discussions.poll(selected) : 0);
+                    executor.submit(() -> options.discussions().enabled() ? discussions.poll(selected, options) : 0);
             try {
                 return created + reviewScan.get() + discussionScan.get();
             } catch (final InterruptedException error) {

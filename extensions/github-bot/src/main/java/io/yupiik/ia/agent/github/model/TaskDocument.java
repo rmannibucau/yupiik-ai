@@ -146,8 +146,24 @@ public record TaskDocument(
         @Property(documentation = "Staged agent result; malformed legacy values are retained for worker recovery.")
         AgentResult result,
 
+        @Property(
+                documentation =
+                        "Safe failure metadata; raw messages and logs require explicit private diagnostics inspection.")
+        FailureDetail lastFailure,
+
         @JsonOthers @Property(documentation = "Unknown task extensions preserved during recovery.")
         Map<String, Object> recovery) {
+
+    @JsonModel
+    public record FailureDetail(
+            String stage,
+            String exceptionClass,
+            String message,
+            String timestamp,
+            Integer attempt,
+            Integer exitCode,
+            String diagnosticFile,
+            boolean diagnosticsRetained) {}
 
     @JsonModel
     public record Run(@JsonOthers Map<String, Object> extensions) {}

@@ -20,7 +20,6 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.kubernetes.client.KubernetesClient;
 import io.yupiik.fusion.kubernetes.client.KubernetesClientConfiguration;
 import io.yupiik.ia.agent.github.client.GitHubClient;
-import io.yupiik.ia.agent.github.command.WorkerCommand;
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
@@ -38,6 +37,7 @@ import io.yupiik.ia.agent.github.model.KubeconfigDocument;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.model.TaskState;
+import io.yupiik.ia.agent.github.store.MutableTask;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -60,6 +60,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
@@ -85,7 +86,6 @@ public class Worker {
     private DockerExecutionBackend backend;
     private Path attemptRoot;
     private NonoExecutionBackend nono;
-    private final WorkerOptions options;
     private final ExecutorConfiguration execution;
     private final BotAudit audit;
     private final Clock clock;
@@ -100,7 +100,6 @@ public class Worker {
 
     public Worker(
             final GithubBotConfiguration conf,
-            final WorkerCommand.Options commandOptions,
             final TaskStore store,
             final GitHubClient github,
             final JsonMapper json,
@@ -116,7 +115,6 @@ public class Worker {
             final DiscussionPublisher discussions,
             final Clock clock) {
         this.conf = conf;
-        this.options = commandOptions == null ? null : commandOptions.worker();
         this.store = store;
         this.github = github;
         this.json = json;
@@ -253,7 +251,7 @@ public class Worker {
     }
 
     /** One invocation processes one task, keeping poll scheduling independent from agent latency. */
-    public void run(final String requestedId) {
+    public void run(final String requestedId, final WorkerOptions options) {
         initializeBackend();
         if (options.maxRetries() < 0 || execution.timeoutSeconds() <= 0 || execution.commandTimeoutSeconds() <= 0) {
             throw new IllegalArgumentException("Invalid execution budget");
@@ -263,7 +261,7 @@ public class Worker {
         }
         store.initialize();
         final var home = Path.of(conf.home()).toAbsolutePath().normalize();
-        try (final var slot = acquireSlot(home)) {
+        try (final var slot = acquireSlot(home, options)) {
             if (slot == null) {
                 return;
             }
@@ -289,7 +287,7 @@ public class Worker {
                     if (task == null || !eligible(task)) {
                         continue;
                     }
-                    process(home, task);
+                    process(home, task, options);
                     return;
                 }
             }
@@ -305,7 +303,7 @@ public class Worker {
                         && (task.attemptDirectory() != null));
     }
 
-    private Lease acquireSlot(final Path home) throws IOException {
+    private Lease acquireSlot(final Path home, final WorkerOptions options) throws IOException {
         if (options.parallelism() == 1) {
             return tryAcquire(home.resolve("worker.lock"));
         }
@@ -348,7 +346,7 @@ public class Worker {
         }
     }
 
-    private void process(final Path home, final TaskDocument task) {
+    private void process(final Path home, final TaskDocument task, final WorkerOptions options) {
         audit.record("worker-selected", task);
         final var id = String.valueOf(task.id());
         if (Set.of(TaskState.done, TaskState.failed).contains(task.state())) {
@@ -365,11 +363,11 @@ public class Worker {
             return;
         }
         if ((task.state() == TaskState.running)) {
-            recover(task);
+            recover(task, options);
         }
         final var current = store.transaction(state -> state.task(id).document());
         if ((current.state() == TaskState.publishing)) {
-            publish(current);
+            publish(current, options);
             return;
         }
         if (current.attemptDirectory() != null) {
@@ -384,8 +382,9 @@ public class Worker {
             audit.record("authorization-denied", current);
             throw new IllegalStateException("Execution blocked: the requesting user is no longer authorized");
         }
+        var stage = "reconciliation";
         try {
-            final var prior = existingPullRequest(current);
+            final var prior = existingPullRequest(current, options);
             final AgentResult result;
             if ((current.kind() == TaskKind.help)) {
                 result = new AgentResult(null, null, "Help requested.", null, null, null, null, null, null, null);
@@ -402,21 +401,26 @@ public class Worker {
                         null,
                         null);
             } else {
-                result = execute(current);
+                stage = "execution";
+                result = execute(current, options);
             }
+            stage = "result-staging";
             stage(id, result);
         } catch (final RuntimeException e) {
             final var interruptedTask =
                     store.transaction(state -> state.task(id).document());
+            if (!"execution".equals(stage)) {
+                retainFailure(interruptedTask, stage, e, null);
+            }
             if ((interruptedTask.state() == TaskState.running)) {
                 // A failed stop deliberately escapes: never retry or clean up an uncertain runtime.
                 stopRuntime(interruptedTask);
             }
-            failedAttempt(id, e);
+            failedAttempt(id, e, options);
         }
         final var completed = store.transaction(state -> state.task(id).document());
         if ((completed.state() == TaskState.publishing)) {
-            publish(completed);
+            publish(completed, options);
         }
     }
 
@@ -433,17 +437,27 @@ public class Worker {
         return true;
     }
 
-    private void recover(final TaskDocument task) {
+    private void recover(final TaskDocument task, final WorkerOptions options) {
         // Persisted runtime identity precedes launch. An uncertain stop blocks recovery, not starts another agent.
         stopRuntime(task);
         try {
             stage(String.valueOf(task.id()), readResult(task));
         } catch (final IOException | IllegalArgumentException e) {
-            failedAttempt(String.valueOf(task.id()), e);
+            retainFailure(task, "recovery-result", e, null);
+            failedAttempt(String.valueOf(task.id()), e, options);
         }
     }
 
     private void stopRuntime(final TaskDocument task) {
+        try {
+            stopRuntimeChecked(task);
+        } catch (final RuntimeException e) {
+            retainFailure(task, "runtime-stop", e, null);
+            throw e;
+        }
+    }
+
+    private void stopRuntimeChecked(final TaskDocument task) {
         final var identity = task.runtimeId();
         if (identity == null || !identity.equals("yca-" + task.id() + "-" + task.attempts())) {
             throw new IllegalStateException("Recovery requires the persisted task-bound runtime identity");
@@ -472,17 +486,24 @@ public class Worker {
         }
     }
 
-    private AgentResult execute(final TaskDocument initialTask) {
+    private AgentResult execute(final TaskDocument initialTask, final WorkerOptions options) {
         var task = initialTask;
         final var id = task.id();
         Path directory = null;
+        var stage = "preparation";
+        Integer exitCode = null;
+        final int attempt = task.attempts() + 1;
         try {
-            final int attempt = ((Number) task.attempts()).intValue() + 1;
             final var runtime = "yca-" + id + "-" + attempt;
             final var config = options.agentConfiguration().isBlank()
                     ? Path.of(conf.home()).resolve("agent-configuration.json")
                     : Path.of(options.agentConfiguration());
             directory = preparation.prepare(config.toAbsolutePath().normalize(), attemptRoot);
+            if (!options.agentCommenting() && task.kind() == TaskKind.review) {
+                stage = "runtime-preflight";
+                GithubContextBroker.verifyRuntime(directory.resolve("workspace"));
+            }
+            stage = "source-staging";
             if (!options.agentCommenting() && (task.kind() == TaskKind.solve)) {
                 if (options.forkOwner().isBlank() || !options.cacheRoot().isBlank()) {
                     throw new IllegalArgumentException(
@@ -526,6 +547,7 @@ public class Worker {
                 new RepositoryCache(cache, options.cacheGit(), Duration.ofSeconds(execution.timeoutSeconds()))
                         .stage("https://github.com/" + task.repository() + ".git", directory.resolve("workspace"));
             }
+            stage = "credentials-and-fork";
             final var credentials = new LinkedHashMap<String, String>();
             final var agentToken = System.getenv(conf.auth().agentTokenEnv());
             if (options.agentCommenting() && agentToken != null && !agentToken.isBlank()) {
@@ -544,9 +566,10 @@ public class Worker {
                 if (options.provisionFork()) {
                     forks.ensure(id, String.valueOf(task.repository()), options.forkOwner());
                 } else {
-                    verifyFork(String.valueOf(task.repository()));
+                    verifyFork(String.valueOf(task.repository()), options);
                 }
             }
+            stage = "launch-preparation";
             final var attemptPath = directory.toString();
             // Once launch becomes possible, absence of a queue reference is not proof of termination.
             Files.delete(directory.resolve(".prepared-only"));
@@ -565,6 +588,7 @@ public class Worker {
             audit.record("execution-starting", task);
             final var prompt = preparation.prompt(task, options.forkOwner(), options.agentCommenting());
             final int exit;
+            stage = "relay-and-context";
             try (final var relay = execution.relay().bind().isBlank()
                             ? null
                             : new AttemptRelay(
@@ -575,6 +599,7 @@ public class Worker {
                     final var broker = !options.agentCommenting() && (task.kind() == TaskKind.review)
                             ? new GithubContextBroker(github, json, task, directory)
                             : null) {
+                stage = "execution";
                 exit = switch (execution.backend()) {
                     case DOCKER -> backend.execute(directory, runtime, prompt, credentials);
                     case NONO -> nono.execute(directory, runtime, prompt, credentials);
@@ -585,13 +610,28 @@ public class Worker {
                     }
                 };
             }
+            exitCode = exit;
             if (exit != 0) {
                 throw new IllegalArgumentException("Agent exited unsuccessfully");
             }
             // A client process exiting is not sufficient evidence that its remote runtime stopped.
+            stage = "runtime-stop";
             stopRuntime(store.transaction(state -> state.task(id).document()));
+            stage = "result-validation";
             return readResult(task);
         } catch (final IOException | RuntimeException e) {
+            // Capture before either provisioning cleanup or the outer stop/retry/publication path.
+            // Early failures have no durable attempt directory or runtime yet.
+            final var failed =
+                    new MutableTask(store.transaction(state -> state.task(id).document()));
+            failed.attempts(attempt);
+            if (failed.state() != TaskState.running) {
+                failed.runtimeId(null);
+            }
+            if (directory != null) {
+                failed.attemptDirectory(directory.toString());
+            }
+            retainFailure(failed.document(), stage, e, exitCode);
             // Provisioning failure occurred before durable launch; remove secrets/workspace immediately.
             if (directory != null
                     && !store.<Boolean>transaction(
@@ -645,7 +685,7 @@ public class Worker {
         return parsed;
     }
 
-    private void verifyFork(final String repository) {
+    private void verifyFork(final String repository, final WorkerOptions options) {
         if (!FORK_OWNER.matcher(options.forkOwner()).matches()) {
             throw new IllegalArgumentException("Invalid fork owner");
         }
@@ -659,7 +699,7 @@ public class Worker {
         }
     }
 
-    private String existingPullRequest(final TaskDocument task) {
+    private String existingPullRequest(final TaskDocument task, final WorkerOptions options) {
         if (!(task.kind() == TaskKind.solve)
                 || !options.agentCommenting()
                 || (task.strictSolveBaseSha() != null)
@@ -673,7 +713,7 @@ public class Worker {
             final var page = github.page(next);
             for (final var raw : (List<?>) page.body()) {
                 final var pr = TaskStore.map(raw);
-                if (validPullRequest(task, pr)) {
+                if (validPullRequest(task, pr, options)) {
                     return String.valueOf(pr.get("html_url"));
                 }
             }
@@ -682,7 +722,8 @@ public class Worker {
         return null;
     }
 
-    private boolean validPullRequest(final TaskDocument task, final Map<String, Object> pr) {
+    private boolean validPullRequest(
+            final TaskDocument task, final Map<String, Object> pr, final WorkerOptions options) {
         if (!"open".equals(pr.get("state"))
                 || !(pr.get("head") instanceof Map<?, ?>)
                 || !(pr.get("base") instanceof Map<?, ?>)) {
@@ -703,6 +744,13 @@ public class Worker {
     }
 
     private void stage(final String id, final AgentResult result) {
+        if (result.failure() != null) {
+            retainFailure(
+                    store.transaction(state -> state.task(id).document()),
+                    "agent-result",
+                    new IllegalArgumentException(result.failure()),
+                    0);
+        }
         store.transaction(state -> {
             final var task = state.task(id);
             task.result(result);
@@ -711,7 +759,7 @@ public class Worker {
         });
     }
 
-    private void failedAttempt(final String id, final Exception failure) {
+    private void failedAttempt(final String id, final Exception failure, final WorkerOptions options) {
         // Errors are intentionally classified, never copied from secret-bearing tool logs to GitHub.
         store.transaction(state -> {
             final var task = state.task(id);
@@ -742,7 +790,19 @@ public class Worker {
                 "execution-failed", store.transaction(state -> state.task(id).document()));
     }
 
-    private void publish(final TaskDocument task) {
+    private void publish(final TaskDocument task, final WorkerOptions options) {
+        try {
+            publishChecked(task, options);
+        } catch (final RuntimeException e) {
+            final var current = store.transaction(state -> state.task(task.id()).document());
+            if (current.lastFailure() == null || Objects.equals(current.lastFailure(), task.lastFailure())) {
+                retainFailure(current, "publication", e, null);
+            }
+            throw e;
+        }
+    }
+
+    private void publishChecked(final TaskDocument task, final WorkerOptions options) {
         final var id = String.valueOf(task.id());
         final var prefix = "/repos/" + task.repository() + "/issues/" + task.number() + "/comments";
         final var marker = "<!-- yca-task:" + id + " -->";
@@ -790,7 +850,7 @@ public class Worker {
             finish(task, "reviewUrl", reviewUrl, false);
             return;
         } else if (!failure && (task.kind() == TaskKind.solve) && (task.strictSolveBaseSha() != null)) {
-            outcome = "I opened a pull request: " + strictSolve.publish(task, result);
+            outcome = "I opened a pull request: " + strictSolve.publish(task, result, options.forkOwner());
         } else if (!failure && result.prUrl() != null) {
             final var url = result.prUrl();
             final var expected = "https://github.com/" + task.repository() + "/pull/";
@@ -798,7 +858,7 @@ public class Worker {
                     && PULL_NUMBER.matcher(url.substring(expected.length())).matches()) {
                 final var pr = TaskStore.map(
                         github.get("/repos/" + task.repository() + "/pulls/" + url.substring(expected.length())));
-                if (validPullRequest(task, pr)) {
+                if (validPullRequest(task, pr, options)) {
                     outcome = "I opened a pull request: " + url;
                 }
             }
@@ -867,6 +927,15 @@ public class Worker {
     }
 
     private void cleanup(final TaskDocument task, final String directory) {
+        try {
+            cleanupChecked(task, directory);
+        } catch (final RuntimeException e) {
+            retainFailure(task, "cleanup", e, null);
+            throw e;
+        }
+    }
+
+    private void cleanupChecked(final TaskDocument task, final String directory) {
         if ("nono".equalsIgnoreCase(String.valueOf(task.executionBackend()))) {
             if (nono == null
                     || ((task.executionFingerprint() != null)
@@ -880,6 +949,55 @@ public class Worker {
             nono.cleanupStoppedState(runtime);
         }
         cleanup(directory);
+    }
+
+    private void retainFailure(
+            final TaskDocument task, final String stage, final Throwable failure, final Integer exitCode) {
+        String diagnosticFile = null;
+        try {
+            diagnosticFile =
+                    new TaskDiagnostics(Path.of(conf.home()), json, clock).capture(task, stage, failure, exitCode);
+        } catch (final IOException | RuntimeException captureFailure) {
+            // Do not mask the original error, retain credentials, or print a potentially secret-bearing message.
+        }
+        final var detail = new TaskDocument.FailureDetail(
+                stage,
+                failure.getClass().getSimpleName(),
+                switch (stage) {
+                    case "preparation" -> "Unable to prepare the private attempt configuration.";
+                    case "runtime-preflight" ->
+                        "Strict reviews require a dispatcher runtime and filesystem with SecureDirectoryStream support.";
+                    case "source-staging" -> "Unable to stage repository context or source.";
+                    case "credentials-and-fork" -> "Unable to prepare execution credentials or fork.";
+                    case "launch-preparation" -> "Unable to prepare the execution launch.";
+                    case "relay-and-context" -> "Unable to initialize the attempt relay or context broker.";
+                    case "execution" ->
+                        exitCode == null
+                                ? "Executor launch or execution failed."
+                                : "Agent process returned a non-zero exit status.";
+                    case "runtime-stop" -> "Unable to confirm runtime termination; recovery remains blocked.";
+                    case "result-validation", "recovery-result" -> "Unable to load a valid bounded task result.";
+                    case "agent-result" -> "The agent reported a task failure.";
+                    case "publication" -> "Unable to publish or reconcile the task response.";
+                    case "cleanup" -> "Unable to remove private attempt data.";
+                    default -> "Unable to reconcile or stage the task result.";
+                },
+                clock.instant().toString(),
+                task.attempts(),
+                exitCode,
+                diagnosticFile,
+                diagnosticFile != null);
+        try {
+            store.transaction(state -> {
+                final var actual = state.task(task.id());
+                actual.lastFailure(detail);
+                actual.lastError(failure.getClass().getSimpleName());
+                return null;
+            });
+        } catch (final RuntimeException metadataFailure) {
+            // Diagnostic metadata is best-effort too. Let the original stop/cleanup/error policy proceed;
+            // its normal queue transitions still fail closed if state storage remains unavailable.
+        }
     }
 
     private void cleanup(final String directory) {

@@ -150,12 +150,18 @@ Task kinds use the lowercase enum values `solve`, `review` and `help`; lifecycle
 
 List output uses a domain JSON object with a `tasks` array; show and mutation previews use task documents.
 
-`--dryRun true` validates and previews create, retry, delete and purge without changing tasks or receipts or emitting audit events.
-It can still create queue directories/lock files and rewrite an unchanged state file; it is not a filesystem-read-only mode.
+`--dryRun true` validates and previews create, retry, delete and purge without changing tasks, receipts or private diagnostics or emitting audit events.
+It can still create queue directories and lock files; it is not a filesystem-read-only mode.
 Poll and worker do not expose a dry-run option.
 
 Deletion preserves invocation receipts.
 The explicit `purge` operation removes clean terminal tasks older than `retentionDays`, never invocation receipts or tasks with retained attempt files.
+
+Delete and purge remove a selected task's private diagnostics before removing its task record, within the queue transaction.
+If private diagnostic deletion fails, the transaction aborts and the task remains available for another delete or purge after the filesystem problem is resolved.
+
+Private file deletion is not rolled back.
+A failed deletion, a later failure elsewhere in a purge batch, or a failed queue commit can leave a retained task with some or all diagnostics already removed.
 
 `audit.jsonl` records polling enqueues and authorization denials, worker selection/launch/failure/publication/completion, and manual create/retry/delete operations, using identifiers only, not request text or credentials.
 
@@ -166,10 +172,52 @@ The same fixed event code and task ID are emitted through JUL at `FINE` for oper
 
 Retry only accepts unpublished failed tasks without retained attempt data and preserves attempt counters.
 Create a new manual task after an already-published failure.
+Retry retains private diagnostics from earlier attempts; delete or purge cleans them up.
 
 Publishing tasks require reconciliation first, and deletion refuses tasks with retained attempts.
 
 The shared headless `run` command is also available directly from the core dependency.
+
+=== Inspecting private failure diagnostics
+
+Normal task documents expose `lastFailure` as safe, classified failure metadata.
+It includes the stage, exception class, safe message, timestamp, attempt, exit code and private diagnostic reference when available.
+
+The legacy `lastError` field remains a compatibility summary, not the original exception message or execution log.
+Use these safe summaries for routine monitoring; raw failure details require explicit operator inspection.
+
+Private diagnostic JSON records live under `github.home/diagnostics/TASK_ID`, independently of attempt-directory cleanup.
+They never appear in generated agent configuration or the workspace.
+
+The latest 16 records per task are retained.
+Each record contains at most a 64 KiB tail of `execution.log`, bounded private exception and cause messages, and up to 32 stack frames.
+
+Directories use mode `0700`, files use mode `0600`, and symbolic storage or log paths are rejected.
+
+Capture failure is reported by `lastFailure.diagnosticsRetained=false` without preventing normal attempt cleanup or changing retry policy.
+
+Unexpected diagnostic-directory entries block deletion until an operator inspects them.
+Abandoned generated temporary records are removed on the next capture or deletion.
+
+Exception messages and log tails can contain credentials, request data or other secrets; private does not mean redacted.
+
+WARNING: `show --task TASK_ID --diagnostics true` writes potentially secret-bearing JSON to standard output, not JUL.
+
+This option returns the retained private records instead of logging the ordinary task document; omit it to inspect safe task metadata.
+
+Run it only as an interactive operator action, never in a scheduled service or a job whose output is collected into a journal.
+Redirect the output to a private file, with a restrictive umask and a new filename in an operator-controlled private directory:
+
+[source,bash]
+----
+(
+  umask 077
+  set -C
+  java -jar github-bot.jar github bot show --task TASK_ID --diagnostics true > task-diagnostics.json
+)
+----
+
+Inspect the file locally, do not attach it to public issues or logs, and remove it when the investigation is complete.
 
 == Repository selection and authentication
 

@@ -22,9 +22,11 @@ import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -38,6 +40,40 @@ import org.junit.jupiter.api.io.TempDir;
 class GithubContextBrokerTest {
     @TempDir
     Path temporary;
+
+    @Test
+    void verifiesPreparedWorkspaceRuntimeWithoutCreatingMailbox() throws Exception {
+        final var workspace = Files.createDirectory(temporary.resolve("workspace"));
+        assertDoesNotThrow(() -> GithubContextBroker.verifyRuntime(workspace));
+        try (final var entries = Files.list(workspace)) {
+            assertEquals(0, entries.count());
+        }
+    }
+
+    @Test
+    void rejectsUnsupportedFilesystemWithActionableDispatcherDiagnostic() throws Exception {
+        try (final var zip = FileSystems.newFileSystem(temporary.resolve("workspace.zip"), Map.of("create", "true"))) {
+            final var workspace = Files.createDirectory(zip.getPath("/workspace"));
+            final var failure = assertThrows(IOException.class, () -> GithubContextBroker.verifyRuntime(workspace));
+            assertTrue(failure.getMessage().contains("dispatcher runtime"));
+            assertTrue(failure.getMessage().contains("SecureDirectoryStream-compatible glibc Java 25 runtime"));
+            assertTrue(failure.getMessage().contains("filesystem"));
+            assertTrue(failure.getMessage().contains("cannot be disabled"));
+            // Calling preflight is not required to enforce the constructor's security boundary.
+            try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty());
+                    final var client = new GitHubClient(
+                            URI.create("http://127.0.0.1:1"), json, () -> "", BotTestConfiguration.CLOCK)) {
+                final var constructorFailure = assertThrows(
+                        IOException.class,
+                        () -> new GithubContextBroker(
+                                client,
+                                json,
+                                TaskFixtures.task(Map.of("repository", "acme/project", "kind", "review", "number", 7)),
+                                zip.getPath("/")));
+                assertEquals(failure.getMessage(), constructorFailure.getMessage());
+            }
+        }
+    }
 
     @Test
     void boundedMailboxIsReadOnlyAndPinnedToTask() throws Exception {

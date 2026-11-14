@@ -56,7 +56,7 @@ public class WorkerCommand implements Runnable {
 
     @Override
     public void run() {
-        worker.run(options.task());
+        worker.run(options.task(), options.worker());
         if (notifications != null) {
             final var failed = store.transaction(state -> {
                 final var selected = state.list().stream()

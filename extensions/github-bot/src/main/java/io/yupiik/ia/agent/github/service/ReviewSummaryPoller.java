@@ -18,7 +18,6 @@ package io.yupiik.ia.agent.github.service;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.client.ReviewClient;
-import io.yupiik.ia.agent.github.command.PollCommand;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
 import io.yupiik.ia.agent.github.model.TaskKind;
@@ -64,7 +63,6 @@ public class ReviewSummaryPoller {
 
     private static final ConcurrentHashMap<Path, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
     private final GithubBotConfiguration conf;
-    private final PollOptions options;
     private final TaskStore store;
     private final ReviewClient reviews;
     private final Clock clock;
@@ -74,14 +72,12 @@ public class ReviewSummaryPoller {
     /** A null audit sink preserves polling without audit output. */
     public ReviewSummaryPoller(
             final GithubBotConfiguration conf,
-            final PollCommand.Options commandOptions,
             final TaskStore store,
             final GitHubClient github,
             final Clock clock,
             final BotAudit audit,
             final TeamAuthorization authorization) {
         this.conf = conf;
-        this.options = commandOptions == null ? null : commandOptions.poll();
         this.store = store;
         // Fusion creates the lazy subclass with null constructor arguments, before injecting the real instance.
         this.reviews = github == null ? null : new ReviewClient(github);
@@ -90,7 +86,7 @@ public class ReviewSummaryPoller {
         this.authorization = authorization;
     }
 
-    public int poll(final List<String> repositories) {
+    public int poll(final List<String> repositories, final PollOptions options) {
         if (!options.reviews().enabled()) {
             return 0;
         }
@@ -129,7 +125,8 @@ public class ReviewSummaryPoller {
             for (int i = 0; i < repos.size(); i += ReviewClient.BATCH_SIZE) {
                 batches.add(repos.subList(i, Math.min(i + ReviewClient.BATCH_SIZE, repos.size())));
             }
-            return PollingTasks.sum(options.parallelism(), batches, group -> scanBatch(group, since, allowed, batch));
+            return PollingTasks.sum(
+                    options.parallelism(), batches, group -> scanBatch(group, since, allowed, batch, options));
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         } finally {
@@ -138,7 +135,11 @@ public class ReviewSummaryPoller {
     }
 
     private int scanBatch(
-            final List<String> repositories, final Instant since, final Set<String> allowed, final String batch) {
+            final List<String> repositories,
+            final Instant since,
+            final Set<String> allowed,
+            final String batch,
+            final PollOptions options) {
         // REST continuation URLs cannot be used as GraphQL cursors. Start a conservative traversal
         // in a separate namespace while retaining initialSince and the transport-independent receipts.
         var pending = store.transaction(state -> {
@@ -165,7 +166,7 @@ public class ReviewSummaryPoller {
                 final var page = result.get(repo);
                 for (final var pull : page.nodes()) {
                     if ("OPEN".equals(pull.state())) {
-                        created += reviews(repo, pull, since, allowed, batch);
+                        created += reviews(repo, pull, since, allowed, batch, options);
                     }
                 }
                 // Failed review requests keep this discovery page eligible for replay.
@@ -187,7 +188,8 @@ public class ReviewSummaryPoller {
             final ReviewClient.Pull initial,
             final Instant since,
             final Set<String> allowed,
-            final String batch) {
+            final String batch,
+            final PollOptions options) {
         final int number = initial.number();
         final var key = repo + "/review-summary-graphql/pulls/" + number + "/reviews";
         final var after = store.transaction(state -> state.cursors().get(key + ":next"));

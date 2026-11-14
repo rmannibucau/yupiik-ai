@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.WorkerCommand$Options$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
@@ -27,6 +28,8 @@ import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfi
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
+import io.yupiik.ia.agent.github.context.GithubContextSnapshot;
+import io.yupiik.ia.agent.github.context.GithubPrivateContext;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
 import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$Capabilities$FusionJsonCodec;
 import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$Container$FusionJsonCodec;
@@ -59,11 +62,13 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -230,8 +235,8 @@ class WorkerTest {
         // Missing target metadata cannot trigger a new agent run or turn into an unverified final comment.
         assertThrows(
                 RuntimeException.class,
-                () -> BotTestConfiguration.worker(conf, options, store, github, json, backend)
-                        .run(id));
+                () -> BotTestConfiguration.worker(conf, store, github, json, backend)
+                        .run(id, options));
         assertEquals(
                 TaskState.publishing, store.transaction(state -> state.task(id).state()));
         assertTrue(store.<Boolean>transaction(state -> (state.task(id).strictSolvePublication() != null)));
@@ -255,8 +260,8 @@ class WorkerTest {
         // Missing identity/team API response must fail closed, not become an execution retry.
         assertThrows(
                 RuntimeException.class,
-                () -> BotTestConfiguration.worker(restricted, DEFAULT_OPTIONS, store, github, json, backend)
-                        .run(id));
+                () -> BotTestConfiguration.worker(restricted, store, github, json, backend)
+                        .run(id, DEFAULT_OPTIONS));
         assertFalse(Files.exists(invocations));
     }
 
@@ -270,7 +275,7 @@ class WorkerTest {
             task.result(TaskFixtures.result(Map.of("review", Map.of("headSha", "head", "body", "Review"))));
             return null;
         });
-        assertThrows(IllegalStateException.class, () -> worker(1).run(id));
+        assertThrows(IllegalStateException.class, () -> worker().run(id, workerOptions(1)));
         assertEquals(
                 TaskState.publishing, store.transaction(state -> state.task(id).state()));
         assertTrue(store.<Boolean>transaction(state -> (state.task(id).result() != null)));
@@ -292,7 +297,7 @@ class WorkerTest {
                 task.runtimeId(identity);
                 return null;
             });
-            assertThrows(IllegalStateException.class, () -> worker(1).run(id));
+            assertThrows(IllegalStateException.class, () -> worker().run(id, workerOptions(1)));
             assertEquals(
                     TaskState.running, store.transaction(state -> state.task(id).state()));
             assertTrue(Files.isDirectory(directory));
@@ -301,7 +306,7 @@ class WorkerTest {
             state.task(id).runtimeId(null);
             return null;
         });
-        assertThrows(IllegalStateException.class, () -> worker(1).run(id));
+        assertThrows(IllegalStateException.class, () -> worker().run(id, workerOptions(1)));
         assertFalse(Files.exists(invocations));
         assertTrue(posts.isEmpty());
     }
@@ -316,8 +321,7 @@ class WorkerTest {
                 "#!/bin/sh\ncase \"$1\" in\nrun) exit 9;;\ncontainer) printf 'false\\n';;\n*) exit 0;;\nesac\n");
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
         final var stoppable = execution(executable.toString(), "trusted-agent", Duration.ofSeconds(5));
-        BotTestConfiguration.worker(conf, DEFAULT_OPTIONS, store, github, json, stoppable)
-                .run(id);
+        BotTestConfiguration.worker(conf, store, github, json, stoppable).run(id, DEFAULT_OPTIONS);
         assertEquals(
                 TaskState.pending, store.transaction(state -> state.task(id).state()));
         assertEquals(1, ((Number) store.transaction(state -> state.task(id).attempts())).intValue());
@@ -328,6 +332,246 @@ class WorkerTest {
         final var directory = Path.of(
                 store.<String>transaction(state -> String.valueOf(state.task(id).attemptDirectory())));
         AttemptPreparation.delete(directory);
+    }
+
+    @Test
+    void preparationFailureSurvivesWithoutAnExecutionLog() throws Exception {
+        enqueue("review");
+        worker().run(id, workerOptions(1));
+        final var task = new TaskStore(BotTestConfiguration.home(home), json)
+                .transaction(state -> state.task(id).document());
+        assertEquals(TaskState.failed, task.state());
+        assertEquals("IllegalArgumentException", task.lastError());
+        assertEquals("preparation", task.lastFailure().stage());
+        assertEquals(1, task.lastFailure().attempt());
+        assertEquals(
+                BotTestConfiguration.CLOCK.instant().toString(),
+                task.lastFailure().timestamp());
+        assertTrue(task.lastFailure().diagnosticsRetained());
+        assertNull(task.attemptDirectory());
+        final var privateDetails = new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK).read(id);
+        assertTrue(privateDetails.contains("Trusted agent configuration must be a regular non-symbolic file"));
+        assertTrue(privateDetails.contains("logUnavailable"));
+        assertFalse(Files.exists(invocations));
+        assertEquals(1, posts.size());
+        assertFalse(posts.getFirst().toString().contains("Trusted agent configuration"));
+    }
+
+    @Test
+    void retriesRetainEachPrivateLogBeforeFinalAttemptCleanup() throws Exception {
+        enqueue("review");
+        Files.writeString(home.resolve("agent-configuration.json"), "{}");
+        final var executable = diagnosticDocker(9);
+        final var executor = execution(executable.toString(), "trusted-agent", Duration.ofSeconds(5));
+        final var directories = new ArrayList<Path>();
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            BotTestConfiguration.worker(conf, store, github, json, executor).run(id, DEFAULT_OPTIONS);
+            final var task = store.transaction(state -> state.task(id).document());
+            assertEquals(attempt, task.attempts());
+            assertEquals("execution", task.lastFailure().stage());
+            assertEquals(9, task.lastFailure().exitCode());
+            assertTrue(task.lastFailure().diagnosticsRetained());
+            assertTrue(Files.isRegularFile(home.resolve(task.lastFailure().diagnosticFile())));
+            if (task.attemptDirectory() != null) {
+                directories.add(Path.of(task.attemptDirectory()));
+            }
+        }
+        final var task = store.transaction(state -> state.task(id).document());
+        assertEquals(TaskState.failed, task.state());
+        assertNull(task.attemptDirectory());
+        for (final var directory : directories) {
+            assertFalse(Files.exists(directory));
+        }
+        final var records = (List<?>)
+                json.fromString(Object.class, new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK).read(id));
+        assertEquals(3, records.size());
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            final var record = (Map<?, ?>) records.get(attempt - 1);
+            assertEquals(attempt, ((Number) record.get("attempt")).intValue());
+            assertTrue(String.valueOf(record.get("logTail")).contains("private-agent-secret"));
+        }
+        assertFalse(Files.readString(home.resolve("state.json")).contains("private-agent-secret"));
+        assertFalse(Files.readString(home.resolve("audit.jsonl")).contains("private-agent-secret"));
+        assertFalse(posts.toString().contains("private-agent-secret"));
+        assertEquals(1, posts.size());
+    }
+
+    @Test
+    void reusedWorkerUsesEachInvocationsRetryBudget() throws Exception {
+        enqueue("review");
+        Files.writeString(home.resolve("agent-configuration.json"), "{}");
+        final var executor = execution(diagnosticDocker(9).toString(), "trusted-agent", Duration.ofSeconds(5));
+        final var worker = BotTestConfiguration.worker(conf, store, github, json, executor);
+
+        worker.run(id, DEFAULT_OPTIONS);
+        assertEquals(
+                TaskState.pending, store.transaction(state -> state.task(id).state()));
+        assertTrue(posts.isEmpty());
+
+        worker.run(id, workerOptions(1));
+        assertEquals(TaskState.failed, store.transaction(state -> state.task(id).state()));
+        assertEquals(2, store.transaction(state -> state.task(id).attempts()).intValue());
+        assertEquals(1, posts.size());
+    }
+
+    @Test
+    void zeroExitWithMissingResultHasDistinctStageAndRetainsLog() throws Exception {
+        enqueue("review");
+        Files.writeString(home.resolve("agent-configuration.json"), "{}");
+        final var executable = diagnosticDocker(0);
+        final var executor = execution(executable.toString(), "trusted-agent", Duration.ofSeconds(5));
+        BotTestConfiguration.worker(conf, store, github, json, executor).run(id, DEFAULT_OPTIONS);
+        final var task = store.transaction(state -> state.task(id).document());
+        assertEquals(TaskState.pending, task.state());
+        assertEquals("result-validation", task.lastFailure().stage());
+        assertEquals(0, task.lastFailure().exitCode());
+        final var details = new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK).read(id);
+        assertTrue(details.contains("No bounded structured result"));
+        assertTrue(details.contains("private-agent-secret"));
+        assertTrue(posts.isEmpty());
+        AttemptPreparation.delete(Path.of(task.attemptDirectory()));
+    }
+
+    @Test
+    void failedDiagnosticCaptureDoesNotPreventFinalCleanupOrReplaceOriginalFailure() throws Exception {
+        enqueue("review");
+        Files.writeString(home.resolve("agent-configuration.json"), "{}");
+        final var outside = Files.createDirectory(home.resolve("outside-diagnostics"));
+        Files.createSymbolicLink(home.resolve("diagnostics"), outside);
+        final var executable = diagnosticDocker(9);
+        final var executor = execution(executable.toString(), "trusted-agent", Duration.ofSeconds(5));
+        final var options = new WorkerCommand$Options$FusionConfigurationFactory(
+                        key -> "worker.maxRetries".equals(key) ? Optional.of("0") : Optional.empty())
+                .get()
+                .worker();
+        BotTestConfiguration.worker(conf, store, github, json, executor).run(id, options);
+        final var task = store.transaction(state -> state.task(id).document());
+        assertEquals(TaskState.failed, task.state());
+        assertNull(task.attemptDirectory());
+        assertEquals("IllegalArgumentException", task.lastError());
+        assertEquals("execution", task.lastFailure().stage());
+        assertEquals(9, task.lastFailure().exitCode());
+        assertFalse(task.lastFailure().diagnosticsRetained());
+        assertNull(task.lastFailure().diagnosticFile());
+        try (final var entries = Files.list(outside)) {
+            assertEquals(0, entries.count());
+        }
+        assertEquals(1, posts.size());
+    }
+
+    private Path diagnosticDocker(final int exitCode) throws Exception {
+        assumeTrue(
+                ((Number) Files.getAttribute(home, "unix:uid")).intValue() != 0,
+                "Docker backend rejects root dispatchers");
+        final var executable = home.resolve("diagnostic-docker");
+        Files.writeString(
+                executable,
+                "#!/bin/sh\ncase \"$1\" in\nrun) printf 'private-agent-secret\\n'; exit " + exitCode
+                        + ";;\ncontainer) printf 'false\\n';;\n*) exit 0;;\nesac\n");
+        Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
+        return executable;
+    }
+
+    @Test
+    void recoveredInvalidResultIsCapturedBeforeTerminalCleanup() throws Exception {
+        enqueue("review");
+        final var directory = Files.createTempDirectory("yca-github-diagnostic-recovery-");
+        Files.createDirectory(directory.resolve("output"));
+        Files.writeString(directory.resolve("output/result.json"), "{}");
+        Files.writeString(directory.resolve("execution.log"), "private-recovery-evidence");
+        Files.writeString(directory.resolve("configuration.json"), "private-configuration-must-be-deleted");
+        store.transaction(state -> {
+            final var task = state.task(id);
+            task.state(TaskState.running);
+            task.attempts(1);
+            task.attemptDirectory(directory.toString());
+            task.runtimeId("yca-" + id + "-1");
+            return null;
+        });
+        backend = execution(diagnosticDocker(0).toString(), "trusted-agent", Duration.ofSeconds(5));
+        try {
+            worker().run(id, workerOptions(1));
+            final var task = store.transaction(state -> state.task(id).document());
+            assertEquals(TaskState.failed, task.state());
+            assertEquals("recovery-result", task.lastFailure().stage());
+            assertEquals(1, task.lastFailure().attempt());
+            assertNull(task.attemptDirectory());
+            assertFalse(Files.exists(directory));
+            final var diagnostics = new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK).read(id);
+            assertTrue(diagnostics.contains("Structured result schema/task identity mismatch"));
+            assertTrue(diagnostics.contains("private-recovery-evidence"));
+            assertFalse(diagnostics.contains("private-configuration-must-be-deleted"));
+            assertFalse(posts.toString().contains("private-recovery-evidence"));
+        } finally {
+            if (Files.exists(directory)) {
+                AttemptPreparation.delete(directory);
+            }
+        }
+    }
+
+    @Test
+    void cleanupFailureKeepsItsPreciseStageAndDoesNotRepublish() throws Exception {
+        enqueue("help");
+        final var directory = Files.createDirectory(home.resolve("unexpected-cleanup-path"));
+        Files.writeString(directory.resolve("execution.log"), "private-cleanup-evidence");
+        store.transaction(state -> {
+            final var task = state.task(id);
+            task.state(TaskState.publishing);
+            task.attempts(1);
+            task.attemptDirectory(directory.toString());
+            task.result(TaskFixtures.result(Map.of("summary", "Help requested.")));
+            return null;
+        });
+        for (int run = 0; run < 2; run++) {
+            assertThrows(IllegalStateException.class, () -> worker().run(id, workerOptions(1)));
+            final var task = store.transaction(state -> state.task(id).document());
+            assertEquals(TaskState.done, task.state());
+            assertEquals("cleanup", task.lastFailure().stage());
+            assertEquals(directory.toString(), task.attemptDirectory());
+            assertTrue(Files.isDirectory(directory));
+            assertEquals(1, posts.size());
+        }
+        final var details = new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK).read(id);
+        assertTrue(details.contains("Unexpected cleanup path"));
+        assertTrue(details.contains("private-cleanup-evidence"));
+        assertFalse(posts.toString().contains("private-cleanup-evidence"));
+    }
+
+    @Test
+    void recoveredAgentFailureRetainsPrivateReasonWithTheCorrectAttempt() throws Exception {
+        enqueue("review");
+        final var directory = Files.createTempDirectory("yca-github-agent-failure-");
+        Files.createDirectory(directory.resolve("output"));
+        Files.writeString(
+                directory.resolve("output/result.json"),
+                json.toString(TaskFixtures.result(
+                        Map.of("schemaVersion", 1, "taskId", id, "failure", "private-agent-reason"))));
+        store.transaction(state -> {
+            final var task = state.task(id);
+            task.state(TaskState.running);
+            task.attempts(1);
+            task.attemptDirectory(directory.toString());
+            task.runtimeId("yca-" + id + "-1");
+            return null;
+        });
+        backend = execution(diagnosticDocker(0).toString(), "trusted-agent", Duration.ofSeconds(5));
+        try {
+            worker().run(id, workerOptions(1));
+            final var task = store.transaction(state -> state.task(id).document());
+            assertEquals(TaskState.failed, task.state());
+            assertEquals("agent-result", task.lastFailure().stage());
+            assertEquals(1, task.lastFailure().attempt());
+            assertFalse(Files.exists(directory));
+            assertTrue(new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK)
+                    .read(id)
+                    .contains("private-agent-reason"));
+            assertFalse(Files.readString(home.resolve("state.json")).contains("private-agent-reason"));
+            assertFalse(posts.toString().contains("private-agent-reason"));
+        } finally {
+            if (Files.exists(directory)) {
+                AttemptPreparation.delete(directory);
+            }
+        }
     }
 
     @Test
@@ -354,12 +598,11 @@ class WorkerTest {
         // Recovery must reject the symbolic output before a subsequent setup failure is published.
         BotTestConfiguration.worker(
                         conf,
-                        DEFAULT_OPTIONS,
                         store,
                         github,
                         json,
                         execution(executable.toString(), "trusted-agent", Duration.ofSeconds(5)))
-                .run(id);
+                .run(id, DEFAULT_OPTIONS);
         assertEquals(TaskState.failed, store.transaction(state -> state.task(id).state()));
         assertFalse(json.toString(posts).contains("Untrusted host file"));
         assertTrue(Files.isRegularFile(outside.resolve("result.json")));
@@ -390,12 +633,11 @@ class WorkerTest {
         });
         BotTestConfiguration.worker(
                         conf,
-                        DEFAULT_OPTIONS,
                         store,
                         github,
                         json,
                         execution(executable.toString(), "trusted-agent", Duration.ofSeconds(5)))
-                .run(id);
+                .run(id, DEFAULT_OPTIONS);
         assertEquals(TaskState.failed, store.transaction(state -> state.task(id).state()));
         assertFalse(Files.exists(directory));
     }
@@ -416,19 +658,66 @@ class WorkerTest {
             state.task(id).actorId(null);
             return null;
         });
-        BotTestConfiguration.worker(
-                        strict,
+        BotTestConfiguration.worker(strict, store, github, json, backend)
+                .run(
+                        id,
                         new WorkerCommand$Options$FusionConfigurationFactory(
                                         key -> Optional.ofNullable(values.get(key)))
                                 .get()
-                                .worker(),
-                        store,
-                        github,
-                        json,
-                        backend)
-                .run(id);
+                                .worker());
         assertFalse(Files.exists(invocations));
         assertEquals(TaskState.failed, store.transaction(state -> state.task(id).state()));
+    }
+
+    @Test
+    void strictReviewRejectsUnsupportedRuntimeBeforeFetchingContextOrLaunching() throws Exception {
+        enqueue("review");
+        store.transaction(state -> {
+            state.task(id).actorId(null);
+            return null;
+        });
+        final var values =
+                Map.of("github.home", home.toString(), "worker.agentCommenting", "false", "worker.maxRetries", "0");
+        final var strict = new GithubBotConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get();
+        final var commandOptions =
+                new WorkerCommand$Options$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+        try (final var filesystem = FileSystems.newFileSystem(
+                URI.create("jar:" + home.resolve("unsupported.zip").toUri()), Map.of("create", "true"))) {
+            final var attempt = Files.createDirectories(filesystem.getPath("/attempt/workspace"))
+                    .getParent();
+            final var preparation = new AttemptPreparation(json) {
+                @Override
+                public Path prepare(final Path configuration, final Path attemptRoot) {
+                    return attempt;
+                }
+            };
+            new Worker(
+                            strict,
+                            store,
+                            github,
+                            json,
+                            backend,
+                            BotTestConfiguration.audit(strict, json),
+                            new TeamAuthorization(github, strict),
+                            preparation,
+                            new GithubPrivateContext(github, json),
+                            new GithubContextSnapshot(github, json),
+                            new ForkProvisioner(github, store),
+                            new ReviewPublisher(github, store, strict),
+                            new StrictSolvePublisher(github, store, json),
+                            new DiscussionPublisher(new DiscussionClient(github), store, strict),
+                            BotTestConfiguration.CLOCK)
+                    .run(id, commandOptions.worker());
+            final var task = store.transaction(state -> state.task(id).document());
+            assertEquals(TaskState.failed, task.state());
+            assertEquals("runtime-preflight", task.lastFailure().stage());
+            assertTrue(task.lastFailure().message().contains("SecureDirectoryStream"));
+            assertFalse(Files.exists(invocations));
+            assertTrue(requests.stream().noneMatch(request -> request.contains("/pulls/12")));
+            assertFalse(Files.exists(attempt));
+        }
     }
 
     @Test
@@ -443,17 +732,13 @@ class WorkerTest {
             state.task(id).actorId(null);
             return null;
         });
-        BotTestConfiguration.worker(
-                        strict,
+        BotTestConfiguration.worker(strict, store, github, json, backend)
+                .run(
+                        id,
                         new WorkerCommand$Options$FusionConfigurationFactory(
                                         key -> Optional.ofNullable(values.get(key)))
                                 .get()
-                                .worker(),
-                        store,
-                        github,
-                        json,
-                        backend)
-                .run(id);
+                                .worker());
         assertFalse(Files.exists(invocations));
         assertEquals(TaskState.failed, store.transaction(state -> state.task(id).state()));
         assertTrue(requests.stream().anyMatch(request -> request.contains("/pulls/12")));
@@ -519,17 +804,13 @@ class WorkerTest {
         final var strict = new GithubBotConfiguration$FusionConfigurationFactory(
                         key -> Optional.ofNullable(values.get(key)))
                 .get();
-        BotTestConfiguration.worker(
-                        strict,
+        BotTestConfiguration.worker(strict, store, github, json, backend)
+                .run(
+                        id,
                         new WorkerCommand$Options$FusionConfigurationFactory(
                                         key -> Optional.ofNullable(values.get(key)))
                                 .get()
-                                .worker(),
-                        store,
-                        github,
-                        json,
-                        backend)
-                .run(id);
+                                .worker());
         assertTrue(Files.readString(home.resolve("staged-context")).contains("private-context-title"));
     }
 
@@ -556,17 +837,13 @@ class WorkerTest {
         final var grouped = new GithubBotConfiguration$FusionConfigurationFactory(
                         key -> Optional.ofNullable(values.get(key)))
                 .get();
-        BotTestConfiguration.worker(
-                        grouped,
+        BotTestConfiguration.worker(grouped, store, github, json, backend)
+                .run(
+                        first,
                         new WorkerCommand$Options$FusionConfigurationFactory(
                                         key -> Optional.ofNullable(values.get(key)))
                                 .get()
-                                .worker(),
-                        store,
-                        github,
-                        json,
-                        backend)
-                .run(first);
+                                .worker());
         assertEquals(
                 TaskState.done, store.transaction(state -> state.task(first).state()));
         assertEquals(
@@ -591,17 +868,13 @@ class WorkerTest {
             state.task(id).actorId(null);
             return null;
         });
-        BotTestConfiguration.worker(
-                        cached,
+        BotTestConfiguration.worker(cached, store, github, json, backend)
+                .run(
+                        id,
                         new WorkerCommand$Options$FusionConfigurationFactory(
                                         key -> Optional.ofNullable(values.get(key)))
                                 .get()
-                                .worker(),
-                        store,
-                        github,
-                        json,
-                        backend)
-                .run(id);
+                                .worker());
         assertFalse(Files.exists(invocations));
         assertFalse(Files.exists(home.resolve("cache")));
     }
@@ -629,17 +902,13 @@ class WorkerTest {
                         .get(key)))
                 .get();
         try {
-            BotTestConfiguration.worker(
-                            configured,
+            BotTestConfiguration.worker(configured, store, github, json, execution)
+                    .run(
+                            id,
                             new WorkerCommand$Options$FusionConfigurationFactory(
                                             key -> Optional.ofNullable(values.get(key)))
                                     .get()
-                                    .worker(),
-                            store,
-                            github,
-                            json,
-                            execution)
-                    .run(id);
+                                    .worker());
             assertFalse(Files.exists(invocations));
             try (final var children = Files.list(attempts)) {
                 assertEquals(0, children.count());
@@ -750,14 +1019,8 @@ class WorkerTest {
         assertEquals(1, posts.size());
         comments =
                 List.of(Map.of("body", marker() + "\nCanonical help", "user", Map.of("login", "BoT"), "html_url", URL));
-        BotTestConfiguration.worker(
-                        conf,
-                        DEFAULT_OPTIONS,
-                        new TaskStore(BotTestConfiguration.home(home), json),
-                        github,
-                        json,
-                        backend)
-                .run(id);
+        BotTestConfiguration.worker(conf, new TaskStore(BotTestConfiguration.home(home), json), github, json, backend)
+                .run(id, DEFAULT_OPTIONS);
         assertEquals(TaskState.done, store.transaction(state -> state.task(id).state()));
         assertEquals(URL, store.transaction(state -> state.task(id).commentUrl()));
         assertEquals(1, posts.size());
@@ -916,7 +1179,7 @@ class WorkerTest {
     void rejectsOutOfBoundsParallelism() {
         enqueue("help");
         for (final var value : List.of(0, -1, 65)) {
-            assertThrows(IllegalArgumentException.class, () -> worker(value).run(id));
+            assertThrows(IllegalArgumentException.class, () -> worker().run(id, workerOptions(value)));
         }
         assertTrue(posts.isEmpty());
     }
@@ -924,20 +1187,21 @@ class WorkerTest {
     @Test
     void twoSlotsRunDistinctTasksButNeverDuplicateOrExceedBound() throws Exception {
         blockingDocker();
+        final var worker = worker();
         final var first = enqueueReview("first");
         final var second = enqueueReview("second");
         final var third = enqueueReview("third");
         id = first;
         try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             try {
-                final var one = executor.submit(() -> worker(2).run(first));
+                final var one = executor.submit(() -> worker.run(first, workerOptions(2)));
                 awaitLaunches(1);
-                executor.submit(() -> worker(2).run(first)).get(5, TimeUnit.SECONDS);
+                executor.submit(() -> worker.run(first, workerOptions(2))).get(5, TimeUnit.SECONDS);
                 assertEquals(List.of("run yca-" + first + "-1"), Files.readAllLines(invocations));
                 // Skip the live first candidate despite same-JVM slot and task lock overlap.
-                final var two = executor.submit(() -> worker(2).run(null));
+                final var two = executor.submit(() -> worker.run(null, workerOptions(2)));
                 awaitLaunches(2);
-                executor.submit(() -> worker(2).run(third)).get(5, TimeUnit.SECONDS);
+                executor.submit(() -> worker.run(third, workerOptions(2))).get(5, TimeUnit.SECONDS);
                 assertEquals(2, launchCount());
                 assertEquals(
                         TaskState.running,
@@ -962,9 +1226,9 @@ class WorkerTest {
         }
         assertEquals(2, launchCount());
         assertEquals(2, posts.size());
-        worker(2).run(first);
+        worker.run(first, workerOptions(2));
         assertEquals(2, launchCount());
-        worker(2).run(third);
+        worker.run(third, workerOptions(2));
         assertEquals(3, launchCount());
         assertEquals(
                 TaskState.failed, store.transaction(state -> state.task(third).state()));
@@ -978,9 +1242,9 @@ class WorkerTest {
         id = first;
         try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             try {
-                final var running = executor.submit(() -> worker(1).run(first));
+                final var running = executor.submit(() -> worker().run(first, workerOptions(1)));
                 awaitLaunches(1);
-                executor.submit(() -> worker(1).run(second)).get(5, TimeUnit.SECONDS);
+                executor.submit(() -> worker().run(second, workerOptions(1))).get(5, TimeUnit.SECONDS);
                 assertEquals(1, launchCount());
                 assertEquals(
                         TaskState.pending,
@@ -1015,13 +1279,13 @@ class WorkerTest {
             try (final var channel = FileChannel.open(
                             home.resolve("task-" + id + ".lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
                     final var lock = channel.lock()) {
-                worker(2).run(id);
+                worker().run(id, workerOptions(2));
                 assertEquals(
                         TaskState.running,
                         store.transaction(state -> state.task(id).state()));
                 assertTrue(posts.isEmpty());
             }
-            worker(2).run(id);
+            worker().run(id, workerOptions(2));
             assertEquals(
                     TaskState.failed, store.transaction(state -> state.task(id).state()));
             assertEquals(
@@ -1048,30 +1312,28 @@ class WorkerTest {
                 new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
         assertThrows(
                 IllegalArgumentException.class,
-                () -> BotTestConfiguration.worker(conf, DEFAULT_OPTIONS, store, github, json, executor)
-                        .run(""));
+                () -> BotTestConfiguration.worker(conf, store, github, json, executor)
+                        .run("", DEFAULT_OPTIONS));
         assertFalse(Files.exists(invocations));
     }
 
-    private Worker worker(final int parallelism) {
+    private Worker worker() {
         final var values = Map.of(
                 "github.home", home.toString(),
                 "github.login", "bot",
-                "github.authorization.userIds", "42",
-                "worker.maxRetries", "0",
-                "worker.parallelism", Integer.toString(parallelism));
+                "github.authorization.userIds", "42");
         final var configuration = new GithubBotConfiguration$FusionConfigurationFactory(
                         key -> Optional.ofNullable(values.get(key)))
                 .get();
         return BotTestConfiguration.worker(
-                configuration,
-                new WorkerCommand$Options$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key)))
-                        .get()
-                        .worker(),
-                new TaskStore(BotTestConfiguration.home(home), json),
-                github,
-                json,
-                backend);
+                configuration, new TaskStore(BotTestConfiguration.home(home), json), github, json, backend);
+    }
+
+    private WorkerOptions workerOptions(final int parallelism) {
+        final var values = Map.of("worker.maxRetries", "0", "worker.parallelism", Integer.toString(parallelism));
+        return new WorkerCommand$Options$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .worker();
     }
 
     private String enqueueReview(final String invocation) {
@@ -1127,8 +1389,7 @@ class WorkerTest {
     }
 
     private void run() {
-        BotTestConfiguration.worker(conf, DEFAULT_OPTIONS, store, github, json, backend)
-                .run(id);
+        BotTestConfiguration.worker(conf, store, github, json, backend).run(id, DEFAULT_OPTIONS);
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -1205,13 +1466,12 @@ class WorkerTest {
                 Files.writeString(config, json.toString(unsafe));
                 assertThrows(
                         IllegalArgumentException.class,
-                        () -> BotTestConfiguration.worker(conf, DEFAULT_OPTIONS, store, github, json, execution)
-                                .run(id));
+                        () -> BotTestConfiguration.worker(conf, store, github, json, execution)
+                                .run(id, DEFAULT_OPTIONS));
                 assertTrue(calls.isEmpty());
                 Files.writeString(config, original);
             }
-            BotTestConfiguration.worker(conf, DEFAULT_OPTIONS, store, github, json, execution)
-                    .run(id);
+            BotTestConfiguration.worker(conf, store, github, json, execution).run(id, DEFAULT_OPTIONS);
             assertEquals(
                     TaskState.done, store.transaction(state -> state.task(id).state()));
             assertTrue(calls.stream()

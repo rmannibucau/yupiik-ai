@@ -99,7 +99,7 @@ class DiscussionSupportTest {
             assertThrows(IllegalArgumentException.class, () -> fixture.poll(true, "42", "", 0));
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> fixture.poller(true, "42", "", 1).poll(List.of("owner/repo/../other")));
+                    () -> fixture.poller("42", "").poll(List.of("owner/repo/../other"), fixture.options(true, 1)));
             assertTrue(fixture.requests.isEmpty());
         }
     }
@@ -601,26 +601,24 @@ class DiscussionSupportTest {
             return result;
         }
 
-        private DiscussionPoller poller(final boolean enabled, final String ids, final String teams, final int budget) {
+        private DiscussionPoller poller(final String ids, final String teams) {
             final var conf = new GithubBotConfiguration(
                     home.toString(), api(), "bot", 0, null, new GithubBotConfiguration.Authorization(ids, teams), null);
-            return BotTestConfiguration.discussionPoller(
-                    conf,
-                    new PollOptions(
-                            "now",
-                            budget,
-                            new PollOptions.Reviews(false),
-                            new PollOptions.Discussions(enabled),
-                            4,
-                            new PollOptions.Search(false, 3600)),
-                    store,
-                    github,
-                    Clock.fixed(NOW, ZoneOffset.UTC),
-                    null);
+            return BotTestConfiguration.discussionPoller(conf, store, github, Clock.fixed(NOW, ZoneOffset.UTC), null);
+        }
+
+        private PollOptions options(final boolean enabled, final int budget) {
+            return new PollOptions(
+                    "now",
+                    budget,
+                    new PollOptions.Reviews(false),
+                    new PollOptions.Discussions(enabled),
+                    4,
+                    new PollOptions.Search(false, 3600));
         }
 
         private int poll(final boolean enabled, final String ids, final String teams, final int budget) {
-            return poller(enabled, ids, teams, budget).poll(List.of("owner/repo"));
+            return poller(ids, teams).poll(List.of("owner/repo"), options(enabled, budget));
         }
 
         private Map<String, Object> task(final String commentId, final String replyToId) {

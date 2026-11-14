@@ -18,7 +18,6 @@ package io.yupiik.ia.agent.github.service;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.client.GitHubClient;
-import io.yupiik.ia.agent.github.command.WorkerCommand;
 import io.yupiik.ia.agent.github.model.AgentResult;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.store.MutableSolvePublication;
@@ -55,23 +54,16 @@ public class StrictSolvePublisher {
     private final GitHubClient github;
     private final TaskStore store;
     private final JsonMapper json;
-    private final WorkerCommand.Options options;
 
-    public StrictSolvePublisher(
-            final GitHubClient github,
-            final TaskStore store,
-            final JsonMapper json,
-            final WorkerCommand.Options options) {
+    public StrictSolvePublisher(final GitHubClient github, final TaskStore store, final JsonMapper json) {
         this.github = github;
         this.store = store;
         this.json = json;
-        this.options = options;
     }
 
     /** Returns the verified upstream PR URL, or throws while retaining all recovery evidence. */
-    public String publish(final TaskDocument taskDocument, final AgentResult agentResult) {
+    public String publish(final TaskDocument taskDocument, final AgentResult agentResult, final String forkOwner) {
         final var task = taskDocument;
-        final var forkOwner = options.worker().forkOwner();
         if (forkOwner == null || !OWNER.matcher(forkOwner).matches()) {
             throw new IllegalArgumentException("Invalid fork owner");
         }
@@ -167,7 +159,7 @@ public class StrictSolvePublisher {
         }
         // PR reconciliation must remain possible after the default branch has moved.
         if (publication.prIntent() != null) {
-            return reconcile(id, upstream, fork, branch, baseBranch, marker, publication);
+            return reconcile(id, upstream, fork, branch, baseBranch, marker, publication, forkOwner);
         }
         verifyTarget(upstream, fork, baseBranch, base);
         final var author = text(TaskStore.map(github.get("/user")), "login");
@@ -305,9 +297,10 @@ public class StrictSolvePublisher {
             final String branch,
             final String baseBranch,
             final String marker,
-            final TaskDocument.SolvePublication publication) {
-        String next = "/repos/" + upstream + "/pulls?state=all&head="
-                + encode(options.worker().forkOwner() + ":" + branch) + "&base=" + encode(baseBranch) + "&per_page=100";
+            final TaskDocument.SolvePublication publication,
+            final String forkOwner) {
+        String next = "/repos/" + upstream + "/pulls?state=all&head=" + encode(forkOwner + ":" + branch) + "&base="
+                + encode(baseBranch) + "&per_page=100";
         final var visited = new HashSet<String>();
         Map<String, Object> found = null;
         while (next != null) {

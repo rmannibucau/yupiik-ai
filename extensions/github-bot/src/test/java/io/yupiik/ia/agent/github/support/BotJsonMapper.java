@@ -74,6 +74,7 @@ import io.yupiik.ia.agent.github.model.AgentResult$Review$FusionJsonCodec;
 import io.yupiik.ia.agent.github.model.AgentResult$StrictSolve$FusionJsonCodec;
 import io.yupiik.ia.agent.github.model.KubeconfigDocument$FusionJsonCodec;
 import io.yupiik.ia.agent.github.model.KubeconfigDocument$User$FusionJsonCodec;
+import io.yupiik.ia.agent.github.model.TaskDocument$FailureDetail$FusionJsonCodec;
 import io.yupiik.ia.agent.github.model.TaskDocument$ForkIntent$FusionJsonCodec;
 import io.yupiik.ia.agent.github.model.TaskDocument$FusionJsonCodec;
 import io.yupiik.ia.agent.github.model.TaskDocument$PublicationObject$FusionJsonCodec;
@@ -155,6 +156,7 @@ public final class BotJsonMapper {
         all.add(new KubeconfigDocument$FusionJsonCodec());
         all.add(new KubeconfigDocument$User$FusionJsonCodec());
         all.add(new TaskDocument$FusionJsonCodec());
+        all.add(new TaskDocument$FailureDetail$FusionJsonCodec());
         all.add(new TaskDocument$Run$FusionJsonCodec());
         all.add(new TaskDocument$ForkIntent$FusionJsonCodec());
         all.add(new TaskDocument$SolvePublication$FusionJsonCodec());

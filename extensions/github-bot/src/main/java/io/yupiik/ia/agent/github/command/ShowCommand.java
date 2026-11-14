@@ -20,7 +20,10 @@ import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.github.service.TaskDiagnostics;
 import io.yupiik.ia.agent.github.store.TaskStore;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.logging.Logger;
 
 @DefaultScoped
@@ -32,21 +35,39 @@ public class ShowCommand implements Runnable {
     private final Options options;
     private final JsonMapper json;
     private final TaskStore store;
+    private final TaskDiagnostics diagnostics;
 
-    public ShowCommand(final Options options, final JsonMapper json, final TaskStore store) {
+    public ShowCommand(
+            final Options options, final JsonMapper json, final TaskStore store, final TaskDiagnostics diagnostics) {
         this.options = options;
         this.json = json;
         this.store = store;
+        this.diagnostics = diagnostics;
     }
 
     @RootConfiguration("-")
     public record Options(
             @Property(defaultValue = "\"\"", documentation = "Task id to show.")
-            String task) {}
+            String task,
+
+            @Property(
+                    defaultValue = "false",
+                    documentation =
+                            "Explicitly print private failure messages and log tails; may contain secrets. Do not send this output to public logs.")
+            boolean diagnostics) {}
 
     @Override
     public void run() {
-        LOGGER.info(json.toString(
-                store.transaction(state -> state.task(options.task()).document())));
+        final var task = store.transaction(state -> state.task(options.task()).document());
+        if (options.diagnostics()) {
+            // Intentional CLI-only output: do not forward private evidence to inherited JUL handlers.
+            try {
+                System.out.println(diagnostics.read(options.task()));
+            } catch (final IOException e) {
+                throw new UncheckedIOException("Unable to read private task diagnostics", e);
+            }
+        } else {
+            LOGGER.info(json.toString(task));
+        }
     }
 }

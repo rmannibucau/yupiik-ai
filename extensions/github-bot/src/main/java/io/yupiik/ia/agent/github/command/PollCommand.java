@@ -29,9 +29,11 @@ import java.util.logging.Logger;
         description = "Poll GitHub mentions into the durable queue.")
 public class PollCommand implements Runnable {
     private static final Logger LOGGER = Logger.getLogger(PollCommand.class.getName());
+    private final Options options;
     private final Poller poller;
 
     public PollCommand(final Options options, final Poller poller) {
+        this.options = options;
         this.poller = poller;
     }
 
@@ -42,6 +44,6 @@ public class PollCommand implements Runnable {
 
     @Override
     public void run() {
-        LOGGER.info(String.valueOf(poller.poll()));
+        LOGGER.info(String.valueOf(poller.poll(options.poll())));
     }
 }

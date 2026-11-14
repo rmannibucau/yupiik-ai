@@ -21,11 +21,8 @@ import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.PollCommand;
 import io.yupiik.ia.agent.github.command.WorkerCommand;
-import io.yupiik.ia.agent.github.command.WorkerCommand$Options$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
-import io.yupiik.ia.agent.github.configuration.PollOptions;
-import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.context.GithubContextSnapshot;
 import io.yupiik.ia.agent.github.context.GithubPrivateContext;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
@@ -46,8 +43,6 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.Map;
-import java.util.Optional;
 
 public final class BotTestConfiguration {
     public static final Clock CLOCK = Clock.fixed(Instant.parse("2026-11-13T12:00:00Z"), ZoneOffset.UTC);
@@ -85,27 +80,14 @@ public final class BotTestConfiguration {
         return new DiscussionPublisher(new DiscussionClient(github), store, configuration("", login, ""));
     }
 
-    public static WorkerCommand.Options workerOptions(final String owner) {
-        final var values = Map.of("worker.forkOwner", owner);
-        return new WorkerCommand$Options$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
-    }
-
-    public static StrictSolvePublisher strictSolvePublisher(
-            final GitHubClient github, final TaskStore store, final JsonMapper json, final String owner) {
-        return new StrictSolvePublisher(github, store, json, workerOptions(owner));
-    }
-
     public static Worker worker(
             final GithubBotConfiguration conf,
-            final WorkerOptions options,
             final TaskStore store,
             final GitHubClient github,
             final JsonMapper json,
             final ExecutorConfiguration execution) {
-        final var commandOptions = new WorkerCommand.Options("", options);
         return new Worker(
                 conf,
-                commandOptions,
                 store,
                 github,
                 json,
@@ -117,63 +99,45 @@ public final class BotTestConfiguration {
                 new GithubContextSnapshot(github, json),
                 new ForkProvisioner(github, store),
                 new ReviewPublisher(github, store, conf),
-                new StrictSolvePublisher(github, store, json, commandOptions),
+                new StrictSolvePublisher(github, store, json),
                 new DiscussionPublisher(new DiscussionClient(github), store, conf),
                 CLOCK);
     }
 
     public static ReviewSummaryPoller reviewSummaryPoller(
             final GithubBotConfiguration conf,
-            final PollOptions options,
             final TaskStore store,
             final GitHubClient github,
             final Clock clock,
             final BotAudit audit) {
-        return new ReviewSummaryPoller(
-                conf,
-                new PollCommand.Options(options),
-                store,
-                github,
-                clock,
-                audit,
-                new TeamAuthorization(github, conf));
+        return new ReviewSummaryPoller(conf, store, github, clock, audit, new TeamAuthorization(github, conf));
     }
 
     public static DiscussionPoller discussionPoller(
             final GithubBotConfiguration conf,
-            final PollOptions options,
             final TaskStore store,
             final GitHubClient github,
             final Clock clock,
             final BotAudit audit) {
         return new DiscussionPoller(
-                conf,
-                new PollCommand.Options(options),
-                store,
-                github,
-                clock,
-                audit,
-                new TeamAuthorization(github, conf),
-                new DiscussionClient(github));
+                conf, store, github, clock, audit, new TeamAuthorization(github, conf), new DiscussionClient(github));
     }
 
     public static Poller poller(
             final GithubBotConfiguration conf,
-            final PollOptions options,
             final TaskStore store,
             final GitHubClient github,
             final Clock clock,
             final BotAudit audit) {
         return new Poller(
                 conf,
-                new PollCommand.Options(options),
                 store,
                 github,
                 clock,
                 audit,
                 new TeamAuthorization(github, conf),
-                reviewSummaryPoller(conf, options, store, github, clock, audit),
-                discussionPoller(conf, options, store, github, clock, audit),
+                reviewSummaryPoller(conf, store, github, clock, audit),
+                discussionPoller(conf, store, github, clock, audit),
                 new RepositoryDiscovery(conf, github, clock));
     }
 
@@ -187,7 +151,7 @@ public final class BotTestConfiguration {
             @Override
             public void run() {
                 try (final var runtime = new GithubServices().client(conf, json, CLOCK)) {
-                    new PollCommand(options, poller(conf, options.poll(), store, runtime, CLOCK, audit)).run();
+                    new PollCommand(options, poller(conf, store, runtime, CLOCK, audit)).run();
                 }
             }
         };
@@ -205,11 +169,7 @@ public final class BotTestConfiguration {
             @Override
             public void run() {
                 try (final var runtime = new GithubServices().client(conf, json, CLOCK)) {
-                    new WorkerCommand(
-                                    options,
-                                    store,
-                                    worker(conf, options.worker(), store, runtime, json, execution),
-                                    notifications)
+                    new WorkerCommand(options, store, worker(conf, store, runtime, json, execution), notifications)
                             .run();
                 }
             }

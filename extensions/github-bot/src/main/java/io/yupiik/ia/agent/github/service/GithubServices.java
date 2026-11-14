@@ -44,6 +44,12 @@ public class GithubServices {
 
     @Bean
     @ApplicationScoped
+    public TaskDiagnostics diagnostics(final GithubBotConfiguration conf, final JsonMapper json, final Clock clock) {
+        return new TaskDiagnostics(Path.of(conf.home()), json, clock);
+    }
+
+    @Bean
+    @ApplicationScoped
     public GitHubClient client(final GithubBotConfiguration conf, final JsonMapper json, final Clock clock) {
         final var authentication =
                 switch (conf.auth().type()) {

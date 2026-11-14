@@ -99,13 +99,29 @@ public final class GithubContextBroker implements AutoCloseable {
         worker = Thread.ofVirtual().name("github-context-broker").start(this::run);
     }
 
+    /**
+     * Checks the dispatcher's secure directory-handle support on the prepared workspace filesystem.
+     * This does not replace the mandatory checks when constructing each broker.
+     *
+     * @param workspace existing prepared workspace, before snapshot or credential access
+     * @throws IOException if the workspace cannot be opened securely
+     */
+    public static void verifyRuntime(final Path workspace) throws IOException {
+        try (final var ignored = open(workspace)) {
+            // Acquiring and closing the same handle used by the broker is the capability check.
+        }
+    }
+
     private static SecureDirectoryStream<Path> open(final Path path) throws IOException {
         final DirectoryStream<Path> stream = Files.newDirectoryStream(path);
         if (stream instanceof SecureDirectoryStream<Path> secure) {
             return secure;
         }
         stream.close();
-        throw new IOException("Broker requires secure directory handles");
+        throw new IOException("GitHub context broker requires SecureDirectoryStream in the dispatcher runtime. "
+                + "Use a SecureDirectoryStream-compatible glibc Java 25 runtime and a workspace filesystem "
+                + "provider supporting secure directory handles; verify the actual dispatcher image and filesystem. "
+                + "Security checks cannot be disabled.");
     }
 
     private void run() {

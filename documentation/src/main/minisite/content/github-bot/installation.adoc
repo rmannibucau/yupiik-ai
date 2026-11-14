@@ -150,6 +150,32 @@ After publishing, record the appropriate Jib digest file for each image: `target
 Configure the executor or deployment with `REGISTRY/IMAGE@sha256:DIGEST` rather than the build tag.
 Keep these digests and the reviewed toolchain provenance with your deployment records.
 
+=== Strict-review runtime compatibility
+
+The dispatcher running strict reviews (`worker.agentCommenting=false`) must provide `java.nio.file.SecureDirectoryStream` on its actual workspace filesystem.
+The context broker relies on descriptor-relative access and refuses to run without this capability; an ordinary directory stream is not a safe substitute.
+A strict-review preflight checks the prepared workspace before fetching repository context or preparing launch credentials, while broker construction independently retains its mandatory security checks.
+An incompatible runtime produces a `runtime-preflight` failure with a safe summary and, when private diagnostic capture succeeds, an actionable private exception message.
+Listing, inspection and other operations do not run this strict-review preflight.
+
+WARNING: The Temurin Alpine dispatcher base listed above does not provide the required secure directory handles in the tested runtime and must be overridden for strict reviews.
+Use a vetted, capability-tested Java 25 runtime and pin its immutable digest; a glibc-based Zulu JRE is a candidate, but neither its vendor nor glibc alone guarantees this capability on every filesystem provider.
+
+After building the actual dispatcher image, run the offline container regression against that image:
+
+[source,bash]
+----
+mvn -pl extensions/github-bot \
+  -Dtest=GithubContextBrokerTest,GithubContextBrokerImageTest,WorkerTest \
+  -Dgithub.bot.dispatcher.live.image=yca-github-dispatcher:local test
+----
+
+The opt-in image test requires a local Linux Docker daemon and mountable compiled test classes.
+It uses the image's production classes and runtime libraries with a loopback fake GitHub endpoint inside a network-isolated container, without credentials or a Docker socket.
+It verifies real broker requests, forbidden path and symlink handling, and response-directory substitution on both tmpfs and a writable bind mount under the non-root, read-only, dropped-capability contract.
+If the image option is supplied, an unsupported runtime fails the test rather than being skipped.
+Run the test independently on every published architecture before promoting a dispatcher image.
+
 == Create disjoint private state and attempts
 
 Run these commands as the dedicated dispatcher account, using real directories without symbolic path components:

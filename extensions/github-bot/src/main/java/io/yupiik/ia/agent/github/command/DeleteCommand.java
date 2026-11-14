@@ -22,7 +22,10 @@ import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.model.TaskState;
 import io.yupiik.ia.agent.github.service.BotAudit;
+import io.yupiik.ia.agent.github.service.TaskDiagnostics;
 import io.yupiik.ia.agent.github.store.TaskStore;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Set;
 import java.util.logging.Logger;
 
@@ -36,12 +39,19 @@ public class DeleteCommand implements Runnable {
     private final JsonMapper json;
     private final TaskStore store;
     private final BotAudit audit;
+    private final TaskDiagnostics diagnostics;
 
-    public DeleteCommand(final Options options, final JsonMapper json, final TaskStore store, final BotAudit audit) {
+    public DeleteCommand(
+            final Options options,
+            final JsonMapper json,
+            final TaskStore store,
+            final BotAudit audit,
+            final TaskDiagnostics diagnostics) {
         this.options = options;
         this.json = json;
         this.store = store;
         this.audit = audit;
+        this.diagnostics = diagnostics;
     }
 
     @RootConfiguration("-")
@@ -65,6 +75,11 @@ public class DeleteCommand implements Runnable {
                 throw new IllegalStateException("Cannot delete a task with retained attempt data");
             }
             if (!options.dryRun()) {
+                try {
+                    diagnostics.delete(options.task());
+                } catch (final IOException e) {
+                    throw new UncheckedIOException("Unable to delete private task diagnostics", e);
+                }
                 state.tasks().remove(options.task());
             }
             return task.document();

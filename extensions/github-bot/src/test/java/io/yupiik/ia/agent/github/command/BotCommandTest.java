@@ -27,10 +27,13 @@ import io.yupiik.ia.agent.github.service.BotAudit;
 import io.yupiik.ia.agent.github.service.BotAudit$AuditEntry$FusionJsonCodec;
 import io.yupiik.ia.agent.github.service.BotMaintenance;
 import io.yupiik.ia.agent.github.service.GithubServices;
+import io.yupiik.ia.agent.github.service.TaskDiagnostics;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -97,6 +100,10 @@ class BotCommandTest {
                 return created;
             });
             final var original = Files.readString(home.resolve("state.json"));
+            final var diagnostics = new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK);
+            final var record = home.resolve(diagnostics.capture(
+                    store.transaction(state -> state.task(id).document()), "execution", new IOException("private"), 1));
+            final var originalDiagnostic = Files.readString(record);
             for (final var command : List.of(
                     new RetryCommand(
                             new RetryCommand.Options(id, true),
@@ -107,10 +114,12 @@ class BotCommandTest {
                             new DeleteCommand.Options(id, true),
                             json,
                             BotTestConfiguration.store(conf, json),
-                            BotTestConfiguration.audit(conf, json)),
+                            BotTestConfiguration.audit(conf, json),
+                            diagnostics),
                     new PurgeCommand(
                             new PurgeCommand.Options(7, true),
-                            new BotMaintenance(BotTestConfiguration.store(conf, json), BotTestConfiguration.CLOCK)),
+                            new BotMaintenance(
+                                    BotTestConfiguration.store(conf, json), BotTestConfiguration.CLOCK, diagnostics)),
                     new CreateCommand(
                             new CreateCommand.Options("acme/repo", 1, TaskKind.help, "preview", true),
                             json,
@@ -119,8 +128,60 @@ class BotCommandTest {
                             BotTestConfiguration.CLOCK))) {
                 command.run();
                 assertEquals(original, Files.readString(home.resolve("state.json")));
+                assertEquals(originalDiagnostic, Files.readString(record));
             }
             assertFalse(Files.exists(home.resolve("audit.jsonl")));
+        }
+    }
+
+    @Test
+    void deleteCleansOnlyItsDiagnosticsAndCanBeRetriedAfterPrivateDeletionFailure() throws Exception {
+        final var conf = BotTestConfiguration.home(home);
+        try (final var json =
+                BotJsonMapper.create(List.of(new BotAudit$AuditEntry$FusionJsonCodec()), ignored -> Optional.empty())) {
+            final var store = new TaskStore(conf, json);
+            final var id = store.transaction(state -> {
+                final var created = state.enqueue("delete-private", TaskFixtures.task(Map.of()));
+                state.task(created).state(TaskState.failed);
+                return created;
+            });
+            final var other = store.transaction(state -> state.enqueue("other-private", TaskFixtures.task(Map.of())));
+            final var diagnostics = new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK);
+            final var record = home.resolve(diagnostics.capture(
+                    store.transaction(state -> state.task(id).document()), "execution", new IOException("private"), 1));
+            diagnostics.capture(store.transaction(state -> state.task(other).document()), "execution", null, 2);
+            final var otherDiagnostic = diagnostics.read(other);
+            new RetryCommand(new RetryCommand.Options(id, false), json, store, BotTestConfiguration.audit(conf, json))
+                    .run();
+            assertTrue(Files.exists(record), "Retry must retain private diagnostics");
+            final var originalState = Files.readString(home.resolve("state.json"));
+            final var originalAudit = Files.readString(home.resolve("audit.jsonl"));
+            final var saved = home.resolve("saved-diagnostic.json");
+            Files.move(record, saved);
+            Files.createDirectory(record);
+            final var command = new DeleteCommand(
+                    new DeleteCommand.Options(id, false),
+                    json,
+                    store,
+                    BotTestConfiguration.audit(conf, json),
+                    diagnostics);
+            assertThrows(UncheckedIOException.class, command::run);
+            assertEquals(originalState, Files.readString(home.resolve("state.json")));
+            assertEquals(originalAudit, Files.readString(home.resolve("audit.jsonl")));
+            assertEquals(
+                    TaskState.pending, store.transaction(state -> state.task(id).state()));
+            assertEquals(otherDiagnostic, diagnostics.read(other));
+
+            Files.delete(record);
+            Files.move(saved, record);
+            command.run();
+            assertFalse(Files.exists(record.getParent()));
+            assertEquals("[]", diagnostics.read(id));
+            assertEquals(otherDiagnostic, diagnostics.read(other));
+            assertEquals(
+                    other, store.transaction(state -> state.list().getFirst().id()));
+            assertEquals(id, store.transaction(state -> state.receipts().get("delete-private")));
+            assertEquals(2, store.transaction(state -> state.receipts().size()).intValue());
         }
     }
 
@@ -199,7 +260,8 @@ class BotCommandTest {
                             new DeleteCommand.Options(id, false),
                             json,
                             BotTestConfiguration.store(conf, json),
-                            BotTestConfiguration.audit(conf, json))
+                            BotTestConfiguration.audit(conf, json),
+                            new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK))
                     .run();
             final var audit = Files.readString(home.resolve("audit.jsonl"));
             assertTrue(audit.contains("manual-retried"));
@@ -212,7 +274,7 @@ class BotCommandTest {
     }
 
     @Test
-    void preventsRetryOfPublishedFailureAndDeletionOfRetainedAttempt() {
+    void preventsRetryOfPublishedFailureAndDeletionOfRetainedAttempt() throws Exception {
         final var values = Map.of("github.home", home.toString());
         final var conf =
                 new GithubBotConfiguration$FusionConfigurationFactory(k -> Optional.ofNullable(values.get(k))).get();
@@ -221,6 +283,9 @@ class BotCommandTest {
             final var store = new TaskStore(BotTestConfiguration.home(home), json);
             final String id =
                     store.transaction(state -> state.enqueue("test:retry", TaskFixtures.task(Map.of("kind", "help"))));
+            final var diagnostics = new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK);
+            diagnostics.capture(store.transaction(state -> state.task(id).document()), "execution", null, 1);
+            final var originalDiagnostics = diagnostics.read(id);
             store.transaction(state -> {
                 final var task = state.task(id);
                 task.state(TaskState.failed);
@@ -261,10 +326,12 @@ class BotCommandTest {
                                     new DeleteCommand.Options(id, false),
                                     json,
                                     BotTestConfiguration.store(conf, json),
-                                    BotTestConfiguration.audit(conf, json))
+                                    BotTestConfiguration.audit(conf, json),
+                                    diagnostics)
                             .run());
             assertEquals(
                     TaskState.failed, store.transaction(state -> state.task(id).state()));
+            assertEquals(originalDiagnostics, diagnostics.read(id));
         }
     }
 

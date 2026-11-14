@@ -502,9 +502,8 @@ class PollerSearchTest {
                     new PollOptions.Search(searchEnabled, 3600));
             try (final var github = new GitHubClient(
                     URI.create(conf.api()), json, () -> "test", Clock.fixed(instant, ZoneOffset.UTC))) {
-                return BotTestConfiguration.poller(
-                                conf, options, store, github, Clock.fixed(instant, ZoneOffset.UTC), null)
-                        .poll();
+                return BotTestConfiguration.poller(conf, store, github, Clock.fixed(instant, ZoneOffset.UTC), null)
+                        .poll(options);
             }
         }
 

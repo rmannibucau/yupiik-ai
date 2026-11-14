@@ -95,12 +95,11 @@ class ReviewSummaryPollerTest {
                         0,
                         BotTestConfiguration.reviewSummaryPoller(
                                         conf.shared(),
-                                        conf.poll(),
                                         new TaskStore(BotTestConfiguration.home(home), fixture.json),
                                         github,
                                         fixed(NOW.plusSeconds(86400)),
                                         null)
-                                .poll(List.of("owner/repo")));
+                                .poll(List.of("owner/repo"), conf.poll()));
             }
             assertEquals(firstRequests, fixture.requests);
             assertTrue(fixture.store.<Boolean>transaction(state -> state.cursors().keySet().stream()
@@ -171,10 +170,12 @@ class ReviewSummaryPollerTest {
             assertEquals(
                     0,
                     BotTestConfiguration.reviewSummaryPoller(
-                                    conf.shared(), conf.poll(), fixture.store, fixture.github, fixed(NOW), null)
-                            .poll(IntStream.range(0, 21)
-                                    .mapToObj(i -> "owner/repo" + i)
-                                    .toList()));
+                                    conf.shared(), fixture.store, fixture.github, fixed(NOW), null)
+                            .poll(
+                                    IntStream.range(0, 21)
+                                            .mapToObj(i -> "owner/repo" + i)
+                                            .toList(),
+                                    conf.poll()));
             assertFalse(fixture.overlapTimedOut.get(), "Independent review batches did not overlap");
             assertEquals(2, fixture.maximumReviews.get());
             assertEquals(3, fixture.requests.size());
@@ -192,13 +193,10 @@ class ReviewSummaryPollerTest {
             assertThrows(
                     IllegalArgumentException.class,
                     () -> BotTestConfiguration.reviewSummaryPoller(
-                                    fixture.conf(Map.of()).shared(),
-                                    fixture.conf(Map.of()).poll(),
-                                    fixture.store,
-                                    fixture.github,
-                                    fixed(NOW),
-                                    null)
-                            .poll(List.of("owner/repo/../other")));
+                                    fixture.conf(Map.of()).shared(), fixture.store, fixture.github, fixed(NOW), null)
+                            .poll(
+                                    List.of("owner/repo/../other"),
+                                    fixture.conf(Map.of()).poll()));
             assertTrue(fixture.requests.isEmpty());
         }
     }
@@ -247,12 +245,13 @@ class ReviewSummaryPollerTest {
                         0,
                         BotTestConfiguration.reviewSummaryPoller(
                                         fixture.conf(Map.of("pageBudget", 20)).shared(),
-                                        fixture.conf(Map.of("pageBudget", 20)).poll(),
                                         new TaskStore(BotTestConfiguration.home(home), fixture.json),
                                         github,
                                         fixed(NOW),
                                         null)
-                                .poll(List.of("owner/repo")));
+                                .poll(
+                                        List.of("owner/repo"),
+                                        fixture.conf(Map.of("pageBudget", 20)).poll()));
             }
             assertTrue(fixture.store
                     .transaction(state ->
@@ -279,9 +278,8 @@ class ReviewSummaryPollerTest {
             // Poller must pass the same sink into its internally created review-summary poller.
             assertEquals(
                     1,
-                    BotTestConfiguration.poller(
-                                    conf.shared(), conf.poll(), fixture.store, fixture.github, fixed(NOW), audit)
-                            .poll());
+                    BotTestConfiguration.poller(conf.shared(), fixture.store, fixture.github, fixed(NOW), audit)
+                            .poll(conf.poll()));
             final var id = fixture.store
                     .transaction(state ->
                             state.list().stream().map(TaskFixtures::map).toList())
@@ -295,12 +293,11 @@ class ReviewSummaryPollerTest {
                     0,
                     BotTestConfiguration.reviewSummaryPoller(
                                     conf.shared(),
-                                    conf.poll(),
                                     new TaskStore(BotTestConfiguration.home(home), fixture.json),
                                     fixture.github,
                                     fixed(NOW),
                                     audit)
-                            .poll(List.of("owner/repo")));
+                            .poll(List.of("owner/repo"), conf.poll()));
             final var events = Files.readAllLines(home.resolve("audit.jsonl")).stream()
                     .map(line -> TaskStore.map(fixture.json.fromString(Object.class, line)))
                     .toList();
@@ -425,12 +422,13 @@ class ReviewSummaryPollerTest {
                     1,
                     BotTestConfiguration.reviewSummaryPoller(
                                     fixture.conf(Map.of("since", "now")).shared(),
-                                    fixture.conf(Map.of("since", "now")).poll(),
                                     new TaskStore(BotTestConfiguration.home(home), fixture.json),
                                     fixture.github,
                                     fixed(NOW.plusSeconds(86400)),
                                     null)
-                            .poll(List.of("owner/repo")));
+                            .poll(
+                                    List.of("owner/repo"),
+                                    fixture.conf(Map.of("since", "now")).poll()));
             assertEquals(
                     initial, fixture.store.transaction(state -> state.cursors().get("initialSince")));
         }
@@ -446,12 +444,11 @@ class ReviewSummaryPollerTest {
                     1,
                     BotTestConfiguration.reviewSummaryPoller(
                                     fixture.conf(Map.of()).shared(),
-                                    fixture.conf(Map.of()).poll(),
                                     fixture.store,
                                     fixture.github,
                                     fixed(NOW.plusSeconds(86400)),
                                     null)
-                            .poll(List.of("owner/repo")));
+                            .poll(List.of("owner/repo"), fixture.conf(Map.of()).poll()));
             assertEquals(
                     NOW.toString(),
                     fixture.store.transaction(state -> state.cursors().get("initialSince")));
@@ -492,13 +489,12 @@ class ReviewSummaryPollerTest {
                     0,
                     BotTestConfiguration.reviewSummaryPoller(
                                     conf.shared(),
-                                    conf.poll(),
                                     fixture.store,
                                     fixture.github,
                                     fixed(NOW),
                                     new BotAudit(
                                             BotTestConfiguration.home(home), fixture.json, BotTestConfiguration.CLOCK))
-                            .poll(List.of("owner/repo")));
+                            .poll(List.of("owner/repo"), conf.poll()));
             final var events = Files.readAllLines(home.resolve("audit.jsonl"));
             assertEquals(1, events.size());
             final var denied = TaskStore.map(fixture.json.fromString(Object.class, events.getFirst()));
@@ -533,10 +529,12 @@ class ReviewSummaryPollerTest {
             assertEquals(
                     0,
                     BotTestConfiguration.reviewSummaryPoller(
-                                    conf.shared(), conf.poll(), fixture.store, fixture.github, fixed(NOW), null)
-                            .poll(IntStream.range(0, 47)
-                                    .mapToObj(i -> "owner/repo" + i)
-                                    .toList()));
+                                    conf.shared(), fixture.store, fixture.github, fixed(NOW), null)
+                            .poll(
+                                    IntStream.range(0, 47)
+                                            .mapToObj(i -> "owner/repo" + i)
+                                            .toList(),
+                                    conf.poll()));
             assertEquals(5, fixture.requests.size());
             assertTrue(fixture.requests.stream().allMatch("/graphql"::equals));
             assertTrue(fixture.queries.stream().allMatch(query -> query.contains("reviews(first:100)")));
@@ -559,8 +557,8 @@ class ReviewSummaryPollerTest {
             assertThrows(
                     IllegalStateException.class,
                     () -> BotTestConfiguration.reviewSummaryPoller(
-                                    conf.shared(), conf.poll(), fixture.store, fixture.github, fixed(NOW), null)
-                            .poll(List.of("owner/repo", "owner/other")));
+                                    conf.shared(), fixture.store, fixture.github, fixed(NOW), null)
+                            .poll(List.of("owner/repo", "owner/other"), conf.poll()));
             assertEquals(before, Files.readString(home.resolve("state.json")));
             fixture.malformedSecondAlias = false;
             fixture.poll(conf);
@@ -591,12 +589,11 @@ class ReviewSummaryPollerTest {
                         2,
                         BotTestConfiguration.reviewSummaryPoller(
                                         conf.shared(),
-                                        conf.poll(),
                                         new TaskStore(BotTestConfiguration.home(home), fixture.json),
                                         github,
                                         fixed(NOW),
                                         null)
-                                .poll(List.of("owner/repo")));
+                                .poll(List.of("owner/repo"), conf.poll()));
             }
             assertEquals(
                     3, fixture.store.<Integer>transaction(state -> state.list().size()));
@@ -705,8 +702,8 @@ class ReviewSummaryPollerTest {
         }
 
         private int poll(final Settings conf) {
-            return BotTestConfiguration.reviewSummaryPoller(conf.shared(), conf.poll(), store, github, fixed(NOW), null)
-                    .poll(List.of("owner/repo"));
+            return BotTestConfiguration.reviewSummaryPoller(conf.shared(), store, github, fixed(NOW), null)
+                    .poll(List.of("owner/repo"), conf.poll());
         }
 
         private Settings conf(final Map<String, Object> overrides) {

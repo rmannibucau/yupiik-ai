@@ -93,13 +93,19 @@ class StrictSolvePublisherTest {
             fixture.fail = null;
             fixture.listed = true;
             fixture.stale = true; // Reconciliation must work after the upstream advances.
-            final var restarted = BotTestConfiguration.strictSolvePublisher(
+            final int reads = fixture.gets.size();
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> fixture.publisher.publish(
+                            TaskFixtures.task(fixture.task()), TaskFixtures.result(fixture.result), "other"));
+            assertEquals(reads, fixture.gets.size(), "A different invocation owner must fail before reconciliation");
+            final var restarted = new StrictSolvePublisher(
                     fixture.github,
                     new TaskStore(BotTestConfiguration.home(fixture.directory), fixture.json),
-                    fixture.json,
-                    "bot");
+                    fixture.json);
             assertEquals(
-                    URL, restarted.publish(TaskFixtures.task(fixture.task()), TaskFixtures.result(fixture.result)));
+                    URL,
+                    restarted.publish(TaskFixtures.task(fixture.task()), TaskFixtures.result(fixture.result), "bot"));
             assertEquals(5, fixture.posts.size());
             assertTrue(fixture.gets.stream()
                     .anyMatch(path -> path.contains("state=all")
@@ -141,12 +147,12 @@ class StrictSolvePublisherTest {
                 fixture.fail = null;
                 assertThrows(
                         IllegalStateException.class,
-                        () -> BotTestConfiguration.strictSolvePublisher(
+                        () -> new StrictSolvePublisher(
                                         fixture.github,
                                         new TaskStore(BotTestConfiguration.home(fixture.directory), fixture.json),
-                                        fixture.json,
-                                        "bot")
-                                .publish(TaskFixtures.task(fixture.task()), TaskFixtures.result(fixture.result)));
+                                        fixture.json)
+                                .publish(
+                                        TaskFixtures.task(fixture.task()), TaskFixtures.result(fixture.result), "bot"));
                 assertEquals(count, fixture.posts.size(), stage);
                 assertEquals("retained-attempt", fixture.task().get("attemptDirectory"));
                 assertEquals(fixture.result, fixture.task().get("result"));
@@ -162,15 +168,16 @@ class StrictSolvePublisherTest {
             final int count = fixture.posts.size();
             assertThrows(
                     IllegalStateException.class,
-                    () -> BotTestConfiguration.strictSolvePublisher(
-                                    fixture.github, fixture.store, fixture.json, "other")
-                            .publish(TaskFixtures.task(fixture.task()), TaskFixtures.result(fixture.result)));
+                    () -> fixture.publisher.publish(
+                            TaskFixtures.task(fixture.task()), TaskFixtures.result(fixture.result), "other"));
             final var changed = new LinkedHashMap<>(TaskStore.map(fixture.result.get("strictSolve")));
             changed.put("title", "Different result");
             assertThrows(
                     IllegalStateException.class,
                     () -> fixture.publisher.publish(
-                            TaskFixtures.task(fixture.task()), TaskFixtures.result(Map.of("strictSolve", changed))));
+                            TaskFixtures.task(fixture.task()),
+                            TaskFixtures.result(Map.of("strictSolve", changed)),
+                            "bot"));
             fixture.store.transaction(state -> {
                 state.task(fixture.id).repository("other/repo");
                 return null;
@@ -215,12 +222,15 @@ class StrictSolvePublisherTest {
             assertThrows(
                     IllegalArgumentException.class,
                     () -> fixture.publisher.publish(
-                            TaskFixtures.task(fixture.task()), TaskFixtures.result(Map.of("strictSolve", solve))));
+                            TaskFixtures.task(fixture.task()),
+                            TaskFixtures.result(Map.of("strictSolve", solve)),
+                            "bot"));
             final var caller = fixture.task();
             caller.put("strictSolveBaseSha", "f".repeat(40));
             assertThrows(
                     IllegalStateException.class,
-                    () -> fixture.publisher.publish(TaskFixtures.task(caller), TaskFixtures.result(fixture.result)));
+                    () -> fixture.publisher.publish(
+                            TaskFixtures.task(caller), TaskFixtures.result(fixture.result), "bot"));
             fixture.store.transaction(state -> {
                 state.task(fixture.id).strictSolveBaseSha(null);
                 return null;
@@ -438,7 +448,7 @@ class StrictSolvePublisherTest {
                     json,
                     () -> "host-secret",
                     BotTestConfiguration.CLOCK);
-            publisher = BotTestConfiguration.strictSolvePublisher(github, store, json, "bot");
+            publisher = new StrictSolvePublisher(github, store, json);
         }
 
         private Map<String, Object> pr() {
@@ -479,7 +489,7 @@ class StrictSolvePublisherTest {
         }
 
         private String publish() {
-            return publisher.publish(TaskFixtures.task(task()), TaskFixtures.result(result));
+            return publisher.publish(TaskFixtures.task(task()), TaskFixtures.result(result), "bot");
         }
 
         @Override

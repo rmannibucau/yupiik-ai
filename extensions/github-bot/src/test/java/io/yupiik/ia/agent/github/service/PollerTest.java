@@ -142,20 +142,15 @@ class PollerTest {
                 final var store = new TaskStore(conf, json);
                 try (final var github =
                         new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
-                    final var poller = BotTestConfiguration.poller(
-                            conf,
-                            new PollOptions(
-                                    "now",
-                                    1,
-                                    new PollOptions.Reviews(false),
-                                    new PollOptions.Discussions(false),
-                                    parallelism,
-                                    new PollOptions.Search(false, 3600)),
-                            store,
-                            github,
-                            Clock.systemUTC(),
-                            null);
-                    assertEquals(3, poller.poll());
+                    final var invocationOptions = new PollOptions(
+                            "now",
+                            1,
+                            new PollOptions.Reviews(false),
+                            new PollOptions.Discussions(false),
+                            parallelism,
+                            new PollOptions.Search(false, 3600));
+                    final var poller = BotTestConfiguration.poller(conf, store, github, Clock.systemUTC(), null);
+                    assertEquals(3, poller.poll(invocationOptions));
                     assertEquals(parallelism, maximum.get());
                     assertEquals(9, paths.size());
                     if (parallelism == 1) {
@@ -184,7 +179,7 @@ class PollerTest {
                                     .map(task -> task.get("batchId"))
                                     .distinct()
                                     .count());
-                    assertEquals(0, poller.poll());
+                    assertEquals(0, poller.poll(invocationOptions));
                     assertEquals(
                             tasks,
                             store.transaction(state ->
@@ -219,19 +214,14 @@ class PollerTest {
                 assertThrows(
                         IllegalArgumentException.class,
                         () -> BotTestConfiguration.poller(
-                                        conf,
-                                        new PollOptions(
-                                                "now",
-                                                1,
-                                                new PollOptions.Reviews(false),
-                                                new PollOptions.Discussions(false),
-                                                invalid,
-                                                new PollOptions.Search(false, 3600)),
-                                        new TaskStore(conf, json),
-                                        github,
-                                        Clock.systemUTC(),
-                                        null)
-                                .poll());
+                                        conf, new TaskStore(conf, json), github, Clock.systemUTC(), null)
+                                .poll(new PollOptions(
+                                        "now",
+                                        1,
+                                        new PollOptions.Reviews(false),
+                                        new PollOptions.Discussions(false),
+                                        invalid,
+                                        new PollOptions.Search(false, 3600))));
             }
             assertEquals(0, requests.get());
             assertEquals(0, github.statistics().requests());
@@ -318,8 +308,8 @@ class PollerTest {
                 try (final var github =
                         new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
                     final var failed = callers.submit(
-                            () -> BotTestConfiguration.poller(conf, options, store, github, Clock.systemUTC(), null)
-                                    .poll());
+                            () -> BotTestConfiguration.poller(conf, store, github, Clock.systemUTC(), null)
+                                    .poll(options));
                     assertTrue(slowRequest.await(5, TimeUnit.SECONDS));
                     final var error = assertThrows(ExecutionException.class, () -> failed.get(5, TimeUnit.SECONDS));
                     assertInstanceOf(GitHubClient.HttpException.class, error.getCause());
@@ -338,10 +328,10 @@ class PollerTest {
                     release.countDown();
                     // Reconstruct the poller/store to exercise durable replay, not in-memory deduplication.
                     final var restarted = new TaskStore(conf, json);
-                    final var poller =
-                            BotTestConfiguration.poller(conf, options, restarted, github, Clock.systemUTC(), null);
-                    assertEquals(1, poller.poll());
-                    assertEquals(0, poller.poll());
+                    final var invocationOptions = options;
+                    final var poller = BotTestConfiguration.poller(conf, restarted, github, Clock.systemUTC(), null);
+                    assertEquals(1, poller.poll(invocationOptions));
+                    assertEquals(0, poller.poll(invocationOptions));
                     final var tasks = restarted.transaction(state ->
                             state.list().stream().map(TaskFixtures::map).toList());
                     assertEquals(2, tasks.size());
@@ -388,22 +378,18 @@ class PollerTest {
                         "http://127.0.0.1:" + server.getAddress().getPort(), "42", "owner/first,owner/second");
                 try (final var github =
                         new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
+                    final var invocationOptions = new PollOptions(
+                            "now",
+                            1,
+                            new PollOptions.Reviews(false),
+                            new PollOptions.Discussions(false),
+                            2,
+                            new PollOptions.Search(false, 3600));
                     final var poller = BotTestConfiguration.poller(
-                            conf,
-                            new PollOptions(
-                                    "now",
-                                    1,
-                                    new PollOptions.Reviews(false),
-                                    new PollOptions.Discussions(false),
-                                    2,
-                                    new PollOptions.Search(false, 3600)),
-                            new TaskStore(conf, json),
-                            github,
-                            Clock.systemUTC(),
-                            null);
+                            conf, new TaskStore(conf, json), github, Clock.systemUTC(), null);
                     final var caller = Thread.ofVirtual().start(() -> {
                         try {
-                            poller.poll();
+                            poller.poll(invocationOptions);
                         } catch (final RuntimeException error) {
                             failure.set(error);
                         } finally {
@@ -486,8 +472,8 @@ class PollerTest {
                     assertEquals(
                             0,
                             BotTestConfiguration.poller(
-                                            conf, options, new TaskStore(conf, json), github, Clock.systemUTC(), null)
-                                    .poll());
+                                            conf, new TaskStore(conf, json), github, Clock.systemUTC(), null)
+                                    .poll(options));
                     assertEquals(4, github.statistics().requests());
                 }
                 assertEquals(4, messages.size());
@@ -519,8 +505,8 @@ class PollerTest {
                 assertThrows(
                         GitHubClient.HttpException.class,
                         () -> BotTestConfiguration.poller(
-                                        conf, options, new TaskStore(conf, json), github, Clock.systemUTC(), null)
-                                .poll());
+                                        conf, new TaskStore(conf, json), github, Clock.systemUTC(), null)
+                                .poll(options));
                 assertEquals(1, github.statistics().requests());
             }
             assertEquals(3, messages.size());
@@ -574,24 +560,24 @@ class PollerTest {
                     throw new IllegalStateException(interrupted);
                 }
             };
-            final var reviews = new ReviewSummaryPoller(conf, options, store, github, Clock.systemUTC(), null, null) {
+            final var reviews = new ReviewSummaryPoller(conf, store, github, Clock.systemUTC(), null, null) {
                 @Override
-                public int poll(final List<String> repositories) {
+                public int poll(final List<String> repositories, final PollOptions actualOptions) {
+                    assertSame(options.poll(), actualOptions);
                     rendezvous.run();
                     return 2;
                 }
             };
-            final var discussions =
-                    new DiscussionPoller(conf, options, store, github, Clock.systemUTC(), null, null, null) {
-                        @Override
-                        public int poll(final List<String> repositories) {
-                            rendezvous.run();
-                            return 3;
-                        }
-                    };
+            final var discussions = new DiscussionPoller(conf, store, github, Clock.systemUTC(), null, null, null) {
+                @Override
+                public int poll(final List<String> repositories, final PollOptions actualOptions) {
+                    assertSame(options.poll(), actualOptions);
+                    rendezvous.run();
+                    return 3;
+                }
+            };
             final var poller = new Poller(
                     conf,
-                    options,
                     store,
                     github,
                     Clock.systemUTC(),
@@ -600,7 +586,16 @@ class PollerTest {
                     reviews,
                     discussions,
                     new RepositoryDiscovery(conf, github, Clock.systemUTC()));
-            assertEquals(5, poller.poll());
+            assertEquals(5, poller.poll(options.poll()));
+            final var disabled = new PollOptions(
+                    "now",
+                    2,
+                    new PollOptions.Reviews(false),
+                    new PollOptions.Discussions(false),
+                    1,
+                    new PollOptions.Search(false, 3600));
+            assertEquals(0, poller.poll(disabled));
+            assertEquals(5, poller.poll(options.poll()));
         } finally {
             server.stop(0);
         }
@@ -668,20 +663,20 @@ class PollerTest {
             final var store = new TaskStore(BotTestConfiguration.home(home), json);
             try (final var github =
                     new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
+                final var invocationOptions = new PollOptions(
+                        "now",
+                        1,
+                        new PollOptions.Reviews(false),
+                        new PollOptions.Discussions(false),
+                        4,
+                        new PollOptions.Search(false, 3600));
                 final var poller = BotTestConfiguration.poller(
                         conf,
-                        new PollOptions(
-                                "now",
-                                1,
-                                new PollOptions.Reviews(false),
-                                new PollOptions.Discussions(false),
-                                4,
-                                new PollOptions.Search(false, 3600)),
                         store,
                         github,
                         Clock.fixed(Instant.parse("2026-11-11T12:00:00Z"), ZoneOffset.UTC),
                         new BotAudit(BotTestConfiguration.home(home), json, BotTestConfiguration.CLOCK));
-                assertEquals(1, poller.poll());
+                assertEquals(1, poller.poll(invocationOptions));
                 assertEquals(
                         1,
                         store.transaction(state -> state.list().stream()
@@ -696,7 +691,7 @@ class PollerTest {
                     state.tasks().clear();
                     return null;
                 });
-                assertEquals(0, poller.poll());
+                assertEquals(0, poller.poll(invocationOptions));
                 final var events = Files.readAllLines(home.resolve("audit.jsonl")).stream()
                         .map(line -> TaskStore.map(json.fromString(Object.class, line)))
                         .toList();
@@ -736,18 +731,17 @@ class PollerTest {
                     IllegalStateException.class,
                     () -> BotTestConfiguration.poller(
                                     configuration("http://127.0.0.1:1", ""),
-                                    new PollOptions(
-                                            "now",
-                                            1,
-                                            new PollOptions.Reviews(false),
-                                            new PollOptions.Discussions(false),
-                                            4,
-                                            new PollOptions.Search(false, 3600)),
                                     new TaskStore(BotTestConfiguration.home(home), json),
                                     github,
                                     Clock.systemUTC(),
                                     null)
-                            .poll());
+                            .poll(new PollOptions(
+                                    "now",
+                                    1,
+                                    new PollOptions.Reviews(false),
+                                    new PollOptions.Discussions(false),
+                                    4,
+                                    new PollOptions.Search(false, 3600))));
         }
     }
 
@@ -770,20 +764,14 @@ class PollerTest {
             final var store = new TaskStore(BotTestConfiguration.home(home), json);
             try (final var github =
                     new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
-                BotTestConfiguration.poller(
-                                conf,
-                                new PollOptions(
-                                        "now",
-                                        1,
-                                        new PollOptions.Reviews(false),
-                                        new PollOptions.Discussions(false),
-                                        4,
-                                        new PollOptions.Search(false, 3600)),
-                                store,
-                                github,
-                                Clock.systemUTC(),
-                                null)
-                        .poll();
+                BotTestConfiguration.poller(conf, store, github, Clock.systemUTC(), null)
+                        .poll(new PollOptions(
+                                "now",
+                                1,
+                                new PollOptions.Reviews(false),
+                                new PollOptions.Discussions(false),
+                                4,
+                                new PollOptions.Search(false, 3600)));
             }
             assertTrue(store.<Boolean>transaction(state -> !state.cursors().containsKey("owner/repo/issues")));
             assertTrue(store.<Boolean>transaction(state -> state.cursors().containsKey("owner/repo/issues:next")));
@@ -834,56 +822,40 @@ class PollerTest {
                     new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
                 assertEquals(
                         0,
-                        BotTestConfiguration.poller(
-                                        conf,
-                                        new PollOptions(
-                                                "now",
-                                                1,
-                                                new PollOptions.Reviews(false),
-                                                new PollOptions.Discussions(false),
-                                                4,
-                                                new PollOptions.Search(false, 3600)),
-                                        store,
-                                        github,
-                                        Clock.fixed(first, ZoneOffset.UTC),
-                                        null)
-                                .poll());
+                        BotTestConfiguration.poller(conf, store, github, Clock.fixed(first, ZoneOffset.UTC), null)
+                                .poll(new PollOptions(
+                                        "now",
+                                        1,
+                                        new PollOptions.Reviews(false),
+                                        new PollOptions.Discussions(false),
+                                        4,
+                                        new PollOptions.Search(false, 3600))));
                 phase.set(1);
                 assertEquals(
                         0,
                         BotTestConfiguration.poller(
-                                        conf,
-                                        new PollOptions(
-                                                "now",
-                                                1,
-                                                new PollOptions.Reviews(false),
-                                                new PollOptions.Discussions(false),
-                                                4,
-                                                new PollOptions.Search(false, 3600)),
-                                        store,
-                                        github,
-                                        Clock.fixed(first.plusSeconds(600), ZoneOffset.UTC),
-                                        null)
-                                .poll());
+                                        conf, store, github, Clock.fixed(first.plusSeconds(600), ZoneOffset.UTC), null)
+                                .poll(new PollOptions(
+                                        "now",
+                                        1,
+                                        new PollOptions.Reviews(false),
+                                        new PollOptions.Discussions(false),
+                                        4,
+                                        new PollOptions.Search(false, 3600))));
                 assertTrue(pages.contains("/page2"));
                 assertFalse(store.<Boolean>transaction(state -> state.cursors().containsKey("owner/repo/issues")));
                 phase.set(2);
                 assertEquals(
                         1,
                         BotTestConfiguration.poller(
-                                        conf,
-                                        new PollOptions(
-                                                "now",
-                                                1,
-                                                new PollOptions.Reviews(false),
-                                                new PollOptions.Discussions(false),
-                                                4,
-                                                new PollOptions.Search(false, 3600)),
-                                        store,
-                                        github,
-                                        Clock.fixed(first.plusSeconds(1200), ZoneOffset.UTC),
-                                        null)
-                                .poll());
+                                        conf, store, github, Clock.fixed(first.plusSeconds(1200), ZoneOffset.UTC), null)
+                                .poll(new PollOptions(
+                                        "now",
+                                        1,
+                                        new PollOptions.Reviews(false),
+                                        new PollOptions.Discussions(false),
+                                        4,
+                                        new PollOptions.Search(false, 3600))));
                 assertEquals(
                         first.toString(),
                         store.transaction(state -> state.cursors().get("initialSince")));
@@ -923,35 +895,25 @@ class PollerTest {
             final var store = new TaskStore(BotTestConfiguration.home(home), json);
             try (final var github =
                     new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
-                final var first = executor.submit(() -> BotTestConfiguration.poller(
-                                conf,
-                                new PollOptions(
+                final var first =
+                        executor.submit(() -> BotTestConfiguration.poller(conf, store, github, Clock.systemUTC(), null)
+                                .poll(new PollOptions(
                                         "now",
                                         1,
                                         new PollOptions.Reviews(false),
                                         new PollOptions.Discussions(false),
                                         4,
-                                        new PollOptions.Search(false, 3600)),
-                                store,
-                                github,
-                                Clock.systemUTC(),
-                                null)
-                        .poll());
+                                        new PollOptions.Search(false, 3600))));
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
-                final var second = executor.submit(() -> BotTestConfiguration.poller(
-                                conf,
-                                new PollOptions(
+                final var second =
+                        executor.submit(() -> BotTestConfiguration.poller(conf, store, github, Clock.systemUTC(), null)
+                                .poll(new PollOptions(
                                         "now",
                                         1,
                                         new PollOptions.Reviews(false),
                                         new PollOptions.Discussions(false),
                                         4,
-                                        new PollOptions.Search(false, 3600)),
-                                store,
-                                github,
-                                Clock.systemUTC(),
-                                null)
-                        .poll());
+                                        new PollOptions.Search(false, 3600))));
                 assertEquals(
                         "worker",
                         executor.submit(() -> store.transaction(state -> "worker"))
