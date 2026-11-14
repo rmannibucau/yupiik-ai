@@ -43,16 +43,15 @@ public record JavacConfiguration(
         Integer jdkFeature,
 
         @Property(
-                defaultValue =
-                        "java.util.List.of(\"-XX:+UseSerialGC\", \"-XX:TieredStopAtLevel=1\", \"-Xshare:auto\", \"-Xverify:none\")",
+                defaultValue = "java.util.List.of(\"-XX:+UseSerialGC\", \"-XX:TieredStopAtLevel=1\", \"-Xshare:auto\")",
                 documentation =
                         "JVM options passed to the spawned-JVM Java parser child process. Defaults to lightweight startup flags "
-                                + "(-XX:+UseSerialGC, -XX:TieredStopAtLevel=1, -Xshare:auto, -Xverify:none) that cut per-spawn JVM "
+                                + "(-XX:+UseSerialGC, -XX:TieredStopAtLevel=1, -Xshare:auto) that cut per-spawn JVM "
                                 + "boot cost. A non-empty list replaces the defaults entirely.")
         List<String> javacOptions) {
 
     public static final List<String> DEFAULT_JAVAC_OPTIONS =
-            List.of("-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1", "-Xshare:auto", "-Xverify:none");
+            List.of("-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1", "-Xshare:auto");
 
     /** The effective JVM options for the child: the configured list, or the safe defaults when null/empty. */
     public List<String> effectiveJavacOptions() {

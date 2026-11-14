@@ -109,8 +109,8 @@ Set `$REPO_ROOT` to the checkout directory (or inline the absolute path).
 
 === Startup performance
 
-The JVM startup cost is dominated by class loading and JIT warm-up. Two cheap
-mitigations cut it by about 2.4x:
+The JVM startup cost is dominated by class loading and JIT warm-up.
+A JVM AOT cache cuts it by about 2.4x:
 
 * A JVM AOT cache (JDK 25+, JEP 483/514/515) preloads and pre-links the
   classes of a training run, and carries method profiles so the JIT warms up
@@ -134,10 +134,6 @@ java --enable-native-access=ALL-UNNAMED \
 TIP: regenerate the AOT cache after every fatjar rebuild - the cache is bound
 to the exact class bytes of the build (a stale or missing cache just logs a
 warning and the JVM falls back to plain startup).
-
-* `-Xverify:none` skips bytecode verification at class load; it is a smaller
-  extra gain once the AOT cache is in place and trades a little safety margin
-  for speed.
 
 Measured time from command line to TUI prompt (JDK 25, Linux, with the
 `--enable-native-access` flag that the JLine terminal requires): plain JVM

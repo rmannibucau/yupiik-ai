@@ -59,8 +59,7 @@ the absolute path.
 
 Shipped-JVM startup is dominated by class loading and JIT warm-up
 (interactive `tui`/`cli` sessions reach steady-state C2 compilation in a few
-minutes). Two cheap mitigations, applied at the JVM launch line above, cut
-startup by about 2.4x:
+minutes). A JVM AOT cache cuts startup by about 2.4x:
 
 * A JVM AOT cache (JDK 25+, JEP 483/514/515) preloads and pre-links the
   classes used by a training run, and carries method profiles so the JIT
@@ -77,9 +76,6 @@ java -XX:AOTCacheOutput=yca/target/yca-bin-*.aot \
 java -XX:AOTCache=yca/target/yca-bin-*.aot \
   --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-*-fatjar.jar "$@"
 ----
-
-* `-Xverify:none` skips bytecode verification at class load. This trades a
-  little safety margin for speed and is only relevant on the JVM path.
 
 Measured time from command line to TUI prompt (JDK 25, Linux, with the
 `--enable-native-access` flag that the JLine terminal requires): plain JVM
