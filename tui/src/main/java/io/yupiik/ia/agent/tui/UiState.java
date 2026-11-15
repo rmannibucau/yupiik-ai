@@ -86,6 +86,7 @@ final class UiState {
     record ToolTop(long ordinal, int row, boolean runMember, boolean bordered) {}
 
     final TuiTranscriptModel model;
+    final TuiCommand.ContentLayout contentLayout = new TuiCommand.ContentLayout();
     final Clock clock;
     final TextAreaState input = new TextAreaState();
     volatile String sessionId = "";

@@ -72,6 +72,7 @@ import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
+import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.ConfigCommands;
@@ -1022,7 +1023,7 @@ class TuiCommandRenderTest {
                 new ArrayList<>(),
                 new ArrayList<>());
         Assertions.assertNull(state.lastCodeBlock);
-        assertEquals(1, ((Map<?, ?>) cacheField.get(command)).size(), "reset must release old regions");
+        assertTrue(((Map<?, ?>) cacheField.get(command)).size() <= 1, "reset must release old regions");
     }
 
     @Test
@@ -1267,6 +1268,132 @@ class TuiCommandRenderTest {
             assertTrue(((Map<?, ?>) cacheField.get(command)).isEmpty(), "explicit clear must release all turns");
             assertEquals(0L, ((Number) weightField.get(command)).longValue());
         }
+    }
+
+    @Test
+    void compactLayoutSurvivesExhaustedWidgetMemoAdmission() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        // Simulate an exhausted memo with a tiny fixture instead of putting the 109M-token
+        // benchmark in the suite. Layout correctness/work must not depend on admission.
+        for (final var field : List.of("turnUnitCacheWeight", "regionUnitCacheWeight")) {
+            final var weight = TuiCommand.class.getDeclaredField(field);
+            weight.setAccessible(true);
+            weight.setLong(command, 8L * 1024 * 1024);
+        }
+        final var history = new StringBuilder();
+        for (var i = 0; i < 24; i++) {
+            history.append("**Assistant**\n\nturn-").append(i).append(" **word** text\n\n");
+        }
+        final var source = history.toString();
+        final var first = renderTurnFrame(command, state, source, 40);
+        assertEquals(24, first.chunks().size());
+        final var render = TuiCommand.class.getDeclaredMethod("layoutContent", String.class, int.class, UiState.class);
+        render.setAccessible(true);
+        final var layout = render.invoke(command, source, 40, state);
+        for (var tick = 0; tick < 10; tick++) {
+            Assertions.assertSame(layout, render.invoke(command, source, 40, state), "unchanged busy frame");
+        }
+        final var growing = renderTurnFrame(command, state, source + " continuation", 40);
+        assertHistoricalChunksSame(first, growing, 23);
+        Assertions.assertNotSame(first.chunks().getLast(), growing.chunks().getLast());
+        assertTurnFrameMatchesCold(command, state, source + " continuation", 40, growing);
+    }
+
+    @Test
+    void compactLayoutsBelongToTabsAndTrackExistingToolUpdates() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var first = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var second = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var render = TuiCommand.class.getDeclaredMethod("layoutContent", String.class, int.class, UiState.class);
+        render.setAccessible(true);
+        final var source = "**Assistant**\n\nanswer";
+        final var a = render.invoke(command, source, 40, first);
+        final var b = render.invoke(command, source, 40, second);
+        Assertions.assertNotSame(a, b);
+        Assertions.assertSame(a, render.invoke(command, source, 40, first));
+        Assertions.assertSame(b, render.invoke(command, source, 40, second));
+        final var narrow = render.invoke(command, source, 20, first);
+        Assertions.assertNotSame(a, narrow);
+        first.showThinking = !first.showThinking;
+        Assertions.assertNotSame(narrow, render.invoke(command, source, 20, first));
+
+        first.showToolActions = ToolOutputVisibility.SHOWN;
+        final var tool =
+                ConversationTranscript.TOOL_BEGIN + "\n`read (#1)`\n\npreview\n" + ConversationTranscript.TOOL_END;
+        first.toolOutputs.record(1, new ToolOutputStore.Entry("read", "", "preview", false, 0));
+        final var before = renderTurnFrame(command, first, tool, 40);
+        first.toolOutputs.record(1, new ToolOutputStore.Entry("read", "", "preview", true, 0));
+        final var after = renderTurnFrame(command, first, tool, 40);
+        Assertions.assertNotSame(before.chunks().getFirst(), after.chunks().getFirst(), "same ordinal changed status");
+        assertTurnFrameMatchesCold(command, first, tool, 40, after);
+    }
+
+    @Test
+    void stableCodeLayoutIsNotRehighlightedOnTailUpdates() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var source = "```java\nint answer = 42;\n```\n\n**Assistant**\n\ntail";
+        final var first = renderTurnFrame(command, state, source, 40);
+        final var next = renderTurnFrame(command, state, source + " grows", 40);
+        Assertions.assertSame(first.chunks().getFirst(), next.chunks().getFirst());
+        assertEquals(first.lastCodeBlock(), next.lastCodeBlock());
+        assertTurnFrameMatchesCold(command, state, source + " grows", 40, next);
+    }
+
+    @Test
+    void oversizedSingleTurnKeepsCommittedCompactPrefixWhileTableTailChanges() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        final var prefix = ("word ".repeat(100) + "\n\n").repeat(132);
+        final var source = prefix + "| name | value |\n| --- | --- |\n| first | 1 |";
+        final var first = renderTurnFrame(command, state, source, 40);
+        final var extended = source + "\n| second | 2 |";
+        final var next = renderTurnFrame(command, state, extended, 40);
+        Assertions.assertSame(first.chunks().getFirst(), next.chunks().getFirst(), "committed prefix reparsed");
+        assertTurnFrameMatchesCold(command, state, extended, 40, next);
+        final var reset = renderTurnFrame(command, state, "reset", 40);
+        assertEquals(1, reset.chunks().size());
+        for (final var field : List.of("turns", "regions", "code", "tools")) {
+            final var parts = state.contentLayout.getClass().getDeclaredField(field);
+            parts.setAccessible(true);
+            assertTrue(((Map<?, ?>) parts.get(state.contentLayout)).size() <= 1, "removed history retained: " + field);
+        }
+    }
+
+    @Test
+    void busyLiveThoughtReusesContentButNotTheIndicator() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        state.showThinking = true;
+        state.model.onEvent(new AgentEvent.ThinkingDelta("pondering", null));
+        final var render = TuiCommand.class.getDeclaredMethod(
+                "appendLiveChunks", List.class, int.class, UiState.class, List.class);
+        render.setAccessible(true);
+        final var first = new ArrayList<>();
+        final var next = new ArrayList<>();
+        render.invoke(command, first, 40, state, new ArrayList<>());
+        render.invoke(command, next, 40, state, new ArrayList<>());
+        assertEquals(2, first.size());
+        Assertions.assertSame(first.getFirst(), next.getFirst());
+        Assertions.assertNotSame(first.getLast(), next.getLast());
+        state.model.onEvent(new AgentEvent.ThinkingDelta(" more", null));
+        final var changed = new ArrayList<>();
+        render.invoke(command, changed, 40, state, new ArrayList<>());
+        Assertions.assertNotSame(first.getFirst(), changed.getFirst());
+    }
+
+    @Test
+    void historicalToolLayoutSurvivesProseTailUpdates() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        state.showToolActions = ToolOutputVisibility.SHOWN;
+        final var source = ConversationTranscript.TOOL_BEGIN + "\n`read (#1)`\n\npreview\n"
+                + ConversationTranscript.TOOL_END + "\n\n**Assistant**\n\nanswer";
+        final var first = renderTurnFrame(command, state, source, 40);
+        final var next = renderTurnFrame(command, state, source + " more", 40);
+        Assertions.assertSame(first.chunks().getFirst(), next.chunks().getFirst());
+        assertTurnFrameMatchesCold(command, state, source + " more", 40, next);
     }
 
     private record TurnFrame(

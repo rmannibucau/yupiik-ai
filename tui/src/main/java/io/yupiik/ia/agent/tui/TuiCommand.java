@@ -112,6 +112,7 @@ import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.AbstractList;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -124,6 +125,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
@@ -246,6 +248,7 @@ public class TuiCommand implements Runnable {
     private final ReentrantLock contentLock = new ReentrantLock();
     private volatile ContentKey lastContentKey;
     private volatile ContentResult lastContent;
+    private volatile long layoutGeneration;
     // bounded per-region render-unit cache: a stable region (thought, log or plain prose) is
     // rendered once per (kind, text, width, theme) key and its chunks/rows are reused across
     // frames; only the growing tail region re-renders each tick. Render-thread confined (like
@@ -4499,7 +4502,7 @@ public class TuiCommand implements Runnable {
 
     private void renderTranscript(final Rect rect, final Frame frame, final UiState state) {
         if (renderOwner != state.model || !Objects.equals(renderSessionId, state.sessionId)) {
-            clearRenderCaches();
+            // Each tab owns its compact layout. Switching tabs must not force a replay.
             renderOwner = state.model;
             renderSessionId = state.sessionId;
         }
@@ -4512,20 +4515,17 @@ public class TuiCommand implements Runnable {
         // the conversation pane is open on the left: the pane wall is replaced by the
         // per-region role bar, so the content starts one column earlier than block.inner()
         final var content = new Rect(inner.x() - 1, inner.y(), inner.width() + 1, inner.height());
-        final var rows = new ArrayList<String>();
-        final var toolTops = new ArrayList<UiState.ToolTop>();
-        final var footerLinks = new ArrayList<UiState.FooterLink>();
-        final var runHeaders = new ArrayList<UiState.RunHeader>();
-        final var chunks = chunks(
-                state.model.markdown(RUNNING_TOOL_MARKER, WELCOME),
-                content.width(),
-                state,
-                toolTops,
-                footerLinks,
-                runHeaders,
-                rows);
-        state.flatRows = rows;
-        final var total = chunks.stream().mapToInt(RenderedChunk::height).sum();
+        final var laidOut = layoutContent(state.model.markdown(RUNNING_TOOL_MARKER, WELCOME), content.width(), state);
+        final var tailChunks = new ArrayList<RenderedChunk>();
+        final var tailRows = new ArrayList<String>();
+        appendLiveChunks(tailChunks, content.width(), state, tailRows);
+        final var chunks = concat(laidOut.chunks(), tailChunks);
+        final var toolTops = laidOut.toolTops();
+        final var footerLinks = laidOut.footerLinks();
+        final var runHeaders = laidOut.runHeaders();
+        state.flatRows = concat(laidOut.rows(), tailRows);
+        final var total = laidOut.index().height()
+                + tailChunks.stream().mapToInt(RenderedChunk::height).sum();
         final var maxViewOffset = Math.max(0, total - Math.max(1, inner.height()));
         state.maxViewOffset = maxViewOffset;
         state.model.maxViewOffset(maxViewOffset);
@@ -4589,12 +4589,17 @@ public class TuiCommand implements Runnable {
             }
         }
         state.toolFooterLinks = links;
-        var chunkTop = 0;
+        final var firstChunk = laidOut.index().firstVisible(viewOffset);
+        var chunkTop = laidOut.index().row(firstChunk);
         final var copyBoxes = new ArrayList<SelectionState.CopyBox>();
         final var kinds = new SelectionState.RowKind[frame.height()];
         Arrays.fill(kinds, SelectionState.RowKind.HARD);
-        for (final var chunk : chunks) {
+        for (var chunkIndex = firstChunk; chunkIndex < chunks.size(); chunkIndex++) {
+            final var chunk = chunks.get(chunkIndex);
             final var top = chunkTop - viewOffset;
+            if (top >= inner.height()) {
+                break;
+            }
             chunkTop += chunk.height();
             final var skip = Math.max(0, -top);
             final var visibleTop = Math.max(0, top);
@@ -4703,6 +4708,24 @@ public class TuiCommand implements Runnable {
         }
     }
 
+    /** Constant-time view: spinner frames must not copy the historical row/chunk lists. */
+    private static <T> List<T> concat(final List<T> head, final List<T> tail) {
+        if (tail.isEmpty()) {
+            return head;
+        }
+        return new AbstractList<>() {
+            @Override
+            public T get(final int index) {
+                return index < head.size() ? head.get(index) : tail.get(index - head.size());
+            }
+
+            @Override
+            public int size() {
+                return head.size() + tail.size();
+            }
+        };
+    }
+
     /**
      * The block chrome of a boxed chunk: the columns/rows the surrounding block
      * (borders plus padding) contributes on each side, so the transcript render
@@ -4760,18 +4783,72 @@ public class TuiCommand implements Runnable {
             List<UiState.ToolTop> toolTops,
             List<UiState.FooterLink> footerLinks,
             List<UiState.RunHeader> runHeaders,
-            String lastCodeBlock) {}
+            String lastCodeBlock,
+            TranscriptLayout<RenderedChunk> index) {}
+
+    /** Per-tab compact layout ownership; shared with UiState, not a widget cache. */
+    static final class ContentLayout {
+        private long generation = -1;
+        private ContentKey key;
+        private ContentResult result;
+        private LiveThoughtKey liveThoughtKey;
+        private ContentPart liveThought;
+        private final Map<TurnUnitKey, ContentPart> turns = new LinkedHashMap<>();
+        private final Map<RegionUnitKey, ContentPart> regions = new LinkedHashMap<>();
+        private final Map<CodeUnitKey, ContentPart> code = new LinkedHashMap<>();
+        private final Map<ToolUnitKey, ToolPart> tools = new LinkedHashMap<>();
+        private final Set<TurnUnitKey> liveTurns = new HashSet<>();
+        private final Set<RegionUnitKey> liveRegions = new HashSet<>();
+        private final Set<CodeUnitKey> liveCode = new HashSet<>();
+        private final Set<ToolUnitKey> liveTools = new HashSet<>();
+
+        private void clear(final long generation) {
+            this.generation = generation;
+            key = null;
+            result = null;
+            liveThoughtKey = null;
+            liveThought = null;
+            turns.clear();
+            regions.clear();
+            code.clear();
+            tools.clear();
+            liveTurns.clear();
+            liveRegions.clear();
+            liveCode.clear();
+            liveTools.clear();
+        }
+    }
 
     /** The content-side outputs of rendering one transcript region. */
     private record ContentPart(List<RenderedChunk> chunks, List<String> rows, String lastCodeBlock) {
         static final ContentPart EMPTY = new ContentPart(List.of(), List.of(), null);
     }
 
+    private record CodeUnitKey(String language, String source, int width, Palette palette) {}
+
+    private record LiveThoughtKey(String source, int width, Style style, Palette palette) {}
+
+    private record ToolUnitKey(
+            List<ToolRun.Member> members,
+            Map<Long, ToolOutputStore.Entry> outputs,
+            int width,
+            Palette palette,
+            ToolOutputVisibility visibility,
+            boolean collapsed,
+            Set<Long> collapsedMembers) {}
+
+    private record ToolPart(
+            ContentPart content,
+            List<UiState.ToolTop> tops,
+            List<UiState.FooterLink> footers,
+            List<UiState.RunHeader> headers) {}
+
     private void clearRenderCaches() {
         contentLock.lock();
         try {
             lastContentKey = null;
             lastContent = null;
+            layoutGeneration++;
         } finally {
             contentLock.unlock();
         }
@@ -4838,6 +4915,18 @@ public class TuiCommand implements Runnable {
         if (text == null || text.isEmpty()) {
             return ContentPart.EMPTY;
         }
+        if ("prose".equals(kind)) {
+            final var chunks = new ArrayList<RenderedChunk>();
+            final var rows = new ArrayList<String>();
+            final var before = state.lastCodeBlock;
+            state.lastCodeBlock = null;
+            appendChunks(chunks, text, width, state, rows);
+            final var code = state.lastCodeBlock;
+            if (code == null) {
+                state.lastCodeBlock = before;
+            }
+            return new ContentPart(List.copyOf(chunks), List.copyOf(rows), code);
+        }
         final var key = new RegionUnitKey(
                 kind,
                 text,
@@ -4846,6 +4935,14 @@ public class TuiCommand implements Runnable {
                 System.identityHashCode(markdownStyles),
                 state.model.userLabel(),
                 state.model.assistantLabel());
+        state.contentLayout.liveRegions.add(key);
+        final var layoutPart = state.contentLayout.regions.get(key);
+        if (layoutPart != null) {
+            if (layoutPart.lastCodeBlock() != null) {
+                state.lastCodeBlock = layoutPart.lastCodeBlock();
+            }
+            return layoutPart;
+        }
         final var cacheable = text.length() <= MAX_REGION_UNIT_SOURCE_CHARS;
         final var cached = cacheable ? regionUnitCache.get(key) : null;
         if (cached != null) {
@@ -4875,6 +4972,7 @@ public class TuiCommand implements Runnable {
             return ContentPart.EMPTY;
         }
         final var part = new ContentPart(List.copyOf(local), List.copyOf(rows), lastCodeBlock);
+        state.contentLayout.regions.put(key, part);
         final var weight = regionWeight(key, part);
         if (!cacheable || weight > MAX_REGION_UNIT_CACHE_WEIGHT) {
             return part;
@@ -4912,31 +5010,34 @@ public class TuiCommand implements Runnable {
         rows.addAll(part.rows());
     }
 
-    private List<RenderedChunk> chunks(
-            final String md,
-            final int width,
-            final UiState state,
-            final List<UiState.ToolTop> toolTops,
-            final List<UiState.FooterLink> footerLinks,
-            final List<UiState.RunHeader> runHeaders,
-            final List<String> rows) {
-        final var out = new ArrayList<RenderedChunk>();
-        contentChunks(out, md, width, state, toolTops, footerLinks, runHeaders, rows);
+    private void appendLiveChunks(
+            final List<RenderedChunk> out, final int width, final UiState state, final List<String> rows) {
         final var contentWidth = Math.max(1, width - 2); // room for the per-region left bar
-        // live (not yet flushed) thinking streams inline on the thought panel; it
-        // grows every tick so it stays outside the chunk memo (spinner-sensitive)
+        // Live thought content is not spinner-sensitive: only the indicator below is.
+        // Keep its compact layout independently so a stalled large thought is cheap too.
         if (state.showThinking && state.model.thinkingLength() > 0) {
             final var live = state.model.thinkingText().stripLeading();
             if (!live.isEmpty()) {
-                addThoughtChunk(out, liveThoughtLines(live, contentWidth), rows);
+                final var key = new LiveThoughtKey(live, contentWidth, thoughtStyle, palette);
+                final var layout = state.contentLayout;
+                if (!key.equals(layout.liveThoughtKey)) {
+                    final var chunks = new ArrayList<RenderedChunk>();
+                    final var textRows = new ArrayList<String>();
+                    addThoughtChunk(chunks, liveThoughtLines(live, contentWidth), textRows);
+                    layout.liveThoughtKey = key;
+                    layout.liveThought = new ContentPart(List.copyOf(chunks), List.copyOf(textRows), null);
+                }
+                appendPart(out, rows, layout.liveThought);
             }
+        } else {
+            state.contentLayout.liveThoughtKey = null;
+            state.contentLayout.liveThought = null;
         }
         // in-pane activity indicator: shown even when thoughts are hidden so a
         // reasoning round never looks like a hang
         if (state.model.thinkingLength() > 0) {
             addThinkingIndicator(out, state, rows);
         }
-        return out;
     }
 
     /** Reuses unchanged frames and bounded rendered regions; tools keep their grouping path. */
@@ -4949,12 +5050,25 @@ public class TuiCommand implements Runnable {
             final List<UiState.FooterLink> footerLinks,
             final List<UiState.RunHeader> runHeaders,
             final List<String> rows) {
+        final var result = layoutContent(md, width, state);
+        out.addAll(result.chunks());
+        rows.addAll(result.rows());
+        toolTops.addAll(result.toolTops());
+        footerLinks.addAll(result.footerLinks());
+        runHeaders.addAll(result.runHeaders());
+    }
+
+    private ContentResult layoutContent(final String md, final int width, final UiState state) {
+        final var layout = state.contentLayout;
+        if (layout.generation != layoutGeneration) {
+            layout.clear(layoutGeneration);
+        }
         final var key = new ContentKey(
                 md,
                 width,
                 state.showThinking,
                 state.showToolActions,
-                state.toolOutputs.size() + state.toolOutputs.latestOrdinal(),
+                state.toolOutputs.revision(),
                 state.collapsedTools.hashCode(),
                 state.runCollapsed.hashCode(),
                 System.identityHashCode(palette),
@@ -4964,20 +5078,19 @@ public class TuiCommand implements Runnable {
         final ContentResult cached;
         contentLock.lock();
         try {
-            cached = lastContentKey != null && lastContentKey.equals(key) ? lastContent : null;
+            cached = key.equals(layout.key) ? layout.result : null;
         } finally {
             contentLock.unlock();
         }
         if (cached != null) {
             state.lastCodeBlock = cached.lastCodeBlock();
-            out.addAll(cached.chunks());
-            rows.addAll(cached.rows());
-            toolTops.addAll(cached.toolTops());
-            footerLinks.addAll(cached.footerLinks());
-            runHeaders.addAll(cached.runHeaders());
-            return;
+            return cached;
         }
         turnUnitFrame++;
+        layout.liveTurns.clear();
+        layout.liveRegions.clear();
+        layout.liveCode.clear();
+        layout.liveTools.clear();
         final var contentWidth = Math.max(1, width - 2); // room for the per-region left bar
         final var local = new ArrayList<RenderedChunk>();
         final var localRows = new ArrayList<String>();
@@ -5069,25 +5182,24 @@ public class TuiCommand implements Runnable {
                 List.copyOf(localToolTops),
                 List.copyOf(localFooterLinks),
                 List.copyOf(localRunHeaders),
-                state.lastCodeBlock);
-        long contentWeight = 2L * md.length() + 256L * local.size();
-        for (final var row : localRows) {
-            contentWeight += 256L + 64L * row.length();
-        }
+                state.lastCodeBlock,
+                new TranscriptLayout<>(local, RenderedChunk::height));
+        layout.turns.keySet().retainAll(layout.liveTurns);
+        layout.regions.keySet().retainAll(layout.liveRegions);
+        layout.code.keySet().retainAll(layout.liveCode);
+        layout.tools.keySet().retainAll(layout.liveTools);
         contentLock.lock();
         try {
-            final var retain =
-                    md.length() <= MAX_REGION_UNIT_SOURCE_CHARS && contentWeight <= MAX_REGION_UNIT_CACHE_WEIGHT;
-            lastContentKey = retain ? key : null;
-            lastContent = retain ? result : null;
+            // Only compact pre-wrapped text/style runs and row metadata live here.
+            // Rich widgets are viewport-local, so cache admission must not discard layout.
+            layout.key = key;
+            layout.result = result;
+            lastContentKey = key;
+            lastContent = result;
         } finally {
             contentLock.unlock();
         }
-        out.addAll(result.chunks());
-        rows.addAll(result.rows());
-        toolTops.addAll(result.toolTops());
-        footerLinks.addAll(result.footerLinks());
-        runHeaders.addAll(result.runHeaders());
+        return result;
     }
 
     /**
@@ -5421,27 +5533,31 @@ public class TuiCommand implements Runnable {
             } else {
                 anySegment = false;
                 final var lang = seg.language();
+                final var key = new CodeUnitKey(lang, seg.text(), width, palette);
+                state.contentLayout.liveCode.add(key);
+                final var cached = state.contentLayout.code.get(key);
+                if (cached != null) {
+                    appendPart(out, rows, cached);
+                    state.lastCodeBlock = cached.lastCodeBlock();
+                    anySegment = true;
+                    continue;
+                }
                 final var text = syntaxHighlighter.highlight(lang, seg.text());
                 // wrap at box inner width minus the code block's horizontal padding
                 final var wrapped = MarkdownLines.wrapCodeWithKinds(text.lines(), Math.max(1, width - 4));
-                final var wrappedText = Text.from(wrapped.lines());
+                final var wrappedText = new CompactText(wrapped.lines());
                 final var boxed = codeBlock(lang);
-                final var innerH = Math.max(wrappedText.height(), 1);
+                final var innerH = Math.max(wrappedText.rows().size(), 1);
                 state.lastCodeBlock = seg.text();
-                for (final var line : wrapped.lines()) {
-                    rows.add(plainText(line));
-                }
+                rows.addAll(wrappedText.rows());
                 // boxed chunks get no row kinds (the CopyBox geometry handles their interior);
                 // only the border rows are excluded from kinds and never copied anyway
-                out.add(new RenderedChunk(
+                final var chunk = new RenderedChunk(
                         innerH + 2,
-                        skip -> Paragraph.builder()
-                                .text(wrappedText)
-                                .block(boxed)
-                                .overflow(Overflow.CLIP)
-                                .scroll(Math.clamp(innerH - 1, 0, skip))
-                                .build(),
-                        BoxChrome.symmetric(boxed)));
+                        skip -> wrappedText.widget(Math.min(innerH - 1, skip), boxed, null),
+                        BoxChrome.symmetric(boxed));
+                out.add(chunk);
+                state.contentLayout.code.put(key, new ContentPart(List.of(chunk), wrappedText.rows(), seg.text()));
                 anySegment = true;
             }
         }
@@ -5459,17 +5575,64 @@ public class TuiCommand implements Runnable {
                         ? (turn.user() ? state.model.userLabel() : state.model.assistantLabel())
                         : turn.label();
         final var key = new TurnUnitKey(turn, width, palette, roleMarkdown, headerLabel);
+        state.contentLayout.liveTurns.add(key);
+        final var laidOut = state.contentLayout.turns.get(key);
+        if (laidOut != null) {
+            final var admitted = turnUnitCache.get(key);
+            if (admitted != null) {
+                turnUnitCache.put(key, new CachedTurnUnit(admitted.part(), admitted.weight(), turnUnitFrame));
+            }
+            return laidOut;
+        }
         final var cached = turnUnitCache.get(key);
         if (cached != null) {
             turnUnitCache.put(key, new CachedTurnUnit(cached.part(), cached.weight(), turnUnitFrame));
+            state.contentLayout.turns.put(key, cached.part());
             return cached.part();
         }
-        // Keep the original miss path: the marker is drawn as a role-colored header, while
-        // the complete body (including any unterminated line) goes through the same renderer.
         final var markerEnd = turn.labelled() ? turn.text().indexOf('\n') : -1;
         final var body = markerEnd < 0
                 ? turn.text()
                 : turn.text().substring(markerEnd + 1).stripLeading();
+        // A single streamed answer can itself exceed the widget memo budget. Preserve
+        // its committed compact prefix using exactly the renderer's fence/table/quote
+        // boundary, rather than reparsing that prefix on every token delta.
+        if (body.length() > 64 * 1024) {
+            final var safe = transcriptRenderer.lastSafeNewline(body);
+            if (safe > 0 && safe < body.length()) {
+                final var prefixText = turn.text().substring(0, turn.text().length() - body.length() + safe);
+                final var prefix = turnUnit(
+                        new TuiTranscriptModel.TurnSegment(prefixText, turn.user(), turn.labelled(), turn.label()),
+                        width,
+                        state);
+                final var suffix = body.substring(safe);
+                final var rendered = transcriptRenderer.renderIndependent(suffix, width, Style.EMPTY, roleMarkdown);
+                final var bar = turn.user() ? userBar() : outputBar();
+                final var lines = new ArrayList<Line>();
+                final var kinds = new ArrayList<SelectionState.RowKind>();
+                final var blank = (TranscriptRenderer.boundaryBlanks(body.substring(0, safe), suffix) > 0
+                                && !rendered.lines().isEmpty())
+                        || (!suffix.isBlank() && rendered.lines().isEmpty());
+                final var last = prefix.rows().isEmpty() ? "" : prefix.rows().getLast();
+                if (blank
+                        && !last.substring(Math.min(last.length(), bar.content().length()))
+                                .isBlank()) {
+                    lines.add(Line.from(bar));
+                    kinds.add(SelectionState.RowKind.HARD);
+                }
+                lines.addAll(withBar(rendered.lines(), bar));
+                kinds.addAll(rendered.kinds());
+                if (lines.isEmpty()) {
+                    return prefix;
+                }
+                final var tail = new ArrayList<RenderedChunk>();
+                final var rows = new ArrayList<String>();
+                addMarkdownChunk(tail, lines, kinds, rows);
+                return new ContentPart(concat(prefix.chunks(), tail), concat(prefix.rows(), rows), null);
+            }
+        }
+        // Keep the original miss path: the marker is drawn as a role-colored header, while
+        // the complete body (including any unterminated line) goes through the same renderer.
         final var bar = turn.user() ? userBar() : outputBar();
         final var rendered = transcriptRenderer.renderRegionWithKinds(body, width, Style.EMPTY, roleMarkdown);
         final var lines = new ArrayList<>(withBar(rendered.lines(), bar));
@@ -5484,6 +5647,7 @@ public class TuiCommand implements Runnable {
         final var rows = new ArrayList<String>();
         addMarkdownChunk(chunks, lines, kinds, rows);
         final var part = new ContentPart(List.copyOf(chunks), List.copyOf(rows), null);
+        state.contentLayout.turns.put(key, part);
         if (turn.text().length() <= MAX_REGION_UNIT_SOURCE_CHARS
                 && turnUnitCache.size() < MAX_TURN_UNIT_CACHE_ENTRIES) {
             final var weight = contentPartWeight(turn.text(), part);
@@ -5501,17 +5665,11 @@ public class TuiCommand implements Runnable {
             final List<SelectionState.RowKind> kinds,
             final List<String> rows) {
         final var innerH = Math.max(lines.size(), 1);
-        final var text = Text.from(lines);
-        for (final var line : lines) {
-            rows.add(plainText(line));
-        }
+        final var text = new CompactText(lines);
+        rows.addAll(text.rows());
         out.add(new RenderedChunk(
                 innerH,
-                skip -> Paragraph.builder()
-                        .text(text)
-                        .overflow(Overflow.CLIP)
-                        .scroll(Math.clamp(innerH - 1, 0, skip))
-                        .build(),
+                skip -> text.widget(Math.min(innerH - 1, skip), null, null),
                 null,
                 kinds == null || kinds.isEmpty() ? null : kinds.toArray(SelectionState.RowKind[]::new)));
     }
@@ -5532,20 +5690,9 @@ public class TuiCommand implements Runnable {
      */
     private void addThoughtChunk(final List<RenderedChunk> out, final List<Line> lines, final List<String> rows) {
         final var innerH = Math.max(lines.size(), 1);
-        final var text = Text.from(lines);
-        for (final var line : lines) {
-            rows.add(plainText(line));
-        }
-        out.add(new RenderedChunk(
-                innerH,
-                skip -> {
-                    final var paragraph = Paragraph.builder().text(text).overflow(Overflow.CLIP);
-                    if (thoughtBg != null) {
-                        paragraph.background(thoughtBg);
-                    }
-                    return paragraph.scroll(Math.clamp(innerH - 1, 0, skip)).build();
-                },
-                null));
+        final var text = new CompactText(lines);
+        rows.addAll(text.rows());
+        out.add(new RenderedChunk(innerH, skip -> text.widget(Math.min(innerH - 1, skip), null, thoughtBg), null));
     }
 
     /**
@@ -5560,6 +5707,71 @@ public class TuiCommand implements Runnable {
      * the per-run override, which now visibly shows/hides the member lines in every mode.
      */
     private void addToolRunChunk(
+            final List<RenderedChunk> out,
+            final ToolRun run,
+            final int width,
+            final UiState state,
+            final List<UiState.ToolTop> toolTops,
+            final List<UiState.FooterLink> footerLinks,
+            final List<UiState.RunHeader> runHeaders,
+            final List<String> rows) {
+        if (run == null || run.members().isEmpty()) {
+            return;
+        }
+        final var outputs = new LinkedHashMap<Long, ToolOutputStore.Entry>();
+        final var collapsed = new HashSet<Long>();
+        for (final var member : run.members()) {
+            final var ordinal = member.card().ordinal();
+            final var entry = state.toolOutputs.get(ordinal);
+            if (entry != null) {
+                outputs.put(ordinal, entry);
+            }
+            if (state.collapsedTools.contains(ordinal)) {
+                collapsed.add(ordinal);
+            }
+        }
+        final var key = new ToolUnitKey(
+                run.members(),
+                outputs,
+                width,
+                palette,
+                state.showToolActions,
+                state.runCollapsed.getOrDefault(run.id(), state.showToolActions == ToolOutputVisibility.COLLAPSED),
+                collapsed);
+        state.contentLayout.liveTools.add(key);
+        var part = state.contentLayout.tools.get(key);
+        if (part == null
+                || run.members().stream().anyMatch(member -> member.card().ordinal() < 0)) {
+            final var chunks = new ArrayList<RenderedChunk>();
+            final var localRows = new ArrayList<String>();
+            final var tops = new ArrayList<UiState.ToolTop>();
+            final var footers = new ArrayList<UiState.FooterLink>();
+            final var headers = new ArrayList<UiState.RunHeader>();
+            renderToolRunChunk(chunks, run, width, state, tops, footers, headers, localRows);
+            part = new ToolPart(
+                    new ContentPart(List.copyOf(chunks), List.copyOf(localRows), null),
+                    List.copyOf(tops),
+                    List.copyOf(footers),
+                    List.copyOf(headers));
+            state.contentLayout.tools.put(key, part);
+        }
+        final var top = out.stream().mapToInt(RenderedChunk::height).sum();
+        appendPart(out, rows, part.content());
+        for (final var anchor : part.tops()) {
+            toolTops.add(
+                    new UiState.ToolTop(anchor.ordinal(), top + anchor.row(), anchor.runMember(), anchor.bordered()));
+        }
+        for (final var anchor : part.footers()) {
+            footerLinks.add(new UiState.FooterLink(anchor.ordinal(), top + anchor.row()));
+        }
+        for (final var anchor : part.headers()) {
+            final var rect = anchor.header();
+            runHeaders.add(new UiState.RunHeader(
+                    anchor.id(), new Rect(rect.x(), top + rect.y(), rect.width(), rect.height()), top + anchor.row()));
+        }
+    }
+
+    private void renderToolRunChunk(
             final List<RenderedChunk> out,
             final ToolRun run,
             final int width,
@@ -5629,18 +5841,11 @@ public class TuiCommand implements Runnable {
                 }
             }
         }
-        final var text = Text.from(lines.toArray(Line[]::new));
-        final var innerH = Math.max(text.height(), 1);
+        final var text = new CompactText(lines);
+        final var innerH = Math.max(text.rows().size(), 1);
         final var box = runBlock(run);
         out.add(new RenderedChunk(
-                innerH + 2,
-                skip -> Paragraph.builder()
-                        .text(text)
-                        .block(box)
-                        .overflow(Overflow.CLIP)
-                        .scroll(Math.clamp(innerH - 1, 0, skip))
-                        .build(),
-                BoxChrome.symmetric(box)));
+                innerH + 2, skip -> text.widget(Math.min(innerH - 1, skip), box, null), BoxChrome.symmetric(box)));
     }
 
     /**
@@ -5784,13 +5989,8 @@ public class TuiCommand implements Runnable {
             toolTops.add(new UiState.ToolTop(card.ordinal(), top, false, false));
             final var line = hiddenToolLine(card);
             rows.add(plainText(line));
-            out.add(new RenderedChunk(
-                    1,
-                    skip -> Paragraph.builder()
-                            .text(Text.from(line))
-                            .overflow(Overflow.CLIP)
-                            .build(),
-                    null));
+            final var compact = new CompactText(List.of(line));
+            out.add(new RenderedChunk(1, skip -> compact.widget(0, null, null), null));
             return;
         }
         final var top = out.stream().mapToInt(RenderedChunk::height).sum();
@@ -5870,17 +6070,10 @@ public class TuiCommand implements Runnable {
                 footerLinks.add(new UiState.FooterLink(card.ordinal(), top + 1 + lines.size() - 1));
             }
         }
-        final var text = Text.from(lines.toArray(Line[]::new));
-        final var innerH = Math.max(text.height(), 1);
+        final var text = new CompactText(lines);
+        final var innerH = Math.max(text.rows().size(), 1);
         out.add(new RenderedChunk(
-                innerH + 2,
-                skip -> Paragraph.builder()
-                        .text(text)
-                        .block(block)
-                        .overflow(Overflow.CLIP)
-                        .scroll(Math.clamp(innerH - 1, 0, skip))
-                        .build(),
-                BoxChrome.symmetric(block)));
+                innerH + 2, skip -> text.widget(Math.min(innerH - 1, skip), block, null), BoxChrome.symmetric(block)));
     }
 
     private String blockTitle(final ToolCard card) {

@@ -125,7 +125,7 @@ final class TranscriptRenderer {
         final var combinedKinds =
                 new ArrayList<SelectionState.RowKind>(prefixLines.kinds().size() + 16);
         combinedKinds.addAll(prefixLines.kinds());
-        final var suffixRendered = renderToList(suffix, width, base, styles);
+        final var suffixRendered = renderIndependent(suffix, width, base, styles);
         appendBlocks(combined, combinedKinds, suffixRendered, boundaryBlanks(prefix, suffix) > 0, !suffix.isBlank());
         return new Rendered(combined, combinedKinds);
     }
@@ -275,7 +275,7 @@ final class TranscriptRenderer {
                 final var resultKinds = new ArrayList<SelectionState.RowKind>(
                         lastPrefixLines.kinds().size() + 8);
                 resultKinds.addAll(lastPrefixLines.kinds());
-                final var deltaRendered = renderToList(delta, width, base, styles);
+                final var deltaRendered = renderIndependent(delta, width, base, styles);
                 appendBlocks(result, resultKinds, deltaRendered, boundaryBlanks(lastPrefix, delta) > 0, false);
                 final var rendered = new Rendered(result, resultKinds);
                 remember(prefix, rendered, width, base, styles);
@@ -290,7 +290,7 @@ final class TranscriptRenderer {
             rendered = cached == null ? null : cached.rendered();
         }
         if (rendered == null) {
-            rendered = renderToList(prefix, width, base, styles);
+            rendered = renderIndependent(prefix, width, base, styles);
             cachePrefix(key, rendered);
         }
         remember(prefix, rendered, width, base, styles);
@@ -338,7 +338,8 @@ final class TranscriptRenderer {
         lastStyles = styles;
     }
 
-    private Rendered renderToList(final String source, final int width, final Style base, final MarkdownStyles styles) {
+    /** Parses an independently delimited block group, shared with the compact streaming layout. */
+    Rendered renderIndependent(final String source, final int width, final Style base, final MarkdownStyles styles) {
         if (source == null || source.isEmpty()) {
             return Rendered.EMPTY;
         }

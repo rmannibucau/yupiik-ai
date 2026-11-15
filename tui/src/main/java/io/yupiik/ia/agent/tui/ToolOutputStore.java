@@ -63,6 +63,12 @@ public final class ToolOutputStore {
     private long totalChars;
     private long latest = -1;
     private long maxOrdinalSeen = -1;
+    private long revision;
+
+    /** Includes updates of an existing ordinal, not just insertions. */
+    long revision() {
+        return revision;
+    }
 
     public ToolOutputStore() {
         this(DEFAULT_MAX_ENTRIES, DEFAULT_MAX_OUTPUT_CHARS, 0);
@@ -82,6 +88,7 @@ public final class ToolOutputStore {
         if (ordinal < 0 || entry == null) {
             return;
         }
+        revision++;
         var output = entry.output() == null ? "" : entry.output();
         if (output.length() > maxOutputChars) {
             output = output.substring(output.length() - maxOutputChars) + TRUNCATED;
@@ -124,6 +131,7 @@ public final class ToolOutputStore {
         if (fragment == null || stored == null || !stored.metadata.running()) {
             return;
         }
+        revision++;
         final var previousLength = stored.length();
         stored.append(fragment, maxOutputChars);
         if (!fragment.endsWith("\n") && !fragment.endsWith("\r")) {
@@ -153,6 +161,7 @@ public final class ToolOutputStore {
 
     /** Releases all outputs and resets ordinal tracking. */
     public void clear() {
+        revision++;
         entries.clear();
         order.clear();
         totalChars = 0;
