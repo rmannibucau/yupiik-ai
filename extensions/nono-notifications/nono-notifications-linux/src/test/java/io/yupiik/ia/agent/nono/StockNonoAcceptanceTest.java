@@ -31,7 +31,6 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -233,12 +232,9 @@ class StockNonoAcceptanceTest {
     }
 
     private static final class Fixture implements AutoCloseable {
-        private final Path root = Files.createTempDirectory(
-                Path.of(System.getProperty("user.home")),
-                ".nono-acceptance-",
-                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
-        private final Path work = root.resolve("work");
-        private final Path privateDir = root.resolve("private");
+        private final Path root;
+        private final Path work;
+        private final Path privateDir;
         private final Path java =
                 Path.of(System.getProperty("java.home"), "bin", "java").toRealPath();
         private final String name = "companion-acceptance-" + UUID.randomUUID();
@@ -249,10 +245,23 @@ class StockNonoAcceptanceTest {
         private boolean launched;
 
         private Fixture() throws IOException {
-            for (final var directory : List.of("config", "state", "data", "work", "outside")) {
-                Files.createDirectory(
-                        root.resolve(directory),
-                        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+            // /tmp is intentionally rejected by the production ancestor policy.
+            root = TestTempDirs.create(Path.of(System.getProperty("user.home")), ".nono-acceptance-");
+            work = root.resolve("work");
+            privateDir = root.resolve("private");
+            try {
+                for (final var directory : List.of("config", "state", "data", "work", "outside")) {
+                    Files.createDirectory(
+                            root.resolve(directory),
+                            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+                }
+            } catch (final IOException e) {
+                try {
+                    TestTempDirs.cleanup(root);
+                } catch (final IOException cleanupFailure) { // keep the creation failure as the cause
+                    e.addSuppressed(cleanupFailure);
+                }
+                throw e;
             }
         }
 
@@ -327,11 +336,8 @@ class StockNonoAcceptanceTest {
                 if (!io.awaitTermination(5, TimeUnit.SECONDS)) {
                     failure = combine(failure, new IOException("Subprocess I/O threads did not terminate"));
                 }
-                try (final var paths = Files.walk(root)) {
-                    for (final var path :
-                            paths.sorted(Comparator.reverseOrder()).toList()) {
-                        Files.delete(path);
-                    }
+                try {
+                    TestTempDirs.cleanup(root);
                 } catch (final Exception e) {
                     failure = combine(failure, e);
                 }

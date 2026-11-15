@@ -38,6 +38,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Throwaway benchmark (not a correctness test): exercises the {@link Indexer} hot path over a project-scoped
@@ -56,7 +57,7 @@ class IndexingBenchmark {
     private static final long SYNTHESIZE_MS = 250;
 
     @Test
-    void sequentialVsConcurrentVsBulkSize() throws Exception {
+    void sequentialVsConcurrentVsBulkSize(@TempDir final Path output) throws Exception {
         final var hopProject = Path.of(System.getProperty("yca.hopProject", "/opt/rmannibucau/dev/Github/hop"));
         final var m2 = Path.of(System.getProperty("user.home", "."), ".m2", "repository");
         final var cohort = cohort(hopProject, m2);
@@ -71,7 +72,7 @@ class IndexingBenchmark {
 
         // linear baseline: concurrency=1, old count-based batching
         final long t1 = System.nanoTime();
-        final var seq = runIndexer(config(m2, 1, 8, 0), cohort, m2);
+        final var seq = runIndexer(config(m2, 1, 8, 0), cohort, m2, output);
         final long seqMs = toMs(t1);
 
         System.out.println();
@@ -85,7 +86,7 @@ class IndexingBenchmark {
         final var budgets = new int[] {0, 32_000, 128_000, 512_000};
         for (final var maxChars : budgets) {
             final long t = System.nanoTime();
-            final var r = runIndexer(config(m2, 4, 256, maxChars), cohort, m2);
+            final var r = runIndexer(config(m2, 4, 256, maxChars), cohort, m2, output);
             final long ms = toMs(t);
             System.out.printf(
                     "    maxBatchChars=%7d : %6d ms | indexed=%d skipped=%d | %3d bulk calls | speedup x%.2f over "
@@ -97,7 +98,7 @@ class IndexingBenchmark {
         // contextWindow=1000000, output budget 32000, concurrency=4.
         {
             final long t = System.nanoTime();
-            final var r = runIndexer(config(m2, 4, 256, -1, new TokenBudget(1_000_000, 32_000)), cohort, m2);
+            final var r = runIndexer(config(m2, 4, 256, -1, new TokenBudget(1_000_000, 32_000)), cohort, m2, output);
             final long ms = toMs(t);
             System.out.printf(
                     "    maxBatchChars= -1 (auto, ctx=1M, out=32k) : %6d ms | indexed=%d skipped=%d | %3d bulk calls | speedup x%.2f over "
@@ -139,8 +140,9 @@ class IndexingBenchmark {
                 budget);
     }
 
-    private Results runIndexer(final KnowledgeConfig config, final List<Gav> cohort, final Path m2) throws IOException {
-        final var output = Files.createTempDirectory("bench-out-");
+    private Results runIndexer(final KnowledgeConfig config, final List<Gav> cohort, final Path m2, final Path parent)
+            throws IOException {
+        final var output = Files.createTempDirectory(parent, "bench-out-");
         final var llm = new TimedLlm();
         final var writer = new KnowledgeWriter(output);
         final var indexer = new Indexer(

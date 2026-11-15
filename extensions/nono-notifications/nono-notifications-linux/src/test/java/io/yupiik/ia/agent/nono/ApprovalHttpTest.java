@@ -34,7 +34,6 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -53,10 +52,7 @@ class ApprovalHttpTest {
     @ParameterizedTest
     @ValueSource(strings = {"127.0.0.1", "::1"})
     void authenticatesCorrelatesAndAuditsWithoutSecrets(final String host) throws Exception {
-        final var root = Files.createTempDirectory(
-                Path.of(System.getProperty("user.home")),
-                ".nono-http-test-",
-                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        final var root = TestTempDirs.create(Path.of(System.getProperty("user.home")), ".nono-http-test-");
         final var prompts = new AtomicInteger();
         final ApprovalUi ui = (text, budget) -> {
             prompts.incrementAndGet();
@@ -137,17 +133,13 @@ class ApprovalHttpTest {
                 assertThrows(FileAlreadyExistsException.class, () -> new PrivateState(root.resolve("launch"), mapper));
             }
         } finally {
-            try (final var files = Files.walk(root)) {
-                for (final var file : files.sorted(Comparator.reverseOrder()).toList()) {
-                    Files.delete(file);
-                }
-            }
+            TestTempDirs.cleanup(root);
         }
     }
 
     @Test
     void deadlineCancelsUiAndRejectsLateGrant() throws Exception {
-        final var root = Files.createTempDirectory(Path.of(System.getProperty("user.home")), ".nono-deadline-test-");
+        final var root = TestTempDirs.create(Path.of(System.getProperty("user.home")), ".nono-deadline-test-");
         final var answer = new CompletableFuture<Boolean>();
         final var closed = new AtomicInteger();
         try (final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
@@ -172,17 +164,13 @@ class ApprovalHttpTest {
                 assertEquals(1, closed.get());
             }
         } finally {
-            try (final var files = Files.walk(root)) {
-                for (final var file : files.sorted(Comparator.reverseOrder()).toList()) {
-                    Files.delete(file);
-                }
-            }
+            TestTempDirs.cleanup(root);
         }
     }
 
     @Test
     void concurrentRetriesShareDialogAndShutdownDenies() throws Exception {
-        final var root = Files.createTempDirectory(Path.of(System.getProperty("user.home")), ".nono-concurrent-test-");
+        final var root = TestTempDirs.create(Path.of(System.getProperty("user.home")), ".nono-concurrent-test-");
         final var entered = new CountDownLatch(1);
         final var answer = new CompletableFuture<Boolean>();
         final var prompts = new AtomicInteger();
@@ -207,17 +195,13 @@ class ApprovalHttpTest {
                 assertEquals(1, prompts.get());
             }
         } finally {
-            try (final var files = Files.walk(root)) {
-                for (final var file : files.sorted(Comparator.reverseOrder()).toList()) {
-                    Files.delete(file);
-                }
-            }
+            TestTempDirs.cleanup(root);
         }
     }
 
     @Test
     void admits128PendingUniqueRequestsAndRejectsOneExcessWithoutOpeningAnotherDialog() throws Exception {
-        final var root = Files.createTempDirectory(Path.of(System.getProperty("user.home")), ".nono-capacity-test-");
+        final var root = TestTempDirs.create(Path.of(System.getProperty("user.home")), ".nono-capacity-test-");
         final var answer = new CompletableFuture<Boolean>();
         final var entered = new CountDownLatch(1);
         final var prompts = new AtomicInteger();
@@ -311,11 +295,7 @@ class ApprovalHttpTest {
                 answer.complete(false);
             }
         } finally {
-            try (final var files = Files.walk(root)) {
-                for (final var file : files.sorted(Comparator.reverseOrder()).toList()) {
-                    Files.delete(file);
-                }
-            }
+            TestTempDirs.cleanup(root);
         }
     }
 

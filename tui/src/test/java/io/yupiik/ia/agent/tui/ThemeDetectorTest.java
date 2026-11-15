@@ -19,11 +19,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class ThemeDetectorTest {
 
@@ -116,8 +118,7 @@ class ThemeDetectorTest {
     }
 
     @Test
-    void kdeMissingFallsBackToGtkFile() throws Exception {
-        final var home = Files.createTempDirectory("gtk-home-");
+    void kdeMissingFallsBackToGtkFile(@TempDir final Path home) throws Exception {
         Files.createDirectories(home.resolve(".config/gtk-3.0"));
         Files.writeString(
                 home.resolve(".config/gtk-3.0/settings.ini"), "[Settings]\ngtk-application-prefer-dark-theme=true\n");

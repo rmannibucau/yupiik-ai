@@ -48,16 +48,12 @@ class PrivateStateTest {
     void temporaryHome() throws Exception {
         // The checkout can have group-writable ancestors, which production correctly rejects.
         // Use only a fresh test-owned directory here, never existing companion state.
-        home = Files.createTempDirectory(
-                Path.of(System.getProperty("user.home")),
-                ".private-state-test-",
-                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        home = TestTempDirs.create(Path.of(System.getProperty("user.home")), ".private-state-test-");
     }
 
     @AfterEach
     void removeTemporaryHome() throws Exception {
-        // Only test-owned temporary storage; Files.walk does not follow symbolic links.
-        removeTree(home);
+        TestTempDirs.cleanup(home);
     }
 
     @ParameterizedTest(name = "{0}")

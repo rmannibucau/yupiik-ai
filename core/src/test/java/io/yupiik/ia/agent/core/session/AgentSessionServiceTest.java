@@ -58,6 +58,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class AgentSessionServiceTest {
 
@@ -395,8 +396,7 @@ class AgentSessionServiceTest {
     }
 
     @Test
-    void exportPlanWritesPathInPlanMode() throws Exception {
-        final var dir = Files.createTempDirectory("agent-session-test");
+    void exportPlanWritesPathInPlanMode(@TempDir final Path dir) throws Exception {
         final var permissions = new PermissionService(cfg());
         permissions.setMode(AgentMode.PLAN);
         final var seeder = new PlanTodoSeeder() {
@@ -435,8 +435,7 @@ class AgentSessionServiceTest {
     }
 
     @Test
-    void reloadPlanReportsUnchangedAndChanged() throws Exception {
-        final var dir = Files.createTempDirectory("agent-session-test");
+    void reloadPlanReportsUnchangedAndChanged(@TempDir final Path dir) throws Exception {
         final var planPath = dir.resolve("plan.md");
         Files.writeString(planPath, "same content");
         final var fileService = new PlanFileService(null) {
@@ -477,9 +476,8 @@ class AgentSessionServiceTest {
     }
 
     @Test
-    void memoryReadsProjectAndGlobal() throws Exception {
-        final var storageHome = Files.createTempDirectory("agent-session-global");
-        final var projectRoot = Files.createTempDirectory("agent-session-project");
+    void memoryReadsProjectAndGlobal(@TempDir final Path storageHome, @TempDir final Path projectRoot)
+            throws Exception {
         Files.createDirectories(storageHome.resolve("memory"));
         Files.createDirectories(projectRoot.resolve(".yca").resolve("memory"));
         Files.writeString(storageHome.resolve("memory").resolve("MEMORY.md"), "global notes");

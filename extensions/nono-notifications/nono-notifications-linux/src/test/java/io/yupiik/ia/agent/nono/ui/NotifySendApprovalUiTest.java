@@ -19,12 +19,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.nono.TestTempDirs;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
-import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
@@ -39,17 +39,12 @@ class NotifySendApprovalUiTest {
     @BeforeEach
     void createTrustedDirectory() throws IOException {
         // /tmp is intentionally rejected by the production ancestor policy.
-        directory = Files.createTempDirectory(Path.of(System.getProperty("user.home")), ".nono-ui-test-");
-        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
+        directory = TestTempDirs.create(Path.of(System.getProperty("user.home")), ".nono-ui-test-");
     }
 
     @AfterEach
     void cleanup() throws IOException {
-        try (final var paths = Files.walk(directory)) {
-            for (final var path : paths.sorted(Comparator.reverseOrder()).toList()) {
-                Files.delete(path);
-            }
-        }
+        TestTempDirs.cleanup(directory);
     }
 
     @Test
