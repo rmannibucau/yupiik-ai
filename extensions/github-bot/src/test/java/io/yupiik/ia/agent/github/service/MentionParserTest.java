@@ -21,6 +21,27 @@ import org.junit.jupiter.api.Test;
 
 class MentionParserTest {
     @Test
+    void fixIsExplicitAndUsesTheSameVisibilityAndBoundaryRules() {
+        assertEquals(
+                new MentionParser.Invocation("fix", "the failing test"),
+                MentionParser.parse("@bot FiX the failing test", "bot").orElseThrow());
+        assertEquals(
+                new MentionParser.Invocation("fix", ""),
+                MentionParser.parse("@bot fix", "bot").orElseThrow());
+        for (final var text : new String[] {
+            "@bot fixes",
+            "@bot fixup",
+            "> @bot fix",
+            "`@bot fix`",
+            "```\n@bot fix\n```",
+            "@bot fix\n<!-- yca-task:id -->",
+            "@bot unknown\n@bot fix"
+        }) {
+            assertTrue(MentionParser.parse(text, "bot").isEmpty(), text);
+        }
+    }
+
+    @Test
     void commands() {
         assertEquals(
                 new MentionParser.Invocation("solve", "fix this"),

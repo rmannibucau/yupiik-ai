@@ -35,6 +35,10 @@ import java.util.concurrent.TimeUnit;
 
 /** Credential-free, bounded CONNECT destination proxy. Does not decrypt or inspect tunnel contents. */
 public final class EgressGateway implements AutoCloseable {
+    private static final Set<String> COMMON_PUBLIC_SUFFIXES = Set.of(
+            "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp", "co.nz", "com.br", "com.cn",
+            "co.in", "co.za");
+
     private final ServerSocket listener;
     private final Set<String> hosts;
     private final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
@@ -59,32 +63,67 @@ public final class EgressGateway implements AutoCloseable {
         return listener.getLocalPort();
     }
 
+    /**
+     * Validates exact DNS names and explicit {@code *.example.com} subdomain patterns, excluding the apex.
+     * Wildcard suffixes require at least two labels and cannot be common public suffixes.
+     * This is not a public suffix list: operators must select only operator-controlled or explicitly trusted domains.
+     */
     public static Set<String> validateHosts(final Collection<String> hosts) {
         if (hosts == null || hosts.isEmpty() || hosts.size() > 256) {
-            throw new IllegalArgumentException("Between 1 and 256 exact DNS hosts required");
+            throw new IllegalArgumentException("Between 1 and 256 DNS hosts or subdomain patterns required");
         }
         final var result = new HashSet<String>();
         for (final var value : hosts) {
-            if (value == null || value.length() > 253 || value.length() < 3) {
-                throw new IllegalArgumentException("Invalid egress hostname");
+            final boolean wildcard = value != null && value.startsWith("*.");
+            final var host = canonicalHost(wildcard ? value.substring(2) : value);
+            if (wildcard && (host.length() > 251 || COMMON_PUBLIC_SUFFIXES.contains(host))) {
+                throw new IllegalArgumentException("Wildcard requires a trusted DNS suffix below a public suffix");
             }
-            final var host = value.toLowerCase(Locale.ROOT);
-            final var labels = host.split("\\.", -1);
-            if (labels.length < 2 || !labels[labels.length - 1].chars().allMatch(c -> c >= 'a' && c <= 'z')) {
-                throw new IllegalArgumentException("DNS hostname required, not an IP or wildcard");
-            }
-            for (final var label : labels) {
-                if (label.isEmpty()
-                        || label.length() > 63
-                        || label.charAt(0) == '-'
-                        || label.charAt(label.length() - 1) == '-'
-                        || !label.chars().allMatch(c -> c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-')) {
-                    throw new IllegalArgumentException("Invalid egress hostname");
-                }
-            }
-            result.add(host);
+            result.add(wildcard ? "*." + host : host);
         }
         return Set.copyOf(result);
+    }
+    /** Tests the DNS allowlist only, without resolving; allowed names must still resolve exclusively to public IPs. */
+    public boolean allowsHost(final String value) {
+        final String host;
+        try {
+            host = canonicalHost(value);
+        } catch (final IllegalArgumentException invalid) {
+            return false;
+        }
+        if (hosts.contains(host)) {
+            return true;
+        }
+        for (final var pattern : hosts) {
+            if (pattern.startsWith("*.") && host.endsWith(pattern.substring(1))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String canonicalHost(final String value) {
+        if (value == null
+                || value.length() > 253
+                || value.length() < 3
+                || !value.chars().allMatch(c -> c < 128)) {
+            throw new IllegalArgumentException("Invalid egress hostname");
+        }
+        final var host = value.toLowerCase(Locale.ROOT);
+        final var labels = host.split("\\.", -1);
+        if (labels.length < 2 || !labels[labels.length - 1].chars().allMatch(c -> c >= 'a' && c <= 'z')) {
+            throw new IllegalArgumentException("DNS hostname required, not an IP or wildcard");
+        }
+        for (final var label : labels) {
+            if (label.isEmpty()
+                    || label.length() > 63
+                    || label.charAt(0) == '-'
+                    || label.charAt(label.length() - 1) == '-'
+                    || !label.chars().allMatch(c -> c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-')) {
+                throw new IllegalArgumentException("Invalid egress hostname");
+            }
+        }
+        return host;
     }
 
     private void accept() {
@@ -135,7 +174,7 @@ public final class EgressGateway implements AutoCloseable {
                 return;
             }
             final var host = request[1].substring(0, request[1].length() - 4).toLowerCase(Locale.ROOT);
-            if (!hosts.contains(host)) {
+            if (!allowsHost(host)) {
                 deny(client);
                 return;
             }

@@ -20,14 +20,18 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.kubernetes.client.KubernetesClient;
 import io.yupiik.fusion.kubernetes.client.KubernetesClientConfiguration;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
+import io.yupiik.ia.agent.github.context.BrokerAttempt;
 import io.yupiik.ia.agent.github.context.GithubContextBroker;
 import io.yupiik.ia.agent.github.context.GithubContextSnapshot;
 import io.yupiik.ia.agent.github.context.GithubPrivateContext;
+import io.yupiik.ia.agent.github.execution.AgentGitSource;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
 import io.yupiik.ia.agent.github.execution.AttemptRelay;
+import io.yupiik.ia.agent.github.execution.AttemptServices;
 import io.yupiik.ia.agent.github.execution.DockerExecutionBackend;
 import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend;
 import io.yupiik.ia.agent.github.execution.NonoExecutionBackend;
@@ -96,6 +100,8 @@ public class Worker {
     private final ReviewPublisher reviews;
     private final StrictSolvePublisher strictSolve;
     private final DiscussionPublisher discussions;
+    private final ContextConfiguration contexts;
+    private final FixPublisher fixes;
 
     public Worker(
             final GithubBotConfiguration conf,
@@ -112,6 +118,8 @@ public class Worker {
             final ReviewPublisher reviews,
             final StrictSolvePublisher strictSolve,
             final DiscussionPublisher discussions,
+            final ContextConfiguration contexts,
+            final FixPublisher fixes,
             final Clock clock) {
         this.conf = conf;
         this.store = store;
@@ -128,6 +136,8 @@ public class Worker {
         this.reviews = reviews;
         this.strictSolve = strictSolve;
         this.discussions = discussions;
+        this.contexts = contexts;
+        this.fixes = fixes;
     }
 
     private void initializeBackend() {
@@ -163,7 +173,8 @@ public class Worker {
                         execution.docker().image(),
                         timeout,
                         execution.docker().network(),
-                        execution.docker().egress());
+                        execution.docker().egress(),
+                        execution.docker().services());
                 this.nono = null;
             }
             case NONO -> {
@@ -285,6 +296,22 @@ public class Worker {
                     });
                     if (task == null || !eligible(task)) {
                         continue;
+                    }
+                    if (options.source().mode() == WorkerOptions.SourceMode.git
+                            && (options.agentCommenting() || task.kind() != TaskKind.solve)) {
+                        throw new IllegalArgumentException(
+                                "Git source mode requires a strict solve (agentCommenting=false)");
+                    }
+                    if (options.source().mode() == WorkerOptions.SourceMode.broker
+                            && (options.agentCommenting()
+                                    || !options.cacheRoot().isBlank()
+                                    || options.privateSource())) {
+                        throw new IllegalArgumentException(
+                                "Broker mode requires a strict solve/review/fix and cannot share export or anonymous cache staging");
+                    }
+                    if (task.kind() == TaskKind.fix && options.agentCommenting()) {
+                        throw new IllegalArgumentException(
+                                "Fix requires agentCommenting=false; only the host may update an existing PR");
                     }
                     process(home, task, options);
                     return;
@@ -480,10 +507,21 @@ public class Worker {
         var task = initialTask;
         final var id = task.id();
         Path directory = null;
+        BrokerAttempt brokerContext = null;
+        AttemptServices privateServices = null;
         var stage = "preparation";
         Integer exitCode = null;
         final int attempt = task.attempts() + 1;
         try {
+            final boolean restricted = execution.backend() == ExecutorConfiguration.Backend.DOCKER
+                    && execution.docker().services() != null;
+            if (restricted
+                    && (options.source().mode() != WorkerOptions.SourceMode.broker
+                            || options.agentCommenting()
+                            || !execution.relay().bind().isBlank())) {
+                throw new IllegalArgumentException(
+                        "Private services require credential-free broker mode without a second relay");
+            }
             final var runtime = "yca-" + id + "-" + attempt;
             final var config = options.agentConfiguration().isBlank()
                     ? Path.of(conf.home()).resolve("agent-configuration.json")
@@ -499,7 +537,21 @@ public class Worker {
                     throw new IllegalArgumentException(
                             "Strict solve requires a fork owner and cannot use the anonymous clone cache");
                 }
-                final var context = privateContext.stageSolve(task, directory);
+                final var context = privateContext.stageSolve(
+                        task, directory, options.source().mode());
+                if (options.source().mode() == WorkerOptions.SourceMode.git) {
+                    AgentGitSource.stage(
+                            directory,
+                            task.repository(),
+                            context.baseSha(),
+                            options.source(),
+                            execution.backend() == ExecutorConfiguration.Backend.NONO
+                                    ? Path.of(execution.nono().runtimeRoot())
+                                            .toAbsolutePath()
+                                            .normalize()
+                                            .resolve("bin/sh")
+                                    : Path.of("/bin/sh"));
+                }
                 store.transaction(state -> {
                     final var actual = state.task(id);
                     if ((actual.strictSolveForkOwner() != null)
@@ -513,7 +565,26 @@ public class Worker {
                 });
                 task = store.transaction(state -> state.task(id).document());
             }
-            if (!options.agentCommenting() && (task.kind() == TaskKind.review)) {
+            if (!options.agentCommenting() && task.kind() == TaskKind.fix) {
+                final var target = fixes.prepare(task);
+                privateContext.stageFix(
+                        task,
+                        directory,
+                        target.repository(),
+                        target.headSha(),
+                        target.branch(),
+                        options.source().mode());
+                store.transaction(state -> {
+                    final var actual = state.task(id);
+                    actual.strictSolveBaseSha(target.headSha());
+                    actual.strictSolveBaseBranch(target.branch());
+                    return null;
+                });
+                task = store.transaction(state -> state.task(id).document());
+            }
+            if (!options.agentCommenting()
+                    && (task.kind() == TaskKind.review)
+                    && options.source().mode() != WorkerOptions.SourceMode.broker) {
                 snapshot.stage(task, directory);
                 if (options.privateSource()) {
                     privateContext.stage(task, directory);
@@ -539,6 +610,76 @@ public class Worker {
             }
             stage = "credentials-and-fork";
             final var credentials = new LinkedHashMap<String, String>();
+            if (options.source().mode() == WorkerOptions.SourceMode.broker) {
+                if (!"https://api.github.com".equals(conf.api())) {
+                    throw new IllegalArgumentException(
+                            "Brokered Git acquisition currently supports canonical github.com only");
+                }
+                if (execution.backend() == ExecutorConfiguration.Backend.DOCKER) {
+                    final var host = System.getenv("DOCKER_HOST");
+                    final var context = System.getenv("DOCKER_CONTEXT");
+                    if ((host != null && !host.isBlank() && !host.startsWith("unix://"))
+                            || (context != null && !context.isBlank() && !"default".equals(context))) {
+                        throw new IllegalArgumentException(
+                                "Broker mode requires a local Docker daemon with the same attempt paths; remote Docker contexts are unsupported");
+                    }
+                    if (execution.docker().egress() != null) {
+                        throw new IllegalArgumentException(
+                                "Broker mode cannot bypass enforced Docker egress; configure and accept a supported routed topology before enabling it");
+                    }
+                    backend.requireLocalDaemon();
+                }
+                final var principal = new MutableTask(task);
+                principal.attempts(attempt);
+                principal.runtimeId(runtime);
+                brokerContext = new BrokerAttempt(
+                        contexts,
+                        options.source(),
+                        github,
+                        json,
+                        principal.document(),
+                        Path.of(conf.home()).toAbsolutePath().normalize(),
+                        directory,
+                        attemptRoot,
+                        clock,
+                        Duration.ofSeconds(execution.timeoutSeconds()));
+                final var binding = brokerContext.storageBinding(principal.document());
+                store.transaction(state -> {
+                    final var actual = state.task(id);
+                    final var recovery =
+                            new LinkedHashMap<String, Object>(actual.recovery() == null ? Map.of() : actual.recovery());
+                    recovery.put("contextStorage", binding);
+                    actual.recovery(recovery);
+                    return null;
+                });
+                credentials.putAll(brokerContext.credentials());
+                preparation.stageBroker(
+                        directory,
+                        brokerContext.endpoint(),
+                        brokerContext.service().primaryRepository(),
+                        brokerContext.service().metadata(),
+                        options.source(),
+                        execution.backend() == ExecutorConfiguration.Backend.NONO
+                                ? Path.of(execution.nono().runtimeRoot())
+                                        .toAbsolutePath()
+                                        .normalize()
+                                : null);
+                if (restricted) {
+                    privateServices = new AttemptServices(
+                            directory.resolve("configuration.json"),
+                            Path.of((String) binding.get("path")),
+                            json,
+                            execution.docker().services(),
+                            brokerContext.privateEndpoint(),
+                            brokerContext.endpoint(),
+                            credentials,
+                            System.getenv(),
+                            Duration.ofSeconds(execution.timeoutSeconds()));
+                }
+            }
+            if (options.source().mode() == WorkerOptions.SourceMode.git) {
+                credentials.putAll(AgentGitSource.credentials(options.source(), conf.auth(), System.getenv()));
+            }
             final var agentToken = System.getenv(conf.auth().agentTokenEnv());
             if (options.agentCommenting() && agentToken != null && !agentToken.isBlank()) {
                 credentials.put("GH_TOKEN", agentToken);
@@ -576,10 +717,16 @@ public class Worker {
             });
             task = store.transaction(state -> state.task(id).document());
             audit.record("execution-starting", task);
-            final var prompt = preparation.prompt(task, options.forkOwner(), options.agentCommenting());
+            final var prompt = preparation.prompt(
+                    task,
+                    options.forkOwner(),
+                    options.agentCommenting(),
+                    options.source().mode());
             final int exit;
             stage = "relay-and-context";
-            try (final var relay = execution.relay().bind().isBlank()
+            try (final var context = brokerContext;
+                    final var services = privateServices;
+                    final var relay = execution.relay().bind().isBlank()
                             ? null
                             : new AttemptRelay(
                                     directory.resolve("configuration.json"),
@@ -587,11 +734,22 @@ public class Worker {
                                     execution.relay().bind(),
                                     execution.relay().advertised());
                     final var broker = !options.agentCommenting() && (task.kind() == TaskKind.review)
-                            ? new GithubContextBroker(github, json, task, directory)
+                            ? (context == null
+                                    ? new GithubContextBroker(github, json, task, directory)
+                                    : new GithubContextBroker(context.service(), json, task, directory))
                             : null) {
                 stage = "execution";
                 exit = switch (execution.backend()) {
-                    case DOCKER -> backend.execute(directory, runtime, prompt, credentials);
+                    case DOCKER ->
+                        services == null
+                                ? backend.execute(directory, runtime, prompt, credentials)
+                                : backend.execute(
+                                        directory,
+                                        runtime,
+                                        prompt,
+                                        credentials,
+                                        services.settings(),
+                                        services.credentials());
                     case NONO -> nono.execute(directory, runtime, prompt, credentials);
                     case KUBERNETES -> {
                         try (final var client = kubernetesClient()) {
@@ -636,6 +794,13 @@ public class Worker {
                 throw runtimeFailure;
             }
             throw new IllegalArgumentException("Execution filesystem failure", e);
+        } finally {
+            if (privateServices != null) {
+                privateServices.close();
+            }
+            if (brokerContext != null) {
+                brokerContext.close();
+            }
         }
     }
 
@@ -839,6 +1004,8 @@ public class Worker {
             final var reviewUrl = reviews.publish(task, result);
             finish(task, "reviewUrl", reviewUrl, false);
             return;
+        } else if (!failure && task.kind() == TaskKind.fix) {
+            outcome = "I updated the existing pull request: " + fixes.publish(task, result);
         } else if (!failure && (task.kind() == TaskKind.solve) && (task.strictSolveBaseSha() != null)) {
             outcome = "I opened a pull request: " + strictSolve.publish(task, result, options.forkOwner());
         } else if (!failure && result.prUrl() != null) {
@@ -926,6 +1093,15 @@ public class Worker {
     }
 
     private void cleanupChecked(final TaskDocument task, final String directory) {
+        try {
+            BrokerAttempt.cleanup(
+                    task,
+                    contexts.storageRoot().isBlank()
+                            ? Path.of(conf.home()).resolve("context")
+                            : Path.of(contexts.storageRoot()));
+        } catch (final IOException invalid) {
+            throw new IllegalStateException("Private context recovery cleanup failed", invalid);
+        }
         if ("nono".equalsIgnoreCase(String.valueOf(task.executionBackend()))) {
             if (nono == null
                     || ((task.executionFingerprint() != null)

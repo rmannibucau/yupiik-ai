@@ -8,8 +8,9 @@
     <jib.version>3.5.2</jib.version>
     <github-bot.images.goal>dockerBuild</github-bot.images.goal>
     <github-bot.image.architecture>amd64</github-bot.image.architecture>
-    <!-- Pin the multi-platform index, not an architecture-specific manifest. -->
-    <github-bot.dispatcher.base-image>ossyupiik/java-docker:25.0.5.0.3-zulu-debian12-docker29.9.2@sha256:d0bfa246a761a066971942bbecc42ae0c7af315bf7660c319c4ad700a409cef2</github-bot.dispatcher.base-image>
+    <!-- Prebuilt manually from src/main/docker/Dockerfile.dispatcher; Maven never builds that recipe. -->
+    <!-- Verified registry index: linux/amd64 plus provenance; no ARM64 image is published yet. -->
+    <github-bot.dispatcher.base-image>rmannibucau/github-dispatcher-base:25.0.5.0.3-zulu-debian12-docker29.9.2-git1@sha256:a7c49aa4e71618340c0abff2a5ab19afff9c53380e616535ed2f8f247efcde36</github-bot.dispatcher.base-image>
     <github-bot.dispatcher.image>yca-github-dispatcher:local</github-bot.dispatcher.image>
     <!-- No agent base default: supply a vetted JDK 25 and development toolchain image. -->
     <github-bot.agent.image>yca-github-agent:local</github-bot.agent.image>
@@ -36,6 +37,14 @@
       <groupId>io.yupiik.fusion</groupId>
       <artifactId>fusion-kubernetes-client</artifactId>
       <version>${fusion.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-http-server-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-http-server-jre</artifactId>
     </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>

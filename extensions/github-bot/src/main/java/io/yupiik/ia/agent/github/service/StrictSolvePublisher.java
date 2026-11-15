@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.github.service;
 
+import static java.util.stream.Collectors.toSet;
+
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.client.GitHubClient;
@@ -28,7 +30,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
@@ -178,11 +179,14 @@ public class StrictSolvePublisher {
             throw new IllegalStateException("Unexpected base commit");
         }
         final var baseTree = sha(TaskStore.map(commit.get("tree")).get("sha"));
-        final var tree = TaskStore.map(github.get("/repos/" + upstream + "/git/trees/" + baseTree + "?recursive=1"));
-        if (!Boolean.FALSE.equals(tree.get("truncated")) || !baseTree.equals(sha(tree.get("sha")))) {
-            throw new IllegalStateException("Complete authoritative base tree required");
-        }
-        final var modes = validateBaseTree(tree.get("tree"), changes);
+        final var modes = new PinnedTreeChanges(github, "/repos/" + upstream)
+                .modes(
+                        baseTree,
+                        changes.stream().map(Change::path).toList(),
+                        changes.stream()
+                                .filter(Change::delete)
+                                .map(Change::path)
+                                .collect(toSet()));
         // Check the actual mapper's null policy before creating any immutable objects.
         if (changes.stream().anyMatch(Change::delete)
                 && !json.toString(new GitHubClient.TreeRequest(
@@ -425,37 +429,10 @@ public class StrictSolvePublisher {
         return result;
     }
 
-    private Map<String, String> validateBaseTree(final Object input, final List<Change> changes) {
-        if (!(input instanceof List<?> entries)) {
-            throw new IllegalStateException("Missing base tree entries");
-        }
-        final var modes = new HashMap<String, String>();
-        for (final var entry : entries) {
-            final var item = TaskStore.map(entry);
-            final var path = text(item, "path");
-            if (modes.put(path, text(item, "mode")) != null) {
-                throw new IllegalStateException("Duplicate base tree path");
-            }
-        }
-        for (final var change : changes) {
-            final var mode = modes.get(change.path());
-            if ((mode != null && !List.of("100644", "100755").contains(mode)) || (change.delete() && mode == null)) {
-                throw new IllegalArgumentException(
-                        "Changes require regular files; symlinks/submodules/trees forbidden");
-            }
-            final var path = change.path();
-            for (int slash = path.indexOf('/'); slash >= 0; slash = path.indexOf('/', slash + 1)) {
-                final var parentMode = modes.get(path.substring(0, slash));
-                if (parentMode != null && !"040000".equals(parentMode)) {
-                    throw new IllegalArgumentException("Non-directory path ancestor");
-                }
-            }
-        }
-        return modes;
-    }
-
     private static void validatePath(final String path) {
-        if (path.toLowerCase(Locale.ROOT).startsWith(".github/workflows/")
+        if (path == null
+                || path.toLowerCase(Locale.ROOT).equals(".github/workflows")
+                || path.toLowerCase(Locale.ROOT).startsWith(".github/workflows/")
                 || path.isEmpty()
                 || path.length() > 1024
                 || path.startsWith("/")

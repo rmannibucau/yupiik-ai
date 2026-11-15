@@ -22,6 +22,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -32,6 +33,93 @@ import org.junit.jupiter.api.io.TempDir;
 class DockerExecutionBackendTest {
     @TempDir
     Path home;
+
+    @Test
+    void localDaemonProbeInspectsEffectiveContextWithSanitizedEnvironment() throws Exception {
+        final var executable = script("""
+                printf '%s\\n' "$@" > "$0.args"
+                env > "$0.env"
+                printf 'ignored diagnostic with credentials\\n' >&2
+                printf 'unix:///run/user/10001/docker.sock\\n'
+                """);
+        backend(executable).requireLocalDaemon();
+        assertEquals(
+                List.of("context", "inspect", "--format", "{{(index .Endpoints \"docker\").Host}}"),
+                Files.readAllLines(Path.of(executable + ".args")));
+        final var actual = new HashMap<String, String>();
+        for (final var entry : Files.readAllLines(Path.of(executable + ".env"))) {
+            final int equals = entry.indexOf('=');
+            if (!entry.startsWith("PWD=")) {
+                actual.put(entry.substring(0, equals), entry.substring(equals + 1));
+            }
+        }
+        assertEquals(
+                DockerControlEnvironment.sanitize(new ProcessBuilder("unused")).environment(), actual);
+    }
+
+    @Test
+    void localDaemonProbeRejectsStoredRemoteAndMalformedEndpoints() throws Exception {
+        for (final var endpoint : List.of(
+                "ssh://operator@private-host",
+                "tcp://private-host:2376",
+                "",
+                "<no value>",
+                "unix://",
+                "unix:/run/docker.sock",
+                "unix://remote/run/docker.sock",
+                "unix://user@remote/run/docker.sock",
+                "unix:///run/docker.sock?query",
+                "unix:///run/docker.sock#fragment",
+                "unix:///run/%00docker.sock",
+                "unix:///bad%zz",
+                "unix:///run/docker.sock\nunix:///another.sock")) {
+            final var executable = script("printf '%s\\n' '" + endpoint + "'\n");
+            final var error = assertThrows(
+                    IllegalStateException.class, () -> backend(executable).requireLocalDaemon());
+            assertEquals("Broker mode requires a declared local Docker Unix socket", error.getMessage());
+            assertNull(error.getCause());
+        }
+    }
+
+    @Test
+    void localDaemonProbeRejectsNonzeroAndOversizedOutput() throws Exception {
+        for (final var body : List.of(
+                "printf 'unix:///run/docker.sock\\n'\nprintf 'secret diagnostic' >&2\nexit 1\n",
+                "printf '%s' 'unix:///" + "a".repeat(2048) + "'\n")) {
+            final var executable = script(body);
+            assertThrows(IllegalStateException.class, () -> backend(executable).requireLocalDaemon());
+        }
+    }
+
+    @Test
+    void localDaemonProbeTimeoutKillsAndReapsClientAndDescendant() throws Exception {
+        final var executable = script("""
+                printf '%s' "$$" > "$0.pid"
+                sleep 60 &
+                printf '%s' "$!" > "$0.child"
+                wait
+                """);
+        try {
+            assertTimeoutPreemptively(
+                    Duration.ofSeconds(4),
+                    () -> assertThrows(
+                            IllegalStateException.class,
+                            () -> new DockerExecutionBackend(
+                                            executable.toString(), "trusted-image", Duration.ofMillis(500), "", null)
+                                    .requireLocalDaemon()));
+            for (final var suffix : List.of(".pid", ".child")) {
+                final long pid = Long.parseLong(Files.readString(Path.of(executable + suffix)));
+                assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
+            }
+        } finally {
+            for (final var suffix : List.of(".child", ".pid")) {
+                final var file = Path.of(executable + suffix);
+                if (Files.exists(file)) {
+                    ProcessHandle.of(Long.parseLong(Files.readString(file))).ifPresent(ProcessHandle::destroyForcibly);
+                }
+            }
+        }
+    }
 
     @Test
     void timeoutReturnsEvenWhenRemoteTerminationFails() throws Exception {
@@ -74,7 +162,7 @@ class DockerExecutionBackendTest {
         assumeNonRoot(directory);
         final var executable = script("""
                 printf '%s\\n' "$@" > "$0.args"
-                printf '%s\\n' "$GH_TOKEN" "$GITHUB_BOT_FORK_TOKEN" "$HOME" > "$0.environment"
+                printf '%s\\n' "$GH_TOKEN" "$GITHUB_BOT_FORK_TOKEN" "$GITHUB_SOURCE_TOKEN" "$YCA_CONTEXT_TOKEN" "$YCA_CONTEXT_GIT_TOKEN" "$HOME" > "$0.environment"
                 env > "$0.env"
                 printf 'executor output\\n'
                 printf 'executor error\\n' >&2
@@ -88,7 +176,12 @@ class DockerExecutionBackendTest {
                                 directory,
                                 "yca-task-1",
                                 prompt,
-                                Map.of("GH_TOKEN", "agent-secret", "GITHUB_BOT_FORK_TOKEN", "fork-secret")));
+                                Map.of(
+                                        "GH_TOKEN", "agent-secret",
+                                        "GITHUB_BOT_FORK_TOKEN", "fork-secret",
+                                        "GITHUB_SOURCE_TOKEN", "source-secret",
+                                        "YCA_CONTEXT_TOKEN", "context-secret",
+                                        "YCA_CONTEXT_GIT_TOKEN", "context-git-secret")));
         final var uid = ((Number) Files.getAttribute(directory, "unix:uid")).intValue();
         final var gid = ((Number) Files.getAttribute(directory, "unix:gid")).intValue();
         final var args = Files.readAllLines(Path.of(executable + ".args"));
@@ -121,7 +214,18 @@ class DockerExecutionBackendTest {
                 "--workdir",
                 "/attempt/workspace",
                 "GH_TOKEN",
-                "GITHUB_BOT_FORK_TOKEN")));
+                "GITHUB_BOT_FORK_TOKEN",
+                "GITHUB_SOURCE_TOKEN",
+                "YCA_CONTEXT_TOKEN",
+                "YCA_CONTEXT_GIT_TOKEN")));
+        for (final var key : List.of(
+                "GH_TOKEN",
+                "GITHUB_BOT_FORK_TOKEN",
+                "GITHUB_SOURCE_TOKEN",
+                "YCA_CONTEXT_TOKEN",
+                "YCA_CONTEXT_GIT_TOKEN")) {
+            assertEquals("--env", args.get(args.indexOf(key) - 1));
+        }
         assertEquals(
                 List.of(
                         "trusted-image",
@@ -143,19 +247,40 @@ class DockerExecutionBackendTest {
                         "--prompt",
                         prompt),
                 args.subList(args.size() - 18, args.size()));
-        assertFalse(args.stream().anyMatch(arg -> arg.contains("agent-secret") || arg.contains("fork-secret")));
+        for (final var secret :
+                List.of("agent-secret", "fork-secret", "source-secret", "context-secret", "context-git-secret")) {
+            assertFalse(args.toString().contains(secret));
+            assertFalse(Files.readString(directory.resolve("execution.log")).contains(secret));
+            assertFalse(
+                    Files.readString(directory.resolve("configuration.json")).contains(secret));
+        }
         final var environment = Files.readAllLines(Path.of(executable + ".environment"));
         assertEquals("agent-secret", environment.get(0));
         assertEquals("fork-secret", environment.get(1));
+        assertEquals("source-secret", environment.get(2));
+        assertEquals("context-secret", environment.get(3));
+        assertEquals("context-git-secret", environment.get(4));
         // The CLI receives host credentials only in its environment, not in command arguments.
         final var allowed = List.of(
                 "PATH",
                 "HOME",
                 "DOCKER_HOST",
                 "DOCKER_CONTEXT",
+                "DOCKER_CONFIG",
+                "DOCKER_TLS",
+                "DOCKER_TLS_VERIFY",
+                "DOCKER_CERT_PATH",
+                "DOCKER_API_VERSION",
                 "XDG_RUNTIME_DIR",
+                "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME",
+                "XDG_STATE_HOME",
+                "SSH_AUTH_SOCK",
                 "GH_TOKEN",
                 "GITHUB_BOT_FORK_TOKEN",
+                "GITHUB_SOURCE_TOKEN",
+                "YCA_CONTEXT_TOKEN",
+                "YCA_CONTEXT_GIT_TOKEN",
                 "PWD"); // POSIX shells can synthesize PWD.
         for (final var entry : Files.readAllLines(Path.of(executable + ".env"))) {
             assertTrue(
@@ -226,6 +351,7 @@ class DockerExecutionBackendTest {
     void stopInspectsThenKillsOnlyRunningContainer() throws Exception {
         final var executable = script("""
                 printf '%s\\n' "$*" >> "$0.calls"
+                env > "$0.$1.env"
                 if [ "$1" = container ]; then
                   printf 'true\\n'
                 fi
@@ -234,6 +360,18 @@ class DockerExecutionBackendTest {
         assertEquals(
                 List.of("container inspect --format {{.State.Running}} yca-task-5", "kill yca-task-5"),
                 Files.readAllLines(Path.of(executable + ".calls")));
+        final var expected =
+                DockerControlEnvironment.sanitize(new ProcessBuilder("unused")).environment();
+        for (final var phase : List.of("container", "kill")) {
+            final var actual = new HashMap<String, String>();
+            for (final var entry : Files.readAllLines(Path.of(executable + "." + phase + ".env"))) {
+                final int equals = entry.indexOf('=');
+                if (!entry.startsWith("PWD=")) {
+                    actual.put(entry.substring(0, equals), entry.substring(equals + 1));
+                }
+            }
+            assertEquals(expected, actual, phase);
+        }
     }
 
     @Test
@@ -362,7 +500,16 @@ class DockerExecutionBackendTest {
 
     private Path script(final String body) throws Exception {
         final var executable = Files.createTempFile(home, "fake-docker-", ".sh");
-        Files.writeString(executable, "#!/bin/sh\n" + body);
+        Files.writeString(executable, """
+                #!/bin/sh
+                for last; do :; done
+                if [ "$2" = inspect ]; then
+                  case "$last" in
+                        *-services|*-egress) printf 'Error: No such container: %s\\n' "$last"; exit 1 ;;
+                        *-services-net|*-external) printf 'Error: No such network: %s\\n' "$last"; exit 1 ;;
+                  esac
+                fi
+                """ + body);
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
         return executable;
     }

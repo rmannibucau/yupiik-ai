@@ -50,6 +50,194 @@ The following settings, defaults and environment variable names are generated fr
 
 include::content/_partials/generated/documentation.github-bot.adoc[]
 
+=== Trusted prompt templates
+
+`PromptConfiguration` uses `github.prompts` for all static prompt text, with defaults declared by `@Property(defaultValue)` and compiled using Fusion Handlebars.
+The supported components are `main`, `commonPolicy`, `headings`, `exportSource`, `gitSource`, `brokerSource`, `strictPublication`, `agentPublication`, `review`, `solve`, `fix`, `toolchain`, `resultContract` and `taskEnvelope`.
+`main` receives the rendered `commonPolicy`, `headings`, `source`, `publication`, `taskKind`, `toolchain`, `resultContract` and `taskEnvelope` components.
+The host selects `source` from the source mode, `publication` from the commenting mode and `taskKind` from the task kind.
+The named sources are also available as configured partials.
+
+Component models contain only explicit nonsecret values: `taskId`, `taskIdJson`, `taskJson`, `referenceJson`, `requestJson`, `forkOwner`, `agentCommenting`, `broker`, `gitSourceMode`, `exportSourceMode`, `review`, `solve`, `fix`, `dependencyDownloadsEnabled`, `allowedDownloadHosts` and `allowedDownloadHostsJson`.
+The JSON values are serialized task identity, reference and request data, not template source or a configuration/environment lookup surface.
+The toolchain component renders the effective allowed download hosts at runtime rather than maintaining another permissions list in the prompt.
+Changing a template does not grant network access or alter host publication validation.
+
+Rendering is single-pass for task data: issue text, comments, repository text, tool results and rendered components are never compiled again as templates.
+For example, `{{exec ...}}` in a user request remains literal untrusted text, not an executable helper call.
+These templates have no `exec`, `systemProperty`, environment or application-configuration helpers.
+Use `{{{value}}}` for raw Markdown or serialized JSON; `{{value}}` HTML-escapes the value and can corrupt literal prompt/JSON examples.
+Raw insertion preserves data without HTML escaping; it does not make untrusted task text authoritative or provide Markdown sanitization.
+Invalid trusted templates fail before agent execution rather than silently falling back to defaults.
+An override replaces the whole named component, with no appended default or fallback policy text, so retain every instruction needed by your deployment.
+
+For example, this trusted dispatcher JSON replaces only the presentation-guidance component:
+
+[source,json]
+----
+{
+  "github": {
+    "prompts": {
+      "headings": "Use concise Summary, Findings and Tests sections. Report actionable findings with path:line and evidence. Preserve failed/skipped checks and reasons; never imply unrun tests passed."
+    }
+  }
+}
+----
+
+=== Host review presentation
+
+`ReviewPresentationConfiguration` uses `github.review.presentation.reportTemplate` and `github.review.presentation.findingTemplate` for host-rendered Markdown.
+The default report has emoji-labelled Summary, Findings and Tests headings, with numbered findings or a count when native inline comments were posted.
+The default finding heading includes its number, `path:line`, side and `Severity: not specified`.
+The finding schema has no severity field; the host does not infer severity from prose, an emoji or the prompt's request for severity.
+Tests are labelled as agent-reported evidence, not independently verified by the host, and failed/skipped evidence must not be presented as passing.
+Correlation markers and publication decisions remain host-owned outside the templates.
+
+The report model is `summary`, `findings`, `findingCount`, `nativeCommentsPosted` and `tests`.
+Each finding, and the standalone finding-template model, contains `number`, `path`, `side`, `line` and `body`.
+These templates use the same single-pass data handling and helper restrictions as the bot prompt templates.
+For example, a trusted dispatcher can replace the whole native finding template without changing the report template:
+
+[source,json]
+----
+{
+  "github": {
+    "review": {
+      "presentation": {
+        "findingTemplate": "### {{number}}. Severity: not specified - `{{{path}}}:{{line}}` ({{side}})\n\n{{{body}}}"
+      }
+    }
+  }
+}
+----
+
+=== Result correction prompt
+
+Core `RunCommand.RunConf` exposes `run.result-correction-prompt`, a Fusion Handlebars template for the single same-session result-artifact correction attempt.
+Its explicit model is `validationError` (diagnostic), `file` (absolute artifact path), `maxBytes` (size ceiling) and `requiredFields` (formatted required-field alternatives).
+No environment, process or system-property helper is available, and diagnostics remain template data rather than a second template source.
+With result validation enabled, the template is compiled before the agent session starts.
+The default asks only for artifact repair from existing context and actual evidence, not repeated implementation, tests, commits, pushes or publication.
+Replacing it replaces the whole correction instruction; it does not change result validation or add a worker retry.
+
+Set this in the trusted agent configuration, not the dispatcher's `github.prompts` graph.
+The trusted agent configuration pass-through retains the root `run.result-correction-prompt` setting alongside the agent settings, including with a `yca` wrapper; `run` remains a root sibling of `yca`.
+For example:
+
+[source,json]
+----
+{
+  "yca": {
+    "todos": {"continueOnUnfinished": true, "maxContinues": 5}
+  },
+  "run": {
+    "result-correction-prompt": "Artifact validation failed: {{{validationError}}}. Repair only {{{file}}}, at most {{maxBytes}} bytes, with required nonblank string alternatives {{{requiredFields}}}. Use existing evidence only; do not repeat tests, commits, pushes or publication. A chat answer does not replace the JSON artifact."
+  }
+}
+----
+
+=== Source mode and host context policy
+
+`worker.source.mode` defaults to `export`; existing direct `git` mode remains a distinct opt-in for strict solves, including its optional agent-visible dedicated read PAT.
+The new `broker` value supports strict solve, review and fix with `worker.agentCommenting=false`, no source PAT, no private export staging and no anonymous clone cache.
+Broker mode gives the agent only finite attempt-scoped `YCA_CONTEXT_TOKEN` and `YCA_CONTEXT_GIT_TOKEN` service credentials with separate control/Git audiences, never upstream GitHub tokens.
+Help remains host-only and works without model configuration in broker mode; it does not launch an executor.
+See xref:private-context.adoc[context operations, worker Git command reference, source helpers and publication limits] before enabling this mode.
+
+These host-only settings are independent of the persisted executor fingerprint; changing them must not be treated as permission to reinterpret a retained attempt or unresolved publication.
+
+[cols="1,1,2",options="header"]
+|===
+|Setting |Default |Contract
+|`github.context.bind` |`127.0.0.1` |JRE HTTP listener address, not an implicit sandbox route
+|`github.context.port` |`0` |Random listener port; use a dedicated port per concurrent worker behind a static terminator
+|`github.context.advertised` |Empty |Required explicit HTTPS origin, without credentials, query, fragment or non-root path, routed to this exact worker
+|`github.context.storageRoot` |Empty |Private owner-only host storage under `github.home/context` unless overridden; outside agent attempt mounts
+|`github.context.git` |`git` |Trusted host executable with HTTPS and `http-backend` helpers
+|`github.context.repositories` |Empty |Exact comma-separated additional code grants; primary and verified PR head remain available
+|`github.context.maxRequests` |`256` |Shared authenticated-request budget across filesystem, HTTP control and native Git adapters; range 1 through 4096
+|`github.context.maxResponseBytes` |`1073741824` |Shared response-byte budget; range 1 MiB through 16 GiB
+|`github.fix.enabled` |`false` |Explicit opt-in to existing open PR head updates
+|`github.fix.repositories` |Empty |Exact canonical head-repository allowlist; empty denies all, independent of code grants
+|===
+
+For example, after provisioning the worker-specific HTTPS route and trusted certificate chains:
+
+[source,bash]
+----
+export GITHUB_CONTEXT_BIND=127.0.0.1
+export GITHUB_CONTEXT_PORT=18081
+export GITHUB_CONTEXT_ADVERTISED=https://context-worker-1.example.com
+java -jar github-bot.jar github bot worker --task TASK_ID \
+  --worker-agentCommenting false --worker-source-mode broker
+----
+
+This example does not provision a TLS terminator, DNS, firewall, agent trust store or network route.
+The service is an explicitly owned Fusion JRE HTTP listener, not an MCP/OAuth/Tomcat endpoint.
+Docker broker mode rejects standalone `github.executor.docker.egress`; services-specific `dependencyEgress` is separate, and an allowlisted private hostname never bypasses public-IP validation.
+The implemented `github.executor.docker.services` route is a separate opt-in with final-image synthetic acceptance; live GitHub/model acceptance is recorded separately in operator release evidence.
+Non-Unix `DOCKER_HOST` and non-default `DOCKER_CONTEXT` remain unsupported; local daemon control and identical absolute bind-mount paths are mandatory.
+Nono and Kubernetes routing and runtime prerequisites are operator-owned and require separate deployment acceptance.
+
+`@BOT_LOGIN fix REQUEST` requests an explicit PR-only fix; `solve` never implicitly updates that PR's branch.
+Fix publication requires the separate opt-in and exact head allowlist, a pinned expected head, host push permission and durable no-replay recovery.
+GraphQL `updateRefs` compares `beforeOid` and uses `force:false`; it does not make PR open state atomic with the ref update or detect an ABA move back to the same head SHA.
+
+=== Docker restricted-services configuration
+
+IMPORTANT: The private gateway settings are canonical; the services-specific `dependencyEgress` extension is implemented and deployed, with passing native AMD64 actual-image acceptance.
+See xref:egress.adoc#restricted-services-evidence[restricted-services validation evidence] for completed package/final-image checks and the separate live-acceptance boundary.
+
+[cols="1,2",options="header"]
+|===
+|Setting |Contract
+|`github.executor.docker.services.image` |Digest-pinned existing egress application image with the new JRE TLS service-gateway runtime; public CONNECT readiness alone is insufficient.
+|`github.executor.docker.services.controlNetwork` |Operator control bridge shared by worker and gateway, never joined by the agent.
+|`github.executor.docker.services.keyStore` |Absolute path to a private PKCS12 TLS leaf key/chain store, root-managed and readable by the dedicated non-root worker/gateway, mounted read-only outside agent-visible storage.
+|`github.executor.docker.services.keyStorePasswordEnv` |Name of the trusted environment variable supplying the key-store password, not a literal password or an agent environment grant.
+|`github.executor.docker.services.serverName` |Exact TLS identity and per-attempt bridge alias, defaulting to `attempt-services.yca.internal`.
+|`github.executor.docker.services.providerTarget` |Fixed canonical private numerical IPv4 HTTP origin with explicit port and optional path prefix, for example `http://172.30.0.1:8080/v1`; must match the configured selected COMPLETIONS provider endpoint, including its configured path, rather than authorizing another upstream.
+|`github.context.advertised` |Set to `https://attempt-services.yca.internal:8443` for this route; no public DNS or published host port is necessary.
+|`github.executor.docker.services.dependencyEgress` |Nested policy for a separate credential-free public CONNECT sidecar, not a change to the private TLS gateway.
+|`github.executor.docker.services.dependencyEgress.enabled` |Boolean, default `true`; set to `false` to disable dependency egress. An explicit empty `allowedHosts` list also disables it.
+|`github.executor.docker.services.dependencyEgress.image` |Operator-reviewed, digest-pinned CONNECT application image for the dependency sidecar.
+|`github.executor.docker.services.dependencyEgress.allowedHosts` |Worker-operator destination policy with the public known-host defaults listed below; an explicit empty list disables dependency egress.
+|`github.executor.docker.services.dependencyEgress.dns` |Agent DNS sink, default `127.0.0.1`; IPv6 loopback `::1` is also supported, not an external resolver.
+|===
+
+Configure restricted services all-or-nothing and independently opt in; do not combine them with standalone `github.executor.docker.egress`, a custom agent network or the legacy `github.executor.relay` mode.
+The services dependency policy defaults to `github.com`, `api.github.com`, `codeload.github.com`, `raw.githubusercontent.com`, `objects.githubusercontent.com`, `repo.maven.apache.org`, `repo1.maven.org`, `registry.npmjs.org`, `docker.io`, `*.docker.io`, `production.cloudflare.docker.com`, `cdn.azul.com`, `api.azul.com` and `*.apache.org`.
+Only the worker operator configures this list; exact hosts and `*.suffix` entries are supported, and a wildcard excludes the suffix apex.
+For example, `*.docker.io` does not authorize `docker.io`, which is listed separately.
+Likewise, `*.apache.org` authorizes subdomains, not the `apache.org` apex.
+The Azul entries support project-compatible JDK metadata and binaries, and Apache subdomains support current and archived Maven toolchains; see xref:egress.adoc[official download sources and policy limits].
+An explicit list replaces these defaults; the runtime toolchain prompt renders that effective policy rather than assuming the defaults still apply.
+Set `github.executor.docker.services.dependencyEgress.enabled=false` or `github.executor.docker.services.dependencyEgress.allowedHosts=[]` explicitly to disable the dependency route rather than restoring defaults.
+The sidecar joins the SAME single isolated services network as the agent and private gateway, plus its own external bridge; the agent gains no external network attachment.
+Agent proxy settings target `egress:8080` with bypasses for the agent's own loopback and the exact configured services host (`attempt-services.yca.internal` by default), and Maven proxy settings are staged automatically without a default offline flag.
+Maven/JVM exclusions are pipe-delimited and include `localhost`, `127.*`, and compressed/expanded IPv6 loopback forms plus that service host.
+The JVM uses literal `[::1]` brackets; Maven Resolver's regex-based host matcher requires escaped brackets (`\[::1\]`) in `settings.xml`.
+The bundled Maven Resolver's repository URL parser mishandles literal IPv6 repository URLs; use `localhost` for local Maven repositories rather than adding a broad IPv6 bypass.
+Native proxy environment exclusions use comma-delimited loopback names/addresses and `127.0.0.0/8` for clients supporting CIDR matching.
+Loopback means the isolated agent namespace, not the Docker host; no host or private-network access is granted.
+Every resolved destination address must be public and dialing uses a checked numeric address; no private CIDR allowance is provided.
+This is a CONNECT destination policy, not a GET-only filter or a guarantee that arbitrary builds work.
+Allowing `docker.io` does not install or grant a Docker daemon or socket to the agent.
+The private TLS gateway retains its fixed routes and per-attempt tokens unchanged; the deployed dependency route has actual-image acceptance and does not change prior accepted review/solve evidence or claim a new live GitHub/model workflow.
+Services require strict broker mode: `--worker-agentCommenting false --worker-source-mode broker`.
+Legacy `AttemptRelay` is unsupported in services mode.
+Provider targets do not accept DNS names, public addresses, upstream IPv6, query strings or redirects; tested IPv6 agent confinement is not IPv6 upstream inference support.
+Endpoint matching appends `/chat/completions` when absent from either configured base, and then requires equality; AUTO selection is pinned to COMPLETIONS, not arbitrary provider APIs.
+Use a local Unix-socket Docker daemon with identical absolute mount paths and Linux Engine 28 or later; the observed remote 29.3.1 version is not isolation acceptance.
+The worker listener must bind its fixed reachable numerical address on the trusted control bridge and the gateway must target its actual bound port, not the default loopback address in the static-terminator example above.
+Keep the listener private and preserve exact worker/attempt affinity; do not load-balance random workers.
+Provision the private CA independently in Java and native Git trust stores, retaining hostname verification and avoiding HTTP fallback.
+The selected `provider.providers[]` entry or supported flat provider configuration is sanitized to one exact model/inference route and an opaque per-attempt capability.
+The real provider key remains host/gateway-only; alternate providers, dynamic credential helpers and background model routing are removed from staged agent configuration.
+Configure explicit `contextWindow` and `outputTokens` to avoid unsupported model-discovery requests; this gateway is not a general models API proxy.
+Do not reuse the legacy relay's single-provider configuration shape or portless HTTP advertised origin for this TLS route.
+See xref:private-context.adoc[private TLS architecture and backend scope] and xref:egress.adoc[restricted-route acceptance gates].
+
 === Qwen3.8 with NInfer: sizing and reasoning replay
 
 For a NInfer server advertising a 196608-token total window, the following is a candidate agent configuration for Qwen3.8-27B reviews.
@@ -146,7 +334,7 @@ java -jar github-bot.jar github bot purge
 Manual creation is a trusted operator action; it does not pretend to be an authenticated GitHub commenter.
 
 List filters are exact matches and combine with AND; omit a filter to leave it unrestricted.
-Task kinds use the lowercase enum values `solve`, `review` and `help`; lifecycle states use `pending`, `running`, `publishing`, `done` and `failed`.
+Task kinds use the lowercase enum values `solve`, `review`, `fix` and `help`; lifecycle states use `pending`, `running`, `publishing`, `done` and `failed`.
 
 List output uses a domain JSON object with a `tasks` array; show and mutation previews use task documents.
 
@@ -407,6 +595,45 @@ The shared worker-slot throttle applies before backend execution, so Docker, Non
 Keep the cache outside queue and attempt roots; it is never mounted in the agent, and private repositories fail rather than using host credentials.
 Cache disk retention is operator-managed, and enterprise API endpoints are not supported by this optional cache.
 
+=== Strict-solve source configuration
+
+The `worker.source` subgraph (`WorkerOptions.Source`) uses `SourceMode` values `export` and `git`; `worker.source.mode=export` remains the default.
+This opt-in source mode requires deployment-specific validation; local automated tests are not live acceptance evidence.
+
+[cols="1,1,3",options="header"]
+|===
+|Key |Default |Meaning
+|`worker.source.mode` |`export` |Host source export, or opt-in `git` for agent-managed strict-solve checkout.
+|`worker.source.tokenEnv` |Empty |Name of an optional dedicated source-read PAT environment variable; empty means anonymous public Git access.
+|`worker.source.maxDepth` |`1000` |Maximum helper fetch depth.
+|`worker.source.maxBytes` |`536870912` |Soft helper pre/post disk-size bound in bytes, not a hard aggregate quota.
+|`worker.source.commandTimeoutSeconds` |`120` |Timeout per helper Git command.
+|===
+
+CLI names preserve camel case within key segments, including `--worker-agentCommenting`, `--worker-source-tokenEnv`, `--worker-source-maxDepth`, `--worker-source-maxBytes` and `--worker-source-commandTimeoutSeconds`.
+For example, public Git source needs no source token:
+
+[source,bash]
+----
+java -jar github-bot.jar github bot worker --task TASK_ID \
+  --worker-agentCommenting false --worker-source-mode git
+----
+
+For private source, add `--worker-source-tokenEnv GH_SOURCE_READ_TOKEN`, equivalent to `worker.source.tokenEnv=GH_SOURCE_READ_TOKEN` or `WORKER_SOURCE_TOKENENV=GH_SOURCE_READ_TOKEN`.
+These settings contain a variable name, not a PAT value; load that dedicated variable securely into the dispatcher environment.
+Do not configure a source token in export mode.
+Git mode requires strict solves, rejects legacy `worker.agentCommenting=true`, reviews and `worker.cacheRoot`, and supports only GitHub.com HTTPS.
+
+Use a fine-grained PAT limited to selected source repositories with Contents read permission and an expiry; source access does not require an App.
+Host, legacy agent and fork credential environment names and known values cannot be reused for source access.
+The source secret is forwarded as `GITHUB_SOURCE_TOKEN`, never `GH_TOKEN`, using the existing ephemeral backend secret transport, not prompts, URLs, scripts or configuration values.
+The agent and build can exfiltrate it or access all repositories selected by the PAT despite prompt policy; permission verification, downscoping, rotation and revocation are not automatic.
+The operator must manage rotation and expiry; runtime cleanup removes the environment/Secret, not the PAT's validity, and no source PAT file is written on the host.
+
+The helper bounds do not cover direct Git commands or build-triggered lazy reads outside the helper and are not a substitute for filesystem quotas, egress restrictions or worker time limits.
+Host structured `strictSolve` publication, exact base SHA, path, file-count and size checks remain unchanged.
+See xref:private-context.adoc[private context and host publication] for pinned metadata staging, sparse partial checkout commands, real-history requirements and credential exposure limits.
+
 == Optional Discussion polling
 
 `poll.discussions.enabled` defaults to `false`; enable it explicitly on the poller with `--poll-discussions-enabled true` or `POLL_DISCUSSIONS_ENABLED=true`.
@@ -421,7 +648,7 @@ Discussion `review` requests are unsupported and do not enqueue work.
 Only `User` actors with an immutable numeric user ID satisfying the shared request authorization policy are eligible.
 Explicitly listed IDs bypass repository-permission and optional team checks; nonlisted users require enabled repository-writer authorization and any configured teams restriction.
 Deleted authors, non-user actors, the configured self login, task-marked output and quoted or code invocation examples do not grant authority to enqueue work.
-Authorization is checked again by the worker; a mention alias is not a separately authenticated bot identity.
+Authorization is checked again by the worker, reusing an unexpired process-local decision when available; a mention alias is not a separately authenticated bot identity.
 
 Polling only discovers and enqueues tasks: it makes no LLM call and launches no executor.
 Help is published without model execution.
@@ -470,7 +697,7 @@ The generic required-fields guard checks nonblank strings, so numeric `schemaVer
 
 The host remains authoritative.
 It requires numeric schema version `1`, the exact task ID and a nonblank summary or failure, plus independently validated task-specific publication evidence.
-The host accepts up to 6 MiB only for strict-solve results and retains its narrower `1000000` byte limit for other results.
+The host accepts up to 6 MiB for strict-solve and explicit fix results and retains its narrower `1000000` byte limit for other results.
 
 Passing the agent-side structural guard is therefore not proof of host acceptance, correct code, valid review locations or permission to publish.
 

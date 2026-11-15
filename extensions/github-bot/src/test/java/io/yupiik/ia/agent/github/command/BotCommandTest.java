@@ -19,7 +19,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.ia.agent.core.notifications.NotificationService;
+import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.model.TaskState;
@@ -35,6 +37,7 @@ import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -44,10 +47,12 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
@@ -62,6 +67,150 @@ class BotCommandTest {
     Path home;
 
     @Test
+    void manualFixValidatesPolicyAndCanonicalOpenPullBeforeEnqueue() throws Exception {
+        final var conf = BotTestConfiguration.home(home);
+        final var requests = new AtomicInteger();
+        final var sha = "a".repeat(40);
+        final var base = BotTestConfiguration.fixRepository("acme/repo", "BASE");
+        final var head = BotTestConfiguration.fixRepository("human/fork", "HEAD");
+        final var valid = BotTestConfiguration.fixPull("acme/repo", sha);
+        final var response = new AtomicReference<Map<String, Object>>(valid);
+        final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try (final var json =
+                BotJsonMapper.create(List.of(new BotAudit$AuditEntry$FusionJsonCodec()), ignored -> Optional.empty())) {
+            server.createContext("/", exchange -> {
+                requests.incrementAndGet();
+                final var path = exchange.getRequestURI().getPath();
+                final var body =
+                        switch (path) {
+                            case "/repos/acme/repo/pulls/12" -> response.get();
+                            case "/repos/acme/repo" -> base;
+                            case "/repos/human/fork" -> head;
+                            case "/repos/human/fork/git/ref/heads/feature" -> BotTestConfiguration.fixRef(sha);
+                            default -> Map.of("message", "Not Found");
+                        };
+                final var bytes = json.toString(body).getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(body.containsKey("message") ? 404 : 200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+                exchange.close();
+            });
+            server.start();
+            final var store = new TaskStore(conf, json);
+            final var clock = BotTestConfiguration.CLOCK;
+            final var audit = new BotAudit(conf, json, clock);
+            final var options = new CreateCommand.Options("acme/repo", 12, TaskKind.fix, "fix findings", false);
+            try (final var github = new GitHubClient(
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()), json, () -> "test", clock)) {
+                assertThrows(
+                        IllegalStateException.class,
+                        () -> new CreateCommand(
+                                        options,
+                                        json,
+                                        store,
+                                        audit,
+                                        clock,
+                                        github,
+                                        new FixConfiguration(false, "human/fork"))
+                                .run());
+                assertEquals(0, requests.get());
+                for (final var policy : List.of("", "acme/repo", "human/*", "Human/fork")) {
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> new CreateCommand(
+                                            options,
+                                            json,
+                                            store,
+                                            audit,
+                                            clock,
+                                            github,
+                                            new FixConfiguration(true, policy))
+                                    .run());
+                }
+                final var enabled = new FixConfiguration(true, "human/fork");
+                for (final var invalid : List.of(
+                        Map.entry("state", (Object) "closed"),
+                        Map.entry("number", (Object) 13),
+                        Map.entry("html_url", (Object) "https://evil.example/acme/repo/pull/12"),
+                        Map.entry(
+                                "base", (Object) Map.of("repo", Map.of("full_name", "acme/repo", "node_id", "WRONG"))),
+                        Map.entry(
+                                "base", (Object) Map.of("repo", Map.of("full_name", "other/repo", "node_id", "BASE"))),
+                        Map.entry("head", (Object) Map.of(
+                                "repo",
+                                Map.of("full_name", "human/fork", "node_id", "WRONG"),
+                                "ref",
+                                "feature",
+                                "sha",
+                                sha)),
+                        Map.entry("head", (Object) Map.of(
+                                "repo",
+                                Map.of("full_name", "unknown/repo", "node_id", "UNKNOWN"),
+                                "ref",
+                                "feature",
+                                "sha",
+                                sha)))) {
+                    final var changed = new LinkedHashMap<>(valid);
+                    changed.put(invalid.getKey(), invalid.getValue());
+                    response.set(changed);
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> new CreateCommand(options, json, store, audit, clock, github, enabled).run());
+                }
+                final var unknown = new LinkedHashMap<>(valid);
+                unknown.put(
+                        "head",
+                        Map.of(
+                                "repo",
+                                Map.of("full_name", "unknown/repo", "node_id", "UNKNOWN"),
+                                "ref",
+                                "feature",
+                                "sha",
+                                sha));
+                response.set(unknown);
+                assertThrows(
+                        GitHubClient.HttpException.class,
+                        () -> new CreateCommand(
+                                        options,
+                                        json,
+                                        store,
+                                        audit,
+                                        clock,
+                                        github,
+                                        new FixConfiguration(true, "unknown/repo"))
+                                .run());
+                assertTrue(store.transaction(state -> state.list()).isEmpty());
+                assertTrue(store.transaction(state -> state.receipts()).isEmpty());
+                assertFalse(Files.exists(home.resolve("audit.jsonl")));
+                response.set(valid);
+                new CreateCommand(
+                                new CreateCommand.Options("acme/repo", 12, TaskKind.fix, "preview", true),
+                                json,
+                                store,
+                                audit,
+                                clock,
+                                github,
+                                enabled)
+                        .run();
+                assertTrue(store.transaction(state -> state.list()).isEmpty());
+                new CreateCommand(options, json, store, audit, clock, github, enabled).run();
+                final var task = store.transaction(state -> state.list().getFirst());
+                assertEquals(TaskKind.fix, task.kind());
+                assertEquals("https://github.com/acme/repo/pull/12", task.reference());
+                assertEquals(clock.instant().toString(), task.createdAt());
+                assertEquals(
+                        sha, TaskStore.map(task.recovery().get("fixTarget")).get("headSha"));
+                assertEquals(
+                        "HEAD", TaskStore.map(task.recovery().get("fixTarget")).get("repositoryId"));
+                assertEquals(
+                        "1", TaskStore.map(task.recovery().get("fixTarget")).get("version"));
+                assertEquals(null, task.actorId(), "Manual creation retains trusted operator semantics");
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void manualCreationUsesInjectedClockForTaskAndAudit() throws Exception {
         final var conf = BotTestConfiguration.home(home);
         try (final var json =
@@ -73,7 +222,9 @@ class BotCommandTest {
                             json,
                             store,
                             new BotAudit(conf, json, clock),
-                            clock)
+                            clock,
+                            null,
+                            new FixConfiguration(false, ""))
                     .run();
             final var tasks = store.transaction(state -> state.list());
             assertEquals(1, tasks.size());
@@ -125,7 +276,9 @@ class BotCommandTest {
                             json,
                             BotTestConfiguration.store(conf, json),
                             BotTestConfiguration.audit(conf, json),
-                            BotTestConfiguration.CLOCK))) {
+                            BotTestConfiguration.CLOCK,
+                            null,
+                            new FixConfiguration(false, "")))) {
                 command.run();
                 assertEquals(original, Files.readString(home.resolve("state.json")));
                 assertEquals(originalDiagnostic, Files.readString(record));

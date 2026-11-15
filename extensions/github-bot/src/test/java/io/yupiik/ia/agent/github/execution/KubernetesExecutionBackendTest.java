@@ -26,12 +26,20 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -50,7 +58,16 @@ class KubernetesExecutionBackendTest {
             assertEquals(
                     7,
                     backend(json, client)
-                            .execute(attempt, "yca-task", "Review '$(never)'", Map.of("GH_TOKEN", "agent-secret")));
+                            .execute(
+                                    attempt,
+                                    "yca-task",
+                                    "Review '$(never)'",
+                                    Map.of(
+                                            "GH_TOKEN", "agent-secret",
+                                            "GITHUB_BOT_FORK_TOKEN", "fork-secret",
+                                            "GITHUB_SOURCE_TOKEN", "source-secret",
+                                            "YCA_CONTEXT_TOKEN", "context-secret",
+                                            "YCA_CONTEXT_GIT_TOKEN", "context-git-secret")));
             final var job = map(json.fromString(Object.class, cluster.createdJob));
             final var spec = map(job.get("spec"));
             assertEquals(0, ((Number) spec.get("backoffLimit")).intValue());
@@ -69,6 +86,34 @@ class KubernetesExecutionBackendTest {
             assertEquals("RuntimeDefault", map(security.get("seccompProfile")).get("type"));
             assertTrue(map(agent.get("resources")).containsKey("limits"));
             assertTrue(((List<?>) agent.get("args")).contains("Review '$(never)'"));
+            final var credentials = Map.of(
+                    "GH_TOKEN", "agent-secret",
+                    "GITHUB_BOT_FORK_TOKEN", "fork-secret",
+                    "GITHUB_SOURCE_TOKEN", "source-secret",
+                    "YCA_CONTEXT_TOKEN", "context-secret",
+                    "YCA_CONTEXT_GIT_TOKEN", "context-git-secret");
+            assertEquals(
+                    credentials,
+                    map(json.fromString(Object.class, cluster.secret)).get("stringData"));
+            for (final var key : credentials.keySet()) {
+                final var variable = ((List<?>) agent.get("env"))
+                        .stream()
+                                .map(KubernetesExecutionBackendTest::map)
+                                .filter(entry -> key.equals(entry.get("name")))
+                                .findFirst()
+                                .orElseThrow();
+                assertNull(variable.get("value"));
+                assertEquals(
+                        Map.of("name", "yca-task", "key", key),
+                        map(variable.get("valueFrom")).get("secretKeyRef"));
+            }
+            for (final var secret : credentials.values()) {
+                assertFalse(cluster.createdJob.contains(secret));
+                assertFalse(cluster.calls.toString().contains(secret));
+                assertFalse(Files.readString(attempt.resolve("execution.log")).contains(secret));
+                assertFalse(
+                        Files.readString(attempt.resolve("configuration.json")).contains(secret));
+            }
             for (final var child : List.of("configuration.json", "storage", "workspace", "output")) {
                 final var mount = ((List<?>) agent.get("volumeMounts"))
                         .stream()
@@ -86,6 +131,7 @@ class KubernetesExecutionBackendTest {
             assertTrue(cluster.secret.contains("agent-secret"));
             assertTrue(cluster.calls.indexOf("DELETE /apis/batch/v1/namespaces/sandbox/jobs/yca-task")
                     < cluster.calls.indexOf("DELETE /api/v1/namespaces/sandbox/secrets/yca-task"));
+            assertTrue(cluster.secretDeleted);
             assertEquals("agent output\n", Files.readString(attempt.resolve("execution.log")));
             assertTrue(cluster.patch.contains("\"suspend\":true"));
             assertTrue(cluster.delete.contains("Foreground"));
@@ -164,11 +210,139 @@ class KubernetesExecutionBackendTest {
                 final var json = json();
                 final var client = cluster.client()) {
             cluster.slow = true;
+            cluster.job = "{}";
+            cluster.secret = "retain-me";
+            final var backend = backend(json, client);
             assertTimeoutPreemptively(
-                    Duration.ofSeconds(3),
-                    () -> assertThrows(
-                            IllegalStateException.class,
-                            () -> backend(json, client).stop("yca-task")));
+                    Duration.ofSeconds(1),
+                    () -> assertThrows(IllegalStateException.class, () -> backend.stop("yca-task")));
+            assertEquals(0, cluster.bodyStarted.getCount());
+            assertEquals(1, cluster.calls.size());
+            assertFalse(cluster.secretDeleted);
+        }
+    }
+
+    @Test
+    void slowDripBodyUsesOneDeadlineIncludingHeaders() throws Exception {
+        try (final var cluster = new Cluster();
+                final var json = json();
+                final var client = cluster.client()) {
+            cluster.slow = true;
+            cluster.drip = true;
+            cluster.headerDelayMillis = 700;
+            final var backend = backend(json, client, Duration.ofSeconds(1));
+            assertTimeoutPreemptively(Duration.ofMillis(1500), () -> {
+                final var failure = assertThrows(IllegalStateException.class, () -> backend.stop("yca-task"));
+                assertNull(failure.getCause());
+            });
+            assertEquals(0, cluster.bodyStarted.getCount());
+            assertTrue(cluster.calls.stream().noneMatch(c -> c.startsWith("DELETE ")));
+        }
+    }
+
+    @Test
+    void oversizedChunkedBodyIsRejectedWithoutWaitingForEof() throws Exception {
+        try (final var cluster = new Cluster();
+                final var json = json();
+                final var client = cluster.client()) {
+            cluster.oversizedChunked = true;
+            cluster.job = "{}";
+            cluster.secret = "retain-me";
+            final var backend = backend(json, client, Duration.ofSeconds(5));
+            assertTimeoutPreemptively(Duration.ofSeconds(3), () -> {
+                final var failure = assertThrows(IllegalStateException.class, () -> backend.stop("yca-task"));
+                assertNull(failure.getCause());
+                assertFalse(failure.toString().contains("response-secret"));
+            });
+            assertEquals(1, cluster.calls.size());
+            assertFalse(cluster.secretDeleted);
+        }
+    }
+
+    @Test
+    void acceptsCompleteBodyAtExactSizeLimit() throws Exception {
+        final var attempt = attempt();
+        try (final var cluster = new Cluster();
+                final var json = json();
+                final var client = cluster.client()) {
+            cluster.logOutput = "x".repeat(8 * 1024 * 1024);
+            assertEquals(
+                    7, backend(json, client, Duration.ofSeconds(5)).execute(attempt, "yca-task", "review", Map.of()));
+            assertEquals(cluster.logOutput, Files.readString(attempt.resolve("execution.log")));
+            assertTrue(cluster.secretDeleted);
+        }
+    }
+
+    @Test
+    void interruptionCancelsStalledBodyAndPreservesInterruptAndResources() throws Exception {
+        try (final var cluster = new Cluster();
+                final var json = json();
+                final var client = cluster.client()) {
+            cluster.slow = true;
+            cluster.job = "{}";
+            cluster.secret = "retain-me";
+            final var backend = backend(json, client, Duration.ofSeconds(10));
+            final var failure = new AtomicReference<Throwable>();
+            final var interrupted = new AtomicBoolean();
+            final var caller = Thread.ofVirtual().start(() -> {
+                try {
+                    backend.stop("yca-task");
+                } catch (final Throwable error) {
+                    failure.set(error);
+                    interrupted.set(Thread.currentThread().isInterrupted());
+                }
+            });
+            try {
+                assertTrue(cluster.bodyStarted.await(3, TimeUnit.SECONDS));
+                caller.interrupt();
+                caller.join(2000);
+                assertFalse(caller.isAlive());
+                assertInstanceOf(IllegalStateException.class, failure.get());
+                assertEquals(
+                        "Kubernetes interrupted; runtime state uncertain",
+                        failure.get().getMessage());
+                assertNull(failure.get().getCause());
+                assertTrue(interrupted.get());
+                assertFalse(cluster.secretDeleted);
+                assertTrue(cluster.calls.stream().noneMatch(c -> c.startsWith("DELETE ")));
+            } finally {
+                caller.interrupt();
+                cluster.bodyRelease.countDown();
+                caller.join(2000);
+            }
+        }
+    }
+
+    @Test
+    void responseReadsDoNotDependOnCommonPoolAvailability() throws Exception {
+        final var parallelism = ForkJoinPool.getCommonPoolParallelism();
+        Assumptions.assumeTrue(parallelism > 1 && parallelism <= 256);
+        final var started = new CountDownLatch(parallelism);
+        final var release = new CountDownLatch(1);
+        final var blockers = new ArrayList<CompletableFuture<Void>>();
+        try (final var cluster = new Cluster();
+                final var json = json();
+                final var client = cluster.client()) {
+            final var backend = backend(json, client, Duration.ofSeconds(1));
+            // Plain latch waits intentionally do not trigger ForkJoinPool managed-block compensation.
+            for (int i = 0; i < parallelism; i++) {
+                blockers.add(CompletableFuture.runAsync(() -> {
+                    started.countDown();
+                    try {
+                        release.await();
+                    } catch (final InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }));
+            }
+            assertTrue(started.await(3, TimeUnit.SECONDS));
+            assertTimeoutPreemptively(Duration.ofSeconds(3), () -> backend.stop("yca-task"));
+            assertTrue(cluster.secretDeleted);
+        } finally {
+            release.countDown();
+            for (final var blocker : blockers) {
+                blocker.get(3, TimeUnit.SECONDS);
+            }
         }
     }
 
@@ -205,6 +379,11 @@ class KubernetesExecutionBackendTest {
 
     private KubernetesExecutionBackend backend(final JsonMapperImpl json, final KubernetesClient client)
             throws Exception {
+        return backend(json, client, Duration.ofMillis(300));
+    }
+
+    private KubernetesExecutionBackend backend(
+            final JsonMapperImpl json, final KubernetesClient client, final Duration commandTimeout) throws Exception {
         Files.createDirectories(home.resolve("shared"));
         return new KubernetesExecutionBackend(
                 json,
@@ -216,7 +395,7 @@ class KubernetesExecutionBackendTest {
                 1000,
                 1000,
                 Duration.ofSeconds(3),
-                Duration.ofMillis(300),
+                commandTimeout,
                 "yca-agent");
     }
 
@@ -266,10 +445,16 @@ class KubernetesExecutionBackendTest {
         private volatile String patch;
         private volatile String delete;
         private volatile String podResponse;
+        private volatile String logOutput = "agent output\n";
         private volatile boolean running;
         private volatile boolean failPost;
         private volatile boolean deleted;
         private volatile boolean slow;
+        private volatile boolean drip;
+        private volatile boolean oversizedChunked;
+        private volatile long headerDelayMillis;
+        private final CountDownLatch bodyStarted = new CountDownLatch(1);
+        private final CountDownLatch bodyRelease = new CountDownLatch(1);
         private volatile boolean retainJob;
 
         private Cluster() throws Exception {
@@ -284,12 +469,42 @@ class KubernetesExecutionBackendTest {
                     final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
                     int status = 200;
                     String output = "{}";
+                    if (oversizedChunked) {
+                        exchange.sendResponseHeaders(200, 0);
+                        final var chunk = "response-secret".repeat(1024).getBytes(StandardCharsets.UTF_8);
+                        final var total = 8 * 1024 * 1024 + 1;
+                        for (int sent = 0; sent < total; sent += chunk.length) {
+                            exchange.getResponseBody().write(chunk, 0, Math.min(chunk.length, total - sent));
+                        }
+                        exchange.getResponseBody().flush();
+                        try {
+                            bodyRelease.await(10, TimeUnit.SECONDS);
+                        } catch (final InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        return;
+                    }
                     if (slow) {
+                        try {
+                            Thread.sleep(headerDelayMillis);
+                        } catch (final InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
                         exchange.sendResponseHeaders(200, 100);
                         exchange.getResponseBody().write('x');
                         exchange.getResponseBody().flush();
+                        bodyStarted.countDown();
                         try {
-                            Thread.sleep(5000);
+                            if (drip) {
+                                for (int i = 0; i < 99; i++) {
+                                    Thread.sleep(20);
+                                    exchange.getResponseBody().write('x');
+                                    exchange.getResponseBody().flush();
+                                }
+                            } else {
+                                bodyRelease.await(10, TimeUnit.SECONDS);
+                            }
                         } catch (final InterruptedException e) {
                             Thread.currentThread().interrupt();
                         }
@@ -328,7 +543,7 @@ class KubernetesExecutionBackendTest {
                                                 + (running ? "Running" : "Failed")
                                                 + "\",\"containerStatuses\":[{\"state\":{\"terminated\":{\"exitCode\":7}}}]}}]}";
                     } else if (path.endsWith("/log")) {
-                        output = "agent output\n";
+                        output = logOutput;
                     } else if (path.contains("/jobs/")) {
                         status = job == null ? 404 : 200;
                     } else if (path.contains("/secrets/")) {
@@ -350,6 +565,7 @@ class KubernetesExecutionBackendTest {
 
         @Override
         public void close() {
+            bodyRelease.countDown();
             server.stop(0);
             executor.shutdownNow();
         }

@@ -180,11 +180,14 @@ class TeamAuthorizationTest {
     @Test
     void tokenCapabilityErrorsLogAtInfoDenyWithoutCachingAndNeverAffectExplicitIds() throws Exception {
         final var records = new CopyOnWriteArrayList<LogRecord>();
+        final var testThread = Thread.currentThread().threadId();
         final var logger = Logger.getLogger(TeamAuthorization.class.getName());
         final var handler = new Handler() {
             @Override
             public void publish(final LogRecord record) {
-                records.add(record);
+                if (record.getLongThreadID() == testThread) {
+                    records.add(record);
+                }
             }
 
             @Override
@@ -195,6 +198,14 @@ class TeamAuthorizationTest {
         };
         logger.addHandler(handler);
         try (final var fixture = new Fixture()) {
+            // Other test classes can authorize actors concurrently against the same global logger.
+            fixture.statuses.put(PERMISSION, 403);
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                assertFalse(executor.submit(
+                                () -> fixture.policy("", "acme/dev", true, 7200).allows("owner/repo", 42, "alice"))
+                        .get());
+            }
+            fixture.statuses.remove(PERMISSION);
             for (final var path : List.of("/user/42", PERMISSION, MEMBERSHIP)) {
                 for (final var status : List.of(401, 403)) {
                     final var policy = fixture.policy("", "acme/dev", true, 7200);
@@ -275,13 +286,22 @@ class TeamAuthorizationTest {
 
     @Test
     void cacheEvictsOldDecisionsInsteadOfGrowingWithoutBound() throws Exception {
-        try (final var fixture = new Fixture()) {
+        try (final var fixture = new Fixture();
+                final var executor =
+                        Executors.newFixedThreadPool(8, Thread.ofVirtual().factory())) {
             final var policy = fixture.policy("", "", true, 7200);
             assertTrue(policy.allows("owner/repo", 42, "alice"));
-            // A single mismatched immutable identity response per entry keeps this bounded-cache test small.
-            for (int actor = 10000; actor < 14096; actor++) {
-                fixture.responses.put("/user/" + actor, user(42, "alice"));
-                assertFalse(policy.allows("owner/repo", actor, "alice"));
+            // Keep real HTTP lookups, but overlap their latency with a bounded number of callers.
+            // Every denial completes before checking eviction; their relative insertion order is irrelevant.
+            final var results = executor.invokeAll(IntStream.range(10000, 14096)
+                    .<Callable<Boolean>>mapToObj(actor -> () -> {
+                        // One mismatched immutable identity response per entry avoids a permission lookup.
+                        fixture.responses.put("/user/" + actor, user(42, "alice"));
+                        return policy.allows("owner/repo", actor, "alice");
+                    })
+                    .toList());
+            for (final var result : results) {
+                assertFalse(result.get());
             }
             fixture.responses.put(PERMISSION, permission("read", "read", 42, "alice"));
             assertFalse(policy.allows("owner/repo", 42, "alice"), "Old allow was evicted before its TTL");

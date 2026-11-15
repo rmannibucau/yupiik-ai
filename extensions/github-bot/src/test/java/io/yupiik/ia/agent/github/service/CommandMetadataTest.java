@@ -61,6 +61,11 @@ class CommandMetadataTest {
                 .map(CliCommand.Parameter::cliName)
                 .toList();
         assertEquals(List.of("--filterKind", "--filterRepository", "--filterState"), list);
+        assertEquals(
+                List.of("--diagnostics", "--task"),
+                commands.get(2).parameters().stream()
+                        .map(CliCommand.Parameter::cliName)
+                        .toList());
         assertTrue(commands.get(0).parameters().stream()
                 .anyMatch(parameter -> parameter.cliName().equals("--poll-pageBudget")));
         assertTrue(commands.get(7).parameters().stream()

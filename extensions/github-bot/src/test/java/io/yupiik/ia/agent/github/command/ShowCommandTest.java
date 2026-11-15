@@ -17,22 +17,32 @@ package io.yupiik.ia.agent.github.command;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.service.TaskDiagnostics;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.logging.SimpleFormatter;
+import java.util.logging.StreamHandler;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
 
+// Capture stdout and JUL in-process without other test classes writing into the capture.
+// CommandMetadataTest separately verifies the generated CLI registration.
+@Isolated
 class ShowCommandTest {
     @TempDir
     Path home;
@@ -62,16 +72,14 @@ class ShowCommandTest {
                                 true));
                 return null;
             });
-            final var ordinary = invoke(id);
-            assertEquals(0, ordinary.exitCode(), ordinary.stderr());
-            assertFalse((ordinary.stdout() + ordinary.stderr()).contains("private-original-secret"));
-            assertTrue(ordinary.stderr().contains("lastFailure"));
-            assertTrue(ordinary.stderr().contains("preparation"));
-            final var explicit = invoke(id, "--diagnostics", "true");
-            assertEquals(0, explicit.exitCode(), explicit.stderr());
+            final var ordinary = invoke(json, store, id, false);
+            assertFalse((ordinary.stdout() + ordinary.logs()).contains("private-original-secret"));
+            assertTrue(ordinary.logs().contains("lastFailure"));
+            assertTrue(ordinary.logs().contains("preparation"));
+            assertEquals("", ordinary.stdout());
+            final var explicit = invoke(json, store, id, true);
             assertTrue(explicit.stdout().contains("private-original-secret"));
-            assertFalse(explicit.stderr().contains("private-original-secret"));
-            assertFalse(explicit.stderr().contains("lastFailure"));
+            assertEquals("", explicit.logs());
         }
     }
 
@@ -83,9 +91,9 @@ class ShowCommandTest {
                     "legacy",
                     TaskFixtures.task(Map.of(
                             "repository", "acme/repo", "kind", "help", "lastError", "IllegalArgumentException"))));
-            final var result = invoke(id, "--diagnostics", "true");
-            assertEquals(0, result.exitCode(), result.stderr());
+            final var result = invoke(json, store, id, true);
             assertEquals("[]", result.stdout().trim());
+            assertEquals("", result.logs());
             assertFalse(Files.exists(home.resolve("diagnostics")));
         }
     }
@@ -97,50 +105,44 @@ class ShowCommandTest {
             final var id = store.transaction(state -> state.enqueue(
                     "unsafe-private", TaskFixtures.task(Map.of("repository", "acme/repo", "kind", "help"))));
             Files.createSymbolicLink(home.resolve("diagnostics"), Files.createDirectory(home.resolve("outside")));
-            final var result = invoke(id);
-            assertEquals(0, result.exitCode(), result.stderr());
-            assertTrue(result.stderr().contains(id));
+            final var result = invoke(json, store, id, false);
+            assertTrue(result.logs().contains(id));
             assertEquals("", result.stdout());
         }
     }
 
-    private Output invoke(final String id, final String... options) throws Exception {
-        final var output = Files.createTempFile(home, "show-stdout-", ".txt");
-        final var error = Files.createTempFile(home, "show-stderr-", ".txt");
-        final var childHome = Files.createTempDirectory(home, "cli-home-");
-        final var logging = Files.writeString(
-                childHome.resolve("logging.properties"),
-                "handlers=java.util.logging.ConsoleHandler\n.level=INFO\njava.util.logging.ConsoleHandler.level=ALL\n");
-        final var command = new ArrayList<>(List.of(
-                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "-Dgithub.home=" + home,
-                "-Duser.home=" + childHome,
-                "-Dyca.home=" + childHome,
-                "-Dyca.storageHome=" + childHome,
-                "-Djava.util.logging.config.file=" + logging,
-                "-cp",
-                System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
-                "io.yupiik.fusion.framework.api.main.CliLauncher",
-                "github",
-                "bot",
-                "show",
-                "--task",
-                id));
-        command.addAll(List.of(options));
-        final var process = new ProcessBuilder(command)
-                .redirectOutput(output.toFile())
-                .redirectError(error.toFile())
-                .start();
-        try {
-            assertTrue(process.waitFor(30, TimeUnit.SECONDS), "show command timed out");
-            return new Output(process.exitValue(), Files.readString(output), Files.readString(error));
-        } finally {
-            if (process.isAlive()) {
-                process.destroyForcibly();
-                assertTrue(process.waitFor(5, TimeUnit.SECONDS), "show command did not terminate");
+    private Output invoke(final JsonMapper json, final TaskStore store, final String id, final boolean diagnostics) {
+        final var originalOut = System.out;
+        final var logger = Logger.getLogger(ShowCommand.class.getName());
+        final var originalLevel = logger.getLevel();
+        final var originalParentHandlers = logger.getUseParentHandlers();
+        final var output = new ByteArrayOutputStream();
+        final var logs = new ByteArrayOutputStream();
+        final var handler = new StreamHandler(logs, new SimpleFormatter());
+        handler.setLevel(Level.ALL);
+        try (final var stdout = new PrintStream(output, true, StandardCharsets.UTF_8)) {
+            try {
+                System.setOut(stdout);
+                logger.setLevel(Level.ALL);
+                logger.setUseParentHandlers(false);
+                logger.addHandler(handler);
+                new ShowCommand(
+                                new ShowCommand.Options(id, diagnostics),
+                                json,
+                                store,
+                                new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK))
+                        .run();
+                handler.flush();
+                return new Output(output.toString(StandardCharsets.UTF_8), logs.toString(StandardCharsets.UTF_8));
+            } finally {
+                System.setOut(originalOut);
+                logger.removeHandler(handler);
+                logger.setLevel(originalLevel);
+                logger.setUseParentHandlers(originalParentHandlers);
+                handler.close();
             }
         }
     }
 
-    private record Output(int exitCode, String stdout, String stderr) {}
+    private record Output(String stdout, String logs) {}
 }

@@ -19,10 +19,12 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.kubernetes.client.KubernetesClient;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -34,6 +36,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -102,7 +106,13 @@ public final class KubernetesExecutionBackend {
     public int execute(
             final Path directory, final String runtimeId, final String prompt, final Map<String, String> credentials) {
         validateRuntimeIdentity(runtimeId);
-        if (!Set.of("GH_TOKEN", "GITHUB_BOT_FORK_TOKEN").containsAll(credentials.keySet())) {
+        if (!Set.of(
+                        "GH_TOKEN",
+                        "GITHUB_BOT_FORK_TOKEN",
+                        "GITHUB_SOURCE_TOKEN",
+                        "YCA_CONTEXT_TOKEN",
+                        "YCA_CONTEXT_GIT_TOKEN")
+                .containsAll(credentials.keySet())) {
             throw new IllegalArgumentException("Unsupported executor credential variable");
         }
         final var attempt = checked(directory, true);
@@ -318,30 +328,35 @@ public final class KubernetesExecutionBackend {
                                 ? HttpRequest.BodyPublishers.noBody()
                                 : HttpRequest.BodyPublishers.ofString(input));
         // Bound both the body and the complete exchange, not just receipt of headers.
-        final var pending = client.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
         final long deadline = System.nanoTime() + commandTimeout.toNanos();
+        final var body = new BoundedBodySubscriber();
+        final var received = new CompletableFuture<Result>();
         try {
-            final var response = pending.get(commandTimeout.toNanos(), TimeUnit.NANOSECONDS);
-            try (final var body = response.body()) {
-                final var read = CompletableFuture.supplyAsync(() -> {
-                    try {
-                        return body.readNBytes(MAX_OUTPUT + 1);
-                    } catch (final IOException e) {
-                        throw new IllegalStateException("Cannot read Kubernetes response");
+            final var pending = client.sendAsync(builder.build(), info -> {
+                // HttpClient can dispatch its final response future completion to the common pool.
+                // Complete our exchange directly from the subscriber instead of waiting on that dispatch.
+                body.getBody().whenComplete((bytes, error) -> {
+                    if (error != null) {
+                        received.completeExceptionally(error);
+                    } else {
+                        received.complete(new Result(info.statusCode(), bytes));
                     }
                 });
-                final byte[] bytes;
-                try {
-                    bytes = read.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
-                } finally {
-                    read.cancel(true);
-                }
-                if (bytes.length > MAX_OUTPUT
-                        || (!(response.statusCode() >= 200 && response.statusCode() < 300)
-                                && !(allowMissing && response.statusCode() == 404))) {
+                return body;
+            });
+            try {
+                pending.whenComplete((response, error) -> {
+                    if (error != null) {
+                        received.completeExceptionally(new IllegalStateException("Cannot read Kubernetes response"));
+                    }
+                });
+                final var response = received.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                if (!(response.code() >= 200 && response.code() < 300) && !(allowMissing && response.code() == 404)) {
                     throw new IllegalStateException("Kubernetes rejected operation; runtime state uncertain");
                 }
-                return new Result(response.statusCode(), bytes);
+                return response;
+            } finally {
+                pending.cancel(true);
             }
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -350,7 +365,77 @@ public final class KubernetesExecutionBackend {
             // Never expose response bodies, manifests or transport diagnostics containing credentials.
             throw new IllegalStateException("Kubernetes request failed; runtime state uncertain");
         } finally {
-            pending.cancel(true);
+            body.cancel();
+        }
+    }
+
+    // No blocking stream reads or common-pool tasks. The body stage completes only at EOF.
+    private static final class BoundedBodySubscriber implements HttpResponse.BodySubscriber<byte[]> {
+        private final CompletableFuture<byte[]> body = new CompletableFuture<>();
+        private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        private final byte[] scratch = new byte[8192];
+        private Flow.Subscription subscription;
+        private boolean done;
+
+        @Override
+        public CompletionStage<byte[]> getBody() {
+            return body;
+        }
+
+        @Override
+        public synchronized void onSubscribe(final Flow.Subscription value) {
+            if (done || subscription != null) {
+                value.cancel();
+                return;
+            }
+            subscription = value;
+            value.request(1);
+        }
+
+        @Override
+        public synchronized void onNext(final List<ByteBuffer> buffers) {
+            if (done) {
+                return;
+            }
+            int remaining = MAX_OUTPUT - bytes.size();
+            for (final var buffer : buffers) {
+                if (buffer.remaining() > remaining) {
+                    cancel();
+                    return;
+                }
+                remaining -= buffer.remaining();
+            }
+            for (final var buffer : buffers) {
+                while (buffer.hasRemaining()) {
+                    final var size = Math.min(buffer.remaining(), scratch.length);
+                    buffer.get(scratch, 0, size);
+                    bytes.write(scratch, 0, size);
+                }
+            }
+            subscription.request(1);
+        }
+
+        @Override
+        public synchronized void onError(final Throwable error) {
+            cancel(); // Never retain transport diagnostics or response content in an exception.
+        }
+
+        @Override
+        public synchronized void onComplete() {
+            if (!done) {
+                done = true;
+                body.complete(bytes.toByteArray());
+            }
+        }
+
+        private synchronized void cancel() {
+            if (!done) {
+                done = true;
+                if (subscription != null) {
+                    subscription.cancel();
+                }
+                body.completeExceptionally(new IllegalStateException("Cannot read Kubernetes response"));
+            }
         }
     }
 

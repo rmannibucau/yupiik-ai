@@ -156,15 +156,33 @@ public class RunCommand implements Runnable {
                     value = "result-max-bytes",
                     defaultValue = "1000000",
                     documentation = "Maximum result artifact size in bytes (positive).")
-            int resultMaxBytes) {}
+            int resultMaxBytes,
+
+            @Property(
+                    value = "result-correction-prompt",
+                    defaultValue = "\"Completion artifact validation failed: {{{validationError}}}.\\n"
+                            + "Write or correct the JSON object at {{{file}}} (maximum {{maxBytes}} bytes).\\n"
+                            + "Required nonblank string fields (each group requires one alternative): {{{requiredFields}}}.\\n"
+                            + "Repair only this artifact from the existing task context and actual evidence; do not fabricate results. "
+                            + "Do not repeat implementation, tests, commits, pushes, or publication. "
+                            + "This is the only correction attempt. A chat answer does not replace the artifact.\"",
+                    documentation =
+                            "Fusion Handlebars template for the single result artifact correction attempt. "
+                                    + "Variables: validationError (diagnostic), file (absolute artifact path), maxBytes (size limit), "
+                                    + "requiredFields (formatted list of required field alternatives). No environment or other helpers are available.")
+            String resultCorrectionPrompt) {}
 
     @Override
     public void run() {
-        final var resultContract = conf.resultFile() == null
-                        || conf.resultFile().isBlank()
-                ? null
-                : new RunResultContract(
-                        jsonMapper, Paths.get(conf.resultFile()), conf.resultRequiredFields(), conf.resultMaxBytes());
+        final var resultContract =
+                conf.resultFile() == null || conf.resultFile().isBlank()
+                        ? null
+                        : new RunResultContract(
+                                jsonMapper,
+                                Paths.get(conf.resultFile()),
+                                conf.resultRequiredFields(),
+                                conf.resultMaxBytes(),
+                                conf.resultCorrectionPrompt());
         mcpManager.start();
         final var sessionId =
                 conf.session() == null || conf.session().isBlank() ? sessionStore.create() : conf.session();

@@ -67,4 +67,53 @@ public record WorkerOptions(
                 defaultValue = "false",
                 documentation =
                         "Stage a bounded, integrity-checked private source snapshot for strict reviews using host authentication. Requires repository contents read permission; no credentials enter the snapshot.")
-        boolean privateSource) {}
+        boolean privateSource,
+
+        @Property(documentation = "Source preparation for strict solves; export remains the default.")
+        Source source) {
+    public enum SourceMode {
+        export,
+        git,
+        broker
+    }
+
+    public record Source(
+            @Property(
+                    defaultValue = "io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode.export",
+                    documentation =
+                            "Source mode: export (default), agent-managed git, or credential-free worker broker. Broker requires agentCommenting=false.")
+            SourceMode mode,
+
+            @Property(
+                    defaultValue = "\"\"",
+                    documentation =
+                            "Optional dedicated read-only source PAT environment variable; empty uses anonymous Git access.")
+            String tokenEnv,
+
+            @Property(defaultValue = "1000", documentation = "Maximum Git fetch depth, from 1 to 100000.")
+            int maxDepth,
+
+            @Property(defaultValue = "536870912L", documentation = "Maximum Git source bytes, from 1 MiB to 16 GiB.")
+            long maxBytes,
+
+            @Property(defaultValue = "120", documentation = "Git command timeout in seconds, from 1 to 3600.")
+            int commandTimeoutSeconds) {
+        public Source {
+            if (mode == null || tokenEnv == null) {
+                throw new IllegalArgumentException("Source mode and token environment must be configured");
+            }
+            if (mode != SourceMode.git && !tokenEnv.isEmpty()) {
+                throw new IllegalArgumentException("Source token environment requires git mode");
+            }
+            if (maxDepth < 1 || maxDepth > 100000) {
+                throw new IllegalArgumentException("Source maximum depth must be between 1 and 100000");
+            }
+            if (maxBytes < 1024L * 1024 || maxBytes > 16L * 1024 * 1024 * 1024) {
+                throw new IllegalArgumentException("Source maximum bytes must be between 1 MiB and 16 GiB");
+            }
+            if (commandTimeoutSeconds < 1 || commandTimeoutSeconds > 3600) {
+                throw new IllegalArgumentException("Source command timeout must be between 1 and 3600 seconds");
+            }
+        }
+    }
+}

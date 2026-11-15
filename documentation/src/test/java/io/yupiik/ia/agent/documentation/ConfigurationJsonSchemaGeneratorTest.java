@@ -43,7 +43,12 @@ class ConfigurationJsonSchemaGeneratorTest {
                                 "partialOutput", "copy.json",
                                 "excludedRoots",
                                         "io.yupiik.ia.agent.github.configuration.GithubBotConfiguration,"
-                                                + "io.yupiik.ia.agent.github.configuration.ExecutorConfiguration"))
+                                                + "io.yupiik.ia.agent.github.configuration.ExecutorConfiguration,"
+                                                + "io.yupiik.ia.agent.github.configuration.AgentContextConfiguration,"
+                                                + "io.yupiik.ia.agent.github.configuration.ContextConfiguration,"
+                                                + "io.yupiik.ia.agent.github.configuration.FixConfiguration,"
+                                                + "io.yupiik.ia.agent.github.configuration.PromptConfiguration,"
+                                                + "io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration"))
                 .run();
         try (final var container = ConfiguringContainer.of()
                         .register(new FusionModule() {
@@ -63,7 +68,13 @@ class ConfigurationJsonSchemaGeneratorTest {
             final var schema = mapper.instance().fromString(Map.class, Files.readString(temp.resolve("schema.json")));
             final var defs = map(schema.get("$defs"));
             assertFalse(map(schema.get("properties")).containsKey("github"));
+            assertFalse(map(schema.get("properties")).containsKey("githubContext"));
             assertFalse(defs.keySet().stream().anyMatch(key -> key.toString().contains("GithubBot")));
+            assertFalse(defs.keySet().stream()
+                    .anyMatch(key -> key.toString().contains("AgentContextConfiguration")
+                            || key.toString().contains("FixConfiguration")
+                            || key.toString().contains("github.configuration.PromptConfiguration")
+                            || key.toString().contains("ReviewPresentationConfiguration")));
             final var yca = map(map(map(schema.get("properties")).get("yca")).get("properties"));
             final var provider = resolve(defs, map(yca.get("provider")));
             assertTrue(map(map(provider.get("properties")).get("contextWindow"))

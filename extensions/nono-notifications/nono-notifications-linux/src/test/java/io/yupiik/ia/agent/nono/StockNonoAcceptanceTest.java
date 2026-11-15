@@ -87,7 +87,7 @@ class StockNonoAcceptanceTest {
             while (!Files.exists(ready) && fixture.helper.process.isAlive() && System.nanoTime() < deadline) {
                 Thread.sleep(50);
             }
-            assertTrue(Files.exists(ready), fixture.helper::output);
+            assertTrue(Files.exists(ready), () -> fixture.helper.output());
             final var backend = object(
                     mapper.fromString(Object.class, Files.readString(fixture.privateDir.resolve("backend.json"))));
             final var security = object(backend.get("security"));

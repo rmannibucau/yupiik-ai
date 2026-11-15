@@ -21,6 +21,7 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 @JsonModel
 public enum TaskKind {
     solve,
+    fix,
     review,
     help
 }

@@ -36,6 +36,8 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.store.MutableTask;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
@@ -76,7 +78,10 @@ class GithubAgentLoopTest {
     void trustedAttemptRunsRealWriteToolAndReturnsStructuredReview(final boolean invalidFinding) throws Exception {
         try (final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty())) {
             final var trustedFile = home.resolve("trusted.json");
-            final var preparation = new AttemptPreparation(json);
+            final var preparation = new AttemptPreparation(
+                    json,
+                    new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
+                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
             final var expected = Map.<String, Object>of(
                     "schemaVersion",
                     1,

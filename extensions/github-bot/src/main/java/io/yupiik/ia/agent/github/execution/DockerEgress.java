@@ -22,7 +22,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -54,30 +53,45 @@ public final class DockerEgress {
     }
 
     public void start(final String runtime) {
+        start(runtime, null);
+    }
+
+    /** The caller owns the already-created isolated services network and its recovery. */
+    public void start(final String runtime, final String servicesNetwork) {
         validateRuntime(runtime);
-        final var version =
-                command(false, "version", "--format", "{{.Server.Version}}").trim();
-        final int dot = version.indexOf('.');
-        if (dot < 1
-                || dot > 3
-                || !version.substring(0, dot).chars().allMatch(Character::isDigit)
-                || Integer.parseInt(version.substring(0, dot)) < 28) {
-            throw new IllegalStateException("Enforced egress requires Docker Engine 28 or later");
+        if (servicesNetwork != null && !(runtime + "-services-net").equals(servicesNetwork)) {
+            throw new IllegalArgumentException("Expected the owned isolated services network");
         }
-        // Docker 28+: isolated mode removes the host bridge address, unlike --internal alone.
-        command(
-                false,
-                "network",
-                "create",
-                "--driver",
-                "bridge",
-                "--internal",
-                "--opt",
-                "com.docker.network.bridge.gateway_mode_ipv4=isolated",
-                "--opt",
-                "com.docker.network.bridge.gateway_mode_ipv6=isolated",
-                internal(runtime));
-        command(false, "network", "create", "--driver", "bridge", external(runtime));
+        if (servicesNetwork == null) {
+            final var version =
+                    command(false, "version", "--format", "{{.Server.Version}}").trim();
+            final int dot = version.indexOf('.');
+            if (dot < 1
+                    || dot > 3
+                    || !version.substring(0, dot).chars().allMatch(Character::isDigit)
+                    || Integer.parseInt(version.substring(0, dot)) < 28) {
+                throw new IllegalStateException("Enforced egress requires Docker Engine 28 or later");
+            }
+            // Docker 28+: isolated mode removes the host bridge address, unlike --internal alone.
+            command(
+                    false,
+                    "network",
+                    "create",
+                    "--driver",
+                    "bridge",
+                    "--internal",
+                    "--opt",
+                    "com.docker.network.bridge.gateway_mode_ipv4=isolated",
+                    "--opt",
+                    "com.docker.network.bridge.gateway_mode_ipv6=isolated",
+                    internal(runtime));
+        }
+        final var externalArgs = new ArrayList<>(List.of("network", "create", "--driver", "bridge"));
+        if (servicesNetwork != null) {
+            externalArgs.addAll(ownership(runtime));
+        }
+        externalArgs.add(external(runtime));
+        command(false, externalArgs.toArray(String[]::new));
         final var create = new ArrayList<>(List.of(
                 "create",
                 "--name",
@@ -95,29 +109,54 @@ public final class DockerEgress {
                 "--sysctl",
                 "net.ipv4.ip_forward=0",
                 "--sysctl",
-                "net.ipv6.conf.all.forwarding=0",
-                "--health-cmd",
-                "java -cp /opt/egress/bot.jar io.yupiik.ia.agent.github.execution.EgressGateway --check",
-                "--health-interval=1s",
-                "--health-timeout=3s",
-                "--health-retries=10",
-                configuration.image()));
+                "net.ipv6.conf.all.forwarding=0"));
+        if (servicesNetwork != null) {
+            create.addAll(ownership(runtime));
+            create.addAll(List.of(
+                    "--entrypoint",
+                    "java",
+                    configuration.image(),
+                    "-Xmx128m",
+                    "-cp",
+                    "@/app/jib-classpath-file",
+                    "io.yupiik.ia.agent.github.execution.EgressGateway"));
+        } else {
+            create.add(configuration.image());
+        }
         create.addAll(List.of("--lifetime-seconds", Long.toString(lifetime.toSeconds() + 120)));
         create.addAll(configuration.allowedHosts());
         command(false, create.toArray(String[]::new));
-        command(false, "network", "connect", "--alias", "egress", internal(runtime), gateway(runtime));
+        command(
+                false,
+                "network",
+                "connect",
+                "--alias",
+                "egress",
+                servicesNetwork == null ? internal(runtime) : servicesNetwork,
+                gateway(runtime));
         command(false, "start", gateway(runtime));
-        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        // Readiness must not outlive a shorter configured executor timeout.
+        final long deadline = System.nanoTime()
+                + (lifetime.compareTo(Duration.ofSeconds(30)) < 0 ? lifetime : Duration.ofSeconds(30)).toNanos();
         while (System.nanoTime() < deadline) {
-            final var health = command(false, "inspect", "--format", "{{.State.Health.Status}}", gateway(runtime));
-            if (health.trim().equals("healthy")) {
+            final var health = invoke(
+                    Duration.ofNanos(Math.max(1, Math.min(TimeUnit.SECONDS.toNanos(3), deadline - System.nanoTime()))),
+                    "exec",
+                    "--user",
+                    "65532:65532",
+                    gateway(runtime),
+                    "java",
+                    "-Xmx32m",
+                    "-cp",
+                    "@/app/jib-classpath-file",
+                    "io.yupiik.ia.agent.github.execution.EgressGateway",
+                    "--check");
+            if (health.code() == 0 && System.nanoTime() <= deadline) {
                 return;
             }
-            if (health.trim().equals("unhealthy")) {
-                throw new IllegalStateException("Egress gateway unhealthy");
-            }
             try {
-                Thread.sleep(200);
+                TimeUnit.NANOSECONDS.sleep(
+                        Math.max(0, Math.min(TimeUnit.MILLISECONDS.toNanos(200), deadline - System.nanoTime())));
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Egress startup interrupted", e);
@@ -128,11 +167,21 @@ public final class DockerEgress {
 
     public List<String> agentArguments(final String runtime) {
         validateRuntime(runtime);
+        final var args = new ArrayList<>(List.of("--network", internal(runtime), "--dns", configuration.dns()));
+        args.addAll(proxyArguments(""));
+        return List.copyOf(args);
+    }
+
+    /** Proxy environment only: does not attach a second network or override the services DNS sink. */
+    public List<String> proxyArguments(final String servicesServerName) {
+        if (servicesServerName == null || !servicesServerName.matches("[A-Za-z0-9.-]*")) {
+            throw new IllegalArgumentException("Exact services server name required");
+        }
+        final var nonProxyHosts = "localhost|127.*|[::1]|::1|[0:0:0:0:0:0:0:1]|0:0:0:0:0:0:0:1"
+                + (servicesServerName.isEmpty() ? "" : "|" + servicesServerName);
+        final var noProxy = "localhost,127.0.0.1,127.0.0.0/8,::1,[::1]"
+                + (servicesServerName.isEmpty() ? "" : "," + servicesServerName);
         return List.of(
-                "--network",
-                internal(runtime),
-                "--dns",
-                configuration.dns(),
                 "--env",
                 "HTTPS_PROXY=http://egress:8080",
                 "--env",
@@ -146,12 +195,22 @@ public final class DockerEgress {
                 "--env",
                 "all_proxy=",
                 "--env",
-                "NO_PROXY=",
+                "NO_PROXY=" + noProxy,
                 "--env",
-                "no_proxy=",
+                "no_proxy=" + noProxy,
                 "--env",
                 "JAVA_TOOL_OPTIONS=-Dhttps.proxyHost=egress -Dhttps.proxyPort=8080"
-                        + " -Dhttp.proxyHost=egress -Dhttp.proxyPort=8080 -Dhttp.nonProxyHosts=");
+                        + " -Dhttp.proxyHost=egress -Dhttp.proxyPort=8080 -Dhttp.nonProxyHosts=" + nonProxyHosts);
+    }
+
+    private static List<String> ownership(final String runtime) {
+        return List.of(
+                "--label",
+                "app=io.yupiik.yca.github-bot",
+                "--label",
+                "io.yupiik.yca.github-bot.runtime=" + runtime,
+                "--label",
+                "io.yupiik.yca.github-bot.component=dependency-egress");
     }
 
     /** Called only after the agent is stopped. Missing resources are accepted; daemon errors are not. */
@@ -186,17 +245,28 @@ public final class DockerEgress {
     }
 
     private String command(final boolean missingAllowed, final String... arguments) {
+        final var result = invoke(Duration.ofSeconds(10), arguments);
+        final var text = result.output();
+        if (result.code() != 0
+                && !(missingAllowed
+                        && (text.contains("No such container")
+                                || text.contains("No such network")
+                                || text.contains("network ") && text.contains(" not found")))) {
+            throw new IllegalStateException("Docker egress control failed: " + arguments[0]);
+        }
+        return text;
+    }
+
+    private Result invoke(final Duration budget, final String... arguments) {
         final var args = new ArrayList<String>();
         args.add(executable);
         args.addAll(List.of(arguments));
         Process process = null;
         final var output = new ByteArrayOutputStream();
         try {
-            final var builder = new ProcessBuilder(args).redirectErrorStream(true);
-            builder.environment()
-                    .keySet()
-                    .removeIf(key -> !Set.of("PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT", "XDG_RUNTIME_DIR")
-                            .contains(key));
+            final var builder =
+                    DockerControlEnvironment.sanitize(new ProcessBuilder(args)).redirectErrorStream(true);
+            final long deadline = System.nanoTime() + budget.toNanos();
             process = builder.start();
             final var running = process;
             final var reader = Thread.ofVirtual().start(() -> {
@@ -212,22 +282,15 @@ public final class DockerEgress {
                     // Process close on timeout.
                 }
             });
-            if (!process.waitFor(10, TimeUnit.SECONDS)) {
-                throw new IllegalStateException("Docker egress control timeout");
+            if (!process.waitFor(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)) {
+                return new Result(-1, "");
             }
-            reader.join(1_000);
+            reader.join(
+                    Duration.ofNanos(Math.max(1, Math.min(TimeUnit.SECONDS.toNanos(1), deadline - System.nanoTime()))));
             if (reader.isAlive()) {
-                throw new IllegalStateException("Docker egress control output timeout");
+                return new Result(-1, "");
             }
-            final var text = output.toString(StandardCharsets.UTF_8);
-            if (process.exitValue() != 0
-                    && !(missingAllowed
-                            && (text.contains("No such container")
-                                    || text.contains("No such network")
-                                    || text.contains("network ") && text.contains(" not found")))) {
-                throw new IllegalStateException("Docker egress control failed: " + arguments[0]);
-            }
-            return text;
+            return new Result(process.exitValue(), output.toString(StandardCharsets.UTF_8));
         } catch (final IOException e) {
             throw new IllegalStateException("Docker egress control failed", e);
         } catch (final InterruptedException e) {
@@ -264,4 +327,6 @@ public final class DockerEgress {
     private static String external(final String runtime) {
         return runtime + "-external";
     }
+
+    private record Result(int code, String output) {}
 }

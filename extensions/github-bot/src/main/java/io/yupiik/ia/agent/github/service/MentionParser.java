@@ -24,7 +24,7 @@ public final class MentionParser {
     private static final Pattern MENTION =
             Pattern.compile("(?i)(?<![\\w@/])@([a-z0-9-]+(?:\\[bot\\])?)(?![\\w-]|\\[bot\\])");
     private static final Pattern COMMAND =
-            Pattern.compile("^[ \\t]+(solve|review|help)(?=$|\\s)", Pattern.CASE_INSENSITIVE);
+            Pattern.compile("^[ \\t]+(solve|review|help|fix)(?=$|\\s)", Pattern.CASE_INSENSITIVE);
     private static final Pattern LINES = Pattern.compile("\\R");
 
     private MentionParser() {}

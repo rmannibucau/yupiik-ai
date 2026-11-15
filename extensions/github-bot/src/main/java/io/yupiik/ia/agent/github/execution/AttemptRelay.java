@@ -26,7 +26,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.regex.Pattern;
 
 /** Owns a per-attempt relay; only the ephemeral access token is written to agent configuration. */
@@ -51,11 +50,9 @@ public final class AttemptRelay implements AutoCloseable {
         if (!NUMERIC_ADDRESS.matcher(bind).matches()) {
             throw new IllegalArgumentException("Relay bind must be a numeric private address");
         }
-        final var root = Map.<String, Object>of(
-                "yca",
-                json.fromString(AgentConfigurationDocument.class, Files.readString(configuration))
-                        .configuration());
-        final var yca = new LinkedHashMap<>(TaskStore.map(root.get("yca")));
+        final var document = json.fromString(AgentConfigurationDocument.class, Files.readString(configuration));
+        final var yca = document.configuration();
+        yca.remove("run");
         final var provider = new LinkedHashMap<>(TaskStore.map(yca.get("provider")));
         if (!(provider.get("apiKey") instanceof String secret)
                 || secret.isBlank()
@@ -90,7 +87,8 @@ public final class AttemptRelay implements AutoCloseable {
             yca.put("provider", safe);
             // Alternate model definitions can contain direct credentials. Relay mode permits one provider only.
             yca.remove("model");
-            Files.writeString(configuration, json.toString(new AgentConfigurationDocument(yca, Map.of())));
+            Files.writeString(
+                    configuration, json.toString(new AgentConfigurationDocument(yca, document.completionSettings())));
             this.relay = started;
         } catch (final IOException | RuntimeException e) {
             started.close();

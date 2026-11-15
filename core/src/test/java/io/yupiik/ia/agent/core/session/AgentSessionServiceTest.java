@@ -28,7 +28,11 @@ import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.CommandOptionsConfiguration;
+import io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration;
+import io.yupiik.ia.agent.core.configuration.CommandStartMatcherConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextManager;
@@ -188,10 +192,8 @@ class AgentSessionServiceTest {
         permissions.setMode(AgentMode.BUILD);
         permissions.grantSession("bash", Map.of("command", "mvn install"));
         assertEquals(1, permissions.sessionGrants().size());
-        permissions.addDynamicRule(new io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration(
-                new io.yupiik.ia.agent.core.configuration.CommandStartMatcherConfiguration(
-                        new io.yupiik.ia.agent.core.configuration.CommandOptionsConfiguration(List.of("mvn")),
-                        List.of()),
+        permissions.addDynamicRule(new CommandPermissionConfiguration(
+                new CommandStartMatcherConfiguration(new CommandOptionsConfiguration(List.of("mvn")), List.of()),
                 PermissionMode.YOLO,
                 null));
         assertEquals(1, permissions.dynamicRules().size());
@@ -483,7 +485,7 @@ class AgentSessionServiceTest {
         Files.writeString(storageHome.resolve("memory").resolve("MEMORY.md"), "global notes");
         Files.writeString(projectRoot.resolve(".yca").resolve("memory").resolve("MEMORY.md"), "project notes");
 
-        final var config = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
+        final var config = TestConfigs.codingAgent(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", projectRoot.toString()));
         final var memoryStore = new MemoryStore(config);
@@ -757,7 +759,7 @@ class AgentSessionServiceTest {
         if (mode != null) {
             map.put("yca.mode", mode.name().toLowerCase(Locale.ROOT));
         }
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(map);
+        return TestConfigs.codingAgent(map);
     }
 
     private static CodingAgentConfiguration agentsConfig(final String... names) {
@@ -767,7 +769,7 @@ class AgentSessionServiceTest {
             map.put("yca.agents." + i + ".name", names[i]);
             map.put("yca.agents." + i + ".prompt", "<prompt>");
         }
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(map);
+        return TestConfigs.codingAgent(map);
     }
 
     private static AgentProvider agentProvider(final String... names) {

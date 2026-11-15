@@ -60,16 +60,43 @@ class NonoExecutionBackendTest {
                             attempt,
                             "yca-task",
                             "Review /attempt/output/result.json; $(never)",
-                            Map.of("GH_TOKEN", "agent-secret")));
+                            Map.of(
+                                    "GH_TOKEN", "agent-secret",
+                                    "GITHUB_BOT_FORK_TOKEN", "fork-secret",
+                                    "GITHUB_SOURCE_TOKEN", "source-secret",
+                                    "YCA_CONTEXT_TOKEN", "context-secret",
+                                    "YCA_CONTEXT_GIT_TOKEN", "context-git-secret")));
             final var args = Files.readAllLines(Path.of(executable + ".args"));
             assertEquals("run", args.getFirst());
             assertTrue(args.contains("--profile"));
             assertTrue(args.contains("--no-audit"));
             assertFalse(args.contains("--allow-cwd"));
             assertTrue(args.contains("Review " + attempt + "/output/result.json; $(never)"));
-            assertFalse(args.toString().contains("agent-secret"));
             final var state = home.resolve("state/yca-task");
             final var profile = map(json.fromString(Object.class, Files.readString(state.resolve("profile.json"))));
+            final var environment = map(profile.get("environment"));
+            assertTrue(((List<?>) environment.get("allow_vars"))
+                    .containsAll(List.of(
+                            "GH_TOKEN",
+                            "GITHUB_BOT_FORK_TOKEN",
+                            "GITHUB_SOURCE_TOKEN",
+                            "YCA_CONTEXT_TOKEN",
+                            "YCA_CONTEXT_GIT_TOKEN")));
+            final var inherited = Files.readAllLines(Path.of(executable + ".env"));
+            assertTrue(inherited.containsAll(List.of(
+                    "GH_TOKEN=agent-secret",
+                    "GITHUB_BOT_FORK_TOKEN=fork-secret",
+                    "GITHUB_SOURCE_TOKEN=source-secret",
+                    "YCA_CONTEXT_TOKEN=context-secret",
+                    "YCA_CONTEXT_GIT_TOKEN=context-git-secret")));
+            for (final var secret :
+                    List.of("agent-secret", "fork-secret", "source-secret", "context-secret", "context-git-secret")) {
+                assertFalse(args.toString().contains(secret));
+                assertFalse(Files.readString(state.resolve("profile.json")).contains(secret));
+                assertFalse(
+                        Files.readString(state.resolve("configuration.json")).contains(secret));
+                assertFalse(Files.readString(attempt.resolve("execution.log")).contains(secret));
+            }
             final var fs = map(profile.get("filesystem"));
             assertTrue(((List<?>) map(profile.get("groups")).get("exclude"))
                     .containsAll(List.of("system_write_linux", "system_read_linux_core", "user_tools")));
@@ -85,10 +112,24 @@ class NonoExecutionBackendTest {
             final var staged = Files.readString(state.resolve("configuration.json"));
             assertTrue(staged.contains(attempt + "/workspace"));
             assertFalse(staged.contains("/attempt/"));
+            assertEquals(
+                    Map.of("result-correction-prompt", "Repair {{{file}}}: {{{validationError}}}"),
+                    map(json.fromString(Object.class, staged)).get("run"));
+            assertFalse(staged.contains("must-not-forward"));
             assertTrue(Files.readString(attempt.resolve("configuration.json")).contains("/attempt/workspace"));
-            for (final var line : Files.readAllLines(Path.of(executable + ".env"))) {
+            for (final var line : inherited) {
                 assertTrue(
-                        List.of("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "PATH", "GH_TOKEN", "PWD")
+                        List.of(
+                                        "HOME",
+                                        "XDG_CONFIG_HOME",
+                                        "XDG_STATE_HOME",
+                                        "PATH",
+                                        "GH_TOKEN",
+                                        "GITHUB_BOT_FORK_TOKEN",
+                                        "GITHUB_SOURCE_TOKEN",
+                                        "YCA_CONTEXT_TOKEN",
+                                        "YCA_CONTEXT_GIT_TOKEN",
+                                        "PWD")
                                 .contains(line.substring(0, line.indexOf('='))),
                         line);
             }
@@ -292,7 +333,11 @@ class NonoExecutionBackendTest {
 
     private Path attempt() throws Exception {
         final var attempt = Files.createDirectory(home.resolve("attempt with spaces"));
-        Files.writeString(attempt.resolve("configuration.json"), "{\"yca\":{\"workingDir\":\"/attempt/workspace\"}}");
+        Files.writeString(
+                attempt.resolve("configuration.json"),
+                "{\"yca\":{\"workingDir\":\"/attempt/workspace\"},\"run\":{"
+                        + "\"result-correction-prompt\":\"Repair {{{file}}}: {{{validationError}}}\","
+                        + "\"prompt\":\"must-not-forward\",\"result-file\":\"/host/forbidden\"}}");
         for (final var name : List.of("storage", "workspace", "output")) {
             Files.createDirectory(attempt.resolve(name));
         }

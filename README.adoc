@@ -16,6 +16,7 @@ https://tamboui.dev[TamboUI], with a multi-LLM and model backend abstraction.
 * Sessions (JSONL) with resume, todos, and global and per-project auto memory
 * Permission modes (`ask`, `auto_edit`, `yolo`) and plan/build access modes
 * Reliability: rate limiting, retries, and concurrency limits per provider
+* GitHub bot target-aware `review`: native code review on PRs, advisory structured assessments on issues and opted-in Discussions, without code changes, closure or answer selection
 
 == Minimal configuration
 
@@ -107,6 +108,13 @@ mvn clean install
 ----
 
 The runnable artifact is the fatjar: `yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar`.
+
+Use `mvn clean install -T1C` to build independent reactor modules concurrently, including all default tests and checks.
+JUnit runs four test classes concurrently per module; methods remain sequential except explicitly isolated concurrent tests such as the broker CPU matrix.
+Tune the per-module worker count separately with `-Dyca.test.parallelism=8` on a machine with spare capacity, or `-Dyca.test.parallelism=1` when diagnosing contention.
+Reactor concurrency and test concurrency multiply, so increasing both can make subprocess-heavy tests slower rather than faster.
+Optional fork JVM flags can be supplied with `-Dyca.test.jvmArgs='-XX:ActiveProcessorCount=4'` without replacing the fixed locale and timezone settings.
+These settings do not exclude tests or change their timeout assertions; native Git/TLS and bounded readiness checks remain part of the default build.
 
 == Contribute
 

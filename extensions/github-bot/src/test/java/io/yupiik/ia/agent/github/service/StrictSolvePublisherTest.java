@@ -288,10 +288,13 @@ class StrictSolvePublisherTest {
                 "C:/x",
                 "a.",
                 "a ",
+                ".github/workflows",
+                ".GITHUB/workflows/ci.yml",
                 ".git~1/x")) {
             invalid.add(List.of(change(path, "", false)));
         }
         invalid.add(List.of(change("a", "not base64", false)));
+        invalid.add(List.of(Map.of("content", "", "delete", false)));
         invalid.add(List.of(change("a", "YQ", false))); // Non-canonical base64.
         invalid.add(List.of(change("a", "YQ==", true)));
         invalid.add(List.of(Map.of("path", "a", "content", "", "delete", "false")));
@@ -315,6 +318,136 @@ class StrictSolvePublisherTest {
             }
             assertTrue(fixture.posts.isEmpty());
             assertTrue(fixture.gets.isEmpty());
+        }
+    }
+
+    @Test
+    void targetedTreesArePinnedCachedAndPreserveExecutableMode() throws Exception {
+        try (final var f = new Fixture()) {
+            final var child = "1".repeat(40);
+            f.directories = Map.of(
+                    TREE,
+                    List.of(
+                            Map.of("path", "src", "mode", "040000", "type", "tree", "sha", child),
+                            Map.of("path", "unrelated", "mode", "040000", "type", "tree", "sha", "2".repeat(40))),
+                    child,
+                    List.of(Map.of("path", "exec", "mode", "100755", "type", "blob", "sha", BLOB)));
+            f.result = result(List.of(change("src/exec", "eA==", false), change("src/new", "eQ==", false)));
+            assertEquals(URL, f.publish());
+            assertEquals(
+                    List.of("/repos/up/repo/git/trees/" + TREE, "/repos/up/repo/git/trees/" + child),
+                    f.gets.stream().filter(p -> p.contains("/git/trees/")).toList());
+            final var entries = (List<?>) f.posts.stream()
+                    .filter(p -> p.containsKey("base_tree"))
+                    .findFirst()
+                    .orElseThrow()
+                    .get("tree");
+            assertEquals("100755", TaskStore.map(entries.get(0)).get("mode"));
+            assertEquals("100644", TaskStore.map(entries.get(1)).get("mode"));
+        }
+    }
+
+    @Test
+    void newPathsCannotTraverseSymlinkOrBlobAncestors() throws Exception {
+        for (final var mode : List.of("120000", "100644")) {
+            try (final var f = new Fixture()) {
+                f.directories = Map.of(TREE, List.of(Map.of("path", "src", "mode", mode, "type", "blob", "sha", BLOB)));
+                f.result = result(List.of(change("src/new", "eA==", false)));
+                assertThrows(IllegalArgumentException.class, f::publish);
+                assertTrue(f.posts.isEmpty());
+                assertEquals(
+                        1,
+                        f.gets.stream().filter(p -> p.contains("/git/trees/")).count());
+            }
+        }
+    }
+
+    @Test
+    void newDirectoryAncestorsAreCreatedWithoutRecursiveTreeQueries() throws Exception {
+        try (final var f = new Fixture()) {
+            f.directories = Map.of(TREE, List.of());
+            f.result = result(List.of(change("new/package/file.java", "eA==", false)));
+            assertEquals(URL, f.publish());
+            assertEquals(
+                    List.of("/repos/up/repo/git/trees/" + TREE),
+                    f.gets.stream().filter(p -> p.contains("/git/trees/")).toList());
+            final var entries = (List<?>) f.posts.stream()
+                    .filter(p -> p.containsKey("base_tree"))
+                    .findFirst()
+                    .orElseThrow()
+                    .get("tree");
+            assertEquals(1, entries.size());
+            assertEquals(
+                    "new/package/file.java", TaskStore.map(entries.getFirst()).get("path"));
+            assertEquals("100644", TaskStore.map(entries.getFirst()).get("mode"));
+        }
+    }
+
+    @Test
+    void missingNestedAncestorsAllowNewFilesWhileExistingSiblingKeepsExecutableMode() throws Exception {
+        try (final var f = new Fixture()) {
+            final var child = "1".repeat(40);
+            f.directories = Map.of(
+                    TREE,
+                    List.of(Map.of("path", "src", "mode", "040000", "type", "tree", "sha", child)),
+                    child,
+                    List.of(Map.of("path", "exec", "mode", "100755", "type", "blob", "sha", BLOB)));
+            f.result = result(List.of(
+                    change("src/new/package/file.java", "eA==", false),
+                    change("src/new/other.java", "eQ==", false),
+                    change("src/exec", "eg==", false)));
+            assertEquals(URL, f.publish());
+            assertEquals(
+                    List.of("/repos/up/repo/git/trees/" + TREE, "/repos/up/repo/git/trees/" + child),
+                    f.gets.stream().filter(p -> p.contains("/git/trees/")).toList());
+            final var entries = (List<?>) f.posts.stream()
+                    .filter(p -> p.containsKey("base_tree"))
+                    .findFirst()
+                    .orElseThrow()
+                    .get("tree");
+            assertEquals(3, entries.size());
+            final var modes = new LinkedHashMap<String, Object>();
+            for (final var entry : entries) {
+                final var fields = TaskStore.map(entry);
+                modes.put((String) fields.get("path"), fields.get("mode"));
+            }
+            assertEquals(
+                    Map.of("src/new/package/file.java", "100644", "src/new/other.java", "100644", "src/exec", "100755"),
+                    modes);
+        }
+    }
+
+    @Test
+    void directoryBudgetFailsBeforeAnyMutationAndNeverUsesRecursiveFallback() throws Exception {
+        try (final var f = new Fixture()) {
+            final var directories = new LinkedHashMap<String, List<Map<String, Object>>>();
+            final var root = new ArrayList<Map<String, Object>>();
+            final var changes = new ArrayList<Map<String, Object>>();
+            for (int i = 0; i < 100; i++) {
+                final var oid = String.format("%040x", i + 1);
+                root.add(Map.of("path", "d" + i, "mode", "040000", "type", "tree", "sha", oid));
+                directories.put(oid, List.of());
+                changes.add(change("d" + i + "/new", "", false));
+            }
+            directories.put(TREE, root);
+            f.directories = directories;
+            f.result = result(changes);
+            assertThrows(IllegalArgumentException.class, f::publish);
+            assertTrue(f.posts.isEmpty());
+            assertEquals(
+                    100, f.gets.stream().filter(p -> p.contains("/git/trees/")).count());
+            assertTrue(f.gets.stream().noneMatch(p -> p.contains("recursive")));
+        }
+    }
+
+    @Test
+    void malformedOrPartialPinnedDirectoriesNeverAuthorizeWrites() throws Exception {
+        for (final var malformed : List.of("sha", "truncated", "missing", "duplicate", "path", "oid", "mode", "type")) {
+            try (final var f = new Fixture()) {
+                f.malformedTree = malformed;
+                assertThrows(RuntimeException.class, f::publish, malformed);
+                assertTrue(f.posts.isEmpty(), malformed);
+            }
         }
     }
 
@@ -360,6 +493,8 @@ class StrictSolvePublisherTest {
         private volatile boolean wrongFork;
         private volatile boolean truncated;
         private volatile String baseMode = "100755";
+        private Map<String, List<Map<String, Object>>> directories;
+        private String malformedTree;
 
         private Fixture() throws IOException {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -418,13 +553,29 @@ class StrictSolvePublisherTest {
                     } else if (path.contains("/git/commits/")) {
                         response = Map.of("sha", BASE, "tree", Map.of("sha", TREE));
                     } else if (path.contains("/git/trees/")) {
-                        response = Map.of(
+                        final var oid = path.substring(path.lastIndexOf('/') + 1);
+                        final var entry = Map.<String, Object>of(
+                                "path",
+                                "path".equals(malformedTree) ? "a/b" : "run.sh",
+                                "mode",
+                                "mode".equals(malformedTree) ? "0100644" : baseMode,
+                                "type",
+                                "type".equals(malformedTree) ? "tree" : "blob",
                                 "sha",
-                                TREE,
-                                "truncated",
-                                truncated,
-                                "tree",
-                                List.of(Map.of("path", "run.sh", "mode", baseMode, "type", "blob", "sha", BLOB)));
+                                "oid".equals(malformedTree) ? "bad" : BLOB);
+                        final var treeResponse = new LinkedHashMap<String, Object>();
+                        treeResponse.put("sha", "sha".equals(malformedTree) ? BLOB : oid);
+                        treeResponse.put("truncated", truncated || "truncated".equals(malformedTree));
+                        if (!"missing".equals(malformedTree)) {
+                            treeResponse.put(
+                                    "tree",
+                                    directories != null
+                                            ? directories.get(oid)
+                                            : "duplicate".equals(malformedTree)
+                                                    ? List.of(entry, entry)
+                                                    : List.of(entry));
+                        }
+                        response = treeResponse;
                     } else if (path.equals("/repos/up/repo/git/ref/heads/main")) {
                         response = ref("main", stale ? "f".repeat(40) : BASE);
                     } else if (path.contains("/git/ref/heads/github-bot/")) {

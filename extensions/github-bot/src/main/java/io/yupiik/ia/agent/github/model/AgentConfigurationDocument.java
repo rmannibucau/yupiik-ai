@@ -32,4 +32,14 @@ public record AgentConfigurationDocument(
     public Map<String, Object> configuration() {
         return new LinkedHashMap<>(yca == null ? settings == null ? Map.of() : settings : yca);
     }
+
+    /** The only root run setting allowed through the isolated configuration handoff. */
+    public Map<String, Object> completionSettings() {
+        if (settings != null
+                && settings.get("run") instanceof Map<?, ?> run
+                && run.get("result-correction-prompt") instanceof String prompt) {
+            return Map.of("run", Map.of("result-correction-prompt", prompt));
+        }
+        return Map.of();
+    }
 }

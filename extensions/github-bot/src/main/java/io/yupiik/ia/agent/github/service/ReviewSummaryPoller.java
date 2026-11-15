@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.github.service;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.client.ReviewClient;
+import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
 import io.yupiik.ia.agent.github.model.TaskKind;
@@ -35,6 +36,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -68,6 +70,8 @@ public class ReviewSummaryPoller {
     private final Clock clock;
     private final BotAudit audit;
     private final TeamAuthorization authorization;
+    private final FixConfiguration fix;
+    private final FixRequestAuthority fixRequests;
 
     /** A null audit sink preserves polling without audit output. */
     public ReviewSummaryPoller(
@@ -76,7 +80,8 @@ public class ReviewSummaryPoller {
             final GitHubClient github,
             final Clock clock,
             final BotAudit audit,
-            final TeamAuthorization authorization) {
+            final TeamAuthorization authorization,
+            final FixConfiguration fix) {
         this.conf = conf;
         this.store = store;
         // Fusion creates the lazy subclass with null constructor arguments, before injecting the real instance.
@@ -84,6 +89,8 @@ public class ReviewSummaryPoller {
         this.clock = clock;
         this.audit = audit;
         this.authorization = authorization;
+        this.fix = fix;
+        this.fixRequests = new FixRequestAuthority(github, fix);
     }
 
     public int poll(final List<String> repositories, final PollOptions options) {
@@ -212,6 +219,9 @@ public class ReviewSummaryPoller {
                 if (parsed.isEmpty()) {
                     continue;
                 }
+                if ("fix".equals(parsed.orElseThrow().kind()) && !fix.enabled()) {
+                    continue;
+                }
                 if (!"User".equals(user.type()) || conf.login().equalsIgnoreCase(user.login())) {
                     auditDenied(repo, number, user);
                     continue;
@@ -237,6 +247,10 @@ public class ReviewSummaryPoller {
                 task.actorId(user.id());
                 task.batchId(batch);
                 task.createdAt(clock.instant().toString());
+                task.sourceType("review_summary");
+                if (task.kind() == TaskKind.fix) {
+                    task.recovery(Map.of("fixTarget", fixRequests.pinRequest(task.document())));
+                }
                 final var taskId = store.transaction(state -> {
                     if (state.receipts().containsKey(receipt)) {
                         return null;

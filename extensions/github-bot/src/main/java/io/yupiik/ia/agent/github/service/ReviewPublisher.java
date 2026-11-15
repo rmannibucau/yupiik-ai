@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.github.service;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
+import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration;
 import io.yupiik.ia.agent.github.model.AgentResult;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.store.TaskStore;
@@ -36,12 +37,24 @@ public class ReviewPublisher {
     private final GitHubClient github;
     private final TaskStore store;
     private final GithubBotConfiguration configuration;
+    private final ReviewRenderer renderer;
+    /** Fusion lazy proxy constructor; the contextual instance owns the compiled presentation templates. */
+    protected ReviewPublisher() {
+        github = null;
+        store = null;
+        configuration = null;
+        renderer = null;
+    }
 
     public ReviewPublisher(
-            final GitHubClient github, final TaskStore store, final GithubBotConfiguration configuration) {
+            final GitHubClient github,
+            final TaskStore store,
+            final GithubBotConfiguration configuration,
+            final ReviewPresentationConfiguration presentation) {
         this.github = github;
         this.store = store;
         this.configuration = configuration;
+        this.renderer = new ReviewRenderer(presentation);
     }
 
     public String publish(final TaskDocument taskDocument, final AgentResult agentResult) {
@@ -117,11 +130,17 @@ public class ReviewPublisher {
                 throw new IllegalArgumentException("Invalid inline finding location or body; nothing published");
             }
             // Inline findings are independently polled, so they need the same loop-prevention marker.
-            comments.add(new GitHubClient.ReviewFinding(path, side, line.intValue(), marker + "\n" + body));
+            final var rendered = renderer.renderFinding(finding, comments.size() + 1);
+            if (rendered.length() > 10000) {
+                throw new IllegalArgumentException("Inline finding presentation too large; nothing published");
+            }
+            comments.add(new GitHubClient.ReviewFinding(path, side, line.intValue(), marker + "\n" + rendered));
         }
-        final var body = review.body() != null
-                ? review.body()
-                : agentResult.summary() != null ? agentResult.summary() : "Review completed.";
+        final var summary = review.body() != null ? review.body() : agentResult.summary();
+        if (summary != null && summary.length() > 30000) {
+            throw new IllegalArgumentException("Review summary too large");
+        }
+        final var body = renderer.render(agentResult, true);
         if (body.length() > 30000) {
             throw new IllegalArgumentException("Review summary too large");
         }

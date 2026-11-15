@@ -20,6 +20,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.model.TaskKind;
@@ -96,8 +97,12 @@ public class GithubPrivateContext {
         return export(attempt, repo, number, head);
     }
 
-    /** Pins the upstream default branch before exposing a credential-free solve attempt. */
-    public SolveContext stageSolve(final TaskDocument task, final Path attempt) throws IOException {
+    /** Git mode pins metadata only; source materialization is deferred to the isolated agent. */
+    public SolveContext stageSolve(final TaskDocument task, final Path attempt, final SourceMode mode)
+            throws IOException {
+        if (mode == null) {
+            throw new IllegalArgumentException("Expected an explicit solve source mode");
+        }
         final var repo = task.repository();
         if (!(task.kind() == TaskKind.solve)
                 || task.repository() == null
@@ -128,7 +133,12 @@ public class GithubPrivateContext {
         final var destination = attempt.resolve("workspace/github-solve.json");
         checkWorkspace(destination.toAbsolutePath().normalize().getParent());
         vacant(destination);
-        export(attempt, repo, number, head);
+        if (mode == SourceMode.export) {
+            export(attempt, repo, number, head);
+        } else {
+            vacant(attempt.resolve("workspace/repository"));
+            vacant(attempt.resolve("workspace/github-source.json"));
+        }
         try {
             Files.writeString(
                     destination, json.toString(result), StandardOpenOption.CREATE_NEW, LinkOption.NOFOLLOW_LINKS);
@@ -138,6 +148,39 @@ public class GithubPrivateContext {
             Files.deleteIfExists(attempt.resolve("workspace/github-source.json"));
             throw failure;
         }
+        return result;
+    }
+
+    /** Existing-PR fixes use independently host-pinned head authority, never an agent-selected repository. */
+    public SolveContext stageFix(
+            final TaskDocument task,
+            final Path attempt,
+            final String repository,
+            final String headSha,
+            final String branch,
+            final SourceMode mode)
+            throws IOException {
+        if (task.kind() != TaskKind.fix
+                || mode == null
+                || mode == SourceMode.git
+                || repository == null
+                || !REPOSITORY.matcher(repository).matches()
+                || branch == null
+                || branch.isBlank()
+                || branch.length() > 255
+                || branch.codePoints().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException("Expected a host-pinned strict fix using export or broker source");
+        }
+        final var head = sha(headSha);
+        final var number = integer(task.number());
+        final var result = new SolveContext(repository, number, branch, head);
+        final var destination = attempt.resolve("workspace/github-solve.json");
+        checkWorkspace(destination.toAbsolutePath().normalize().getParent());
+        vacant(destination);
+        if (mode == SourceMode.export) {
+            export(attempt, repository, number, head);
+        }
+        Files.writeString(destination, json.toString(result), StandardOpenOption.CREATE_NEW, LinkOption.NOFOLLOW_LINKS);
         return result;
     }
 

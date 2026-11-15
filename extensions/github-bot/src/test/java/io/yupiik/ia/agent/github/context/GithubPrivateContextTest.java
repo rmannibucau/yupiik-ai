@@ -20,6 +20,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
@@ -66,14 +69,22 @@ class GithubPrivateContextTest {
     @Test
     void promptDescribesCredentialFreeExportAndHostOwnedSolve() {
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
-            final var prompt = new AttemptPreparation(json).prompt(TaskFixtures.task(TASK), "example-fork", false);
+            final var prompt = new AttemptPreparation(
+                            json,
+                            new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
+                            new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                    .prompt(TaskFixtures.task(TASK), "example-fork", false);
             assertTrue(prompt.contains("github-source.json"));
             assertTrue(prompt.contains("not a Git clone"));
             assertTrue(prompt.contains("Never configure git credentials"));
             assertFalse(prompt.contains("gh auth setup-git"));
             final var task = new LinkedHashMap<>(TASK);
             task.put("kind", "solve");
-            final var solve = new AttemptPreparation(json).prompt(TaskFixtures.task(task), "example-fork", false);
+            final var solve = new AttemptPreparation(
+                            json,
+                            new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
+                            new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                    .prompt(TaskFixtures.task(task), "example-fork", false);
             assertTrue(solve.contains("The host alone creates Git objects"));
             assertTrue(solve.contains("github-solve.json"));
         }
@@ -94,7 +105,7 @@ class GithubPrivateContextTest {
             Files.createDirectories(attempt.resolve("workspace"));
             final var task = new LinkedHashMap<>(TASK);
             task.put("kind", "solve");
-            final var context = stub.source.stageSolve(TaskFixtures.task(task), attempt);
+            final var context = stub.source.stageSolve(TaskFixtures.task(task), attempt, SourceMode.export);
             assertEquals(HEAD, context.baseSha());
             assertEquals("main", context.baseBranch());
             assertTrue(Files.exists(attempt.resolve("workspace/github-solve.json")));
@@ -103,8 +114,43 @@ class GithubPrivateContextTest {
             final var other = temporary.resolve("changed");
             Files.createDirectories(other.resolve("workspace"));
             task.put("strictSolveBaseSha", "c".repeat(40));
-            assertThrows(IllegalStateException.class, () -> stub.source.stageSolve(TaskFixtures.task(task), other));
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> stub.source.stageSolve(TaskFixtures.task(task), other, SourceMode.export));
             assertFalse(Files.exists(other.resolve("workspace/repository")));
+        }
+    }
+
+    @Test
+    void gitSolvePinsMetadataWithoutFetchingAnyTreeOrBlob() throws Exception {
+        final var requests = new CopyOnWriteArrayList<String>();
+        try (final var stub = new Stub(path -> {
+            requests.add(path);
+            return switch (path) {
+                case "/repos/acme/private" -> "{\"default_branch\":\"main\"}";
+                case "/repos/acme/private/commits/main" -> "{\"sha\":\"" + HEAD + "\"}";
+                default -> throw new AssertionError("Unexpected eager source request: " + path);
+            };
+        })) {
+            final var attempt = temporary.resolve("git-solve");
+            Files.createDirectories(attempt.resolve("workspace"));
+            final var task = new LinkedHashMap<>(TASK);
+            task.put("kind", "solve");
+            final var context = stub.source.stageSolve(TaskFixtures.task(task), attempt, SourceMode.git);
+            assertEquals(HEAD, context.baseSha());
+            assertEquals("main", context.baseBranch());
+            assertEquals(List.of("/repos/acme/private", "/repos/acme/private/commits/main"), requests);
+            assertTrue(Files.isRegularFile(attempt.resolve("workspace/github-solve.json")));
+            assertFalse(Files.exists(attempt.resolve("workspace/github-source.json")));
+            assertFalse(Files.exists(attempt.resolve("workspace/repository")));
+
+            final var other = temporary.resolve("git-changed");
+            Files.createDirectories(other.resolve("workspace"));
+            task.put("strictSolveBaseSha", "c".repeat(40));
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> stub.source.stageSolve(TaskFixtures.task(task), other, SourceMode.git));
+            assertFalse(Files.exists(other.resolve("workspace/github-solve.json")));
         }
     }
 

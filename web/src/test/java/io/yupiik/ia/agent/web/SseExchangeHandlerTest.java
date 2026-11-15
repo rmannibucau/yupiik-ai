@@ -39,6 +39,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -124,6 +125,10 @@ class SseExchangeHandlerTest {
     }
 
     private Queue<String> stream(final String url) {
+        return stream(url, _ -> {});
+    }
+
+    private Queue<String> stream(final String url, final Consumer<String> onLine) {
         final var lines = new ConcurrentLinkedQueue<String>();
         // sendAsync gives us a handle we can cancel in stop() to close a still-open SSE connection; a
         // synchronous client.send() would block forever and leave the server's stop(2) grace to time it out.
@@ -138,6 +143,7 @@ class SseExchangeHandlerTest {
                             body.forEach(l -> {
                                 if (!l.isBlank()) {
                                     lines.add(l);
+                                    onLine.accept(l);
                                 }
                             });
                         }
@@ -288,8 +294,13 @@ class SseExchangeHandlerTest {
     void concurrentPushesDoNotDropTheConnection(final JsonMapper mapper) throws Exception {
         final var broker = new SseBroker(mapper);
         final var s = start(broker);
+        final var drained = new CountDownLatch(1);
         // a real SSE connection driven by JreHttpServer's demand-gated subscriber
-        final var tab = stream(url(s, "/api/stream?session=c1"));
+        final var tab = stream(url(s, "/api/stream?session=c1"), line -> {
+            if (line.equals("data: {\"id\":\"concurrent-pushes-drained\"}")) {
+                drained.countDown();
+            }
+        });
         await(() -> firstEvent(tab) != null, 3, TimeUnit.SECONDS);
 
         // hammer the connection with concurrent pushes from several threads, mixing live agent
@@ -325,21 +336,11 @@ class SseExchangeHandlerTest {
         for (final Thread p : pushers) {
             p.join();
         }
-        // wait until the serialized drain has flushed the tail frames (the frame count plateaus) before
-        // closing - a deterministic wait-until-done instead of a fixed sleep, so a fast drain is not charged
-        // a gratuitous 300ms and a slow one still converges before the assertion.
-        final long drainDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-        long previousAgentFrames = -1;
-        while (System.nanoTime() < drainDeadline) {
-            final var current = framesPeek(tab).stream()
-                    .filter(l -> l.startsWith("event: agent"))
-                    .count();
-            if (current == previousAgentFrames) {
-                break; // stable: the drain caught up
-            }
-            previousAgentFrames = current;
-            Thread.sleep(20);
-        }
+        // All pushers have finished enqueueing. The serialized FIFO writer sends this non-agent
+        // marker after their frames, and the reader records each line before releasing the latch.
+        // A temporary plateau in the frame count is not evidence that either drain has finished.
+        broker.pushRpc("c1", Map.of("id", "concurrent-pushes-drained"));
+        assertTrue(drained.await(3, TimeUnit.SECONDS), "connection must deliver the trailing drain marker");
 
         final var agentFrames = framesPeek(tab).stream()
                 .filter(l -> l.startsWith("event: agent"))

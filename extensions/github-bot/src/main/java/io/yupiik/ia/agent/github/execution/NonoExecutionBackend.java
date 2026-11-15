@@ -97,7 +97,13 @@ public final class NonoExecutionBackend {
     public int execute(
             final Path directory, final String runtimeId, final String prompt, final Map<String, String> credentials) {
         validateRuntimeIdentity(runtimeId);
-        if (!Set.of("GH_TOKEN", "GITHUB_BOT_FORK_TOKEN").containsAll(credentials.keySet())) {
+        if (!Set.of(
+                        "GH_TOKEN",
+                        "GITHUB_BOT_FORK_TOKEN",
+                        "GITHUB_SOURCE_TOKEN",
+                        "YCA_CONTEXT_TOKEN",
+                        "YCA_CONTEXT_GIT_TOKEN")
+                .containsAll(credentials.keySet())) {
             throw new IllegalArgumentException("Unsupported executor credential variable");
         }
         final var attempt = checked(directory, true);
@@ -133,14 +139,14 @@ public final class NonoExecutionBackend {
                     StandardOpenOption.WRITE,
                     StandardOpenOption.SYNC);
             final var staged = state.resolve("configuration.json");
+            final var document = json.fromString(AgentConfigurationDocument.class, Files.readString(configuration));
+            final var agentConfiguration = document.configuration();
+            agentConfiguration.remove("run");
             Files.writeString(
                     staged,
                     json.toString(new AgentConfigurationDocument(
-                            TaskStore.map(relocate(
-                                    json.fromString(AgentConfigurationDocument.class, Files.readString(configuration))
-                                            .configuration(),
-                                    attempt)),
-                            Map.of())),
+                            TaskStore.map(relocate(agentConfiguration, attempt)),
+                            TaskStore.map(relocate(document.completionSettings(), attempt)))),
                     StandardOpenOption.CREATE_NEW);
             final var profile = state.resolve("profile.json");
             final var env = Map.of(

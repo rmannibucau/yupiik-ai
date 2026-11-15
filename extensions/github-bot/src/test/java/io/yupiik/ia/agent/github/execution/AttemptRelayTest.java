@@ -72,13 +72,26 @@ class AttemptRelayTest {
                                                     Map.of("other", "secret"),
                                                     "model",
                                                     "test"),
-                                    "model", Map.of("apiKey", "alternate-secret")))));
+                                    "model", Map.of("apiKey", "alternate-secret")),
+                            "run",
+                            Map.of(
+                                    "result-correction-prompt",
+                                    "Repair {{{file}}}: {{{validationError}}}",
+                                    "prompt",
+                                    "must-not-forward",
+                                    "result-file",
+                                    "/host/forbidden"))));
             String endpoint;
             try (final var relay = new AttemptRelay(configuration, json, "127.0.0.1", "http://127.0.0.1")) {
                 final var text = Files.readString(configuration);
                 assertFalse(text.contains("upstream-secret"));
                 assertFalse(text.contains("alternate-secret"));
                 assertFalse(text.contains("headers"));
+                assertFalse(text.contains("must-not-forward"));
+                assertFalse(text.contains("/host/forbidden"));
+                assertEquals(
+                        Map.of("result-correction-prompt", "Repair {{{file}}}: {{{validationError}}}"),
+                        TaskStore.map(json.fromString(Object.class, text)).get("run"));
                 final var yca = TaskStore.map(
                         TaskStore.map(json.fromString(Object.class, text)).get("yca"));
                 final var provider = TaskStore.map(yca.get("provider"));

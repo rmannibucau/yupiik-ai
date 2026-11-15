@@ -21,14 +21,19 @@ import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.PollCommand;
 import io.yupiik.ia.agent.github.command.WorkerCommand;
+import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
+import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.context.GithubContextSnapshot;
 import io.yupiik.ia.agent.github.context.GithubPrivateContext;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
 import io.yupiik.ia.agent.github.service.BotAudit;
 import io.yupiik.ia.agent.github.service.DiscussionPoller;
 import io.yupiik.ia.agent.github.service.DiscussionPublisher;
+import io.yupiik.ia.agent.github.service.FixPublisher;
 import io.yupiik.ia.agent.github.service.ForkProvisioner;
 import io.yupiik.ia.agent.github.service.GithubServices;
 import io.yupiik.ia.agent.github.service.Poller;
@@ -43,11 +48,47 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Map;
+import java.util.Optional;
 
 public final class BotTestConfiguration {
     public static final Clock CLOCK = Clock.fixed(Instant.parse("2026-11-13T12:00:00Z"), ZoneOffset.UTC);
 
     private BotTestConfiguration() {}
+
+    public static Map<String, Object> fixRepository(final String repository, final String nodeId) {
+        return Map.of(
+                "full_name",
+                repository,
+                "node_id",
+                nodeId,
+                "archived",
+                false,
+                "disabled",
+                false,
+                "permissions",
+                Map.of("push", true));
+    }
+
+    public static Map<String, Object> fixPull(final String upstream, final String headSha) {
+        return Map.of(
+                "number",
+                12,
+                "node_id",
+                "PR",
+                "state",
+                "open",
+                "html_url",
+                "https://github.com/" + upstream + "/pull/12",
+                "base",
+                Map.of("repo", fixRepository(upstream, "BASE")),
+                "head",
+                Map.of("repo", fixRepository("human/fork", "HEAD"), "ref", "feature", "sha", headSha));
+    }
+
+    public static Map<String, Object> fixRef(final String headSha) {
+        return Map.of("ref", "refs/heads/feature", "object", Map.of("sha", headSha));
+    }
 
     public static GithubBotConfiguration home(final Path home) {
         return configuration(home.toString(), "bot", "");
@@ -72,7 +113,11 @@ public final class BotTestConfiguration {
 
     public static ReviewPublisher reviewPublisher(
             final GitHubClient github, final TaskStore store, final String login) {
-        return new ReviewPublisher(github, store, configuration("", login, ""));
+        return new ReviewPublisher(
+                github,
+                store,
+                configuration("", login, ""),
+                new ReviewPresentationConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
     }
 
     public static DiscussionPublisher discussionPublisher(
@@ -94,13 +139,22 @@ public final class BotTestConfiguration {
                 execution,
                 audit(conf, json),
                 new TeamAuthorization(github, conf, CLOCK),
-                new AttemptPreparation(json),
+                new AttemptPreparation(
+                        json,
+                        new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
+                        execution),
                 new GithubPrivateContext(github, json),
                 new GithubContextSnapshot(github, json),
                 new ForkProvisioner(github, store),
-                new ReviewPublisher(github, store, conf),
+                new ReviewPublisher(
+                        github,
+                        store,
+                        conf,
+                        new ReviewPresentationConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get()),
                 new StrictSolvePublisher(github, store, json),
                 new DiscussionPublisher(new DiscussionClient(github), store, conf),
+                new ContextConfiguration("127.0.0.1", 0, "", "", "git", "", 256, 1073741824L),
+                new FixPublisher(github, store, json, new FixConfiguration(false, "")),
                 CLOCK);
     }
 
@@ -110,7 +164,14 @@ public final class BotTestConfiguration {
             final GitHubClient github,
             final Clock clock,
             final BotAudit audit) {
-        return new ReviewSummaryPoller(conf, store, github, clock, audit, new TeamAuthorization(github, conf, clock));
+        return new ReviewSummaryPoller(
+                conf,
+                store,
+                github,
+                clock,
+                audit,
+                new TeamAuthorization(github, conf, clock),
+                new FixConfiguration(false, ""));
     }
 
     public static DiscussionPoller discussionPoller(
@@ -144,7 +205,8 @@ public final class BotTestConfiguration {
                 new TeamAuthorization(github, conf, clock),
                 reviewSummaryPoller(conf, store, github, clock, audit),
                 discussionPoller(conf, store, github, clock, audit),
-                new RepositoryDiscovery(conf, github, clock));
+                new RepositoryDiscovery(conf, github, clock),
+                new FixConfiguration(false, ""));
     }
 
     public static PollCommand pollCommand(

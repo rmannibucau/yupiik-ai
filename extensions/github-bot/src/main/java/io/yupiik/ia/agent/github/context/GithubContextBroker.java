@@ -34,11 +34,9 @@ import java.nio.file.Path;
 import java.nio.file.SecureDirectoryStream;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -50,6 +48,8 @@ public final class GithubContextBroker implements AutoCloseable {
     private static final int REQUEST_LIMIT = 4096;
     private static final int RESPONSE_LIMIT = 4 * 1024 * 1024;
     private final GitHubClient github;
+    private final TaskDiscussionContext discussions;
+    private final ContextService service;
     private final JsonMapper json;
     private final String repository;
     private final long number;
@@ -62,7 +62,25 @@ public final class GithubContextBroker implements AutoCloseable {
     public GithubContextBroker(
             final GitHubClient github, final JsonMapper json, final TaskDocument task, final Path attempt)
             throws IOException {
+        this(github, null, json, task, attempt);
+    }
+
+    public GithubContextBroker(
+            final ContextService service, final JsonMapper json, final TaskDocument task, final Path attempt)
+            throws IOException {
+        this(null, Objects.requireNonNull(service), json, task, attempt);
+    }
+
+    private GithubContextBroker(
+            final GitHubClient github,
+            final ContextService service,
+            final JsonMapper json,
+            final TaskDocument task,
+            final Path attempt)
+            throws IOException {
         this.github = github;
+        this.discussions = service == null ? new TaskDiscussionContext(github, task) : null;
+        this.service = service;
         this.json = json;
         final var repo = task.repository();
         if (!(task.kind() == TaskKind.review)
@@ -76,7 +94,7 @@ public final class GithubContextBroker implements AutoCloseable {
         repository = repo;
         number = new BigDecimal(task.number().toString()).longValueExact();
         if (number <= 0) {
-            throw new IllegalArgumentException("Expected a positive PR number");
+            throw new IllegalArgumentException("Expected a positive task number");
         }
         final var workspace = attempt.toAbsolutePath().normalize().resolve("workspace");
         Path current = workspace.getRoot();
@@ -193,67 +211,19 @@ public final class GithubContextBroker implements AutoCloseable {
     }
 
     private Object fetch(final Request request) {
-        if (request == null || request.page() < 1 || request.page() > 10 || request.operation() == null) {
+        if (request == null) {
             throw new IllegalArgumentException("Invalid broker request");
         }
-        final var pull = "/repos/" + repository + "/pulls/" + number;
-        final String endpoint;
-        final String[] fields;
-        switch (request.operation()) {
-            case "pull" -> {
-                if (request.page() != 1) {
-                    throw new IllegalArgumentException("Pull is not paginated");
-                }
-                final var raw = github.get(pull);
-                final var result = select(raw, "title", "body", "state");
-                if (!(raw instanceof Map<?, ?> value)) {
-                    throw new IllegalArgumentException("Expected PR object");
-                }
-                result.put("head", select(value.get("head"), "sha"));
-                result.put("base", select(value.get("base"), "sha"));
-                return result;
-            }
-            case "files" -> {
-                endpoint = pull + "/files";
-                fields = new String[] {"filename", "status", "patch"};
-            }
-            case "reviews" -> {
-                endpoint = pull + "/reviews";
-                fields = new String[] {"body", "state", "commit_id"};
-            }
-            case "reviewComments" -> {
-                endpoint = pull + "/comments";
-                fields = new String[] {"path", "line", "side", "body"};
-            }
-            case "issueComments" -> {
-                endpoint = "/repos/" + repository + "/issues/" + number + "/comments";
-                fields = new String[] {"body"};
-            }
-            default -> throw new IllegalArgumentException("Unknown broker operation");
+        final Object result;
+        if (service == null) {
+            result = discussions.read(request.operation(), request.page(), null);
+        } else {
+            final var response = service.call(Map.of("operation", request.operation(), "page", request.page()));
+            final var body = (Map<?, ?>) response.get("body");
+            result = body.get("data");
         }
-        final var value = github.get(endpoint + "?per_page=100&page=" + request.page());
-        if (!(value instanceof List<?> entries) || entries.size() > 100) {
-            throw new IllegalArgumentException("Expected bounded list");
-        }
-        final var result = new ArrayList<Map<String, Object>>();
-        for (final var entry : entries) {
-            result.add(select(entry, fields));
-        }
-        return result;
-    }
-
-    private static Map<String, Object> select(final Object value, final String... fields) {
-        if (!(value instanceof Map<?, ?> source)) {
-            throw new IllegalArgumentException("Expected object");
-        }
-        final var result = new LinkedHashMap<String, Object>();
-        for (final var field : fields) {
-            final var scalar = source.get(field);
-            if (scalar == null || scalar instanceof String || scalar instanceof Number || scalar instanceof Boolean) {
-                result.put(field, scalar);
-            }
-        }
-        return result;
+        // Preserve the legacy filesystem list shape while both transports share the fixed task reader.
+        return result instanceof Map<?, ?> page && page.containsKey("entries") ? page.get("entries") : result;
     }
 
     private void respond(final Path name, final Response response) {

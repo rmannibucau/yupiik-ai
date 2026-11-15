@@ -22,9 +22,11 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.PollCommand$Options$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
+import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
@@ -630,6 +632,54 @@ class ReviewSummaryPollerTest {
         }
     }
 
+    @Test
+    void nativeReviewFixRequiresExplicitOptIn() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.pulls = List.of(Map.of("number", 12));
+            fixture.reviews.put(12, List.of(changed(1, "body", "@bot fix review findings")));
+            final var conf = fixture.conf(Map.of());
+            assertEquals(0, fixture.poll(conf));
+            assertTrue(fixture.store.transaction(state -> state.list()).isEmpty());
+            final var enabled = new ReviewSummaryPoller(
+                    conf.shared(),
+                    fixture.store,
+                    fixture.github,
+                    fixed(NOW),
+                    null,
+                    new TeamAuthorization(fixture.github, conf.shared(), fixed(NOW)),
+                    new FixConfiguration(true, "human/fork"));
+            fixture.failFixMetadata = true;
+            assertThrows(GitHubClient.HttpException.class, () -> enabled.poll(List.of("owner/repo"), conf.poll()));
+            assertTrue(fixture.store.transaction(state -> state.list()).isEmpty());
+            assertTrue(fixture.store.transaction(state -> state.receipts()).isEmpty());
+            assertFalse(fixture.store
+                    .transaction(state -> state.cursors())
+                    .containsKey("owner/repo/review-summary-graphql/pulls/12/reviews:next"));
+            fixture.failFixMetadata = false;
+            assertEquals(1, enabled.poll(List.of("owner/repo"), conf.poll()));
+            final var task = fixture.store.transaction(state -> state.list().getFirst());
+            assertEquals("review_summary", task.sourceType());
+            assertEquals("42", task.actorId());
+            assertEquals(
+                    "a".repeat(40),
+                    TaskStore.map(task.recovery().get("fixTarget")).get("headSha"));
+            final var pinnedRequests = fixture.requests.stream()
+                    .filter(path -> !path.equals("/graphql"))
+                    .count();
+            assertEquals(
+                    TaskKind.fix,
+                    fixture.store.transaction(state -> state.list().getFirst().kind()));
+            fixture.failFixMetadata = true;
+            assertEquals(0, enabled.poll(List.of("owner/repo"), conf.poll()));
+            assertEquals(
+                    pinnedRequests,
+                    fixture.requests.stream()
+                            .filter(path -> !path.equals("/graphql"))
+                            .count(),
+                    "An existing receipt must not resolve a new head");
+        }
+    }
+
     private static Clock fixed(final Instant instant) {
         return Clock.fixed(instant, ZoneOffset.UTC);
     }
@@ -678,6 +728,7 @@ class ReviewSummaryPollerTest {
         private final Map<Integer, List<Map<String, Object>>> reviews = new LinkedHashMap<>();
         private final AtomicBoolean failReview = new AtomicBoolean();
         private boolean failReviewPage;
+        private boolean failFixMetadata;
         private boolean partialErrors;
         private boolean closeDuringReview;
         private boolean malformedSecondAlias;
@@ -738,7 +789,17 @@ class ReviewSummaryPollerTest {
                 requests.add(exchange.getRequestURI().toString());
                 Object body;
                 int status = 200;
-                if (path.equals("/user/42")) {
+                if (path.equals("/repos/owner/repo/pulls/12")
+                        || path.equals("/repos/owner/repo")
+                        || path.startsWith("/repos/human/fork")) {
+                    status = failFixMetadata ? 403 : 200;
+                    body = switch (path) {
+                        case "/repos/owner/repo/pulls/12" -> BotTestConfiguration.fixPull("owner/repo", "a".repeat(40));
+                        case "/repos/owner/repo" -> BotTestConfiguration.fixRepository("owner/repo", "BASE");
+                        case "/repos/human/fork" -> BotTestConfiguration.fixRepository("human/fork", "HEAD");
+                        default -> BotTestConfiguration.fixRef("a".repeat(40));
+                    };
+                } else if (path.equals("/user/42")) {
                     body = Map.of("id", 42, "login", resolvedLogin);
                 } else if (path.contains("/collaborators/")) {
                     body = Map.of("permission", "write", "user", Map.of("id", 42, "login", resolvedLogin));

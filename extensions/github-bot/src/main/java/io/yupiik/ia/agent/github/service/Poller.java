@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.github.service;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.client.MentionSearchClient;
+import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
 import io.yupiik.ia.agent.github.model.TaskKind;
@@ -69,6 +70,8 @@ public class Poller {
     private final ReviewSummaryPoller reviews;
     private final DiscussionPoller discussions;
     private final RepositoryDiscovery discovery;
+    private final FixConfiguration fix;
+    private final FixRequestAuthority fixRequests;
 
     /** The optional audit sink is shared with the review-summary poller. */
     public Poller(
@@ -80,7 +83,8 @@ public class Poller {
             final TeamAuthorization authorization,
             final ReviewSummaryPoller reviews,
             final DiscussionPoller discussions,
-            final RepositoryDiscovery discovery) {
+            final RepositoryDiscovery discovery,
+            final FixConfiguration fix) {
         this.conf = conf;
         this.store = store;
         this.github = github;
@@ -90,6 +94,8 @@ public class Poller {
         this.reviews = reviews;
         this.discussions = discussions;
         this.discovery = discovery;
+        this.fix = fix;
+        this.fixRequests = new FixRequestAuthority(github, fix);
     }
 
     public int poll(final PollOptions options) {
@@ -352,6 +358,24 @@ public class Poller {
                         throw new IllegalStateException("Unexpected event reference");
                     }
                     final var number = Integer.parseInt(parts[4]);
+                    if ("fix".equals(invocation.kind())
+                            && (!fix.enabled()
+                                    || !parts[3].equals("pull")
+                                    || number <= 0
+                                    || !"https".equalsIgnoreCase(uri.getScheme())
+                                    || !("github.com".equalsIgnoreCase(uri.getHost())
+                                            || (conf.api() != null
+                                                    && URI.create(conf.api())
+                                                            .getHost()
+                                                            .equalsIgnoreCase(uri.getHost())))
+                                    || uri.getUserInfo() != null
+                                    || (uri.getPort() != -1 && uri.getPort() != 443)
+                                    || uri.getQuery() != null
+                                    || !uri.getRawPath().equalsIgnoreCase("/" + repo + "/pull/" + number)
+                                    || (endpoint.equals("issues")
+                                            && !(item.get("pull_request") instanceof Map<?, ?>)))) {
+                        continue;
+                    }
                     final var task = MutableTask.create();
                     task.repository(repo);
                     task.number((long) number);
@@ -362,6 +386,14 @@ public class Poller {
                     task.batchId(batch);
                     task.createdAt(clock.instant().toString());
                     final var receipt = key + ":" + item.get("id");
+                    if (task.kind() == TaskKind.fix) {
+                        if (store.transaction(state -> state.receipts().containsKey(receipt))) {
+                            continue;
+                        }
+                        final var recovery = new LinkedHashMap<String, Object>();
+                        recovery.put("fixTarget", fixRequests.pinRequest(task.document()));
+                        task.recovery(recovery);
+                    }
                     final var id = store.transaction(state -> {
                         if (state.receipts().containsKey(receipt)) {
                             return null;

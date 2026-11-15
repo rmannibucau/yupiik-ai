@@ -23,10 +23,14 @@ import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.WorkerCommand$Options$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.context.GithubContextSnapshot;
 import io.yupiik.ia.agent.github.context.GithubPrivateContext;
@@ -58,6 +62,7 @@ import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.channels.FileChannel;
@@ -69,6 +74,7 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -99,6 +105,10 @@ class WorkerTest {
     private TaskStore store;
     private GithubBotConfiguration conf;
     private ExecutorConfiguration backend;
+    private Path attemptRoot;
+    private String executable;
+    private String image;
+    private Duration timeout;
     private Path invocations;
     private final List<String> requests = new CopyOnWriteArrayList<>();
     private final List<Map<String, Object>> posts = new CopyOnWriteArrayList<>();
@@ -316,7 +326,7 @@ class WorkerTest {
         enqueue("review");
         Files.writeString(home.resolve("agent-configuration.json"), "{}");
         final var executable = home.resolve("stoppable-docker");
-        Files.writeString(
+        writeDockerFixture(
                 executable,
                 "#!/bin/sh\ncase \"$1\" in\nrun) exit 9;;\ncontainer) printf 'false\\n';;\n*) exit 0;;\nesac\n");
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
@@ -464,7 +474,7 @@ class WorkerTest {
                 ((Number) Files.getAttribute(home, "unix:uid")).intValue() != 0,
                 "Docker backend rejects root dispatchers");
         final var executable = home.resolve("diagnostic-docker");
-        Files.writeString(
+        writeDockerFixture(
                 executable,
                 "#!/bin/sh\ncase \"$1\" in\nrun) printf 'private-agent-secret\\n'; exit " + exitCode
                         + ";;\ncontainer) printf 'false\\n';;\n*) exit 0;;\nesac\n");
@@ -473,9 +483,9 @@ class WorkerTest {
     }
 
     @Test
-    void recoveredInvalidResultIsCapturedBeforeTerminalCleanup() throws Exception {
+    void recoveredInvalidResultIsCapturedBeforeTerminalCleanup(@TempDir final Path root) throws Exception {
         enqueue("review");
-        final var directory = Files.createTempDirectory("yca-github-diagnostic-recovery-");
+        final var directory = attemptDirectory(root, "diagnostic-recovery");
         Files.createDirectory(directory.resolve("output"));
         Files.writeString(directory.resolve("output/result.json"), "{}");
         Files.writeString(directory.resolve("execution.log"), "private-recovery-evidence");
@@ -538,9 +548,9 @@ class WorkerTest {
     }
 
     @Test
-    void recoveredAgentFailureRetainsPrivateReasonWithTheCorrectAttempt() throws Exception {
+    void recoveredAgentFailureRetainsPrivateReasonWithTheCorrectAttempt(@TempDir final Path root) throws Exception {
         enqueue("review");
-        final var directory = Files.createTempDirectory("yca-github-agent-failure-");
+        final var directory = attemptDirectory(root, "agent-failure");
         Files.createDirectory(directory.resolve("output"));
         Files.writeString(
                 directory.resolve("output/result.json"),
@@ -575,9 +585,9 @@ class WorkerTest {
     }
 
     @Test
-    void recoveredResultCannotFollowSymbolicOutputDirectory() throws Exception {
+    void recoveredResultCannotFollowSymbolicOutputDirectory(@TempDir final Path root) throws Exception {
         enqueue("review");
-        final var directory = Files.createTempDirectory("yca-github-symbolic-output");
+        final var directory = attemptDirectory(root, "symbolic-output");
         final var outside = Files.createDirectory(home.resolve("outside"));
         Files.writeString(
                 outside.resolve("result.json"),
@@ -585,7 +595,7 @@ class WorkerTest {
                         Map.of("schemaVersion", 1, "taskId", id, "summary", "Untrusted host file must not be loaded")));
         Files.createSymbolicLink(directory.resolve("output"), outside);
         final var executable = home.resolve("stoppable-docker");
-        Files.writeString(executable, "#!/bin/sh\nprintf 'false\\n'\n");
+        writeDockerFixture(executable, "#!/bin/sh\nprintf 'false\\n'\n");
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
         store.transaction(state -> {
             final var task = state.task(id);
@@ -611,9 +621,9 @@ class WorkerTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"[]", "null", "42", "blank-summary", "blank-failure"})
-    void recoveredNonObjectResultDoesNotWedgeTask(final String content) throws Exception {
+    void recoveredNonObjectResultDoesNotWedgeTask(final String content, @TempDir final Path root) throws Exception {
         enqueue("review");
-        final var directory = Files.createTempDirectory("yca-github-invalid-result");
+        final var directory = attemptDirectory(root, "invalid-result");
         Files.createDirectory(directory.resolve("output"));
         Files.writeString(
                 directory.resolve("output/result.json"),
@@ -621,7 +631,7 @@ class WorkerTest {
                         ? json.toString(Map.of("schemaVersion", 1, "taskId", id, content.substring(6), " \t\n"))
                         : content);
         final var executable = home.resolve("stoppable-docker");
-        Files.writeString(executable, "#!/bin/sh\nprintf 'false\\n'\n");
+        writeDockerFixture(executable, "#!/bin/sh\nprintf 'false\\n'\n");
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
         store.transaction(state -> {
             final var task = state.task(id);
@@ -669,15 +679,150 @@ class WorkerTest {
         assertEquals(TaskState.failed, store.transaction(state -> state.task(id).state()));
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+        "solve, true",
+        "review, true",
+        "help, true",
+        "review, false",
+        "help, false"
+    })
+    void gitSourceRejectsAnythingExceptStrictSolves(final String kind, final boolean agentCommenting) {
+        enqueue(kind);
+        final var values =
+                Map.of("worker.source.mode", "git", "worker.agentCommenting", Boolean.toString(agentCommenting));
+        final var options = new WorkerCommand$Options$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .worker();
+        final var failure = assertThrows(IllegalArgumentException.class, () -> worker().run(id, options));
+        assertTrue(failure.getMessage().contains("strict solve"));
+        assertEquals(
+                TaskState.pending, store.transaction(state -> state.task(id).state()));
+        assertFalse(Files.exists(invocations));
+        assertTrue(requests.isEmpty());
+    }
+
     @Test
-    void strictReviewRejectsUnsupportedRuntimeBeforeFetchingContextOrLaunching() throws Exception {
+    void gitStrictSolvePinsContextWithoutHostSourceExportOrPublishingCredentials() throws Exception {
+        assumeTrue(
+                ((Number) Files.getAttribute(home, "unix:uid")).intValue() != 0,
+                "Docker backend rejects root dispatchers");
+        enqueue("solve");
+        store.transaction(state -> {
+            state.task(id).actorId(null);
+            return null;
+        });
+        final var base = "a".repeat(40);
+        responses.put("/repos/owner/repo", Map.of("default_branch", "main"));
+        responses.put("/repos/owner/repo/commits/main", Map.of("sha", base));
+        responses.put("/repos/fork/repo", Map.of("fork", true, "parent", Map.of("full_name", "owner/repo")));
+        Files.writeString(home.resolve("agent-configuration.json"), "{}");
+        final var staged = home.resolve("git-solve-context");
+        writeDockerFixture(home.resolve("fake-docker"), """
+            #!/bin/sh
+            if [ "$1" != run ]; then
+              printf 'false\\n'
+              exit 0
+            fi
+            [ -z "${GH_TOKEN:-}" ] || exit 99
+            [ -z "${GITHUB_BOT_FORK_TOKEN:-}" ] || exit 99
+            [ -z "${GITHUB_SOURCE_TOKEN:-}" ] || exit 99
+            for arg in "$@"; do
+              case "$arg" in
+                GH_TOKEN|GH_TOKEN=*|GITHUB_BOT_FORK_TOKEN|GITHUB_BOT_FORK_TOKEN=*|GITHUB_SOURCE_TOKEN|GITHUB_SOURCE_TOKEN=*) exit 99 ;;
+                type=bind,src=*,dst=/attempt/workspace)
+                  workspace=${arg#type=bind,src=}
+                  workspace=${workspace%%,dst=/attempt/workspace}
+                  [ ! -e "$workspace/repository" ] || exit 98
+                  [ ! -e "$workspace/github-source.json" ] || exit 98
+                  [ -f "$workspace/github-source-git.sh" ] || exit 98
+                  [ -f "$workspace/github-source-askpass.sh" ] || exit 98
+                  cat "$workspace/github-solve.json" > '%s'
+                  ;;
+              esac
+            done
+            exit 97
+            """.formatted(staged));
+        final var values =
+                Map.of("worker.source.mode", "git", "worker.agentCommenting", "false", "worker.forkOwner", "fork");
+        final var options = new WorkerCommand$Options$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .worker();
+        try {
+            worker().run(id, options);
+            final var task = store.transaction(state -> state.task(id).document());
+            assertEquals(base, task.strictSolveBaseSha());
+            assertEquals("main", task.strictSolveBaseBranch());
+            assertEquals("fork", task.strictSolveForkOwner());
+            assertEquals("execution", task.lastFailure().stage());
+            assertEquals(97, task.lastFailure().exitCode());
+            assertTrue(Files.readString(staged).contains(base));
+            assertTrue(requests.stream().noneMatch(request -> request.contains("/git/")));
+            assertTrue(posts.isEmpty());
+        } finally {
+            final var directory = store.transaction(state -> state.task(id).attemptDirectory());
+            if (directory != null && Files.exists(Path.of(directory))) {
+                AttemptPreparation.delete(Path.of(directory));
+            }
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"baseSha", "baseBranch", "forkOwner"})
+    void gitStrictSolveRejectsChangedPinsBeforeLaunching(final String pin) throws Exception {
+        enqueue("solve");
+        final var base = "a".repeat(40);
+        store.transaction(state -> {
+            final var task = state.task(id);
+            task.actorId(null);
+            task.strictSolveBaseSha("baseSha".equals(pin) ? "b".repeat(40) : base);
+            task.strictSolveBaseBranch("baseBranch".equals(pin) ? "previous" : "main");
+            task.strictSolveForkOwner("forkOwner".equals(pin) ? "previous-fork" : "fork");
+            return null;
+        });
+        Files.writeString(home.resolve("agent-configuration.json"), "{}");
+        responses.put("/repos/owner/repo", Map.of("default_branch", "main"));
+        responses.put("/repos/owner/repo/commits/main", Map.of("sha", base));
+        final var values =
+                Map.of("worker.source.mode", "git", "worker.agentCommenting", "false", "worker.forkOwner", "fork");
+        final var options = new WorkerCommand$Options$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .worker();
+        worker().run(id, options);
+        final var task = store.transaction(state -> state.task(id).document());
+        assertEquals("source-staging", task.lastFailure().stage());
+        assertEquals("IllegalStateException", task.lastError());
+        assertEquals("baseSha".equals(pin) ? "b".repeat(40) : base, task.strictSolveBaseSha());
+        assertEquals("baseBranch".equals(pin) ? "previous" : "main", task.strictSolveBaseBranch());
+        assertEquals("forkOwner".equals(pin) ? "previous-fork" : "fork", task.strictSolveForkOwner());
+        assertFalse(Files.exists(invocations));
+        assertTrue(requests.stream().noneMatch(request -> request.contains("/git/")));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void strictReviewRejectsUnsupportedRuntimeBeforeFetchingContextOrLaunching(final boolean privateServices)
+            throws Exception {
         enqueue("review");
         store.transaction(state -> {
             state.task(id).actorId(null);
             return null;
         });
-        final var values =
-                Map.of("github.home", home.toString(), "worker.agentCommenting", "false", "worker.maxRetries", "0");
+        final var values = Map.of(
+                "github.home",
+                home.toString(),
+                "worker.agentCommenting",
+                "false",
+                "worker.maxRetries",
+                "0",
+                "worker.source.mode",
+                privateServices ? "broker" : "export");
+        if (privateServices) {
+            backend = servicesExecution("");
+        }
         final var strict = new GithubBotConfiguration$FusionConfigurationFactory(
                         key -> Optional.ofNullable(values.get(key)))
                 .get();
@@ -687,12 +832,16 @@ class WorkerTest {
                 URI.create("jar:" + home.resolve("unsupported.zip").toUri()), Map.of("create", "true"))) {
             final var attempt = Files.createDirectories(filesystem.getPath("/attempt/workspace"))
                     .getParent();
-            final var preparation = new AttemptPreparation(json) {
-                @Override
-                public Path prepare(final Path configuration, final Path attemptRoot) {
-                    return attempt;
-                }
-            };
+            final var preparation =
+                    new AttemptPreparation(
+                            json,
+                            new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
+                            backend) {
+                        @Override
+                        public Path prepare(final Path configuration, final Path attemptRoot) {
+                            return attempt;
+                        }
+                    };
             new Worker(
                             strict,
                             store,
@@ -705,9 +854,17 @@ class WorkerTest {
                             new GithubPrivateContext(github, json),
                             new GithubContextSnapshot(github, json),
                             new ForkProvisioner(github, store),
-                            new ReviewPublisher(github, store, strict),
+                            new ReviewPublisher(
+                                    github,
+                                    store,
+                                    strict,
+                                    new ReviewPresentationConfiguration$FusionConfigurationFactory(
+                                                    key -> Optional.empty())
+                                            .get()),
                             new StrictSolvePublisher(github, store, json),
                             new DiscussionPublisher(new DiscussionClient(github), store, strict),
+                            new ContextConfiguration("127.0.0.1", 0, "", "", "git", "", 256, 1073741824L),
+                            new FixPublisher(github, store, json, new FixConfiguration(false, "")),
                             BotTestConfiguration.CLOCK)
                     .run(id, commandOptions.worker());
             final var task = store.transaction(state -> state.task(id).document());
@@ -776,7 +933,7 @@ class WorkerTest {
                     "/repos/owner/repo/git/trees/" + "b".repeat(40),
                     Map.of("sha", "b".repeat(40), "truncated", false, "tree", List.of()));
         }
-        Files.writeString(home.resolve("fake-docker"), """
+        writeDockerFixture(home.resolve("fake-docker"), """
             #!/bin/sh
             if [ "$1" != run ]; then
               printf 'false\\n'
@@ -972,10 +1129,19 @@ class WorkerTest {
         assertFalse(Files.exists(invocations));
     }
 
-    @Test
-    void helpPublishesCanonicalHostTextOnceWithoutExecution() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"export, false", "broker, false", "broker, true"})
+    void helpPublishesCanonicalHostTextOnceWithoutExecution(final String source, final boolean services) {
+        if (services) {
+            backend = servicesExecution("");
+        }
+        final var values = Map.of("worker.source.mode", source, "worker.agentCommenting", "false");
+        final var options = new WorkerCommand$Options$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .worker();
         enqueue("help");
-        run();
+        BotTestConfiguration.worker(conf, store, github, json, backend).run(id, options);
         final var finished =
                 TaskFixtures.map(store.transaction(state -> state.task(id).document()));
         assertEquals("done", finished.get("state"));
@@ -998,7 +1164,7 @@ class WorkerTest {
                         "GET /repos/owner/repo/issues/12/comments?per_page=100",
                         "POST /repos/owner/repo/issues/12/comments"),
                 requests);
-        run();
+        BotTestConfiguration.worker(conf, store, github, json, backend).run(id, options);
         assertEquals(1, posts.size());
         assertEquals(2, requests.size());
         assertFalse(Files.exists(invocations));
@@ -1028,9 +1194,9 @@ class WorkerTest {
     }
 
     @Test
-    void retriesAlreadyStagedPublicationWithoutLaunchingAnotherAttempt() throws Exception {
+    void retriesAlreadyStagedPublicationWithoutLaunchingAnotherAttempt(@TempDir final Path root) throws Exception {
         enqueue("solve");
-        final var directory = Files.createTempDirectory("yca-github-recovered");
+        final var directory = attemptDirectory(root, "recovered");
         Files.writeString(directory.resolve("secret"), "attempt credential");
         store.transaction(state -> {
             final var task = state.task(id);
@@ -1048,8 +1214,7 @@ class WorkerTest {
                         "body",
                         marker()
                                 + "\n"
-                                + "I could not complete the requested task. The operator can inspect the task"
-                                + " diagnostics."),
+                                + "I could not complete the requested task. The operator can inspect the task diagnostics."),
                 posts.getFirst());
         final var finished =
                 TaskFixtures.map(store.transaction(state -> state.task(id).document()));
@@ -1062,11 +1227,17 @@ class WorkerTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void terminalTransitionCrashResumesCleanupWithoutExecutionOrPublication(final boolean alreadyDeleted)
+    @org.junit.jupiter.params.provider.CsvSource({
+        "review, export, false",
+        "review, export, true",
+        "help, broker, false",
+        "help, broker, true"
+    })
+    void terminalTransitionCrashResumesCleanupWithoutExecutionOrPublication(
+            final String kind, final String source, final boolean alreadyDeleted, @TempDir final Path root)
             throws Exception {
-        enqueue("review");
-        final var directory = Files.createTempDirectory("yca-github-terminal");
+        enqueue(kind);
+        final var directory = attemptDirectory(root, "terminal");
         Files.writeString(directory.resolve("secret"), "attempt credential");
         if (alreadyDeleted) {
             AttemptPreparation.delete(directory);
@@ -1078,7 +1249,12 @@ class WorkerTest {
             task.attemptDirectory(directory.toString());
             return null;
         });
-        run();
+        final var values = Map.of("worker.source.mode", source, "worker.agentCommenting", "false");
+        final var options = new WorkerCommand$Options$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .worker();
+        BotTestConfiguration.worker(conf, store, github, json, backend).run(id, options);
         assertFalse(Files.exists(directory));
         assertFalse(store.<Boolean>transaction(state -> (state.task(id).attemptDirectory() != null)));
         assertEquals(TaskState.done, store.transaction(state -> state.task(id).state()));
@@ -1258,15 +1434,15 @@ class WorkerTest {
     }
 
     @Test
-    void releasedTaskLeaseAllowsRunningRecoveryWithoutRelaunch() throws Exception {
+    void releasedTaskLeaseAllowsRunningRecoveryWithoutRelaunch(@TempDir final Path root) throws Exception {
         enqueue("review");
-        final var directory = Files.createTempDirectory("yca-github-recovered");
+        final var directory = attemptDirectory(root, "recovered");
         try {
             Files.createDirectory(directory.resolve("output"));
             Files.writeString(
                     directory.resolve("output/result.json"),
                     json.toString(Map.of("schemaVersion", 1, "taskId", id, "failure", "blocked")));
-            Files.writeString(home.resolve("fake-docker"), "#!/bin/sh\nprintf 'false\\n'\n");
+            writeDockerFixture(home.resolve("fake-docker"), "#!/bin/sh\nprintf 'false\\n'\n");
             store.transaction(state -> {
                 final var task = state.task(id);
                 task.state(TaskState.running);
@@ -1317,6 +1493,85 @@ class WorkerTest {
         assertFalse(Files.exists(invocations));
     }
 
+    @Test
+    void privateServicesRemainOptInWithoutChangingWorkerDefaults() {
+        assertNull(backend.docker().services());
+        assertNull(new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                .get()
+                .docker()
+                .services());
+        assertEquals(WorkerOptions.SourceMode.export, DEFAULT_OPTIONS.source().mode());
+        assertTrue(DEFAULT_OPTIONS.agentCommenting());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"export, true, false", "export, false, false", "broker, false, true"})
+    void privateServicesRejectUnsafeModesBeforePreparationOrLaunch(
+            final String source, final boolean commenting, final boolean secondRelay) throws Exception {
+        enqueue("review");
+        store.transaction(state -> {
+            state.task(id).actorId(null);
+            return null;
+        });
+        backend = servicesExecution(secondRelay ? "127.0.0.1" : "");
+        final var values = Map.of(
+                "worker.source.mode",
+                source,
+                "worker.agentCommenting",
+                Boolean.toString(commenting),
+                "worker.maxRetries",
+                "0");
+        final var options = new WorkerCommand$Options$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .worker();
+        worker().run(id, options);
+        final var task = store.transaction(state -> state.task(id).document());
+        assertEquals(TaskState.failed, task.state());
+        assertEquals("preparation", task.lastFailure().stage());
+        assertEquals("IllegalArgumentException", task.lastError());
+        assertTrue(new TaskDiagnostics(home, json, BotTestConfiguration.CLOCK)
+                .read(id)
+                .contains("Private services require credential-free broker mode without a second relay"));
+        assertNull(task.attemptDirectory());
+        assertFalse(Files.exists(invocations));
+        assertTrue(requests.stream().noneMatch(request -> request.contains("/pulls/12")));
+    }
+
+    @Test
+    void privateServicesDoNotPermitAgentCommentingInBrokerMode() {
+        enqueue("review");
+        backend = servicesExecution("");
+        final var values = Map.of("worker.source.mode", "broker", "worker.agentCommenting", "true");
+        final var options = new WorkerCommand$Options$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .worker();
+        final var failure = assertThrows(IllegalArgumentException.class, () -> worker().run(id, options));
+        assertTrue(failure.getMessage().contains("Broker mode requires a strict"));
+        assertEquals(
+                TaskState.pending, store.transaction(state -> state.task(id).state()));
+        assertFalse(Files.exists(invocations));
+        assertTrue(requests.isEmpty());
+    }
+
+    private ExecutorConfiguration servicesExecution(final String relayBind) {
+        final var values = Map.of(
+                "github.executor.docker.executable",
+                home.resolve("fake-docker").toString(),
+                "github.executor.docker.services.image",
+                "trusted-services",
+                "github.executor.docker.services.controlNetwork",
+                "worker-control",
+                "github.executor.docker.services.keyStore",
+                home.resolve("private-tls.p12").toString(),
+                "github.executor.docker.services.providerTarget",
+                "http://192.168.52.32:8000/v1",
+                "github.executor.relay.bind",
+                relayBind);
+        return new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+    }
+
     private Worker worker() {
         final var values = Map.of(
                 "github.home", home.toString(),
@@ -1347,7 +1602,7 @@ class WorkerTest {
                 ((Number) Files.getAttribute(home, "unix:uid")).intValue() != 0,
                 "Docker backend rejects root dispatchers");
         Files.writeString(home.resolve("agent-configuration.json"), "{}");
-        Files.writeString(
+        writeDockerFixture(
                 home.resolve("fake-docker"), """
                     #!/bin/sh
                     if [ "$1" = run ]; then
@@ -1366,6 +1621,24 @@ class WorkerTest {
                     printf 'false\\n'
                     """.formatted(invocations, home.resolve("release"), invocations));
         backend = execution(home.resolve("fake-docker").toString(), "trusted-agent", Duration.ofSeconds(15));
+    }
+
+    private void writeDockerFixture(final Path executable, final String script) throws Exception {
+        // Legacy fixtures never create services resources. Only their ownership recovery
+        // probes are absent; preserve every original runtime/daemon failure response.
+        final var absentServices = """
+                if [ "$#" = 5 ] && [ "$2 $3" = 'inspect --format' ]; then
+                  case "$4" in
+                    *io.yupiik.yca.github-bot.runtime*io.yupiik.yca.github-bot.component*)
+                      case "$1:$5" in
+                        container:yca-*-services|container:yca-*-egress) printf 'Error: No such container: %s\\n' "$5"; exit 1 ;;
+                        network:yca-*-services-net|network:yca-*-external) printf 'Error: No such network: %s\\n' "$5"; exit 1 ;;
+                      esac
+                      ;;
+                  esac
+                fi
+                """;
+        Files.writeString(executable, script.replace("#!/bin/sh\n", "#!/bin/sh\n" + absentServices));
     }
 
     private long launchCount() throws Exception {
@@ -1394,9 +1667,9 @@ class WorkerTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void kubernetesRecoveryUsesConfiguredFusionClient(final boolean kubeconfig) throws Exception {
+    void kubernetesRecoveryUsesConfiguredFusionClient(final boolean kubeconfig, @TempDir final Path attempts)
+            throws Exception {
         enqueue("help");
-        final var attempts = Files.createTempDirectory("yca-worker-kubernetes-");
         final var directory = Files.createTempDirectory(attempts, "yca-github-");
         final var calls = new CopyOnWriteArrayList<String>();
         final var cluster = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -1487,10 +1760,33 @@ class WorkerTest {
     }
 
     private ExecutorConfiguration execution(final String executable, final String image, final Duration timeout) {
-        final var values = Map.of(
+        this.executable = executable;
+        this.image = image;
+        this.timeout = timeout;
+        final var values = new HashMap<String, String>(Map.of(
                 "github.executor.docker.executable", executable,
                 "github.executor.docker.image", image,
-                "github.executor.timeoutSeconds", Long.toString(timeout.toSeconds()));
+                "github.executor.timeoutSeconds", Long.toString(timeout.toSeconds())));
+        if (attemptRoot != null) {
+            values.put("github.executor.attemptRoot", attemptRoot.toString());
+        }
         return new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+    }
+
+    /**
+     * The worker only cleans up an attempt directory which is a direct {@code yca-github-} child of its attempt
+     * root, so the tests derive it from the injected temporary root instead of using that root directly.
+     *
+     * @param root the {@code @TempDir} root of the current test.
+     * @param name suffix of the attempt directory name.
+     * @return the created attempt directory, deleted by the worker under test.
+     * @throws IOException if it cannot be created.
+     */
+    private Path attemptDirectory(final Path root, final String name) throws IOException {
+        attemptRoot = root;
+        if (executable != null) { // the backend of setUp() predates the injected root
+            backend = execution(executable, image, timeout);
+        }
+        return Files.createDirectory(root.resolve("yca-github-" + name));
     }
 }

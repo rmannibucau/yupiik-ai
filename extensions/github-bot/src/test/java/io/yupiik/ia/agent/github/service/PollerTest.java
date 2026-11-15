@@ -22,8 +22,10 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.PollCommand$Options$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.command.PollCommand.Options;
+import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
+import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
@@ -73,6 +75,186 @@ class PollerTest {
                 new GithubBotConfiguration.Authorization(ids, "", false, 7200),
                 new GithubBotConfiguration.Repositories(
                         repositories, "", "", "", List.of(RepositorySelector.Visibility.values()), false, false));
+    }
+
+    @Test
+    void fixesRequireOptInAndPullRequestContextWithoutConvertingSolve() throws Exception {
+        final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try (final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty())) {
+            final var actor = Map.of("id", 42, "login", "human", "type", "User");
+            final var sha = new AtomicReference<>("a".repeat(40));
+            final var metadataRequests = new AtomicInteger();
+            final var failMetadata = new AtomicBoolean(true);
+            server.createContext("/", exchange -> {
+                final var path = exchange.getRequestURI().getPath();
+                if (path.equals("/repos/owner/repo/pulls/12")
+                        || path.equals("/repos/owner/repo")
+                        || path.startsWith("/repos/human/fork")) {
+                    metadataRequests.incrementAndGet();
+                    final var body =
+                            switch (path) {
+                                case "/repos/owner/repo/pulls/12" ->
+                                    BotTestConfiguration.fixPull("owner/repo", sha.get());
+                                case "/repos/owner/repo" -> BotTestConfiguration.fixRepository("owner/repo", "BASE");
+                                case "/repos/human/fork" -> BotTestConfiguration.fixRepository("human/fork", "HEAD");
+                                default -> BotTestConfiguration.fixRef(sha.get());
+                            };
+                    final var bytes = json.toString(body).getBytes(StandardCharsets.UTF_8);
+                    exchange.sendResponseHeaders(failMetadata.get() ? 403 : 200, bytes.length);
+                    exchange.getResponseBody().write(bytes);
+                    exchange.close();
+                    return;
+                }
+                final var body = path.endsWith("/issues")
+                        ? List.of(
+                                Map.of(
+                                        "id",
+                                        1,
+                                        "user",
+                                        actor,
+                                        "body",
+                                        "@bot fix issue",
+                                        "html_url",
+                                        "https://github.com/owner/repo/issues/12"),
+                                Map.of(
+                                        "id",
+                                        2,
+                                        "user",
+                                        actor,
+                                        "body",
+                                        "@bot fix description",
+                                        "html_url",
+                                        "https://github.com/owner/repo/pull/12",
+                                        "pull_request",
+                                        Map.of()),
+                                Map.of(
+                                        "id",
+                                        3,
+                                        "user",
+                                        actor,
+                                        "body",
+                                        "@bot fix unconfirmed",
+                                        "html_url",
+                                        "https://github.com/owner/repo/pull/13"),
+                                Map.of(
+                                        "id",
+                                        4,
+                                        "user",
+                                        actor,
+                                        "body",
+                                        "@bot solve unchanged",
+                                        "html_url",
+                                        "https://github.com/owner/repo/pull/14",
+                                        "pull_request",
+                                        Map.of()))
+                        : path.endsWith("/issues/comments")
+                                ? List.of(
+                                        Map.of(
+                                                "id",
+                                                5,
+                                                "user",
+                                                actor,
+                                                "body",
+                                                "@bot fix issue comment",
+                                                "html_url",
+                                                "https://github.com/owner/repo/issues/12#issuecomment-5"),
+                                        Map.of(
+                                                "id",
+                                                6,
+                                                "user",
+                                                actor,
+                                                "body",
+                                                "@bot fix PR comment",
+                                                "html_url",
+                                                "https://github.com/owner/repo/pull/12#issuecomment-6"))
+                                : List.of(Map.of(
+                                        "id",
+                                        7,
+                                        "user",
+                                        actor,
+                                        "body",
+                                        "@bot fix inline",
+                                        "html_url",
+                                        "https://github.com/owner/repo/pull/12#discussion_r7"));
+                final var bytes = json.toString(body).getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+                exchange.close();
+            });
+            server.start();
+            final var conf =
+                    configuration("http://127.0.0.1:" + server.getAddress().getPort(), "42");
+            final var store = new TaskStore(conf, json);
+            final var options = new PollCommand$Options$FusionConfigurationFactory(
+                            key -> "poll.search.enabled".equals(key) ? Optional.of("false") : Optional.empty())
+                    .get()
+                    .poll();
+            try (final var github =
+                    new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
+                assertEquals(
+                        1,
+                        BotTestConfiguration.poller(conf, store, github, BotTestConfiguration.CLOCK, null)
+                                .poll(options));
+                assertEquals(
+                        TaskKind.solve,
+                        store.transaction(state -> state.list().getFirst().kind()));
+                final var completedCursor =
+                        store.transaction(state -> state.cursors().get("owner/repo/issues"));
+                final var enabled = new Poller(
+                        conf,
+                        store,
+                        github,
+                        BotTestConfiguration.CLOCK,
+                        null,
+                        new TeamAuthorization(github, conf, BotTestConfiguration.CLOCK),
+                        BotTestConfiguration.reviewSummaryPoller(conf, store, github, BotTestConfiguration.CLOCK, null),
+                        BotTestConfiguration.discussionPoller(conf, store, github, BotTestConfiguration.CLOCK, null),
+                        new RepositoryDiscovery(conf, github, BotTestConfiguration.CLOCK),
+                        new FixConfiguration(true, "human/fork"));
+                assertThrows(GitHubClient.HttpException.class, () -> enabled.poll(options));
+                assertEquals(1, store.transaction(state -> state.list()).size(), "Failed pin creates no fix task");
+                assertEquals(1, store.transaction(state -> state.receipts()).size(), "Failed pin consumes no receipt");
+                assertEquals(
+                        completedCursor,
+                        store.transaction(state -> state.cursors().get("owner/repo/issues")));
+                failMetadata.set(false);
+                assertEquals(3, enabled.poll(options));
+                final var requestsAfterEnqueue = metadataRequests.get();
+                assertEquals(0, enabled.poll(options));
+                final var tasks = store.transaction(state -> state.list());
+                assertEquals(requestsAfterEnqueue, metadataRequests.get(), "Receipts avoid repeat metadata GETs");
+                assertEquals(
+                        3,
+                        tasks.stream()
+                                .filter(task -> task.kind() == TaskKind.fix)
+                                .count());
+                for (final var task : tasks) {
+                    if (task.kind() == TaskKind.fix) {
+                        final var pinned = TaskStore.map(task.recovery().get("fixTarget"));
+                        assertEquals("a".repeat(40), pinned.get("headSha"));
+                        assertEquals("HEAD", pinned.get("repositoryId"));
+                        assertEquals("42", task.actorId());
+                    }
+                }
+                final var queued = tasks.stream()
+                        .filter(task -> task.kind() == TaskKind.fix)
+                        .findFirst()
+                        .orElseThrow();
+                sha.set("b".repeat(40));
+                final var publisher = new FixPublisher(github, store, json, new FixConfiguration(true, "human/fork"));
+                assertThrows(IllegalStateException.class, () -> publisher.prepare(queued));
+                assertThrows(IllegalStateException.class, () -> publisher.pinRequest(queued));
+                final var durable =
+                        store.transaction(state -> state.task(queued.id()).document());
+                assertEquals(
+                        "a".repeat(40),
+                        TaskStore.map(durable.recovery().get("fixTarget")).get("headSha"),
+                        "A head change between enqueue and execution must not repin");
+                assertTrue(tasks.stream().allMatch(task -> task.reference().contains("/pull/")));
+            }
+        } finally {
+            server.stop(0);
+        }
     }
 
     @Test
@@ -560,14 +742,16 @@ class PollerTest {
                     throw new IllegalStateException(interrupted);
                 }
             };
-            final var reviews = new ReviewSummaryPoller(conf, store, github, Clock.systemUTC(), null, null) {
-                @Override
-                public int poll(final List<String> repositories, final PollOptions actualOptions) {
-                    assertSame(options.poll(), actualOptions);
-                    rendezvous.run();
-                    return 2;
-                }
-            };
+            final var reviews =
+                    new ReviewSummaryPoller(
+                            conf, store, github, Clock.systemUTC(), null, null, new FixConfiguration(false, "")) {
+                        @Override
+                        public int poll(final List<String> repositories, final PollOptions actualOptions) {
+                            assertSame(options.poll(), actualOptions);
+                            rendezvous.run();
+                            return 2;
+                        }
+                    };
             final var discussions = new DiscussionPoller(conf, store, github, Clock.systemUTC(), null, null, null) {
                 @Override
                 public int poll(final List<String> repositories, final PollOptions actualOptions) {
@@ -585,7 +769,8 @@ class PollerTest {
                     new TeamAuthorization(github, conf, Clock.systemUTC()),
                     reviews,
                     discussions,
-                    new RepositoryDiscovery(conf, github, Clock.systemUTC()));
+                    new RepositoryDiscovery(conf, github, Clock.systemUTC()),
+                    new FixConfiguration(false, ""));
             assertEquals(5, poller.poll(options.poll()));
             final var disabled = new PollOptions(
                     "now",

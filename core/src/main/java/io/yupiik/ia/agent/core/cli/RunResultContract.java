@@ -15,14 +15,10 @@
  */
 package io.yupiik.ia.agent.core.cli;
 
-import io.yupiik.fusion.framework.build.api.json.JsonModel;
-import io.yupiik.fusion.framework.build.api.json.JsonOthers;
+import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
+import io.yupiik.fusion.framework.handlebars.spi.Template;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.parser.BufferProvider;
-import io.yupiik.fusion.json.internal.parser.JsonParser;
-import io.yupiik.fusion.json.spi.Parser;
 import java.io.IOException;
-import java.io.StringReader;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -39,9 +35,14 @@ public final class RunResultContract {
     private final Path file;
     private final List<List<String>> requiredFields;
     private final int maxBytes;
+    private final Template correctionTemplate;
 
     public RunResultContract(
-            final JsonMapper mapper, final Path file, final String requiredFields, final int maxBytes) {
+            final JsonMapper mapper,
+            final Path file,
+            final String requiredFields,
+            final int maxBytes,
+            final String template) {
         if (maxBytes < 1) {
             throw new IllegalArgumentException("run.result-max-bytes must be positive");
         }
@@ -57,6 +58,13 @@ public final class RunResultContract {
                         .toList();
         if (this.requiredFields.stream().flatMap(List::stream).anyMatch(String::isBlank)) {
             throw new IllegalArgumentException("run.result-required-fields contains an empty field name");
+        }
+        try {
+            this.correctionTemplate = new HandlebarsCompiler()
+                    .compile(new HandlebarsCompiler.CompilationContext(
+                            new HandlebarsCompiler.Settings().helpers(Map.of()), template));
+        } catch (final RuntimeException invalid) {
+            throw new IllegalArgumentException("Invalid run.result-correction-prompt Handlebars template");
         }
     }
 
@@ -92,18 +100,12 @@ public final class RunResultContract {
             if (!json.startsWith("{") || !json.endsWith("}")) {
                 return "result must be a JSON object";
             }
-            try (final var parser = new JsonParser(new StringReader(json), 8192, new BufferProvider(8192, 2), true)) {
-                parser.enforceNext(Parser.Event.START_OBJECT);
-                parser.skipObject();
-                if (parser.hasNext()) {
-                    return "result must contain exactly one JSON object";
-                }
+            if (!isSingleObject(json)) {
+                return "result must contain exactly one JSON object";
             }
-            final var document = mapper.fromString(ResultDocument.class, json);
-            if (document == null) {
+            if (!(mapper.fromString(Object.class, json) instanceof final Map<?, ?> fields)) {
                 return "result must be a JSON object";
             }
-            final var fields = document.fields() == null ? Map.<String, Object>of() : document.fields();
             for (final var alternatives : requiredFields) {
                 if (alternatives.stream()
                         .noneMatch(name -> fields.get(name) instanceof final String value && !value.isBlank())) {
@@ -117,15 +119,41 @@ public final class RunResultContract {
     }
 
     public String correctionPrompt(final String validationError) {
-        return "Completion artifact validation failed: " + validationError + ".\n"
-                + "Write or correct the JSON object at " + file + " (maximum " + maxBytes + " bytes).\n"
-                + "Required nonblank string fields (each group requires one alternative): "
-                + requiredFields.stream().map(group -> String.join("|", group)).toList() + ".\n"
-                + "Repair only this artifact from the existing task context and actual evidence; do not fabricate results. "
-                + "Do not repeat implementation, tests, commits, pushes, or publication. "
-                + "This is the only correction attempt. A chat answer does not replace the artifact.";
+        return correctionTemplate.render(Map.of(
+                "validationError", String.valueOf(validationError),
+                "file", file.toString(),
+                "maxBytes", maxBytes,
+                "requiredFields",
+                        requiredFields.stream()
+                                .map(group -> String.join("|", group))
+                                .toList()
+                                .toString()));
     }
 
-    @JsonModel
-    public record ResultDocument(@JsonOthers Map<String, Object> fields) {}
+    private boolean isSingleObject(final String json) {
+        // JsonMapper reads one value and can ignore trailing input. Check only its outer framing here;
+        // JSON syntax and field values are exclusively decoded by the mapper.
+        var depth = 0;
+        var quoted = false;
+        var escaped = false;
+        for (var i = 0; i < json.length(); i++) {
+            final var character = json.charAt(i);
+            if (quoted) {
+                if (escaped) {
+                    escaped = false;
+                } else if (character == '\\') {
+                    escaped = true;
+                } else if (character == '"') {
+                    quoted = false;
+                }
+            } else if (character == '"') {
+                quoted = true;
+            } else if (character == '{') {
+                depth++;
+            } else if (character == '}' && --depth == 0) {
+                return i == json.length() - 1;
+            }
+        }
+        return false;
+    }
 }

@@ -27,6 +27,8 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.GeneralSecurityException;
+import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.Signature;
 import java.time.Clock;
@@ -44,11 +46,21 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class AuthTokenProviderTest {
+    // Share only the key material; providers, signatures, clocks, and servers remain test-local.
+    private static final KeyPair KEY_PAIR = newKeyPair();
+
+    private static KeyPair newKeyPair() {
+        try {
+            final var generator = KeyPairGenerator.getInstance("RSA");
+            generator.initialize(2048);
+            return generator.generateKeyPair();
+        } catch (final GeneralSecurityException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
     @Test
     void refreshesRejectedInstallationTokenForGetButNeverRetriesPost() throws Exception {
-        final var generator = KeyPairGenerator.getInstance("RSA");
-        generator.initialize(2048);
-        final var pair = generator.generateKeyPair();
         final var issued = new AtomicInteger();
         final var reads = new AtomicInteger();
         final var writes = new AtomicInteger();
@@ -88,8 +100,8 @@ class AuthTokenProviderTest {
                                 new AuthTokenProvider$JwtHeader$FusionJsonCodec(),
                                 new AuthTokenProvider$JwtClaims$FusionJsonCodec()),
                         key -> Optional.empty());
-                final var provider =
-                        AuthTokenProvider.app(base, json, "app", 42, pair.getPrivate(), BotTestConfiguration.CLOCK);
+                final var provider = AuthTokenProvider.app(
+                        base, json, "app", 42, KEY_PAIR.getPrivate(), BotTestConfiguration.CLOCK);
                 final var client = new GitHubClient(base, json, provider, BotTestConfiguration.CLOCK)) {
             client.get("/resource");
             assertEquals(2, issued.get());
@@ -119,9 +131,6 @@ class AuthTokenProviderTest {
     @Test
     void appSignsAndCachesUntilActualExpiry() throws Exception {
         for (final var source : List.of("explicit", "repository", "organization")) {
-            final var generator = KeyPairGenerator.getInstance("RSA");
-            generator.initialize(2048);
-            final var pair = generator.generateKeyPair();
             final var now = new AtomicReference<>(Instant.parse("2026-01-01T00:00:00Z"));
             final var clock = new Clock() {
                 @Override
@@ -185,11 +194,12 @@ class AuthTokenProviderTest {
                             switch (source) {
                                 case "repository" ->
                                     AuthTokenProvider.appForRepository(
-                                            base, json, "app-id", "acme/project", pair.getPrivate(), clock);
+                                            base, json, "app-id", "acme/project", KEY_PAIR.getPrivate(), clock);
                                 case "organization" ->
                                     AuthTokenProvider.appForOrganization(
-                                            base, json, "app-id", "acme", pair.getPrivate(), clock);
-                                default -> AuthTokenProvider.app(base, json, "app-id", 42, pair.getPrivate(), clock);
+                                            base, json, "app-id", "acme", KEY_PAIR.getPrivate(), clock);
+                                default ->
+                                    AuthTokenProvider.app(base, json, "app-id", 42, KEY_PAIR.getPrivate(), clock);
                             }) {
                 assertEquals(0, lookups.get());
                 assertEquals("installation-1", provider.get());
@@ -209,7 +219,7 @@ class AuthTokenProviderTest {
                 }
                 final var parts = jwt.get().split("\\.");
                 final var verifier = Signature.getInstance("SHA256withRSA");
-                verifier.initVerify(pair.getPublic());
+                verifier.initVerify(KEY_PAIR.getPublic());
                 verifier.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII));
                 assertTrue(verifier.verify(Base64.getUrlDecoder().decode(parts[2])));
                 final var payload = json.fromString(
@@ -230,7 +240,7 @@ class AuthTokenProviderTest {
 
     @Test
     void lookupFailsClosedForInvalidIdsAndHttpErrors() throws Exception {
-        final var key = KeyPairGenerator.getInstance("RSA").generateKeyPair().getPrivate();
+        final var key = KEY_PAIR.getPrivate();
         final var response = new AtomicReference<>("{}");
         final var status = new AtomicInteger(200);
         final var tokens = new AtomicInteger();
@@ -290,7 +300,7 @@ class AuthTokenProviderTest {
 
     @Test
     void runtimeSelectsOnlyUnambiguousInstallationSources(@TempDir final Path directory) throws Exception {
-        final var key = KeyPairGenerator.getInstance("RSA").generateKeyPair().getPrivate();
+        final var key = KEY_PAIR.getPrivate();
         final var keyFile = directory.resolve("app.pem");
         Files.writeString(
                 keyFile,

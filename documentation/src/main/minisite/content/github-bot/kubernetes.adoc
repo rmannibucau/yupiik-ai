@@ -11,6 +11,26 @@ No Docker socket or Docker-in-Docker is needed.
 
 For the centralized validation overview, see xref:index.adoc[validation history and version 0 limits].
 
+== Operator-owned broker TLS and deny-default routing
+
+Kubernetes is a supported execution backend, but the new Docker-only restricted-services route has NOT been ported to it.
+The completed restricted-Docker package and synthetic native AMD64 image checks do not establish cluster deployment acceptance; see xref:egress.adoc#restricted-services-evidence[the current evidence boundary].
+The descriptor below is not an all-modes restricted-routing deployment and does not provision a TLS proxy, attempt-affine route or default-deny NetworkPolicy.
+
+Before enabling broker mode, provision an operator-managed TLS proxy with a signed certificate and public CA trust in both agent Java and native Git.
+Route each attempt's context/Git paths to the exact owning worker Pod and its stable bound listener port, not a load-balanced pool of transient worker Jobs.
+Keep that worker reachable for the whole attempt, including long Git and inference streams, and validate failure/expiry behavior when its Pod disappears.
+Never use host networking, broaden service-account privileges, disable hostname verification or fall back to HTTP to repair connectivity.
+
+Apply and verify default-deny ingress/egress NetworkPolicy using an enforcing CNI, with only narrow broker/proxy, fixed provider mediation and necessary DNS exceptions.
+Do not turn those exceptions into broad namespace, private-network or internet access, and test both address families, direct API access and cross-attempt denial.
+The public CONNECT proxy does not provide private service routing and its private-IP checks must remain intact.
+The new Docker provider-token sanitization must not be assumed present in this backend; the baseline provider credential exposure described below remains a limitation unless separately mediated and verified.
+Keep GitHub credentials host-only in strict broker mode and do not provision the legacy agent GitHub token for that workflow.
+Worker state and attempts remain separate PVCs; private Git storage, TLS keys and source provider Secrets must not be mounted into agents.
+Retain runtime Secrets and attempts while termination is uncertain, as described in recovery below; a vanished API object or unreachable node is not proof that processes or streams stopped.
+Validate TLS trust, exact worker affinity, NetworkPolicy, streaming cancellation, storage semantics and uncertain-stop cleanup on the actual cluster before scheduling.
+
 == Prepare images and dedicated storage
 
 Use the xref:installation.adoc#_jib_image_profiles[Jib image profiles] with reactor dependencies already installed by your trusted build pipeline.
@@ -102,7 +122,7 @@ If using expiring service-account credentials, rotate the Secret before expiry a
 Create private files in your secret-management workspace:
 
 * `host-token`: host metadata/read and final-publication credential.
-* `agent-token`: separate agent upstream credential.
+* `agent-token`: separate agent upstream credential for the legacy agent-commenting workflow only; omit it for strict broker execution.
 * `fork-token`: optional separate fork-write credential when resource-owner boundaries require it.
 * `agent-configuration.json`: trusted provider configuration as in xref:installation.adoc[the bare-metal walkthrough].
 * `dispatcher.kubeconfig.json`: the explicit dispatcher identity described above.
@@ -122,7 +142,8 @@ Remove private provisioning files according to your secret-management policy, an
 
 Secret mounts are read-only and group-readable for the non-root dispatcher, not world-readable.
 The provider file is sanitized into each attempt; the agent still receives the provider credential and can misuse it.
-The backend creates a single-use runtime Secret for agent credentials over authenticated HTTP, not by writing it to shared storage.
+The baseline creates a single-use runtime Secret for configured agent credentials over authenticated HTTP, not by writing it to shared storage.
+The `yca-agent-api` provisioning command above applies only to the legacy agent-commenting workflow; strict broker execution must omit that Secret and its source-token configuration.
 
 == Verify polling before execution
 

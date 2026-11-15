@@ -20,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration;
+import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
@@ -127,7 +129,13 @@ class ReviewPublisherTest {
         final var posted = posts.getFirst();
         assertEquals("head", posted.get("commit_id"));
         assertEquals("COMMENT", posted.get("event"));
-        assertEquals(marker() + "\nFindings", posted.get("body"));
+        final var body = String.valueOf(posted.get("body"));
+        assertTrue(body.startsWith(marker() + "\n## \uD83D\uDCCB Summary\n\nFindings\n"));
+        assertEquals(1, occurrences(body, marker()));
+        assertEquals(1, occurrences(body, "## \uD83D\uDD0E Findings"));
+        assertTrue(body.contains("3 finding(s) posted as inline review comments."));
+        assertTrue(body.contains("No test evidence was reported."));
+        assertFalse(body.contains("Explain the defect"));
         final var actual = (List<?>) posted.get("comments");
         assertEquals(3, actual.size());
         for (int i = 0; i < comments.size(); i++) {
@@ -135,10 +143,93 @@ class ReviewPublisherTest {
             assertEquals(comments.get(i).get("path"), comment.get("path"));
             assertEquals(comments.get(i).get("side"), comment.get("side"));
             assertEquals(((Number) comments.get(i).get("line")).intValue(), ((Number) comment.get("line")).intValue());
-            assertEquals(marker() + "\nExplain the defect", comment.get("body"));
+            final var inline = String.valueOf(comment.get("body"));
+            assertEquals(
+                    marker() + "\n### " + (i + 1) + ". `src/App.java:"
+                            + comments.get(i).get("line") + "` ("
+                            + comments.get(i).get("side")
+                            + ")\n\nExplain the defect",
+                    inline);
+            assertEquals(1, occurrences(inline, marker()));
             assertTrue(MentionParser.parse(String.valueOf(comment.get("body")), "bot")
                     .isEmpty());
         }
+    }
+
+    @Test
+    void defaultReportIncludesActualTestEvidenceWithoutClaimingSuccess() {
+        final var tests = List.of("mvn test: FAILED (2 failures)", "integration tests: NOT RUN");
+        final var result = Map.<String, Object>of(
+                "summary",
+                "Summary fallback with **Markdown** & <literal> {{notATemplate}}",
+                "review",
+                Map.of("headSha", "head", "comments", List.of()),
+                "tests",
+                tests);
+        publisher().publish(TaskFixtures.task(task), TaskFixtures.result(result));
+        final var body = String.valueOf(posts.getFirst().get("body"));
+        assertEquals(1, occurrences(body, marker()));
+        assertEquals(1, occurrences(body, "## \uD83D\uDCCB Summary"));
+        assertEquals(1, occurrences(body, "## \uD83E\uDDEA Tests"));
+        assertTrue(body.contains("Summary fallback with **Markdown** & <literal> {{notATemplate}}"));
+        assertTrue(body.contains("No inline findings were reported."));
+        assertTrue(body.contains("Agent-reported test evidence (not independently verified by the host):"));
+        for (final var test : tests) {
+            assertEquals(1, occurrences(body, test));
+        }
+        assertFalse(body.contains("passed"));
+        assertFalse(body.contains("&amp;"));
+        assertFalse(body.contains("&lt;"));
+    }
+
+    @Test
+    void defaultReportHonestlyHandlesMissingSummaryFindingsAndTests() {
+        publisher().publish(TaskFixtures.task(task), TaskFixtures.result(Map.of("review", Map.of("headSha", "head"))));
+        final var body = String.valueOf(posts.getFirst().get("body"));
+        assertTrue(body.contains("No review summary was provided."));
+        assertTrue(body.contains("No inline findings were reported."));
+        assertTrue(body.contains("No test evidence was reported."));
+        assertFalse(body.contains("passed"));
+        assertFalse(body.contains("Review completed."));
+    }
+
+    @Test
+    void customTemplatesPreserveLiteralMarkdownAndHostMarkers() {
+        final var presentation = presentation(Map.of(
+                "github.review.presentation.reportTemplate",
+                        "Report: {{{summary}}}\n{{#each tests}}{{{this}}}{{/each}}",
+                "github.review.presentation.findingTemplate", "Finding {{number}}: {{{body}}}"));
+        final var literal = "**keep** & <T> {{summary}} {{{body}}} {{#if tests}}literal{{/if}}";
+        final var result = Map.<String, Object>of(
+                "review",
+                        Map.of(
+                                "headSha",
+                                "head",
+                                "body",
+                                literal,
+                                "comments",
+                                List.of(Map.of("path", "src/App.java", "side", "RIGHT", "line", 21, "body", literal))),
+                "tests", List.of("not run {{summary}}"));
+        publisher(presentation).publish(TaskFixtures.task(task), TaskFixtures.result(result));
+        final var posted = posts.getFirst();
+        assertEquals(marker() + "\nReport: " + literal + "\nnot run {{summary}}", posted.get("body"));
+        final var inline = TaskStore.map(((List<?>) posted.get("comments")).getFirst());
+        assertEquals(marker() + "\nFinding 1: " + literal, inline.get("body"));
+    }
+
+    @Test
+    void rejectsOversizedRenderedTemplatesBeforeWritingIntent() {
+        final var defaults = presentation(Map.of());
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> publisher(new ReviewPresentationConfiguration("x".repeat(30001), defaults.findingTemplate()))
+                        .publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of()))));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> publisher(new ReviewPresentationConfiguration(defaults.reportTemplate(), "x".repeat(10001)))
+                        .publish(TaskFixtures.task(task), TaskFixtures.result(result(List.of(finding("RIGHT", 21))))));
+        assertTrue(posts.isEmpty());
+        assertFalse(store.<Boolean>transaction(state -> state.task(id()).reviewIntent() != null));
     }
 
     @Test
@@ -293,6 +384,20 @@ class ReviewPublisherTest {
     }
 
     private ReviewPublisher publisher() {
-        return BotTestConfiguration.reviewPublisher(github, store, "bot");
+        return publisher(presentation(Map.of()));
+    }
+
+    private ReviewPublisher publisher(final ReviewPresentationConfiguration presentation) {
+        return new ReviewPublisher(github, store, BotTestConfiguration.configuration("", "bot", ""), presentation);
+    }
+
+    private ReviewPresentationConfiguration presentation(final Map<String, String> values) {
+        return new ReviewPresentationConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get();
+    }
+
+    private int occurrences(final String value, final String token) {
+        return (value.length() - value.replace(token, "").length()) / token.length();
     }
 }

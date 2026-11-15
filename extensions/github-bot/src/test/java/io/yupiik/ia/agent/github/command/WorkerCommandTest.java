@@ -32,7 +32,9 @@ class WorkerCommandTest {
         final var tasks = new ArrayList<String>();
         final var invocations = new ArrayList<WorkerOptions>();
         final var worker =
-                new Worker(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null) {
+                new Worker(
+                        null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
+                        null) {
                     @Override
                     public void run(final String task, final WorkerOptions options) {
                         tasks.add(task);

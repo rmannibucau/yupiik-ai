@@ -55,6 +55,15 @@ public final class GitHubClient implements AutoCloseable {
     private final JsonMapper json;
     private final Clock clock;
     private final Supplier<String> token;
+
+    /**
+     * Host-only Git acquisition authentication, borrowed from this client's rotating credential owner.
+     * Never serialize, log, or forward the value to an agent; the caller must restrict its Git origin.
+     */
+    public String sourceToken() {
+        return token.get();
+    }
+
     private final Map<String, Cached> cache = new LinkedHashMap<>();
     private final ReentrantLock pacing = new ReentrantLock();
     private final Duration requestInterval;

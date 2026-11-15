@@ -17,6 +17,9 @@ package io.yupiik.ia.agent.github.execution;
 
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
 import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -44,6 +47,8 @@ public final class DockerExecutionBackend {
     private final String network;
 
     private final DockerEgress egress;
+    private final DockerRestrictedServices services;
+    private final Path servicesKeyStore;
 
     public DockerExecutionBackend(
             final String executable,
@@ -51,6 +56,16 @@ public final class DockerExecutionBackend {
             final Duration timeout,
             final String network,
             final ExecutorConfiguration.Docker.Egress egress) {
+        this(executable, image, timeout, network, egress, null);
+    }
+
+    public DockerExecutionBackend(
+            final String executable,
+            final String image,
+            final Duration timeout,
+            final String network,
+            final ExecutorConfiguration.Docker.Egress egress,
+            final ExecutorConfiguration.Docker.Services services) {
         if (executable.isBlank() || image.isBlank() || timeout.isNegative() || timeout.isZero()) {
             throw new IllegalArgumentException("Docker executable, image and positive timeout required");
         }
@@ -65,20 +80,134 @@ public final class DockerExecutionBackend {
             throw new IllegalArgumentException("Enforced egress cannot use a pre-created agent network");
         }
         this.egress = egress == null ? null : new DockerEgress(executable, egress, timeout);
+        if (services != null && (egress != null || !network.isEmpty())) {
+            throw new IllegalArgumentException("Restricted services cannot use egress or a pre-created agent network");
+        }
+        this.services = services == null ? null : new DockerRestrictedServices(executable, services, timeout);
+        this.servicesKeyStore = services == null ? null : Path.of(services.keyStore());
+    }
+
+    /**
+     * Requires the effective CLI context to declare a local Unix socket. The operator remains responsible
+     * for the actual daemon and for making the attempt paths available at the same location.
+     */
+    public void requireLocalDaemon() {
+        Process process = null;
+        try {
+            final var budget = timeout.compareTo(Duration.ofSeconds(5)) < 0 ? timeout : Duration.ofSeconds(5);
+            final long deadline = System.nanoTime() + budget.toNanos();
+            process = DockerControlEnvironment.sanitize(new ProcessBuilder(
+                            executable, "context", "inspect", "--format", "{{(index .Endpoints \"docker\").Host}}"))
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            final var running = process;
+            final var output = new CompletableFuture<byte[]>();
+            Thread.ofVirtual().start(() -> {
+                try {
+                    output.complete(running.getInputStream().readNBytes(2049));
+                } catch (final IOException e) {
+                    output.completeExceptionally(e);
+                }
+            });
+            final var bytes = output.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+            if (bytes.length > 2048
+                    || !process.waitFor(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)
+                    || process.exitValue() != 0) {
+                throw new IllegalStateException("Broker mode requires a declared local Docker Unix socket");
+            }
+            final var endpoint = StandardCharsets.UTF_8
+                    .newDecoder()
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString()
+                    .strip();
+            final var uri = new URI(endpoint);
+            if (!endpoint.startsWith("unix://")
+                    || !"unix".equals(uri.getScheme())
+                    || uri.isOpaque()
+                    || uri.getRawAuthority() != null
+                    || uri.getRawUserInfo() != null
+                    || uri.getRawQuery() != null
+                    || uri.getRawFragment() != null
+                    || uri.getPath() == null
+                    || !uri.getPath().startsWith("/")
+                    || uri.getPath().indexOf('\0') >= 0) {
+                throw new IllegalStateException("Broker mode requires a declared local Docker Unix socket");
+            }
+        } catch (final IOException | URISyntaxException | ExecutionException | TimeoutException e) {
+            // Do not expose endpoints, CLI diagnostics, or host configuration in errors.
+            throw new IllegalStateException("Broker mode requires a declared local Docker Unix socket");
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Local Docker verification interrupted");
+        } finally {
+            if (process != null) {
+                closeProbe(process);
+            }
+        }
+    }
+
+    private static void closeProbe(final Process process) {
+        // Kill descendants while their parent can still reap them; never leave a pipe-holding child behind.
+        final var descendants = process.descendants().toList();
+        for (final var child : descendants.reversed()) {
+            child.destroyForcibly();
+        }
+        boolean interrupted = Thread.interrupted();
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        try {
+            for (final var child : descendants) {
+                try {
+                    child.onExit().get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                } catch (final InterruptedException e) {
+                    interrupted = true;
+                } catch (final ExecutionException | TimeoutException ignored) {
+                    // The local client must still be closed even if a descendant cannot be reaped promptly.
+                }
+            }
+            closeClient(process);
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     public int execute(
             final Path directory, final String runtimeId, final String prompt, final Map<String, String> credentials) {
+        return execute(directory, runtimeId, prompt, credentials, null, Map.of());
+    }
+
+    public int execute(
+            final Path directory,
+            final String runtimeId,
+            final String prompt,
+            final Map<String, String> credentials,
+            final Path serviceSettings,
+            final Map<String, String> gatewaySecrets) {
+        if (services == null && (serviceSettings != null || gatewaySecrets != null && !gatewaySecrets.isEmpty())) {
+            throw new IllegalArgumentException("Services bundle supplied without restricted services mode");
+        }
+        if (services != null && (serviceSettings == null || gatewaySecrets == null || gatewaySecrets.isEmpty())) {
+            throw new IllegalArgumentException(
+                    "Restricted services mode requires private settings and gateway secrets");
+        }
         if (!RUNTIME_ID.matcher(runtimeId).matches()) {
             throw new IllegalArgumentException("Invalid execution identity");
         }
         for (final var key : credentials.keySet()) {
-            if (!Set.of("GH_TOKEN", "GITHUB_BOT_FORK_TOKEN").contains(key)) {
+            if (!Set.of(
+                            "GH_TOKEN",
+                            "GITHUB_BOT_FORK_TOKEN",
+                            "GITHUB_SOURCE_TOKEN",
+                            "YCA_CONTEXT_TOKEN",
+                            "YCA_CONTEXT_GIT_TOKEN")
+                    .contains(key)) {
                 throw new IllegalArgumentException("Unsupported executor credential variable");
             }
         }
         Process process = null;
         boolean egressStarted = false;
+        boolean servicesStarted = false;
         try {
             final var uid = ((Number) Files.getAttribute(directory, "unix:uid")).intValue();
             final var gid = ((Number) Files.getAttribute(directory, "unix:gid")).intValue();
@@ -88,6 +217,19 @@ public final class DockerExecutionBackend {
             if (egress != null) {
                 egressStarted = true;
                 egress.start(runtimeId);
+            }
+            if (services != null) {
+                final var settings = serviceSettings.toRealPath();
+                final var keyStore = servicesKeyStore.toRealPath();
+                for (final var name : List.of("storage", "workspace", "output", "configuration.json")) {
+                    final var mount = directory.resolve(name).toRealPath();
+                    if (settings.startsWith(mount) || keyStore.startsWith(mount)) {
+                        throw new IllegalArgumentException(
+                                "Services settings and TLS store must remain outside agent mounts");
+                    }
+                }
+                servicesStarted = true;
+                services.start(runtimeId, settings, gatewaySecrets);
             }
             final var command = new ArrayList<>(List.of(
                     executable,
@@ -112,6 +254,9 @@ public final class DockerExecutionBackend {
             }
             if (egress != null) {
                 command.addAll(egress.agentArguments(runtimeId));
+            }
+            if (services != null) {
+                command.addAll(services.agentArguments(runtimeId));
             }
             mount(command, directory.resolve("storage"), "/attempt/storage", false);
             mount(command, directory.resolve("workspace"), "/attempt/workspace", false);
@@ -145,11 +290,8 @@ public final class DockerExecutionBackend {
                     "6291456",
                     "--prompt",
                     prompt));
-            final var builder = new ProcessBuilder(command).redirectErrorStream(true);
-            builder.environment()
-                    .keySet()
-                    .removeIf(key -> !Set.of("PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT", "XDG_RUNTIME_DIR")
-                            .contains(key));
+            final var builder = DockerControlEnvironment.sanitize(new ProcessBuilder(command))
+                    .redirectErrorStream(true);
             builder.environment().putAll(credentials);
             process = builder.start();
             final var running = process;
@@ -198,11 +340,11 @@ public final class DockerExecutionBackend {
         } finally {
             if (process != null && process.isAlive()) {
                 process.destroyForcibly();
-                if (!egressStarted) {
+                if (!egressStarted && !servicesStarted) {
                     stop(runtimeId);
                 }
             }
-            if (egressStarted) {
+            if (egressStarted || servicesStarted) {
                 stop(runtimeId);
             }
         }
@@ -220,12 +362,12 @@ public final class DockerExecutionBackend {
     public void stop(final String runtimeId) {
         final boolean interrupted = Thread.interrupted();
         try {
-            try {
-                stopContainer(runtimeId);
-            } finally {
-                if (egress != null) {
-                    egress.remove(runtimeId);
-                }
+            stopContainer(runtimeId);
+            if (egress != null) {
+                egress.remove(runtimeId);
+            } else {
+                // Recovery is label-based even when this process no longer has services configured.
+                DockerRestrictedServices.stopOwned(executable, timeout, runtimeId);
             }
         } finally {
             if (interrupted) {
@@ -240,59 +382,62 @@ public final class DockerExecutionBackend {
         }
         try {
             // Inspect first: failure is ambiguous unless Docker explicitly reports no such object.
-            final var inspectFile = Files.createTempFile("yca-docker-inspect-", ".log");
+            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            final var inspect = DockerControlEnvironment.sanitize(new ProcessBuilder(
+                            executable, "container", "inspect", "--format", "{{.State.Running}}", runtimeId))
+                    .redirectErrorStream(true)
+                    .start();
             try {
-                final var inspect = new ProcessBuilder(
-                                executable, "container", "inspect", "--format", "{{.State.Running}}", runtimeId)
-                        .redirectErrorStream(true)
-                        .redirectOutput(inspectFile.toFile())
-                        .start();
-                try {
-                    if (!inspect.waitFor(20, TimeUnit.SECONDS)) {
-                        throw new IllegalStateException("Unable to inspect previous executor");
+                final var output = new CompletableFuture<byte[]>();
+                Thread.ofVirtual().start(() -> {
+                    try {
+                        output.complete(inspect.getInputStream().readNBytes(4097));
+                    } catch (final IOException e) {
+                        output.completeExceptionally(e);
                     }
-                    final String response;
-                    final boolean truncated;
-                    try (final var input = Files.newInputStream(inspectFile)) {
-                        // One extra byte prevents a truncated diagnostic from proving absence.
-                        final var bytes = input.readNBytes(4097);
-                        truncated = bytes.length > 4096;
-                        response = new String(bytes, StandardCharsets.UTF_8);
-                    }
-                    if (inspect.exitValue() != 0) {
-                        if (!truncated
-                                && Pattern.compile(
-                                                "(?:Error: |Error response from daemon: )?No such (?:container|object): "
-                                                        + Pattern.quote(runtimeId))
-                                        .matcher(response.strip())
-                                        .matches()) {
-                            return;
-                        }
-                        throw new IllegalStateException("Docker unavailable; executor termination is uncertain");
-                    }
-                    if (response.trim().equals("false")) {
+                });
+                final var bytes = output.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                if (bytes.length > 4096
+                        || !inspect.waitFor(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)) {
+                    throw new IllegalStateException("Docker unavailable; executor termination is uncertain");
+                }
+                final var response = new String(bytes, StandardCharsets.UTF_8);
+                if (inspect.exitValue() != 0) {
+                    if (List.of(
+                                    "No such container: ",
+                                    "No such object: ",
+                                    "Error: No such container: ",
+                                    "Error: No such object: ",
+                                    "Error response from daemon: No such container: ",
+                                    "Error response from daemon: No such object: ")
+                            .stream()
+                            .anyMatch(prefix -> (prefix + runtimeId).equals(response.strip()))) {
                         return;
                     }
-                    if (!response.trim().equals("true")) {
-                        throw new IllegalStateException("Unrecognized executor state; termination is uncertain");
-                    }
-                    final var kill = new ProcessBuilder(executable, "kill", runtimeId)
-                            .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                            .redirectError(ProcessBuilder.Redirect.DISCARD)
-                            .start();
-                    try {
-                        if (!kill.waitFor(20, TimeUnit.SECONDS) || kill.exitValue() != 0) {
-                            throw new IllegalStateException("Unable to terminate previous executor");
-                        }
-                    } finally {
-                        closeClient(kill);
+                    throw new IllegalStateException("Docker unavailable; executor termination is uncertain");
+                }
+                if (response.trim().equals("false")) {
+                    return;
+                }
+                if (!response.trim().equals("true")) {
+                    throw new IllegalStateException("Unrecognized executor state; termination is uncertain");
+                }
+                final var kill = DockerControlEnvironment.sanitize(new ProcessBuilder(executable, "kill", runtimeId))
+                        .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                        .redirectError(ProcessBuilder.Redirect.DISCARD)
+                        .start();
+                try {
+                    if (!kill.waitFor(20, TimeUnit.SECONDS) || kill.exitValue() != 0) {
+                        throw new IllegalStateException("Unable to terminate previous executor");
                     }
                 } finally {
-                    closeClient(inspect);
+                    closeProbe(kill);
                 }
             } finally {
-                Files.deleteIfExists(inspectFile);
+                closeProbe(inspect);
             }
+        } catch (final ExecutionException | TimeoutException e) {
+            throw new IllegalStateException("Docker unavailable; executor termination is uncertain");
         } catch (final IOException e) {
             throw new IllegalStateException("Unable to terminate previous executor", e);
         } catch (final InterruptedException e) {

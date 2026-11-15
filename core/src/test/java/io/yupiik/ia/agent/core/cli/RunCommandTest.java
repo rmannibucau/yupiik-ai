@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -196,7 +197,8 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", "", "", "", "", 1000000),
+                new RunCommand.RunConf(
+                        "say hi", "", "", false, "", "collapsed", "", "", "", "", 1000000, defaultCorrectionPrompt()),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -278,7 +280,8 @@ class RunCommandTest {
                                 "",
                                 result.toString(),
                                 "summary|failure",
-                                1000000),
+                                1000000,
+                                defaultCorrectionPrompt()),
                         testRegistry(),
                         runtimeFactory(loop, new PermissionService(null)),
                         store,
@@ -302,13 +305,30 @@ class RunCommandTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                calls.incrementAndGet();
+                if (calls.incrementAndGet() == 2) {
+                    assertEquals("custom correction: result requires a nonblank string field: summary|failure", prompt);
+                }
                 return "claimed success without artifact";
             }
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf(
-                        "task", "", "", false, "", "hidden", "", "", result.toString(), "summary|failure", 1000000),
+                        "task",
+                        "",
+                        "",
+                        false,
+                        "",
+                        "hidden",
+                        "",
+                        "",
+                        result.toString(),
+                        "summary|failure",
+                        1000000,
+                        new RunCommand$RunConf$FusionConfigurationFactory(Configuration.of(Map.of(
+                                        "run.prompt", "task",
+                                        "run.result-correction-prompt", "custom correction: {{{validationError}}}")))
+                                .get()
+                                .resultCorrectionPrompt()),
                 testRegistry(),
                 runtimeFactory(loop, new PermissionService(null)),
                 sessionStore(),
@@ -350,7 +370,8 @@ class RunCommandTest {
                                 "",
                                 result.toString(),
                                 "summary|failure",
-                                1000000),
+                                1000000,
+                                defaultCorrectionPrompt()),
                         testRegistry(),
                         runtimeFactory(loop, new PermissionService(null)),
                         sessionStore(),
@@ -390,7 +411,8 @@ class RunCommandTest {
                         "",
                         temp.resolve("missing.json").toString(),
                         "summary|failure",
-                        1000000),
+                        1000000,
+                        defaultCorrectionPrompt()),
                 registry,
                 runtimeFactory(loop, new PermissionService(null)),
                 sessionStore(),
@@ -420,7 +442,19 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "s-2", "", false, "", "collapsed", "", "", "", "", 1000000),
+                new RunCommand.RunConf(
+                        "say hi",
+                        "s-2",
+                        "",
+                        false,
+                        "",
+                        "collapsed",
+                        "",
+                        "",
+                        "",
+                        "",
+                        1000000,
+                        defaultCorrectionPrompt()),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -464,7 +498,19 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "build", "collapsed", "", "", "", "", 1000000),
+                new RunCommand.RunConf(
+                        "say hi",
+                        "",
+                        "",
+                        false,
+                        "build",
+                        "collapsed",
+                        "",
+                        "",
+                        "",
+                        "",
+                        1000000,
+                        defaultCorrectionPrompt()),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -508,7 +554,8 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", "", "", "", "", 1000000),
+                new RunCommand.RunConf(
+                        "say hi", "", "", false, "", "collapsed", "", "", "", "", 1000000, defaultCorrectionPrompt()),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -543,7 +590,19 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "plan", "collapsed", "", "", "", "", 1000000),
+                new RunCommand.RunConf(
+                        "say hi",
+                        "",
+                        "",
+                        false,
+                        "plan",
+                        "collapsed",
+                        "",
+                        "",
+                        "",
+                        "",
+                        1000000,
+                        defaultCorrectionPrompt()),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -584,7 +643,19 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "plan", "collapsed", "", "", "", "", 1000000),
+                new RunCommand.RunConf(
+                        "say hi",
+                        "",
+                        "",
+                        false,
+                        "plan",
+                        "collapsed",
+                        "",
+                        "",
+                        "",
+                        "",
+                        1000000,
+                        defaultCorrectionPrompt()),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -620,7 +691,8 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "", "shown", "", "", "", "", 1000000),
+                new RunCommand.RunConf(
+                        "say hi", "", "", false, "", "shown", "", "", "", "", 1000000, defaultCorrectionPrompt()),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -653,7 +725,8 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, "", "shown", "", "", "", "", 1000000),
+                new RunCommand.RunConf(
+                        "say hi", "", "", false, "", "shown", "", "", "", "", 1000000, defaultCorrectionPrompt()),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -676,7 +749,19 @@ class RunCommandTest {
                 .build();
         final var shellRegistry = testRegistry();
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "nope", false, "", "collapsed", "", "", "", "", 1000000),
+                new RunCommand.RunConf(
+                        "say hi",
+                        "",
+                        "nope",
+                        false,
+                        "",
+                        "collapsed",
+                        "",
+                        "",
+                        "",
+                        "",
+                        1000000,
+                        defaultCorrectionPrompt()),
                 shellRegistry,
                 runtimeFactory(stubAgentLoop(), new PermissionService(null)),
                 sessionStore(),
@@ -703,6 +788,12 @@ class RunCommandTest {
                 return "ok";
             }
         };
+    }
+
+    private static String defaultCorrectionPrompt() {
+        return new RunCommand$RunConf$FusionConfigurationFactory(Configuration.of(Map.of("run.prompt", "task")))
+                .get()
+                .resultCorrectionPrompt();
     }
 
     private static SessionRuntimeFactory runtimeFactory(final AgentLoop loop, final PermissionService permissions) {
@@ -760,7 +851,18 @@ class RunCommandTest {
         final var metricsFile = temp.resolve("metrics1.txt");
         final var command = new RunCommand(
                 new RunCommand.RunConf(
-                        "say hi", "", "", false, "", "collapsed", metricsFile.toString(), "", "", "", 1000000),
+                        "say hi",
+                        "",
+                        "",
+                        false,
+                        "",
+                        "collapsed",
+                        metricsFile.toString(),
+                        "",
+                        "",
+                        "",
+                        1000000,
+                        defaultCorrectionPrompt()),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -801,7 +903,18 @@ class RunCommandTest {
         final var metricsFile = temp.resolve("metrics2.txt");
         final var command = new RunCommand(
                 new RunCommand.RunConf(
-                        "say hi", "", "", false, "", "collapsed", metricsFile.toString(), "", "", "", 1000000),
+                        "say hi",
+                        "",
+                        "",
+                        false,
+                        "",
+                        "collapsed",
+                        metricsFile.toString(),
+                        "",
+                        "",
+                        "",
+                        1000000,
+                        defaultCorrectionPrompt()),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),

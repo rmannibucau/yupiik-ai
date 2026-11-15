@@ -20,11 +20,15 @@ import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.service.BotAudit;
+import io.yupiik.ia.agent.github.service.FixRequestAuthority;
 import io.yupiik.ia.agent.github.store.MutableTask;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import java.time.Clock;
+import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -41,18 +45,22 @@ public class CreateCommand implements Runnable {
     private final TaskStore store;
     private final BotAudit audit;
     private final Clock clock;
+    private final FixRequestAuthority fixRequests;
 
     public CreateCommand(
             final Options options,
             final JsonMapper json,
             final TaskStore store,
             final BotAudit audit,
-            final Clock clock) {
+            final Clock clock,
+            final GitHubClient github,
+            final FixConfiguration fix) {
         this.options = options;
         this.json = json;
         this.clock = clock;
         this.store = store;
         this.audit = audit;
+        this.fixRequests = new FixRequestAuthority(github, fix);
     }
 
     @RootConfiguration("-")
@@ -65,7 +73,7 @@ public class CreateCommand implements Runnable {
 
             @Property(
                     defaultValue = "io.yupiik.ia.agent.github.model.TaskKind.solve",
-                    documentation = "Task kind: solve, review or help.")
+                    documentation = "Task kind: solve, review, help or fix (explicit opt-in, open PR only).")
             TaskKind kind,
 
             @Property(defaultValue = "\"\"", documentation = "Manual request text (trusted operator input).")
@@ -90,6 +98,10 @@ public class CreateCommand implements Runnable {
         task.request(options.request());
         task.createdAt(clock.instant().toString());
         task.reference("https://github.com/" + options.repository() + "/issues/" + options.number());
+        if (options.kind() == TaskKind.fix) {
+            task.reference("https://github.com/" + options.repository() + "/pull/" + options.number());
+            task.recovery(Map.of("fixTarget", fixRequests.pinRequest(task.document())));
+        }
         if (options.dryRun()) {
             LOGGER.info(json.toString(task.document()));
             return;

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.github.command;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
 
+import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
 import io.yupiik.ia.agent.github.service.Poller;
 import java.util.ArrayList;
@@ -27,13 +28,14 @@ class PollCommandTest {
     @Test
     void passesEachCommandsOptionsToTheSharedPoller() {
         final var received = new ArrayList<PollOptions>();
-        final var poller = new Poller(null, null, null, null, null, null, null, null, null) {
-            @Override
-            public int poll(final PollOptions options) {
-                received.add(options);
-                return 0;
-            }
-        };
+        final var poller =
+                new Poller(null, null, null, null, null, null, null, null, null, new FixConfiguration(false, "")) {
+                    @Override
+                    public int poll(final PollOptions options) {
+                        received.add(options);
+                        return 0;
+                    }
+                };
         final var defaults = new PollCommand$Options$FusionConfigurationFactory(ignored -> Optional.empty()).get();
         final var custom = new PollCommand.Options(new PollOptions(
                 "2026-01-01T00:00:00Z",
