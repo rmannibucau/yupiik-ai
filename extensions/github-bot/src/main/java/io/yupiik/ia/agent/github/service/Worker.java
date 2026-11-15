@@ -54,7 +54,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -425,16 +424,7 @@ public class Worker {
     }
 
     private boolean authorized(final TaskDocument task) {
-        if (task.actorId() != null
-                && Arrays.stream(conf.authorization().userIds().split(","))
-                        .map(String::trim)
-                        .noneMatch(id -> id.equals(String.valueOf(task.actorId())))) {
-            return false;
-        }
-        if (task.actorId() != null && !authorization.allows(task.actorId(), null)) {
-            return false;
-        }
-        return true;
+        return task.actorId() == null || authorization.allows(task.repository(), task.actorId(), null);
     }
 
     private void recover(final TaskDocument task, final WorkerOptions options) {

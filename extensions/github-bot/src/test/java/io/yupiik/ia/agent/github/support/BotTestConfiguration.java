@@ -55,7 +55,7 @@ public final class BotTestConfiguration {
 
     public static GithubBotConfiguration configuration(final String home, final String login, final String teams) {
         return new GithubBotConfiguration(
-                home, null, login, 0, null, new GithubBotConfiguration.Authorization("42", teams), null);
+                home, null, login, 0, null, new GithubBotConfiguration.Authorization("42", teams, false, 7200), null);
     }
 
     public static TaskStore store(final GithubBotConfiguration conf, final JsonMapper json) {
@@ -67,7 +67,7 @@ public final class BotTestConfiguration {
     }
 
     public static TeamAuthorization authorization(final GitHubClient github, final String teams) {
-        return new TeamAuthorization(github, configuration("", "bot", teams));
+        return new TeamAuthorization(github, configuration("", "bot", teams), CLOCK);
     }
 
     public static ReviewPublisher reviewPublisher(
@@ -93,7 +93,7 @@ public final class BotTestConfiguration {
                 json,
                 execution,
                 audit(conf, json),
-                new TeamAuthorization(github, conf),
+                new TeamAuthorization(github, conf, CLOCK),
                 new AttemptPreparation(json),
                 new GithubPrivateContext(github, json),
                 new GithubContextSnapshot(github, json),
@@ -110,7 +110,7 @@ public final class BotTestConfiguration {
             final GitHubClient github,
             final Clock clock,
             final BotAudit audit) {
-        return new ReviewSummaryPoller(conf, store, github, clock, audit, new TeamAuthorization(github, conf));
+        return new ReviewSummaryPoller(conf, store, github, clock, audit, new TeamAuthorization(github, conf, clock));
     }
 
     public static DiscussionPoller discussionPoller(
@@ -120,7 +120,13 @@ public final class BotTestConfiguration {
             final Clock clock,
             final BotAudit audit) {
         return new DiscussionPoller(
-                conf, store, github, clock, audit, new TeamAuthorization(github, conf), new DiscussionClient(github));
+                conf,
+                store,
+                github,
+                clock,
+                audit,
+                new TeamAuthorization(github, conf, clock),
+                new DiscussionClient(github));
     }
 
     public static Poller poller(
@@ -135,7 +141,7 @@ public final class BotTestConfiguration {
                 github,
                 clock,
                 audit,
-                new TeamAuthorization(github, conf),
+                new TeamAuthorization(github, conf, clock),
                 reviewSummaryPoller(conf, store, github, clock, audit),
                 discussionPoller(conf, store, github, clock, audit),
                 new RepositoryDiscovery(conf, github, clock));

@@ -13,7 +13,7 @@ WARNING: This is an initial implementation, not the complete production architec
 Do not deploy unattended production solving before validating permissions and recovery in a disposable repository.
 
 The CLI discovers repositories, filters requests and stores durable tasks.
-It supports PAT or GitHub App authentication and authorizes users by immutable numeric ID.
+It supports PAT or GitHub App authentication and authorizes users through explicit immutable numeric IDs or effective repository-writer permissions.
 
 Workers execute tasks through Docker, Nono or Kubernetes.
 Choose strict host publication or separately provisioned agent credentials.
@@ -56,8 +56,15 @@ It leaves unrestricted Docker egress explicit and does not require Nono or Kuber
 
 === Authorization and polling
 
-An empty authorization list denies all polling.
 Authorization uses immutable numeric GitHub user IDs, not mutable login names.
+Explicit `github.authorization.userIds` are unconditional overrides that bypass repository permissions, optional teams and all authorization API calls; bot/self filtering still applies.
+By default, `github.authorization.allowRepositoryWriters=true` also allows nonlisted users with effective write or admin permission on the exact target repository, subject to optional configured teams.
+Effective permissions include direct, team, organization and enterprise grants, not mere organization membership; maintain maps to write, triage maps to read, and custom roles use their base permission.
+An empty ID list works with repository-writer authorization enabled; setting the flag to `false` restores list-only behavior.
+Aggregate decisions, including identity and team checks, are cached in a bounded, thread-safe, process-local cache with a fixed default TTL of `github.authorization.permissionsCacheTtlSeconds=7200` and no cross-process persistence.
+Permission grants or revocations can therefore take up to two hours to take effect, and the worker reuses unexpired decisions in the same process.
+Zero disables the cache and negative TTL values are rejected.
+See xref:configuration.adoc#_request_authorization[request authorization] for the full policy and authorization API failure handling.
 
 Issue bodies, issue comments and review comments are scanned independently.
 Task-marked bot output is never parsed as an invocation.

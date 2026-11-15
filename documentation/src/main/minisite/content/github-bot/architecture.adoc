@@ -55,7 +55,7 @@ sequenceDiagram
     CLI->>Poll: Run one scan
     Poll->>API: Discover and select repositories
     Poll->>API: Read issue and inline-comment feeds
-    Poll->>Poll: Parse visible mentions and authorize immutable user IDs
+    Poll->>Poll: Parse mentions, filter bot/self and apply ID override or repository-writer policy
     Poll->>Store: Atomically record receipt and enqueue typed task
     par Virtual review scan
         Poll->>Optional: Poll submitted review bodies
@@ -72,7 +72,25 @@ sequenceDiagram
 
 Receipts survive task deletion, so overlap scans do not recreate old invocations.
 Each feed maintains its own cursor, and incomplete scans do not advance completed watermarks.
-Authentication and transport failures still fail the scan; only an explicit repository-disabled Discussion capability is skipped.
+Feed authentication and transport failures still fail the scan; only an explicit repository-disabled Discussion capability is skipped.
+Authorization API failures follow the separate deny-path and rate-limit rules below.
+
+=== Authorization decisions and cache
+
+The shared authorization policy runs at enqueue and before worker execution, retaining bot/self filtering.
+Explicit immutable `github.authorization.userIds` are unconditional overrides that bypass repository permissions, optional teams and every authorization API call.
+For nonlisted users, `github.authorization.allowRepositoryWriters=true` is required along with effective write or admin permission on the exact target repository and any optional configured teams restriction.
+The repository permission endpoint includes effective direct, team, organization and enterprise grants, not mere organization membership.
+Maintain maps to write, triage maps to read, and custom roles use their base permission.
+Repository-writer authorization defaults to enabled, so an empty ID list is valid; disabling it restores list-only authorization.
+
+A bounded, thread-safe, process-local cache stores aggregate decisions, including identity and team checks, with a fixed TTL rather than extending expiry on access.
+`github.authorization.permissionsCacheTtlSeconds` defaults to `7200`, zero disables caching and negative values are rejected.
+There is no cross-process persistence or sharing, and a worker reuses an unexpired decision in its process rather than necessarily making fresh API calls.
+With the default TTL, permission grants and revocations or relevant identity/team changes can take up to two hours to affect authorization.
+
+HTTP 401 and non-rate-limit HTTP 403 during authorization checks log at INFO that the host token does not enable the required checks and deny that path; HTTP 404 also denies it.
+Rate-limit responses retain existing rate-limit handling rather than becoming ordinary cached permission denials.
 
 == Execution and publication sequence
 
@@ -89,7 +107,7 @@ sequenceDiagram
     participant API as GitHub client
     CLI->>Worker: Process at most one eligible task
     Worker->>Store: Acquire slot and task lease, reread authoritative task
-    Worker->>Worker: Recheck requesting user authorization
+    Worker->>Worker: Apply authorization, reusing an unexpired process-local decision
     Worker->>Context: Prepare private attempt and bounded context
     Context->>API: Fetch source and conversation context
     Worker->>Store: Persist runtime identity and running state before launch

@@ -245,8 +245,33 @@ Use a distinct agent credential for upstream reads, pull requests and reviews, a
 
 Optional archived and fork exclusions apply after inclusion, even for explicitly included repositories.
 
-Optional `github.authorization.teams` adds an active-team-membership restriction to the immutable-ID allowlist, at enqueue and again before execution.
-User logins are resolved from their immutable IDs; team API failures fail closed.
+=== Request authorization
+
+[cols="1,1,2",options="header"]
+|===
+|Setting |Default |Contract
+|`github.authorization.userIds` |Empty |Explicit immutable numeric GitHub user IDs with an unconditional authorization override; bypasses repository permissions, optional teams and all authorization API calls, but not bot/self filtering
+|`github.authorization.allowRepositoryWriters` |`true` |Allows nonlisted users with effective write or admin permission on the exact target repository, subject to optional configured teams
+|`github.authorization.teams` |Empty |Optional active-team-membership restriction for nonlisted repository writers only; never restricts explicitly listed IDs
+|`github.authorization.permissionsCacheTtlSeconds` |`7200` |Fixed authorization decision TTL in seconds; zero disables caching and negative values are rejected
+|===
+
+Authorization uses immutable numeric user IDs, not mutable login names.
+After bot/self filtering, an explicitly listed ID is accepted without identity resolution, repository-permission lookups or team-membership API calls.
+A nonlisted user must have `github.authorization.allowRepositoryWriters=true`, effective write or admin permission on the exact target repository and, when configured, satisfy the optional teams restriction.
+The repository permission endpoint accounts for effective direct, team, organization and enterprise grants; mere organization membership is not sufficient.
+Maintain maps to write, triage maps to read, and custom repository roles are evaluated by their base permission.
+An empty `userIds` list works with repository-writer authorization enabled; setting `github.authorization.allowRepositoryWriters=false` restores list-only behavior, where an empty list denies all requesters.
+
+Aggregate authorization decisions, including identity resolution and team checks, use a bounded, thread-safe, process-local cache with a fixed two-hour TTL by default.
+Cache hits do not extend the TTL, and there is no cross-process persistence or cache sharing.
+Permission grants and revocations, including identity or team changes affecting the decision, can take up to two hours to be reflected with the default TTL.
+The worker applies authorization again before execution but reuses an unexpired decision in the same process rather than forcing fresh API checks.
+Set `github.authorization.permissionsCacheTtlSeconds=0` to disable this caching.
+
+Authorization checks receiving HTTP 401 or a non-rate-limit HTTP 403 log at INFO that the host token does not enable the required checks and deny that authorization path.
+HTTP 404 denies the path as well.
+Rate-limit responses preserve the existing rate-limit handling rather than being treated as ordinary authorization denials.
 
 Optional `worker.provisionFork` allows organization fork creation with the host credential; personal-account destinations must still be provisioned manually.
 
@@ -393,7 +418,8 @@ Provision host Discussions read permission to discover and read threads, and Dis
 The poller recognizes `help` and `solve` mentions in Discussion bodies, top-level comments and replies.
 Discussion `review` requests are unsupported and do not enqueue work.
 
-Only `User` actors with an allowed immutable numeric user ID are eligible, with the optional team restriction applied as well.
+Only `User` actors with an immutable numeric user ID satisfying the shared request authorization policy are eligible.
+Explicitly listed IDs bypass repository-permission and optional team checks; nonlisted users require enabled repository-writer authorization and any configured teams restriction.
 Deleted authors, non-user actors, the configured self login, task-marked output and quoted or code invocation examples do not grant authority to enqueue work.
 Authorization is checked again by the worker; a mention alias is not a separately authenticated bot identity.
 

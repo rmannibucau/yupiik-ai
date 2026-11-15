@@ -92,15 +92,32 @@ public record GithubBotConfiguration(
                             + " To find your own ID, open https://api.github.com/users/YOUR_USERNAME"
                             + " and copy the numeric 'id' field (not 'node_id')."
                             + " IDs remain stable when usernames change."
-                            + " Empty denies all.")
+                            + " Listed IDs are an unconditional authorization override, independent of repository"
+                            + " permissions and teams.")
             String userIds,
 
             @Property(
                     defaultValue = "\"\"",
                     documentation =
-                            "Optional comma-separated org/team slugs. Authorized immutable IDs must additionally be"
-                                    + " active members of at least one team; API errors fail closed.")
-            String teams) {}
+                            "Optional comma-separated org/team slugs restricting only the repository-writer path."
+                                    + " Writers must be active members of at least one team; API errors fail closed.")
+            String teams,
+
+            @Property(
+                    defaultValue = "true",
+                    documentation = "Authorize actors with write permission on the target repository.")
+            boolean allowRepositoryWriters,
+
+            @Property(
+                    defaultValue = "7200L",
+                    documentation = "Repository permission cache TTL in seconds; zero disables caching.")
+            long permissionsCacheTtlSeconds) {
+        public Authorization {
+            if (permissionsCacheTtlSeconds < 0) {
+                throw new IllegalArgumentException("permissionsCacheTtlSeconds must be nonnegative");
+            }
+        }
+    }
 
     public record Repositories(
             @Property(defaultValue = "\"\"", documentation = "Comma-separated explicit owner/repository names.")

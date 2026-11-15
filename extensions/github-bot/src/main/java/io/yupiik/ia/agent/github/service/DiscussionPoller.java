@@ -92,7 +92,7 @@ public class DiscussionPoller {
                 .map(String::trim)
                 .filter(it -> !it.isEmpty())
                 .collect(Collectors.toSet());
-        if (allowed.isEmpty()
+        if ((allowed.isEmpty() && !conf.authorization().allowRepositoryWriters())
                 || allowed.stream().anyMatch(it -> !POSITIVE_ID.matcher(it).matches())) {
             throw new IllegalStateException("Authorized immutable numeric user IDs required");
         }
@@ -127,10 +127,10 @@ public class DiscussionPoller {
                 for (final var id : known(repo + "/discussion:known/")) {
                     final var discussion = discussions.discussion(id);
                     validateRepository(repo, discussion);
-                    created += enqueue(discussion, null, since, allowed, authorization, batch);
-                    created += comments(discussion, since, allowed, authorization, batch, options);
+                    created += enqueue(discussion, null, since, batch);
+                    created += comments(discussion, since, batch, options);
                     for (final var commentId : known(repo + "/discussion:threads/" + id + "/")) {
-                        created += replies(discussion, commentId, since, allowed, authorization, batch, options);
+                        created += replies(discussion, commentId, since, batch, options);
                     }
                 }
             }
@@ -167,8 +167,6 @@ public class DiscussionPoller {
     private int comments(
             final DiscussionClient.Discussion discussion,
             final Instant since,
-            final Set<String> allowed,
-            final TeamAuthorization authorization,
             final String batch,
             final PollOptions options) {
         final var key = discussion.repository() + "/discussion:comments/" + discussion.id();
@@ -178,7 +176,7 @@ public class DiscussionPoller {
             final var page = discussions.comments(discussion.id(), after);
             for (final var comment : page.nodes()) {
                 discussion.validate(comment, null);
-                created += enqueue(discussion, comment, since, allowed, authorization, batch);
+                created += enqueue(discussion, comment, since, batch);
             }
             // Register threads before advancing the comments cursor, even when reply reads later fail.
             store.transaction(state -> {
@@ -204,8 +202,6 @@ public class DiscussionPoller {
             final DiscussionClient.Discussion discussion,
             final String commentId,
             final Instant since,
-            final Set<String> allowed,
-            final TeamAuthorization authorization,
             final String batch,
             final PollOptions options) {
         final var key = discussion.repository() + "/discussion:replies/" + commentId;
@@ -215,7 +211,7 @@ public class DiscussionPoller {
             final var page = discussions.replies(commentId, after);
             for (final var reply : page.nodes()) {
                 discussion.validate(reply, commentId);
-                created += enqueue(discussion, reply, since, allowed, authorization, batch);
+                created += enqueue(discussion, reply, since, batch);
             }
             store.transaction(state -> {
                 saveNext(state, key, page.next());
@@ -233,8 +229,6 @@ public class DiscussionPoller {
             final DiscussionClient.Discussion discussion,
             final DiscussionClient.Comment comment,
             final Instant since,
-            final Set<String> allowed,
-            final TeamAuthorization authorization,
             final String batch) {
         final var body = comment == null ? discussion.body() : comment.body();
         final var updated = comment == null ? discussion.updatedAt() : comment.updatedAt();
@@ -247,9 +241,8 @@ public class DiscussionPoller {
         final var actor = comment == null ? discussion.author() : comment.author();
         if (!"User".equals(actor.type())
                 || actor.databaseId() == null
-                || !allowed.contains(actor.databaseId())
                 || conf.login().equalsIgnoreCase(actor.login())
-                || !authorization.allows(actor.databaseId(), actor.login())) {
+                || !authorization.allows(discussion.repository(), actor.databaseId(), actor.login())) {
             if (audit != null) {
                 final var event = MutableTask.create();
                 event.repository(discussion.repository());

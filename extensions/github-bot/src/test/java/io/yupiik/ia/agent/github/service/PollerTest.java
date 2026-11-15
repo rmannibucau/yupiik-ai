@@ -70,7 +70,7 @@ class PollerTest {
                 0,
                 new GithubBotConfiguration.Auth(
                         GithubBotConfiguration.AuthType.pat, "GH_TOKEN", "", 0, "", "GH_AGENT_TOKEN"),
-                new GithubBotConfiguration.Authorization(ids, ""),
+                new GithubBotConfiguration.Authorization(ids, "", false, 7200),
                 new GithubBotConfiguration.Repositories(
                         repositories, "", "", "", List.of(RepositorySelector.Visibility.values()), false, false));
     }
@@ -582,7 +582,7 @@ class PollerTest {
                     github,
                     Clock.systemUTC(),
                     null,
-                    new TeamAuthorization(github, conf),
+                    new TeamAuthorization(github, conf, Clock.systemUTC()),
                     reviews,
                     discussions,
                     new RepositoryDiscovery(conf, github, Clock.systemUTC()));

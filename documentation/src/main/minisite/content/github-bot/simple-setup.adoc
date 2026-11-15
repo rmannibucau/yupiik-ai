@@ -75,7 +75,7 @@ Do not paste secrets into this table or shell history.
 |State directory |`/var/lib/yca/state`
 |Attempt directory |`/var/lib/yca/attempts`, separate from the state directory
 |GitHub login |Actual author login for the dispatcher credential, not an invented mention alias
-|Authorized users |Comma-separated immutable numeric GitHub user IDs
+|Explicit authorization overrides |Comma-separated immutable numeric GitHub user IDs; nonlisted repository writers are also eligible by default
 |Repositories |Explicit `owner/repository` entries; begin with a disposable repository
 |Fork owner |A distinct owner with a verified fork of each upstream repository
 |Agent image |An approved image digest, or an immutable local image ID when transferred as a tar archive
@@ -213,6 +213,10 @@ Grant only the selected repositories and required operations.
 * For strict solve, also grant the dispatcher contents-write access to the fork and PR-write access upstream.
 * For team-based authorization, provide the corresponding organization membership visibility/permissions.
 
+For nonlisted requesters, ensure the host token can query effective permissions on the exact target repository and resolve the requester's immutable ID, plus team membership when teams are configured.
+HTTP 401 or non-rate-limit HTTP 403 on these authorization checks logs at INFO that the token does not enable the checks and denies that path; HTTP 404 also denies it, while rate-limit handling is preserved.
+Explicitly listed IDs bypass all authorization API calls, so testing only the listed requester does not validate repository-writer or team checks.
+
 With fine-grained PATs, verify that a single credential can actually access both upstream and fork.
 Cross-owner access restrictions can require a different credential strategy or GitHub App installation arrangement.
 Do not assume permissions from token labels alone: test the actual endpoints and selected repositories.
@@ -256,6 +260,14 @@ Set `GITHUB_EXECUTOR_DOCKER_IMAGE` to the recorded `sha256:...` local image ID o
 
 Explicit repositories are comma-separated; start with just one disposable repository.
 The actual publishing login and an authorized human requester should normally be different accounts because self-authored invocations are ignored.
+The `GITHUB_AUTHORIZATION_USERIDS` entry below is an unconditional authorization override, bypassing repository permissions and optional configured teams but not bot/self filtering.
+The default `github.authorization.allowRepositoryWriters=true` also admits nonlisted users with effective write or admin permission on the exact target repository, subject to any configured teams restriction.
+Effective grants can be direct or inherited through a team, organization or enterprise, but mere organization membership is insufficient; maintain maps to write, triage maps to read, and custom roles use their base permission.
+Omit the ID entry to authorize only qualifying repository writers, or set `GITHUB_AUTHORIZATION_ALLOWREPOSITORYWRITERS=false` for list-only authorization.
+An empty ID list denies all requesters only in list-only mode.
+The bounded, thread-safe, process-local cache holds aggregate decisions including identity and team checks for a fixed two hours by default, without cross-process persistence.
+Workers reuse unexpired decisions in the same process, so permission grants or revocations can take up to two hours to affect authorization.
+Set `GITHUB_AUTHORIZATION_PERMISSIONSCACHETTLSECONDS=0` to disable caching; the default is `7200` and negative values are rejected.
 
 [source,bash]
 ----

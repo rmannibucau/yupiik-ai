@@ -199,11 +199,20 @@ Adapt trusted executable paths to your host.
 The state directory is never exposed to an agent, and the attempts root must not be within it.
 
 Use `gh api users/YOUR_LOGIN --jq .id` to find your immutable numeric ID.
-An empty authorization list fails closed.
+The explicit ID above is an unconditional authorization override that bypasses repository permissions, optional teams and all authorization API calls, while bot/self filtering remains.
+By default, `github.authorization.allowRepositoryWriters=true` also admits nonlisted users with effective write or admin permission on the exact target repository and any optional configured teams restriction.
+The repository permission endpoint accounts for direct, team, organization and enterprise effective grants, not mere organization membership; maintain maps to write, triage maps to read, and custom roles use their base permission.
+An empty ID list works with repository-writer authorization enabled; set `GITHUB_AUTHORIZATION_ALLOWREPOSITORYWRITERS=false` to restore list-only behavior, where an empty list denies all requesters.
+Aggregate authorization decisions, including identity and team checks, use a bounded, thread-safe, process-local cache with a fixed two-hour TTL and no cross-process persistence.
+Workers reuse unexpired decisions in the same process, so permission grants or revocations can take up to two hours to take effect.
+`github.authorization.permissionsCacheTtlSeconds` defaults to `7200`; set `GITHUB_AUTHORIZATION_PERMISSIONSCACHETTLSECONDS=0` to disable caching, and do not use negative values, which are rejected.
 
 Use xref:configuration.adoc[the generated configuration and CLI references] for supported fields and defaults, not invented launcher options.
 
 Provision a host token with metadata/issues/pull-request read access and final publication permissions appropriate to the tasks you enable.
+For nonlisted requesters, the token must also support immutable-ID resolution, effective repository-permission checks and any configured team-membership checks.
+Authorization HTTP 401 or non-rate-limit HTTP 403 logs at INFO that the token does not enable the required checks and denies that path; HTTP 404 also denies it, while rate-limit handling is preserved.
+Testing an explicitly listed requester does not validate these API checks because the override bypasses them.
 Keep it in a secret manager or private environment file, never command-line arguments:
 
 [source,bash]

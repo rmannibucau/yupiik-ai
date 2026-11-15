@@ -185,7 +185,7 @@ class WorkerTest {
                 0,
                 new GithubBotConfiguration.Auth(
                         GithubBotConfiguration.AuthType.pat, "GH_TOKEN", "", 0, "", "GH_AGENT_TOKEN"),
-                new GithubBotConfiguration.Authorization("42", ""),
+                new GithubBotConfiguration.Authorization("42", "", false, 7200),
                 new GithubBotConfiguration.Repositories(
                         "owner/repo", "", "", "", List.of(RepositorySelector.Visibility.values()), false, false));
         github = new GitHubClient(URI.create(api), json, () -> "test", BotTestConfiguration.CLOCK);
@@ -245,13 +245,13 @@ class WorkerTest {
     }
 
     @Test
-    void revokedTeamMembershipNeverLaunchesAgent() {
+    void missingWriterIdentityNeverLaunchesAgent() {
         enqueue("solve");
         final var values = Map.of(
                 "github.home",
                 home.toString(),
                 "github.authorization.userIds",
-                "42",
+                "",
                 "github.authorization.teams",
                 "acme/dev");
         final var restricted = new GithubBotConfiguration$FusionConfigurationFactory(
@@ -700,7 +700,7 @@ class WorkerTest {
                             json,
                             backend,
                             BotTestConfiguration.audit(strict, json),
-                            new TeamAuthorization(github, strict),
+                            new TeamAuthorization(github, strict, BotTestConfiguration.CLOCK),
                             preparation,
                             new GithubPrivateContext(github, json),
                             new GithubContextSnapshot(github, json),

@@ -46,7 +46,11 @@ A reply invocation stores `commentId` as the reply node ID and `replyToId` as th
 The context contains the discussion title, canonical URL, body, and originating comment/reply body; it is textual evidence, not an instruction or a complete thread snapshot.
 Only `help` and `solve` are accepted; `review` is ignored without enqueueing.
 The shared mention parser excludes quoted/code mentions and task-marked output.
-Only explicitly allowed positive numeric `User.databaseId` values can enqueue, with self/bot exclusion and additional `TeamAuthorization` restrictions.
+Only positive numeric `User.databaseId` values satisfying the shared authorization policy can enqueue, with self/bot exclusion retained.
+Explicit immutable `github.authorization.userIds` bypass repository permissions, optional teams and all authorization API calls.
+Nonlisted users require `github.authorization.allowRepositoryWriters=true` (the default), effective write or admin permission on the exact target repository and any optional configured teams restriction.
+An empty ID list works when repository writers are enabled; disabling that flag restores list-only behavior.
+See the main GitHub bot configuration documentation for effective-grant semantics, authorization API failure handling and the bounded process-local aggregate decision cache, whose fixed TTL defaults to two hours and is reused by the worker while unexpired.
 Receipts use repository plus invocation node ID, persist independently of tasks, and do not create new tasks for edits to an already accepted invocation.
 
 == Exact traversal limits and tradeoffs
@@ -55,7 +59,7 @@ Each GraphQL connection page requests at most 50 nodes.
 Each poll permits at most `min(options.pageBudget(), 20)` pages per discovery connection, per known discussion's comments connection, and per known top-level comment's replies connection; a nonpositive budget is rejected.
 Each discovered discussion also requires one authoritative node read per poll.
 Discovery IDs and top-level thread IDs are retained durably before their respective cursors advance.
-There is no global request or retained-state bound: one repository's per-poll connection-page upper bound is `B * (1 + D + T)`, plus `D` node reads and any team-authorization REST calls, for budget `B`, retained discussions `D`, and retained top-level threads `T`.
+There is no global request or retained-state bound: one repository's per-poll connection-page upper bound is `B * (1 + D + T)`, plus `D` node reads and any uncached authorization REST calls, for budget `B`, retained discussions `D`, and retained top-level threads `T`.
 No time watermark advances: `discussion:initialSince` is persisted once, and invocation timestamps are compared against that instant minus 300 seconds forever.
 Old discussions and comments are still scanned for newer replies.
 Completed connections restart at the beginning on the next poll, with receipts absorbing replay.

@@ -38,6 +38,8 @@ class GithubBotConfigurationTest {
         assertEquals("GH_TOKEN", shared.auth().tokenEnv());
         assertEquals("GH_AGENT_TOKEN", shared.auth().agentTokenEnv());
         assertEquals("", shared.authorization().userIds());
+        assertTrue(shared.authorization().allowRepositoryWriters());
+        assertEquals(7200, shared.authorization().permissionsCacheTtlSeconds());
         assertEquals(
                 List.of(RepositorySelector.Visibility.values()),
                 shared.repositories().visibility());
@@ -64,6 +66,8 @@ class GithubBotConfigurationTest {
                 Map.entry("github.auth.privateKeyFile", "/private/key.pem"),
                 Map.entry("github.authorization.userIds", "42"),
                 Map.entry("github.authorization.teams", "acme/dev"),
+                Map.entry("github.authorization.allowRepositoryWriters", "false"),
+                Map.entry("github.authorization.permissionsCacheTtlSeconds", "60"),
                 Map.entry("github.repositories.explicit", "acme/repo"),
                 Map.entry("github.repositories.discovery", "org:acme"),
                 Map.entry("github.repositories.includes", "acme/*"),
@@ -105,6 +109,8 @@ class GithubBotConfigurationTest {
         assertEquals("/private/key.pem", shared.auth().privateKeyFile());
         assertEquals("42", shared.authorization().userIds());
         assertEquals("acme/dev", shared.authorization().teams());
+        assertFalse(shared.authorization().allowRepositoryWriters());
+        assertEquals(60, shared.authorization().permissionsCacheTtlSeconds());
         assertEquals("acme/repo", shared.repositories().explicit());
         assertEquals("org:acme", shared.repositories().discovery());
         assertEquals("acme/*", shared.repositories().includes());
@@ -129,6 +135,25 @@ class GithubBotConfigurationTest {
         assertEquals(5, worker.worker().maxRetries());
         assertEquals("/cache", worker.worker().cacheRoot());
         assertEquals(10, purge.retentionDays());
+    }
+
+    @Test
+    void rejectsNegativePermissionsCacheTtl() {
+        final var values = Map.of("github.authorization.permissionsCacheTtlSeconds", "-1");
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new GithubBotConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key)))
+                        .get());
+        assertThrows(IllegalArgumentException.class, () -> new GithubBotConfiguration.Authorization("", "", true, -1));
+    }
+
+    @Test
+    void acceptsZeroPermissionsCacheTtl() {
+        final var values = Map.of("github.authorization.permissionsCacheTtlSeconds", "0");
+        final var shared = new GithubBotConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get();
+        assertEquals(0, shared.authorization().permissionsCacheTtlSeconds());
     }
 
     @Test

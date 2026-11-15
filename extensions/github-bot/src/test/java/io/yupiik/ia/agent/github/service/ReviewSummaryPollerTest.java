@@ -483,7 +483,7 @@ class ReviewSummaryPollerTest {
         try (final var fixture = new Fixture()) {
             fixture.pulls = List.of(Map.of("number", 12));
             fixture.reviews.put(12, List.of(review(1)));
-            final var conf = fixture.conf(Map.of("teams", "owner/team"));
+            final var conf = fixture.conf(Map.of("userIds", "", "teams", "owner/team", "allowRepositoryWriters", true));
             fixture.membership = "pending";
             assertEquals(
                     0,
@@ -506,7 +506,7 @@ class ReviewSummaryPollerTest {
             assertEquals(0, fixture.poll(conf));
             fixture.resolvedLogin = "human";
             fixture.failTeam.set(true);
-            assertThrows(GitHubClient.HttpException.class, () -> fixture.poll(conf));
+            assertEquals(0, fixture.poll(conf), "Missing token capability must deny without throwing");
             assertTrue(fixture.store
                     .transaction(state ->
                             state.list().stream().map(TaskFixtures::map).toList())
@@ -712,12 +712,13 @@ class ReviewSummaryPollerTest {
             values.put("github.api", api());
             values.put("github.login", "bot");
             values.put("github.authorization.userIds", "42");
+            values.put("github.authorization.allowRepositoryWriters", "false");
             values.put("github.repositories.explicit", "owner/repo");
             values.put("poll.pageBudget", "1");
             values.put("poll.reviews.enabled", "true");
             overrides.forEach((key, value) -> values.put(
                     switch (key) {
-                        case "userIds", "teams" -> "github.authorization." + key;
+                        case "userIds", "teams", "allowRepositoryWriters" -> "github.authorization." + key;
                         case "since", "pageBudget", "parallelism" -> "poll." + key;
                         case "pollReviews" -> "poll.reviews.enabled";
                         default -> throw new IllegalArgumentException("Unsupported setting: " + key);
@@ -739,6 +740,8 @@ class ReviewSummaryPollerTest {
                 int status = 200;
                 if (path.equals("/user/42")) {
                     body = Map.of("id", 42, "login", resolvedLogin);
+                } else if (path.contains("/collaborators/")) {
+                    body = Map.of("permission", "write", "user", Map.of("id", 42, "login", resolvedLogin));
                 } else if (path.startsWith("/orgs/")) {
                     status = failTeam.get() ? 403 : 200;
                     body = Map.of("state", membership);

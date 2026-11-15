@@ -191,12 +191,12 @@ class DiscussionSupportTest {
         try (final var fixture = new Fixture()) {
             fixture.discussion.put("body", "@bot help");
             fixture.member = false;
-            assertEquals(0, fixture.poll(true, "42", "org/team", 1));
+            assertEquals(0, fixture.poller("", "org/team", true).poll(List.of("owner/repo"), fixture.options(true, 1)));
             fixture.member = true;
             fixture.currentLogin = "reused-login";
-            assertEquals(0, fixture.poll(true, "42", "org/team", 1));
+            assertEquals(0, fixture.poller("", "org/team", true).poll(List.of("owner/repo"), fixture.options(true, 1)));
             fixture.currentLogin = "alice";
-            assertEquals(1, fixture.poll(true, "42", "org/team", 1));
+            assertEquals(1, fixture.poller("", "org/team", true).poll(List.of("owner/repo"), fixture.options(true, 1)));
             assertTrue(fixture.restPaths.contains("/user/42"));
             assertTrue(fixture.restPaths.contains("/orgs/org/teams/team/memberships/alice"));
         }
@@ -566,6 +566,8 @@ class DiscussionSupportTest {
                     restPaths.add(path);
                     if (path.equals("/user/42")) {
                         response = Map.of("id", 42, "login", currentLogin);
+                    } else if (path.startsWith("/repos/owner/repo/collaborators/")) {
+                        response = Map.of("permission", "write", "user", Map.of("id", 42, "login", currentLogin));
                     } else if (path.equals("/orgs/org/teams/team/memberships/alice")) {
                         response = Map.of("state", member ? "active" : "pending");
                     } else {
@@ -602,8 +604,18 @@ class DiscussionSupportTest {
         }
 
         private DiscussionPoller poller(final String ids, final String teams) {
+            return poller(ids, teams, false);
+        }
+
+        private DiscussionPoller poller(final String ids, final String teams, final boolean writers) {
             final var conf = new GithubBotConfiguration(
-                    home.toString(), api(), "bot", 0, null, new GithubBotConfiguration.Authorization(ids, teams), null);
+                    home.toString(),
+                    api(),
+                    "bot",
+                    0,
+                    null,
+                    new GithubBotConfiguration.Authorization(ids, teams, writers, 7200),
+                    null);
             return BotTestConfiguration.discussionPoller(conf, store, github, Clock.fixed(NOW, ZoneOffset.UTC), null);
         }
 

@@ -97,7 +97,7 @@ public class ReviewSummaryPoller {
                 .map(String::trim)
                 .filter(it -> !it.isEmpty())
                 .collect(Collectors.toSet());
-        if (allowed.isEmpty()) {
+        if (allowed.isEmpty() && !conf.authorization().allowRepositoryWriters()) {
             throw new IllegalStateException("No authorized immutable user IDs configured; polling denied");
         }
         final var repos = List.copyOf(repositories).stream().distinct().toList();
@@ -125,8 +125,7 @@ public class ReviewSummaryPoller {
             for (int i = 0; i < repos.size(); i += ReviewClient.BATCH_SIZE) {
                 batches.add(repos.subList(i, Math.min(i + ReviewClient.BATCH_SIZE, repos.size())));
             }
-            return PollingTasks.sum(
-                    options.parallelism(), batches, group -> scanBatch(group, since, allowed, batch, options));
+            return PollingTasks.sum(options.parallelism(), batches, group -> scanBatch(group, since, batch, options));
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         } finally {
@@ -135,11 +134,7 @@ public class ReviewSummaryPoller {
     }
 
     private int scanBatch(
-            final List<String> repositories,
-            final Instant since,
-            final Set<String> allowed,
-            final String batch,
-            final PollOptions options) {
+            final List<String> repositories, final Instant since, final String batch, final PollOptions options) {
         // REST continuation URLs cannot be used as GraphQL cursors. Start a conservative traversal
         // in a separate namespace while retaining initialSince and the transport-independent receipts.
         var pending = store.transaction(state -> {
@@ -166,7 +161,7 @@ public class ReviewSummaryPoller {
                 final var page = result.get(repo);
                 for (final var pull : page.nodes()) {
                     if ("OPEN".equals(pull.state())) {
-                        created += reviews(repo, pull, since, allowed, batch, options);
+                        created += reviews(repo, pull, since, batch, options);
                     }
                 }
                 // Failed review requests keep this discovery page eligible for replay.
@@ -187,7 +182,6 @@ public class ReviewSummaryPoller {
             final String repo,
             final ReviewClient.Pull initial,
             final Instant since,
-            final Set<String> allowed,
             final String batch,
             final PollOptions options) {
         final int number = initial.number();
@@ -218,9 +212,7 @@ public class ReviewSummaryPoller {
                 if (parsed.isEmpty()) {
                     continue;
                 }
-                if (!"User".equals(user.type())
-                        || !allowed.contains(user.id())
-                        || conf.login().equalsIgnoreCase(user.login())) {
+                if (!"User".equals(user.type()) || conf.login().equalsIgnoreCase(user.login())) {
                     auditDenied(repo, number, user);
                     continue;
                 }
@@ -229,7 +221,7 @@ public class ReviewSummaryPoller {
                 if (store.transaction(state -> state.receipts().containsKey(receipt))) {
                     continue;
                 }
-                if (!authorization.allows(user.id(), user.login())) {
+                if (!authorization.allows(repo, user.id(), user.login())) {
                     auditDenied(repo, number, user);
                     continue;
                 }

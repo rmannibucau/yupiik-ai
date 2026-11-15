@@ -138,7 +138,7 @@ public class Poller {
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
                 .collect(Collectors.toSet());
-        if (allowed.isEmpty()) {
+        if (allowed.isEmpty() && !conf.authorization().allowRepositoryWriters()) {
             throw new IllegalStateException("No authorized immutable user IDs configured; polling denied");
         }
         final var selected = measured("discovery", this::repositories);
@@ -147,7 +147,7 @@ public class Poller {
                 + " discussionsEnabled=" + options.discussions().enabled()
                 + " searchEnabled=" + options.search().enabled());
         if (!options.search().enabled()) {
-            return direct(options, selected, allowed);
+            return direct(options, selected);
         }
 
         // A quiet search must not move the initial lower bound to the time of the first later hit.
@@ -178,7 +178,7 @@ public class Poller {
                 state.cursors().putIfAbsent(key + ":running", started.toString());
                 return null;
             });
-            final var created = direct(options, selected, allowed);
+            final var created = direct(options, selected);
             if (pending(options, selected, false).isEmpty()
                     && pending(options, selected, true).isEmpty()) {
                 store.transaction(state -> {
@@ -189,26 +189,26 @@ public class Poller {
             }
             return created;
         }
-        return search(options, selected, allowed);
+        return search(options, selected);
     }
 
-    private int direct(final PollOptions options, final List<String> selected, final Set<String> allowed) {
-        final var created = measured("mentions", () -> scanMentions(options, selected, allowed));
+    private int direct(final PollOptions options, final List<String> selected) {
+        final var created = measured("mentions", () -> scanMentions(options, selected));
         return measured("reviews-and-discussions", () -> scanOptional(options, selected, created));
     }
 
-    private int search(final PollOptions options, final List<String> selected, final Set<String> allowed) {
+    private int search(final PollOptions options, final List<String> selected) {
         final var search = new MentionSearch(conf, store, github, clock);
         final var visited = new HashSet<String>();
         final var issueCreated = measured("search-mentions-and-reviews", () -> {
             // Acknowledged candidate pages can leave independent feed/review continuations. Resume
             // those first, even if the parent has since disappeared from search or was edited.
-            int created = scanIssueCandidates(options, pending(options, selected, false), allowed, visited);
+            int created = scanIssueCandidates(options, pending(options, selected, false), visited);
             created += search.poll(
                     selected,
                     MentionSearchClient.Kind.ISSUE,
                     options.pageBudget(),
-                    repos -> scanIssueCandidates(options, repos, allowed, visited));
+                    repos -> scanIssueCandidates(options, repos, visited));
             return created;
         });
         if (!options.discussions().enabled()) {
@@ -229,15 +229,12 @@ public class Poller {
     }
 
     private int scanIssueCandidates(
-            final PollOptions options,
-            final List<String> candidates,
-            final Set<String> allowed,
-            final Set<String> visited) {
+            final PollOptions options, final List<String> candidates, final Set<String> visited) {
         final var selected = candidates.stream().filter(visited::add).toList();
         if (selected.isEmpty()) {
             return 0;
         }
-        final var created = scanMentions(options, selected, allowed);
+        final var created = scanMentions(options, selected);
         return created + (options.reviews().enabled() ? reviews.poll(selected, options) : 0);
     }
 
@@ -285,13 +282,12 @@ public class Poller {
         }
     }
 
-    private int scanMentions(final PollOptions options, final List<String> selected, final Set<String> allowed) {
+    private int scanMentions(final PollOptions options, final List<String> selected) {
         final var batch = UUID.randomUUID().toString();
-        return PollingTasks.sum(options.parallelism(), selected, repo -> scanMentions(options, repo, allowed, batch));
+        return PollingTasks.sum(options.parallelism(), selected, repo -> scanMentions(options, repo, batch));
     }
 
-    private int scanMentions(
-            final PollOptions options, final String repo, final Set<String> allowed, final String batch) {
+    private int scanMentions(final PollOptions options, final String repo, final String batch) {
         int created = 0;
         for (final var endpoint : List.of("issues", "issues/comments", "pulls/comments")) {
             final var key = repo + "/" + endpoint;
@@ -335,10 +331,9 @@ public class Poller {
                     if (parsed.isEmpty()) {
                         continue;
                     }
-                    if (!allowed.contains(String.valueOf(user.get("id")))
-                            || conf.login().equalsIgnoreCase(String.valueOf(user.get("login")))
+                    if (conf.login().equalsIgnoreCase(String.valueOf(user.get("login")))
                             || "Bot".equals(user.get("type"))
-                            || !authorization.allows(user.get("id"), String.valueOf(user.get("login")))) {
+                            || !authorization.allows(repo, user.get("id"), String.valueOf(user.get("login")))) {
                         if (audit != null) {
                             final var identifiers = MutableTask.create();
                             identifiers.repository(repo);
