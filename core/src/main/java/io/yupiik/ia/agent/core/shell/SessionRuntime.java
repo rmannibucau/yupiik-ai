@@ -166,6 +166,7 @@ public final class SessionRuntime {
 
     /** Releases the session: fires the {@code yca.hooks.SessionEnded} hook once (idempotent like the loop). */
     public void close() {
+        permissions.subagentRoutes().close();
         loop.close();
         // release the per-session memory-production flag so the application-scoped policy never leaks
         if (memoryProductionPolicy != null && memoryProductionKey != null && !memoryProductionKey.isBlank()) {

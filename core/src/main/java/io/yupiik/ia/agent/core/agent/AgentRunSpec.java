@@ -32,7 +32,9 @@ public record AgentRunSpec(
         String providerId,
         // the spawning session's sub-agent budget; null when the caller has no session (tests,
         // standalone), in which case the per-session limit is not enforced
-        SubagentBudget subagentBudget) {
+        SubagentBudget subagentBudget,
+        // approved concrete settings; the runner must not resolve the route again after admission
+        EffectiveAgentModel admittedModel) {
     public AgentRunSpec {
         allowedTools = allowedTools == null ? null : Set.copyOf(allowedTools);
         parentAllowedTools = parentAllowedTools == null ? null : Set.copyOf(parentAllowedTools);
@@ -48,7 +50,7 @@ public record AgentRunSpec(
             final Integer maxTurns,
             final Set<String> allowedTools,
             final Set<String> parentAllowedTools) {
-        this(parentSessionId, task, name, profile, model, maxTurns, allowedTools, parentAllowedTools, null, null);
+        this(parentSessionId, task, name, profile, model, maxTurns, allowedTools, parentAllowedTools, null, null, null);
     }
 
     /** Null means no per-run override; an empty set explicitly allows no tools. */

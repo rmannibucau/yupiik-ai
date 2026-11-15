@@ -118,10 +118,9 @@ public record ProviderConfiguration(
         PromptConfiguration prompt,
 
         @Property(
-                defaultValue = "\"\"",
                 documentation =
-                        "Default model used for sub-agents spawned from this provider when the spawn request carries no explicit `model` param (same $provider/model or bare resolution as the background compact/prune/memory models). Blank (the default) keeps today's behavior: the sub-agent inherits the parent session's provider/model. A non-blank value is that provider's own model when bare, or the explicitly routed model for a $provider/model reference. The explicit `model` param of spawn_subagent always wins over this default.")
-        String defaultSubagentModel,
+                        "Sub-agent routing policy for sessions on this provider. Unset fields inherit yca.subagents.")
+        ProviderSubagentConfiguration subagents,
 
         @Property(
                 documentation =

@@ -27,6 +27,7 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -89,6 +90,26 @@ class SessionRuntimeTest {
                 null, // quota store
                 null,
                 null);
+    }
+
+    @Test
+    void routeApprovalsAreSessionOwnedAndClearedOnDisposal() {
+        final var factory = factory();
+        final var first = factory.create("k1", "s1");
+        final var second = factory.create("k2", "s2");
+        final var routes = first.permissions().subagentRoutes();
+        assertTrue(routes.approve(
+                "$private/main",
+                "$external/model",
+                (title, detail, tool, args) -> ApprovalGate.Result.ALLOW_SESSION,
+                () -> false));
+        assertTrue(routes.allows("$external/model"));
+        assertFalse(second.permissions().subagentRoutes().allows("$external/model"));
+        first.close();
+        assertFalse(routes.allows("$external/model"));
+        assertTrue(routes.routes().isEmpty());
+        assertFalse(factory.create("k1", "s1").permissions().subagentRoutes().allows("$external/model"));
+        second.close();
     }
 
     @Test

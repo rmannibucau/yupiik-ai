@@ -20,6 +20,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.Usage;
@@ -255,17 +259,17 @@ class TurnNotificationReporterTest {
         // nothing to assert beyond no NPE
     }
 
-    private static io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration stubConfig() {
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of("yca.storageHome", "/tmp"));
+    private static CodingAgentConfiguration stubConfig() {
+        return TestConfigs.codingAgent(Map.of("yca.storageHome", "/tmp"));
     }
 
-    private static io.yupiik.ia.agent.core.configuration.ProviderConfiguration provider() {
-        return new io.yupiik.ia.agent.core.configuration.ProviderConfiguration(
+    private static ProviderConfiguration provider() {
+        return new ProviderConfiguration(
                 "p1",
                 "https://example.test/v1",
                 "",
                 "gpt-9",
-                io.yupiik.ia.agent.core.llm.ApiFlavor.AUTO,
+                ApiFlavor.AUTO,
                 -1,
                 -1,
                 "",
@@ -278,7 +282,7 @@ class TurnNotificationReporterTest {
                 Map.of(),
                 "",
                 null,
-                "",
+                null,
                 null,
                 null,
                 null);

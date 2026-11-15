@@ -319,19 +319,23 @@ public class ProviderManager {
     }
 
     /**
-     * The effective default subagent model for a context, using the identical fallback in both
-     * {@code spawn_subagent} and the options catalog: the effective provider's
-     * {@code defaultSubagentModel}, then the contextual selection's model, then the provider default
-     * model. Centralizing it keeps the discovery view aligned with what a spawn really inherits.
+     * Default selection for standalone subagent callers. Tool calls use SubagentRoutingPolicy to
+     * apply the session boundary and consent before capturing immutable admitted settings.
      */
     public String effectiveSubagentDefault(final ChatSettings settings) {
         final var ctx = settings == null ? ChatSettings.EMPTY : settings;
         final var provider =
                 ctx.providerId() == null || ctx.providerId().isBlank() ? current() : provider(ctx.providerId());
         if (provider != null
-                && provider.defaultSubagentModel() != null
-                && !provider.defaultSubagentModel().isBlank()) {
-            return provider.defaultSubagentModel().strip();
+                && provider.subagents() != null
+                && provider.subagents().defaultModel() != null) {
+            return provider.subagents().defaultModel().strip();
+        }
+        if (configuration != null
+                && configuration.subagents() != null
+                && configuration.subagents().defaultModel() != null
+                && !configuration.subagents().defaultModel().isBlank()) {
+            return configuration.subagents().defaultModel().strip();
         }
         if (ctx.model() != null && !ctx.model().isBlank()) {
             return ctx.model().strip();

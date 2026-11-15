@@ -57,6 +57,7 @@ public class PermissionService {
 
     private volatile ApprovalGate gate;
     private final Set<String> sessionGrants = ConcurrentHashMap.newKeySet();
+    private final SubagentRouteApprovals subagentRoutes = new SubagentRouteApprovals();
     private volatile AgentMode mode;
     private volatile PermissionMode permissionMode;
     private volatile RulesCache rulesCache;
@@ -144,6 +145,11 @@ public class PermissionService {
     /** The approval gate currently installed, if any (used to route /btw approvals to the same gate as the main turn). */
     public ApprovalGate gate() {
         return gate;
+    }
+
+    /** In-memory destination consent owned by this session, never copied as a generic tool grant. */
+    public SubagentRouteApprovals subagentRoutes() {
+        return subagentRoutes;
     }
 
     public void grantSession(final String toolName) {

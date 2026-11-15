@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import java.util.List;
 
 @JsonModel
 public record SubagentConfiguration(
@@ -35,4 +36,33 @@ public record SubagentConfiguration(
                 defaultValue = "250",
                 documentation =
                         "Maximum number of model round-trips a sub-agent can execute in one run. A per-spawn max_turns can lower this limit; provider/model iteration caps can lower it further. When unset, the global yca.llm.maxIterations applies.")
-        Integer maxIterations) {}
+        Integer maxIterations,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Allow automatic sub-agent routing to alternative models. By default children stay on the live parent provider/model; explicitly requested alternatives require user approval.")
+        boolean allowModelOverride,
+
+        @Property(
+                defaultValue = "java.util.List.of()",
+                documentation =
+                        "Exact $provider/model routes automatically available when overrides are enabled. Empty imposes no inclusion restriction. Explicit alternatives outside this list require user approval.")
+        List<String> includes,
+
+        @Property(
+                defaultValue = "java.util.List.of()",
+                documentation =
+                        "Exact $provider/model hard denies for every sub-agent; cannot be overridden by provider settings or user approval.")
+        List<String> excludes,
+
+        @Property(
+                defaultValue = "\"\"",
+                documentation =
+                        "Default alternative model for sub-agents when overrides are enabled, subject to includes/excludes. Blank inherits the parent route.")
+        String defaultModel) {
+    public SubagentConfiguration {
+        includes = includes == null ? List.of() : List.copyOf(includes);
+        excludes = excludes == null ? List.of() : List.copyOf(excludes);
+    }
+}

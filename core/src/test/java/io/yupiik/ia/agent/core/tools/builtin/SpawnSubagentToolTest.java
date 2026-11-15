@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.agent.AgentRunSpec;
+import io.yupiik.ia.agent.core.agent.SubagentBudget;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.agent.SubagentRunner;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -28,6 +30,7 @@ import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -38,6 +41,7 @@ import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -178,13 +182,39 @@ class SpawnSubagentToolTest {
     }
 
     private ToolContext context(final TodoStore todos) {
-        return new ToolContext("s1", null, null, null, null, todos, null, null, null, Cancellations.NEVER);
+        return new ToolContext(
+                "s1",
+                null,
+                null,
+                null,
+                null,
+                todos,
+                null,
+                null,
+                null,
+                Cancellations.NEVER,
+                ChatSettings.EMPTY.withProviderId("default").withModel("model"),
+                null,
+                null);
     }
 
     /** A context with the default per-session sub-agent budget of the given config. */
-    private ToolContext context(final TodoStore todos, final io.yupiik.ia.agent.core.agent.SubagentBudget budget) {
+    private ToolContext context(final TodoStore todos, final SubagentBudget budget) {
         return new ToolContext(
-                "s1", null, null, null, null, todos, null, null, null, Cancellations.NEVER, null, null, null, budget);
+                "s1",
+                null,
+                null,
+                null,
+                null,
+                todos,
+                null,
+                null,
+                null,
+                Cancellations.NEVER,
+                ChatSettings.EMPTY.withProviderId("default").withModel("model"),
+                null,
+                null,
+                budget);
     }
 
     private TodoStore noopTodoStore() {
@@ -205,7 +235,8 @@ class SpawnSubagentToolTest {
     void executeReturnsSubagentIdWhenStarted() {
         final var cfg = config(Map.of());
         final var reg = registry(cfg);
-        final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
+        final var tool =
+                new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg, providerManager(4));
         final var result = tool.execute(Map.of("task", "do work"), context(noopTodoStore()));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("Sub-agent started"));
@@ -216,7 +247,8 @@ class SpawnSubagentToolTest {
     void executeFailsWhenRegistryDisabled() {
         final var cfg = config(Map.of("yca.subagents.enabled", "false"));
         final var reg = registry(cfg);
-        final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
+        final var tool =
+                new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg, providerManager(4));
         final var result = tool.execute(Map.of("task", "do work"), context(noopTodoStore()));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("disabled"));
@@ -226,7 +258,8 @@ class SpawnSubagentToolTest {
     void executeFailsWhenTaskMissing() {
         final var cfg = config(Map.of());
         final var reg = registry(cfg);
-        final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
+        final var tool =
+                new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg, providerManager(4));
         final var result = tool.execute(Map.of(), context(noopTodoStore()));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("task is required"));
@@ -287,9 +320,21 @@ class SpawnSubagentToolTest {
                     }
                 };
         final var parentCancelled = new AtomicBoolean(false);
-        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg);
-        final var ctx =
-                new ToolContext("s1", null, null, null, null, noopTodoStore(), null, null, null, parentCancelled::get);
+        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg, providerManager(4));
+        final var ctx = new ToolContext(
+                "s1",
+                null,
+                null,
+                null,
+                null,
+                noopTodoStore(),
+                null,
+                null,
+                null,
+                parentCancelled::get,
+                ChatSettings.EMPTY.withProviderId("default").withModel("model"),
+                null,
+                null);
 
         final var result = tool.execute(Map.of("task", "do work"), ctx);
         assertTrue(result.success(), result.output());
@@ -307,14 +352,11 @@ class SpawnSubagentToolTest {
         final var reg = registry(cfg);
         // Fill the session budget directly (the per-session cap is 1) with the same budget the
         // tool's context will carry, so the spawn is refused at the session cap.
-        final var budget = new io.yupiik.ia.agent.core.agent.SubagentBudget(1);
-        reg.start(
-                        new io.yupiik.ia.agent.core.agent.AgentRunSpec(
-                                "parent", "t1", null, null, null, null, null, null),
-                        "default",
-                        budget)
+        final var budget = new SubagentBudget(1);
+        reg.start(new AgentRunSpec("parent", "t1", null, null, null, null, null, null), "default", budget)
                 .state();
-        final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
+        final var tool =
+                new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg, providerManager(4));
         final var result = tool.execute(Map.of("task", "do work"), context(noopTodoStore(), budget));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("yca.subagents.maxConcurrent"), result.output());
@@ -322,7 +364,7 @@ class SpawnSubagentToolTest {
 
     @Test
     void forwardsExplicitModelToTheSubagentState() {
-        final var cfg = config(Map.of());
+        final var cfg = config(Map.of("yca.subagents.allowModelOverride", "true"));
         final var reg = registry(cfg);
         final var captured = new AtomicReference<String>();
         final var runner =
@@ -361,18 +403,19 @@ class SpawnSubagentToolTest {
                                 state.id(), SubagentRegistry.SubagentResult.success("mock result", "conv", List.of()));
                     }
                 };
-        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg);
+        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg, providerManager(4));
         final var result =
-                tool.execute(Map.of("task", "do work", "model", "$local/deepseek-v4-flash"), context(noopTodoStore()));
+                tool.execute(Map.of("task", "do work", "model", "$default/other-model"), context(noopTodoStore()));
         assertTrue(result.success(), result.output());
-        assertEquals("$local/deepseek-v4-flash", captured.get(), "the explicit model must reach the subagent state");
+        assertEquals("$default/other-model", captured.get(), "the explicit model must reach the subagent state");
     }
 
     @Test
     void toleratesBlankAgentProfileAndRejectsUnknown() {
         final var cfg = config(Map.of());
         final var reg = registry(cfg);
-        final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
+        final var tool =
+                new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg, providerManager(4));
 
         // null == blank: an empty/whitespace profile is treated as "no profile", so it succeeds.
         final var blankProfile = tool.execute(Map.of("task", "do work", "agent", "   "), context(noopTodoStore()));
@@ -387,7 +430,8 @@ class SpawnSubagentToolTest {
     void toleratesBlankExplicitModel() {
         final var cfg = config(Map.of());
         final var reg = registry(cfg);
-        final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
+        final var tool =
+                new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg, providerManager(4));
         // null == blank: an empty/whitespace model is treated as "no model", so it succeeds.
         final var result = tool.execute(Map.of("task", "do work", "model", "  "), context(noopTodoStore()));
         assertTrue(result.success(), result.output());
@@ -434,7 +478,7 @@ class SpawnSubagentToolTest {
                                 state.id(), SubagentRegistry.SubagentResult.success("mock result", "conv", List.of()));
                     }
                 };
-        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg);
+        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg, providerManager(4));
         final var result = tool.execute(Map.of("task", "do work"), context(noopTodoStore()));
         assertTrue(result.success(), result.output());
         assertNull(captured.get(), "no explicit model means inherit (null on the state)");
@@ -481,7 +525,7 @@ class SpawnSubagentToolTest {
                                 state.id(), SubagentRegistry.SubagentResult.success("mock result", "conv", List.of()));
                     }
                 };
-        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg);
+        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg, providerManager(4));
         final var ctx = context(noopTodoStore());
 
         final var positive = tool.execute(Map.of("task", "do work", "max_turns", 7), ctx);
@@ -489,8 +533,8 @@ class SpawnSubagentToolTest {
         assertEquals(7, captured.get(), "a positive max_turns must set the per-spawn cap");
 
         // zero and negative values (and omission) disable the per-spawn override -> null cap
-        for (final Object maxTurns : java.util.Arrays.asList(0, -3, null)) {
-            final Map<String, Object> args = new java.util.HashMap<>(Map.of("task", "do work"));
+        for (final Object maxTurns : Arrays.asList(0, -3, null)) {
+            final Map<String, Object> args = new HashMap<>(Map.of("task", "do work"));
             if (maxTurns != null) {
                 args.put("max_turns", maxTurns);
             }

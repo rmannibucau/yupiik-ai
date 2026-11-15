@@ -350,34 +350,37 @@ public class SubagentRunner {
                 null,
                 null,
                 null);
-        // The sub-agent runs on its own dedicated AgentLoop, so its model selection is per-run:
-        // inherit the parent tab's provider/model/variant/sampling selection so a child spawned from
-        // tab B runs on B's provider, not the process default. An explicit model (spawn_subagent
-        // model=/defaultSubagentModel) overrides the selection. Resolve one authoritative
-        // (provider, model) tuple here - the same one the spawn gate allowed - and install it as this
-        // loop's session selection.
+        // Tool-admitted children use exactly the approved settings, even if the parent changes model
+        // while they queue. The fallback is for standalone registry callers without tool admission.
         final var requested = state.model();
         final var baseSettings =
                 agentLoop.chatSettings().inheritFrom(parentContext == null ? null : parentContext.settings());
         final var resolver = agentModelResolver == null ? new AgentModelResolver(providerManager) : agentModelResolver;
-        final var effectiveModel = resolver.resolve(
-                baseSettings,
-                profile,
-                requested,
-                parentContext == null || parentContext.settings() == null || providerManager == null
-                        ? null
-                        : providerManager.provider(parentContext.settings().providerId()) == null
+        final var effectiveModel = state.admittedModel() != null
+                ? state.admittedModel()
+                : resolver.resolve(
+                        baseSettings,
+                        profile,
+                        requested,
+                        parentContext == null || parentContext.settings() == null || providerManager == null
                                 ? null
-                                : providerManager
-                                        .provider(parentContext.settings().providerId())
-                                        .defaultSubagentModel());
+                                : providerManager.provider(
+                                                        parentContext.settings().providerId())
+                                                == null
+                                        ? null
+                                        : providerManager.effectiveSubagentDefault(parentContext.settings()));
         final var subagentSettings = effectiveModel.settings();
         agentLoop.updateChatSettings(subagentSettings);
         // the transcript's default speaker labels must reflect this child's effective provider/model
         // (a $provider/model spawn may target a provider other than the process-wide current one);
         // the transcript may already have been created lazily by the UI, so the identity is stored
         // and read back at creation time, not pushed into an existing transcript
-        subagentRegistry.setTranscriptIdentity(state.id(), subagentSettings.providerId(), subagentSettings.model());
+        subagentRegistry.setTranscriptIdentity(
+                state.id(),
+                effectiveModel.resolved() != null && effectiveModel.resolved().provider() != null
+                        ? effectiveModel.resolved().provider().id()
+                        : subagentSettings.providerId(),
+                effectiveModel.reference());
         agentLoop.agentModelTuning(profile == null ? null : profile.model());
         agentLoop.skipConfiguredAgentModel(true);
         agentLoop.allowedTools(effectiveAllowedTools);

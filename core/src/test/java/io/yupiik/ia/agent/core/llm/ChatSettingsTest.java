@@ -24,6 +24,18 @@ import org.junit.jupiter.api.Test;
 class ChatSettingsTest {
 
     @Test
+    void concreteDefaultProviderRouteRemainsPinnedWhenSettingsAreRebased() {
+        final var pinned = new ChatSettings("default", "$default/model", "balanced", null);
+        assertEquals("default", pinned.providerId());
+        assertEquals(
+                "default",
+                pinned.inheritFrom(ChatSettings.EMPTY.withProviderId("external"))
+                        .providerId());
+        assertEquals("default", pinned.withVariant("high").providerId());
+        assertEquals("default", pinned.withoutModelOverrides().providerId());
+    }
+
+    @Test
     void providerOverrideLifecycle() {
         final var settings = ChatSettings.EMPTY;
         assertNull(settings.providerId(), "no override by default (process default applies)");

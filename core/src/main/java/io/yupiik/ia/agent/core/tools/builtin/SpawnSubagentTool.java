@@ -21,8 +21,8 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentModelResolver;
 import io.yupiik.ia.agent.core.agent.AgentRunSpec;
 import io.yupiik.ia.agent.core.agent.EffectiveAgentModel;
-import io.yupiik.ia.agent.core.agent.SubagentModelPolicy;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
+import io.yupiik.ia.agent.core.agent.SubagentRoutingPolicy;
 import io.yupiik.ia.agent.core.agent.SubagentRunner;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -129,9 +129,11 @@ public class SpawnSubagentTool implements EmbeddedTool {
                         "name", Schemas.str("Optional name for the sub-agent (for display/logging)."),
                         "agent", Schemas.str("Optional named agent profile whose prompt and tool restrictions apply."),
                         "model",
-                                Schemas.str("Optional model (or $provider/model) routing this sub-agent to a specific "
-                                        + "model/provider instead of inheriting the parent session's selection or the "
-                                        + "provider's defaultSubagentModel. The explicit model always wins."),
+                                Schemas.str(
+                                        "Optional model (or $provider/model) routing this sub-agent to a specific "
+                                                + "model/provider instead of inheriting the parent session's selection or the "
+                                                + "provider's subagents.defaultModel. Alternative routes require policy permission or "
+                                                + "explicit user approval before project context is sent; hard excludes cannot be overridden."),
                         "max_turns",
                                 Schemas.intProp(
                                         "Maximum model round-trips for the sub-agent; a non-positive or omitted value means no per-spawn override, so the configured subagent/global/provider limit applies."),
@@ -189,19 +191,19 @@ public class SpawnSubagentTool implements EmbeddedTool {
         if (policy != null && profileName != null && !policy.allowsAgent(profileName)) {
             return ToolResult.error("Agent profile is not available for subagents: " + profileName);
         }
-        // resolve the effective (provider, model) the child would actually run on, once, so the
-        // admission gate targets the right provider (its N-1 cap) and the model-policy check (when
-        // configured) sees the same authoritative tuple. providerDefault comes from the tool only
-        // when the policy gate needs it; the budget/provider parts always use the resolution.
-        final var providerDefault = providerManager == null
-                ? (context.settings() == null ? null : context.settings().model())
-                : providerManager.effectiveSubagentDefault(context.settings());
-        final var resolver = agentModelResolver == null ? new AgentModelResolver(providerManager) : agentModelResolver;
-        final var effective = resolver.resolve(context.settings(), selectedProfile, normalizedModel, providerDefault);
-        if (policy != null) {
-            if (!SubagentModelPolicy.allows(policy, effective)) {
-                return ToolResult.error("Model is not available for subagents: " + effective.routedReference());
+        final EffectiveAgentModel effective;
+        try {
+            final var routing = new SubagentRoutingPolicy(configuration, providerManager, agentModelResolver, context);
+            effective = routing.select(selectedProfile, normalizedModel);
+            if (!routing.admit(effective, normalizedModel != null && !normalizedModel.isBlank())) {
+                return ToolResult.error(
+                        "Model is not available for subagents or user approval was not granted: "
+                                + effective.routedReference()
+                                + ". Use the current session route or a permitted option from list_subagent_options. "
+                                + "Only an explicit model request can ask for destination approval; hard denies cannot be overridden.");
             }
+        } catch (final IllegalArgumentException invalid) {
+            return ToolResult.error(invalid.getMessage());
         }
         // a non-positive or missing max_turns disables the per-spawn override: the child falls back to the
         // configured yca.subagents.maxIterations / global / provider default (null = no per-run cap)
@@ -213,6 +215,9 @@ public class SpawnSubagentTool implements EmbeddedTool {
                         .map(String.class::cast)
                         .collect(Collectors.toUnmodifiableSet())
                 : args.containsKey("tools") ? Set.of() : null;
+        if (context.isCancelled()) {
+            return ToolResult.error("Sub-agent spawn cancelled before admission.");
+        }
         final var start = subagentRegistry.start(
                 new AgentRunSpec(
                         context.sessionId(),
@@ -222,8 +227,11 @@ public class SpawnSubagentTool implements EmbeddedTool {
                         normalizedModel,
                         maxTurns,
                         allowedTools,
-                        context.allowedTools()),
-                effective == null ? null : effective.settings().providerId(),
+                        context.allowedTools(),
+                        effective.resolved().provider().id(),
+                        context.subagentBudget(),
+                        effective),
+                effective.resolved().provider().id(),
                 context.subagentBudget());
         if (!start.admitted()) {
             return ToolResult.error(refusalMessage(start.reason(), effective));
@@ -252,11 +260,12 @@ public class SpawnSubagentTool implements EmbeddedTool {
             case PROVIDER_FORBIDDEN ->
                 "Cannot start sub-agent on provider '" + providerId
                         + "': its maxConcurrent is 1, reserving the only slot for the main session. Route the task"
-                        + " to another provider (model=$other/...) or raise the provider's maxConcurrent.";
+                        + " to another permitted destination or raise the provider's maxConcurrent."
+                        + " Alternative destinations still require routing permission or user consent.";
             case PROVIDER_FULL ->
                 "Cannot start sub-agent on provider '" + providerId
                         + "': it already runs its sub-agent cap (maxConcurrent - 1 concurrent children). Wait for one"
-                        + " to finish or route the task to another provider.";
+                        + " to finish or use another permitted destination.";
             case SESSION_FULL ->
                 "Cannot start sub-agent: this session already reached its"
                         + " yca.subagents.maxConcurrent sub-agents. Wait for one to complete before spawning another.";

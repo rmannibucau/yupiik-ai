@@ -159,6 +159,25 @@ class ChatClientFlavorTest {
         return new ProviderManager(configuration(), mapper);
     }
 
+    @Test
+    void explicitDefaultRouteDoesNotFollowALaterProcessProviderSwitch() throws Exception {
+        final var cfg = configuration(Map.of(
+                "yca.provider.providers.length", "2",
+                "yca.provider.providers.1.id", "external",
+                "yca.provider.providers.1.baseUrl",
+                        "http://localhost:" + server.getAddress().getPort() + "/forbidden",
+                "yca.provider.providers.1.model", "test-model"));
+        final var providers = new ProviderManager(cfg, mapper);
+        providers.setProvider("external");
+        try (final var routed = new ChatClient(cfg, mapper, providers, Clock.systemUTC(), http)) {
+            final var result = routed.chat(request("$default/test-model")
+                    .withSettings(new ChatSettings("default", "$default/test-model", null, null)));
+            assertEquals("hello there", result.message().content());
+            assertTrue(bodies.getLast().contains("\"model\":\"test-model\""));
+            assertEquals("external", providers.currentProviderId(), "routing never mutates process selection");
+        }
+    }
+
     private static void respond(
             final com.sun.net.httpserver.HttpExchange exchange,
             final int status,

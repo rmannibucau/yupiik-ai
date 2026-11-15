@@ -143,7 +143,7 @@ public class SubagentRegistry {
      * Starts a sub-agent, optionally with a requested model/reference.
      *
      * @param model the raw model reference from {@code spawn_subagent model=} ($provider/model or bare), or {@code null}
-     *     when the caller did not request one (the provider {@code defaultSubagentModel} or parent inheritance applies).
+     *     when the caller did not request one (the provider {@code subagents.defaultModel} or parent inheritance applies).
      */
     public Optional<SubagentState> start(
             final String parentSessionId, final String task, final String name, final String model) {
@@ -516,7 +516,8 @@ public class SubagentRegistry {
                             spec.allowedTools(),
                             spec.parentAllowedTools(),
                             providerId,
-                            budget == null ? spec.subagentBudget() : budget);
+                            budget == null ? spec.subagentBudget() : budget,
+                            spec.admittedModel());
             this.startedAt = startedAt;
         }
 
@@ -539,6 +540,10 @@ public class SubagentRegistry {
         /** The raw model reference requested via {@code spawn_subagent model=}, or {@code null} when none was requested. */
         public String model() {
             return spec.model();
+        }
+
+        public EffectiveAgentModel admittedModel() {
+            return spec.admittedModel();
         }
 
         public String profile() {

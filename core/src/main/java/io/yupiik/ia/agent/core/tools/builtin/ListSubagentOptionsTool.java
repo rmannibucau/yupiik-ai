@@ -21,14 +21,14 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentModelResolver;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
-import io.yupiik.ia.agent.core.agent.SubagentModelPolicy;
+import io.yupiik.ia.agent.core.agent.EffectiveAgentModel;
+import io.yupiik.ia.agent.core.agent.SubagentRoutingPolicy;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.SpawnSubagentToolConfiguration;
-import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.math.BigDecimal;
@@ -40,7 +40,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 
 /** On-demand, bounded catalog of agent profiles and configured model routes. */
 @ApplicationScoped
@@ -92,7 +91,9 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Search the configured agent profiles and model routes that can be used with spawn_subagent. "
+        return "Search this session's permitted agent profiles and model routes for spawn_subagent. "
+                + "By default only the current provider/model is available. An explicit alternative model "
+                + "may ask the user for destination approval before project context is sent. "
                 + "Pass kind (agents, models, or all) and a small limit to keep the reply cheap; filter by a "
                 + "provider id or a query substring when you already know what to look for. Call only when you "
                 + "need to choose or inspect options; results are bounded and paginated.";
@@ -117,6 +118,11 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return ToolResult.error("list_subagent_options requires an active session context.");
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var kind = arg(args, "kind");
         final var normalizedKind =
                 kind == null || kind.isBlank() ? "all" : kind.strip().toLowerCase(Locale.ROOT);
@@ -139,7 +145,13 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
         if (limit < 1) {
             return ToolResult.error("limit must be a positive integer between 1 and " + MAX_LIMIT);
         }
-        final var entries = entries(normalizedKind, query, provider);
+        final List<Map<String, Object>> entries;
+        try {
+            final var routing = new SubagentRoutingPolicy(configuration, providerManager, agentModelResolver, context);
+            entries = entries(normalizedKind, query, provider, context, routing);
+        } catch (final IllegalArgumentException invalid) {
+            return ToolResult.error(invalid.getMessage());
+        }
         final var page =
                 entries.stream().skip(offset).limit(Math.min(limit, MAX_LIMIT)).toList();
         final var result = new LinkedHashMap<String, Object>();
@@ -157,29 +169,37 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
         }
     }
 
-    private List<Map<String, Object>> entries(final String kind, final String query, final String providerFilter) {
+    private List<Map<String, Object>> entries(
+            final String kind,
+            final String query,
+            final String providerFilter,
+            final ToolContext context,
+            final SubagentRoutingPolicy routing) {
         final var policy = policy();
         final var search = query == null ? "" : query.strip().toLowerCase(Locale.ROOT);
         final var entries = new ArrayList<Map<String, Object>>();
         final var includeAgents =
                 ("all".equals(kind) && (providerFilter == null || providerFilter.isBlank())) || "agents".equals(kind);
         if (includeAgents) {
-            final var profileDefault = effectiveProviderDefault();
             for (final var agent : agentProvider.agents()) {
                 if (!policy.allowsAgent(agent.name())) {
                     continue;
                 }
                 final var description = compactDescription(agent.description());
-                final var resolver =
-                        agentModelResolver == null ? new AgentModelResolver(providerManager) : agentModelResolver;
-                final var effective = resolver.resolve(ChatSettings.EMPTY, agent, null, profileDefault);
-                final var model = effective.reference();
-                if (!SubagentModelPolicy.allows(policy, effective)) {
+                final EffectiveAgentModel effective;
+                try {
+                    effective = routing.select(agent, null);
+                } catch (final IllegalArgumentException invalidRoute) {
+                    continue;
+                }
+                final var model = effective.routedReference();
+                if (!routing.available(effective)) {
                     continue;
                 }
                 if (providerFilter != null
                         && !providerFilter.isBlank()
-                        && !providerFilter.equals(effective.settings().providerId())) {
+                        && !providerFilter.equals(
+                                effective.resolved().provider().id())) {
                     continue;
                 }
                 final var haystack = (agent.name() + " " + description).toLowerCase(Locale.ROOT);
@@ -199,8 +219,31 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
             }
         }
         if ("all".equals(kind) || "models".equals(kind)) {
+            final var references = new LinkedHashSet<String>();
+            references.add(routing.parent().routedReference());
+            references.add(routing.select(null, null).routedReference());
+            if (context.permissions() != null) {
+                references.addAll(context.permissions().subagentRoutes().routes());
+            }
             for (final var provider : providerManager.providers()) {
-                addProviderModels(entries, provider, policy, search, providerFilter);
+                final var id = provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
+                if (provider.model() != null && !provider.model().isBlank()) {
+                    references.add("$" + id + "/" + provider.model());
+                }
+                if (provider.models() != null) {
+                    provider.models().stream()
+                            .filter(m ->
+                                    m != null && m.model() != null && !m.model().isBlank())
+                            .map(m -> "$" + id + "/" + m.model())
+                            .forEach(references::add);
+                }
+            }
+            for (final var reference : references) {
+                try {
+                    addModel(entries, routing, search, providerFilter, routing.resolve(reference));
+                } catch (final IllegalArgumentException invalidRoute) {
+                    // Stale configuration/grants never disclose an unresolvable route.
+                }
             }
         }
         entries.sort(Comparator.comparing((Map<String, Object> it) -> String.valueOf(it.get("kind")))
@@ -208,61 +251,21 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
         return entries;
     }
 
-    private void addProviderModels(
-            final List<Map<String, Object>> entries,
-            final ProviderConfiguration provider,
-            final SpawnSubagentToolConfiguration policy,
-            final String search,
-            final String providerFilter) {
-        final var providerId = providerId(provider);
-        if (!policy.allowsProvider(providerId)
-                || providerFilter != null && !providerFilter.isBlank() && !providerFilter.equals(providerId)) {
-            return;
-        }
-        final var models = new LinkedHashSet<String>();
-        if (provider.model() != null && !provider.model().isBlank()) {
-            models.add(provider.model().strip());
-        }
-        if (provider.defaultSubagentModel() != null
-                && !provider.defaultSubagentModel().isBlank()) {
-            final var configured = provider.defaultSubagentModel().strip();
-            final var routed = configured.startsWith("$")
-                    ? configured
-                    : Objects.requireNonNullElseGet(
-                            providerManager.toRoutedReference(configured), () -> "$" + providerId + "/" + configured);
-            final var resolved = providerManager.resolve(routed);
-            final var target = resolved.provider() == null ? providerId : providerId(resolved.provider());
-            addModel(entries, policy, search, providerFilter, target, resolved.model());
-        }
-        if (provider.models() != null) {
-            provider.models().stream()
-                    .map(m -> m == null ? null : m.model())
-                    .filter(m -> m != null && !m.isBlank())
-                    .map(String::strip)
-                    .forEach(models::add);
-        }
-        for (final var model : models) {
-            addModel(entries, policy, search, providerFilter, providerId, model);
-        }
-    }
-
     private void addModel(
             final List<Map<String, Object>> entries,
-            final SpawnSubagentToolConfiguration policy,
+            final SubagentRoutingPolicy routing,
             final String search,
             final String providerFilter,
-            final String providerId,
-            final String model) {
-        if (model == null || model.isBlank() || !policy.allowsProvider(providerId)) {
+            final EffectiveAgentModel effective) {
+        if (!routing.available(effective)) {
             return;
         }
+        final var providerId = effective.resolved().provider().id();
+        final var model = effective.reference();
         if (providerFilter != null && !providerFilter.isBlank() && !providerFilter.equals(providerId)) {
             return;
         }
-        final var reference = "$" + providerId + "/" + model;
-        if (!policy.allowsModel(reference) && !policy.allowsModel(model)) {
-            return;
-        }
+        final var reference = effective.routedReference();
         final var haystack = (providerId + " " + model + " " + reference).toLowerCase(Locale.ROOT);
         if (!search.isEmpty() && !haystack.contains(search)) {
             return;
@@ -273,14 +276,6 @@ public class ListSubagentOptionsTool implements EmbeddedTool {
         entry.put("provider", providerId);
         entry.put("reference", reference);
         entries.add(entry);
-    }
-
-    private static String providerId(final ProviderConfiguration provider) {
-        return provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
-    }
-
-    private String effectiveProviderDefault() {
-        return providerManager == null ? null : providerManager.effectiveSubagentDefault(ChatSettings.EMPTY);
     }
 
     private SpawnSubagentToolConfiguration policy() {

@@ -21,18 +21,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
+import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
@@ -65,11 +69,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -149,7 +155,7 @@ class SubagentIntegrationTest {
                         "http://test",
                         "key",
                         "model",
-                        io.yupiik.ia.agent.core.llm.ApiFlavor.AUTO,
+                        ApiFlavor.AUTO,
                         -1,
                         -1,
                         "",
@@ -484,7 +490,7 @@ class SubagentIntegrationTest {
             final ExecutorService executor) {
         final var mockUsageTracker = new UsageTracker() {
             @Override
-            public void record(final io.yupiik.ia.agent.core.llm.Usage usage) {}
+            public void record(final Usage usage) {}
 
             @Override
             public int estimateContext(final List<Message> messages, final int extraToolTokens) {
@@ -536,11 +542,11 @@ class SubagentIntegrationTest {
                     }
                 },
                 mapper,
-                new io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph() {
+                new StructuralCodeGraph() {
                     @Override
                     public void ensureReadyAsync() {}
                 },
-                new ProviderManager() {
+                new ProviderManager(cfg, mapper) {
                     @Override
                     public ResolvedModel resolveDefault() {
                         return new ResolvedModel(null, "test-model");
@@ -591,6 +597,75 @@ class SubagentIntegrationTest {
                 1, reg.providerActive("default"), "a duplicate completion must not release another child's permit");
         reg.cancel(replacement.id());
         assertEquals(0, reg.providerActive("default"));
+    }
+
+    @Test
+    @Timeout(10)
+    void queuedChildUsesAdmittedSettingsInsteadOfParentSettingsAtExecution() throws Exception {
+        final var cfg = config(Map.of());
+        final var reg = newRegistry(cfg, 4);
+        final var captured = new AtomicReference<ChatCompletionRequest>();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauses,
+                    final Consumer<LlmStreamEvent> deltas,
+                    final BooleanSupplier cancelled) {
+                captured.set(request);
+                deltas.accept(new End("stop", null));
+                return new Message("assistant", "done", null, null, null, null);
+            }
+        };
+        final var release = new CountDownLatch(1);
+        try (final var executor = Executors.newSingleThreadExecutor()) {
+            executor.submit(() -> {
+                try {
+                    release.await();
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            try {
+                final var admitted = new EffectiveAgentModel(
+                        new ProviderManager.ResolvedModel(providerManager(4).provider("default"), "approved"),
+                        new ChatSettings("default", "$default/approved", "balanced", null),
+                        "approved",
+                        "$default/approved");
+                final var state = reg.start(new AgentRunSpec(
+                                "parent", "task", null, null, null, null, null, null, "default", null, admitted))
+                        .orElseThrow();
+                final var runner = newRunner(client, emptyToolRegistry(), reg, cfg, executor);
+                // The parent now has a different route; the raw spawn model is deliberately null.
+                final var switchedContext = new ToolContext(
+                        "parent",
+                        null,
+                        null,
+                        null,
+                        null,
+                        noopTodoStore(),
+                        null,
+                        null,
+                        null,
+                        () -> false,
+                        ChatSettings.EMPTY.withProviderId("other").withModel("redirect"),
+                        null,
+                        null);
+                runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), switchedContext, () -> false);
+                assertEquals(null, captured.get(), "queued children make no inference requests");
+                release.countDown();
+                final var result = state.awaitResult();
+                assertTrue(result.success(), result.error());
+                assertEquals("$default/approved", captured.get().model());
+                assertEquals("default", captured.get().settings().providerId());
+                assertEquals("balanced", captured.get().settings().variant());
+                assertEquals(
+                        new SubagentRegistry.TranscriptIdentity("default", "approved"),
+                        reg.identityOf(state.id()).orElseThrow());
+            } finally {
+                release.countDown();
+            }
+        }
     }
 
     @Test
@@ -658,7 +733,7 @@ class SubagentIntegrationTest {
     void thirdSubagentRejectedWhenAtLimit() {
         final var cfg = config(Map.of("yca.subagents.maxConcurrent", "1"));
         final var reg = newRegistry(cfg, 3); // provider max 3 -> N-1 = 2, session cap = 1
-        final var budget = new io.yupiik.ia.agent.core.agent.SubagentBudget(1);
+        final var budget = new SubagentBudget(1);
 
         assertTrue(reg.start(new AgentRunSpec("parent", "t1", null, null, null, null, null, null), "default", budget)
                 .admitted());

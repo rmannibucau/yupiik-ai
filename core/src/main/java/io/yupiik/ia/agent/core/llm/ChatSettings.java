@@ -45,13 +45,15 @@ public record ChatSettings(String providerId, String model, String variant, Chat
     }
 
     private static String normalizeProvider(final String value) {
-        final var v = normalize(value);
-        return "default".equalsIgnoreCase(v) ? null : v;
+        // A concrete route can target a provider literally named "default". Keep that id in
+        // directly constructed request settings; only the UI convenience setter treats it as reset.
+        return normalize(value);
     }
 
     /** A copy with the provider override replaced. Blank (or {@code "default"}) clears it. */
     public ChatSettings withProviderId(final String value) {
-        return new ChatSettings(value, model, variant, sampling);
+        final var id = normalize(value);
+        return new ChatSettings("default".equalsIgnoreCase(id) ? null : id, model, variant, sampling);
     }
 
     /** A copy with the model override replaced. Blank resets to the provider default and drops the sampling override. */
