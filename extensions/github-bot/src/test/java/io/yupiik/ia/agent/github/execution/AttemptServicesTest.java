@@ -43,6 +43,40 @@ class AttemptServicesTest {
     Path home;
 
     @Test
+    void retainsConfiguredRemoteMcpWithoutForwardingItsCredentialToServices() throws Exception {
+        try (final var json = BotJsonMapper.create(
+                List.of(new RestrictedServicesGateway$Settings$FusionJsonCodec()), key -> Optional.empty())) {
+            final var mcp = Map.of(
+                    "enabled", true,
+                    "servers", List.of(Map.of(
+                            "name", "documentation",
+                            "url", "https://docs.example.test/mcp",
+                            "apiKey", "agent-only-documentation-key",
+                            "readonly", List.of("lookup"))));
+            final var configuration = minimalConfiguration();
+            final var document = TaskStore.map(json.fromString(Object.class, Files.readString(configuration)));
+            final var yca = new LinkedHashMap<>(TaskStore.map(document.get("yca")));
+            yca.put("mcp", mcp);
+            Files.writeString(configuration, json.toString(Map.of("yca", yca)));
+            try (final var services = new AttemptServices(
+                    configuration,
+                    privateDirectory(),
+                    json,
+                    settings(),
+                    "http://172.30.0.2:12345" + ROUTE,
+                    "https://attempt-services.yca.internal:8443" + ROUTE,
+                    CONTEXT,
+                    Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret"),
+                    Duration.ofSeconds(60))) {
+                final var rewritten = TaskStore.map(json.fromString(Object.class, Files.readString(configuration)));
+                assertEquals(mcp, TaskStore.map(rewritten.get("yca")).get("mcp"));
+                assertFalse(services.credentials().containsValue("agent-only-documentation-key"));
+                assertFalse(Files.readString(services.settings()).contains("agent-only-documentation-key"));
+            }
+        }
+    }
+
+    @Test
     void disabledDependencyDownloadsDoNotStageMavenSettings() throws Exception {
         try (final var json = BotJsonMapper.create(
                 List.of(new RestrictedServicesGateway$Settings$FusionJsonCodec()), key -> Optional.empty())) {

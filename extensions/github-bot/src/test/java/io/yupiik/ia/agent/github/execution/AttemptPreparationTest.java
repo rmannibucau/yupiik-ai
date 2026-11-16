@@ -35,7 +35,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 class AttemptPreparationTest {
     @Test
-    void retainsTrustedTodosForFlatAndWrappedInputsWithoutEnablingIntegrations() throws Exception {
+    void retainsTrustedTodosForFlatAndWrappedInputs() throws Exception {
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
             for (final var wrapped : List.of(false, true)) {
                 for (final var todos : List.of(
@@ -73,8 +73,104 @@ class AttemptPreparationTest {
                                         : json.fromString(Object.class, json.toString(trusted.get("todos"))),
                                 sanitized.get("todos"));
                         assertEquals(trusted.containsKey("todos"), sanitized.containsKey("todos"));
-                        assertEquals(Map.of("enabled", false), sanitized.get("memory"));
+                        assertEquals(Map.of("enabled", true), sanitized.get("memory"));
                         assertEquals(Map.of(), sanitized.get("hooks"));
+                    } finally {
+                        AttemptPreparation.delete(attempt);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    void retainsTrustedOptionalFeaturesForFlatAndWrappedInputsAndForcesMandatoryOverrides() throws Exception {
+        try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
+            for (final var wrapped : List.of(false, true)) {
+                for (final var enabled : List.of(false, true)) {
+                    final var optional = Map.of(
+                            "memory", Map.of("enabled", enabled, "custom", "memory-setting"),
+                            "skills", Map.of("enabled", enabled, "custom", "skills-setting"),
+                            "subagents", Map.of("enabled", enabled, "custom", "subagents-setting"),
+                            "notifications", Map.of("enabled", enabled, "custom", "notifications-setting"),
+                            "mcp", Map.of(
+                                    "enabled", enabled,
+                                    "servers", List.of(Map.of(
+                                            "name", "documentation",
+                                            "url", "https://docs.example.test/mcp",
+                                            "apiKey", "fake-api-key"))));
+                    final var trusted = new LinkedHashMap<String, Object>(optional);
+                    trusted.put("permissions", Map.of("mode", "ASK"));
+                    trusted.put("hooks", Map.of("beforeTool", "host-command"));
+                    trusted.put("home", "/host/home");
+                    trusted.put("storageHome", "/host/storage");
+                    trusted.put("workingDir", "/host/workspace");
+                    trusted.put("mode", "PLAN");
+                    trusted.put("unknownHostSetting", "discard-me");
+                    trusted.put("credentials", Map.of("token", "fake-host-token"));
+                    final var input = wrapped
+                            ? new LinkedHashMap<String, Object>(Map.of("yca", trusted))
+                            : new LinkedHashMap<>(trusted);
+                    input.put("run", Map.of("result-correction-prompt", "Correct the result", "other", "discard-me"));
+                    if (wrapped) {
+                        input.put("model", "discard-root-model");
+                        input.put("credentials", Map.of("token", "fake-root-token"));
+                    }
+                    final var source = json.toString(input);
+                    final var config = Files.writeString(home.resolve("optional.json"), source);
+                    final var attempt = new AttemptPreparation(
+                                    json,
+                                    new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
+                                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                            .prepare(config);
+                    try {
+                        final var expected = new LinkedHashMap<String, Object>(optional);
+                        expected.put("permissions", Map.of("mode", "YOLO"));
+                        expected.put("hooks", Map.of());
+                        expected.put("home", "/attempt/storage");
+                        expected.put("storageHome", "/attempt/storage");
+                        expected.put("workingDir", "/attempt/workspace");
+                        expected.put("mode", "BUILD");
+                        assertEquals(
+                                Map.of(
+                                        "yca", expected,
+                                        "run", Map.of("result-correction-prompt", "Correct the result")),
+                                json.fromString(Object.class, Files.readString(attempt.resolve("configuration.json"))));
+                        assertEquals(source, Files.readString(config));
+                    } finally {
+                        AttemptPreparation.delete(attempt);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    void defaultsAbsentAndNullOptionalFeaturesForFlatAndWrappedInputs() throws Exception {
+        try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
+            for (final var wrapped : List.of(false, true)) {
+                for (final var explicitNull : List.of(false, true)) {
+                    final var trusted = new LinkedHashMap<String, Object>();
+                    if (explicitNull) {
+                        for (final var key : List.of("memory", "skills", "subagents", "mcp", "notifications")) {
+                            trusted.put(key, null);
+                        }
+                    }
+                    final var config = Files.writeString(
+                            home.resolve("defaults.json"), json.toString(wrapped ? Map.of("yca", trusted) : trusted));
+                    final var attempt = new AttemptPreparation(
+                                    json,
+                                    new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
+                                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                            .prepare(config);
+                    try {
+                        final var sanitized = TaskStore.map(TaskStore.map(json.fromString(
+                                        Object.class, Files.readString(attempt.resolve("configuration.json"))))
+                                .get("yca"));
+                        for (final var key : List.of("memory", "skills", "subagents", "notifications")) {
+                            assertEquals(Map.of("enabled", false), sanitized.get(key), key);
+                        }
+                        assertEquals(Map.of("enabled", false, "servers", List.of()), sanitized.get("mcp"));
                     } finally {
                         AttemptPreparation.delete(attempt);
                     }
@@ -157,7 +253,7 @@ class AttemptPreparationTest {
     Path home;
 
     @Test
-    void copiesOnlyTrustedModelSettingsAndForcesIsolatedIntegrations() throws Exception {
+    void copiesOnlyTrustedModelSettingsAndDefaultsAbsentIntegrations() throws Exception {
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
             final var trusted = new LinkedHashMap<String, Object>();
             trusted.put("provider", "openai");
@@ -168,12 +264,7 @@ class AttemptPreparationTest {
             trusted.put("compression", Map.of("enabled", true));
             final var retained = new LinkedHashMap<>(trusted);
             for (final var key : List.of(
-                    "memory",
-                    "skills",
-                    "subagents",
-                    "mcp",
                     "hooks",
-                    "notifications",
                     "permissions",
                     "home",
                     "storageHome",

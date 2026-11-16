@@ -127,7 +127,7 @@ class GithubAgentLoopTest {
                                                 "timeoutSeconds",
                                                 5),
                                 "llm", Map.of("maxIterations", 3, "retriesMaxAttempts", 0),
-                                "memory", Map.of("enabled", true),
+                                "memory", Map.of("enabled", false),
                                 "permissions", Map.of("mode", "ASK"))));
                 Files.writeString(trustedFile, trustedText);
                 final var attempt = preparation.prepare(trustedFile, home.resolve("attempts"));

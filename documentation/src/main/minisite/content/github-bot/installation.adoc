@@ -473,10 +473,16 @@ Live Discussion acceptance results for this changing implementation are pending 
 == Provision trusted agent configuration and credentials
 
 Create `$GITHUB_HOME/agent-configuration.json` using provider fields from your working ordinary YCA JSON configuration.
-Only `provider`, `model`, `llm`, `compaction`, `pruning` and `compression` are copied into attempts.
+Only `provider`, `model`, `llm`, `compaction`, `pruning`, `compression`, `todos`, `memory`, `skills`, `subagents`, `mcp` and `notifications` are copied into attempts.
 
-Memory, skills, MCP, notifications and subagents are force-disabled, hooks are cleared, permissions use YOLO inside the sandbox, and project-local configuration loading is disabled.
+Memory, skills, MCP, notifications and subagents default to disabled when omitted or null; explicit trusted configuration is retained.
+Hooks are always cleared, permissions use YOLO inside the sandbox, attempt-local home/storage/workspace paths and BUILD mode are enforced, and project-local configuration loading is disabled.
 Do not copy the host token or unrelated integration settings into this file.
+
+Remote MCP servers use the ordinary xref:../features/mcp.adoc[MCP configuration], including their `url`, `apiKey` or `headers`, and `readonly` tool names.
+For restricted Docker execution, add each remote server's exact public hostname to the configured dependency-egress allowlist while preserving other required hosts; do not weaken private-address rejection or bypass the isolated network.
+MCP credentials included here are available to code inside that attempt, like other agent-side credentials, so provision narrowly scoped keys and protect the configuration file.
+Enabling a feature does not grant new filesystem mounts, executable tooling or network destinations; provision those requirements separately inside the existing execution boundary.
 
 For example, adapt the provider details to your actual provider configuration:
 

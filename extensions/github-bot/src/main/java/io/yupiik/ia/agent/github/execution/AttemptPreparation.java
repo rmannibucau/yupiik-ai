@@ -107,13 +107,18 @@ public class AttemptPreparation {
                     sanitized.put(key, trusted.get(key));
                 }
             }
-            sanitized.put("memory", Map.of("enabled", false));
-            sanitized.put("skills", Map.of("enabled", false));
-            sanitized.put("subagents", Map.of("enabled", false));
+            for (final var key : List.of("memory", "skills", "subagents", "mcp", "notifications")) {
+                if (trusted.get(key) != null) {
+                    sanitized.put(key, trusted.get(key));
+                }
+            }
+            sanitized.putIfAbsent("memory", Map.of("enabled", false));
+            sanitized.putIfAbsent("skills", Map.of("enabled", false));
+            sanitized.putIfAbsent("subagents", Map.of("enabled", false));
             sanitized.put("permissions", Map.of("mode", "YOLO"));
-            sanitized.put("mcp", Map.of("enabled", false, "servers", List.of()));
+            sanitized.putIfAbsent("mcp", Map.of("enabled", false, "servers", List.of()));
             sanitized.put("hooks", Map.of());
-            sanitized.put("notifications", Map.of("enabled", false));
+            sanitized.putIfAbsent("notifications", Map.of("enabled", false));
             sanitized.put("home", "/attempt/storage");
             sanitized.put("storageHome", "/attempt/storage");
             sanitized.put("workingDir", "/attempt/workspace");
