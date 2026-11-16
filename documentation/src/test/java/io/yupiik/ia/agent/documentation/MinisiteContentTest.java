@@ -23,10 +23,70 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.regex.Pattern;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.xpath.XPathFactory;
 import org.junit.jupiter.api.Test;
 
 class MinisiteContentTest {
     private final Path content = Path.of("src/main/minisite/content");
+
+    @Test
+    void testExecutionKeepsIsolationAndBoundsWorkerGrowth() throws Exception {
+        final var factory = DocumentBuilderFactory.newInstance();
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        final var pom = factory.newDocumentBuilder().parse(Path.of("../pom.xml").toFile());
+        final var xpath = XPathFactory.newInstance().newXPath();
+        assertEquals("8", xpath.evaluate("/project/properties/yca.test.parallelism", pom));
+        assertEquals("16", xpath.evaluate("/project/properties/yca.test.maxPoolSize", pom));
+        assertEquals("-XX:TieredStopAtLevel=1", xpath.evaluate("/project/properties/yca.test.jvmArgs", pom));
+        final var configuration =
+                "/project/build/pluginManagement/plugins/plugin[artifactId='maven-surefire-plugin']/configuration";
+        final var parameters = xpath.evaluate(configuration + "/properties/configurationParameters", pom);
+        assertTrue(parameters.contains("junit.jupiter.execution.parallel.mode.default = same_thread"));
+        assertTrue(parameters.contains("junit.jupiter.execution.parallel.mode.classes.default = concurrent"));
+        assertTrue(parameters.contains(
+                "junit.jupiter.execution.parallel.config.fixed.parallelism = ${yca.test.parallelism}"));
+        assertTrue(parameters.contains(
+                "junit.jupiter.execution.parallel.config.fixed.max-pool-size = ${yca.test.maxPoolSize}"));
+        final var arguments = xpath.evaluate(configuration + "/argLine", pom);
+        assertTrue(arguments.startsWith("${yca.test.jvmArgs} "));
+        assertTrue(arguments.contains("-Duser.timezone=UTC"));
+        assertTrue(arguments.contains("-Duser.language=en"));
+        assertTrue(arguments.contains("-Duser.country=US"));
+    }
+
+    @Test
+    void frontendInstallDefaultsToLocalWithStrictCiActivatedByPresence() throws Exception {
+        final var factory = DocumentBuilderFactory.newInstance();
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        final var pom =
+                factory.newDocumentBuilder().parse(Path.of("../web/pom.xml").toFile());
+        final var xpath = XPathFactory.newInstance().newXPath();
+        assertEquals("install", xpath.evaluate("/project/properties/frontend.npm.install.arguments", pom));
+
+        final var plugin = "/project/build/plugins/plugin[artifactId='frontend-maven-plugin']";
+        final var install = plugin + "/executions/execution[id='npm-install']";
+        assertEquals("npm", xpath.evaluate(install + "/goals/goal", pom));
+        assertEquals("generate-resources", xpath.evaluate(install + "/phase", pom));
+        assertEquals("${frontend.npm.install.arguments}", xpath.evaluate(install + "/configuration/arguments", pom));
+        assertEquals("${skip.frontend}", xpath.evaluate(plugin + "/configuration/skip", pom));
+        assertEquals(
+                "run build",
+                xpath.evaluate(plugin + "/executions/execution[id='npm-build']/configuration/arguments", pom));
+        assertEquals(
+                "test", xpath.evaluate(plugin + "/executions/execution[id='npm-test']/configuration/arguments", pom));
+
+        final var profile = "/project/profiles/profile[id='frontend-ci']";
+        assertEquals("env.CI", xpath.evaluate(profile + "/activation/property/name", pom));
+        // No value constraint: CI=true and CI=false both select the strict install.
+        assertEquals("0", xpath.evaluate("count(" + profile + "/activation/property/value)", pom));
+        assertEquals("ci", xpath.evaluate(profile + "/properties/frontend.npm.install.arguments", pom));
+
+        final var readme = Files.readString(Path.of("../README.adoc"));
+        assertTrue(readme.contains("-Dfrontend.npm.install.arguments=ci"));
+        assertTrue(readme.contains("-Dfrontend.npm.install.arguments=install"));
+        assertTrue(readme.contains("CI=false"));
+    }
 
     @Test
     void commandDirectoriesLinkGeneratedReferences() throws Exception {

@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.github.support.TestJava;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -28,6 +29,7 @@ import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -40,10 +42,21 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class AgentBrokerSourceTest {
+    @TempDir
+    static Path seedTemporary;
+
+    private static String seedHead;
+
+    @BeforeAll
+    static void buildSeed() throws Exception {
+        seedHead = buildFixture(seedTemporary);
+    }
+
     @Test
     void deadlineAndInheritedPipesDoNotLeaveGitProcessesOrAnUnboundedExecutorClose() throws Exception {
         for (final var mode : List.of("stall", "inherited-pipe")) {
@@ -79,12 +92,7 @@ class AgentBrokerSourceTest {
     @Test
     void interruptionKillsAndReapsGitWhilePreservingTheInterruptFlag() throws Exception {
         final var workspace = Files.createDirectory(temporary.resolve("interrupted"));
-        final var command = new ArrayList<>(List.of(
-                Path.of(System.getProperty("java.home"), "bin/java").toString(),
-                "-XX:TieredStopAtLevel=1",
-                "-cp",
-                classpath(),
-                InterruptLauncher.class.getName()));
+        final var command = TestJava.javaCommand("-cp", classpath(), InterruptLauncher.class.getName());
         command.addAll(fixtureFlags(workspace, "stall"));
         command.add("init");
         final var result = process(workspace, command, "", Map.of());
@@ -99,9 +107,9 @@ class AgentBrokerSourceTest {
         Files.writeString(
                 executable,
                 "#!/bin/sh\nexec "
-                        + shell(Path.of(System.getProperty("java.home"), "bin/java")
-                                .toString())
-                        + " -cp " + shell(classpath()) + " " + shell(GitProcessFixture.class.getName())
+                        + TestJava.javaCommand("-cp", classpath(), GitProcessFixture.class.getName()).stream()
+                                .map(AgentBrokerSourceTest::shell)
+                                .collect(Collectors.joining(" "))
                         + " " + mode + " " + shell(workspace.toString()) + " \"$@\"\n");
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
         final var flags = new ArrayList<>(flags("a".repeat(40)));
@@ -146,13 +154,8 @@ class AgentBrokerSourceTest {
                 System.out.print("fixture-private-value".repeat(30_000));
                 return;
             }
-            final var child = new ProcessBuilder(
-                            Path.of(System.getProperty("java.home"), "bin/java").toString(),
-                            "-cp",
-                            classpath(),
-                            GitProcessFixture.class.getName(),
-                            "child",
-                            workspace.toString())
+            final var child = new ProcessBuilder(TestJava.javaCommand(
+                            "-cp", classpath(), GitProcessFixture.class.getName(), "child", workspace.toString()))
                     .inheritIO()
                     .start();
             if (mode.equals("inherited-pipe")) {
@@ -230,8 +233,10 @@ class AgentBrokerSourceTest {
                 Files.createDirectory(temporary.resolve("classpath with 'quotes'")) + File.pathSeparator + classpath();
         final var generated = process(
                 workspace,
-                List.of(
-                        Path.of(System.getProperty("java.home"), "bin/java").toString(),
+                TestJava.javaCommand(
+                        "-Dyca.test.parentOnly=private-runtime-value",
+                        "-XX:ActiveProcessorCount=2",
+                        "-Xmx64m",
                         "-cp",
                         helperClasspath,
                         HelperLauncher.class.getName(),
@@ -240,6 +245,10 @@ class AgentBrokerSourceTest {
                 Map.of());
         assertEquals(0, generated.exit(), generated.error());
         final var helper = generated.output();
+        for (final var runtimeOption :
+                List.of("TieredStopAtLevel", "ActiveProcessorCount", "-Xmx", "yca.test.", "private-runtime-value")) {
+            assertFalse(helper.contains(runtimeOption), helper);
+        }
         final var command = List.of(
                 "/usr/bin/git",
                 "-c",
@@ -344,8 +353,8 @@ class AgentBrokerSourceTest {
             assertNotEquals(0, result.exit());
             assertTrue(
                     result.error()
-                            .matches(
-                                    "Broker source operation failed: stage=git_[a-z_]+ code=REJECTED processors=[0-9]+ commonPoolParallelism=[0-9]+\\n"),
+                            .matches("Broker source operation failed: stage=git_[a-z_]+ code=REJECTED"
+                                    + " processors=[0-9]+ commonPoolParallelism=[0-9]+\\n"),
                     result.error());
             if (kind.equals("symlink")) {
                 assertTrue(Files.isSymbolicLink(protectedPath));
@@ -391,7 +400,54 @@ class AgentBrokerSourceTest {
         assertFalse(Files.exists(workspace.resolve("repository")));
     }
 
-    private String fixture(final Path workspace) throws Exception {
+    private String fixture(final Path workspace) throws IOException {
+        // Preserve the complete sparse worktree, index, config, objects, and source identity without
+        // sharing files.
+        try (final var paths = Files.walk(seedTemporary.resolve("repository"))) {
+            for (final var source : paths.toList()) {
+                final var target = workspace.resolve(seedTemporary.relativize(source));
+                if (Files.isDirectory(source)) {
+                    Files.createDirectories(target);
+                } else {
+                    Files.copy(source, target, StandardCopyOption.COPY_ATTRIBUTES);
+                }
+            }
+        }
+        return seedHead;
+    }
+
+    @Test
+    void fixtureCopiesKeepSparseMetadataAndSourceIdentityIndependentAtQuotedPaths() throws Exception {
+        final var first = temporary.resolve("first workspace with 'quotes'");
+        final var second = temporary.resolve("second workspace with 'quotes'");
+        assertEquals(seedHead, fixture(first));
+        assertEquals(seedHead, fixture(second));
+        try (final var paths = Files.walk(seedTemporary.resolve("repository"))) {
+            for (final var source : paths.filter(Files::isRegularFile).toList()) {
+                final var relative = seedTemporary.relativize(source);
+                final var original = Files.readAllBytes(source);
+                final var firstFile = first.resolve(relative);
+                final var secondFile = second.resolve(relative);
+                assertFalse(Files.isSameFile(source, firstFile), relative.toString());
+                assertFalse(Files.isSameFile(firstFile, secondFile), relative.toString());
+                assertArrayEquals(original, Files.readAllBytes(firstFile), relative.toString());
+                // Loose Git objects are read-only; make only this private copy writable before mutation.
+                Files.setPosixFilePermissions(firstFile, PosixFilePermissions.fromString("rw-------"));
+                Files.writeString(firstFile, "copy-only mutation\n");
+                assertArrayEquals(original, Files.readAllBytes(source), relative.toString());
+                assertArrayEquals(original, Files.readAllBytes(secondFile), relative.toString());
+            }
+        }
+        assertFalse(Files.exists(second.resolve("repository/.git/objects/info/alternates")));
+        assertFalse(Files.exists(second.resolve("repository/docs/guide.txt")));
+        assertEquals(
+                seedHead, git(second.resolve("repository"), "rev-parse", "HEAD").strip());
+        assertEquals(0, cli(second, seedHead, "expand", "docs").exit());
+        assertEquals("guide\n", Files.readString(second.resolve("repository/docs/guide.txt")));
+        assertFalse(Files.exists(seedTemporary.resolve("repository/docs/guide.txt")));
+    }
+
+    private static String buildFixture(final Path workspace) throws Exception {
         final var repo = Files.createDirectories(workspace.resolve("repository"));
         git(repo, "init", "--template=", ".");
         Files.createDirectories(repo.resolve("src"));
@@ -469,12 +525,7 @@ class AgentBrokerSourceTest {
     }
 
     private static Result launch(final Path cwd, final List<String> flags, final List<String> args) throws Exception {
-        final var command = new ArrayList<>(List.of(
-                Path.of(System.getProperty("java.home"), "bin/java").toString(),
-                "-XX:TieredStopAtLevel=1",
-                "-cp",
-                classpath(),
-                AgentBrokerSource.class.getName()));
+        final var command = TestJava.javaCommand("-cp", classpath(), AgentBrokerSource.class.getName());
         command.addAll(flags);
         command.addAll(args);
         return process(cwd, command, "", Map.of());

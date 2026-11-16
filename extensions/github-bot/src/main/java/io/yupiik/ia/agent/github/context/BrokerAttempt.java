@@ -107,6 +107,7 @@ public final class BrokerAttempt implements AutoCloseable {
                 conf.git(),
                 Duration.ofSeconds(source.commandTimeoutSeconds()),
                 source.maxBytes(),
+                conf.maxHttpBufferBytes(),
                 github::sourceToken);
         ContextService owned = null;
         try {

@@ -46,13 +46,13 @@ public record ExecutorConfiguration(
 
         @Property(defaultValue = "30", documentation = "Maximum executor control request duration in seconds.")
         int commandTimeoutSeconds,
+
         @Property(
                 defaultValue = "\"shown\"",
                 documentation = "Agent tool visibility: shown prints requested arguments, streams and results; "
                         + "collapsed prints lifecycle summaries; hidden suppresses ordinary tool activity. "
                         + "Shown includes shell commands and can expose sensitive tool data in execution logs.")
         String showToolOutput,
-
 
         @Property(documentation = "Docker launcher settings.")
         Docker docker,

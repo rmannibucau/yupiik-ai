@@ -42,14 +42,6 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
-        <dependencies>
-          <!-- fusion JSON metadata merge transformers (documentation.json / schemas.json / openrpc) -->
-          <dependency>
-            <groupId>io.yupiik.maven</groupId>
-            <artifactId>maven-shade-transformers</artifactId>
-            <version>0.0.5</version>
-          </dependency>
-        </dependencies>
         <executions>
           <execution>
             <id>fatjar</id>

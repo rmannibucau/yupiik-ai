@@ -67,6 +67,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -119,6 +120,8 @@ class TuiCommandHeadlessTest {
     private static TuiDeps deps;
 
     private HeadlessBackend backend;
+    private long textPollMillis = 50;
+    private CountDownLatch quietTextPoll;
     private final AtomicReference<TuiRunner> tuiRef = new AtomicReference<>();
     private Thread uiThread;
     /** Render cycles observed through the headless runner (post-render processor), incl. no-op frames. */
@@ -604,6 +607,7 @@ class TuiCommandHeadlessTest {
 
     @Test
     void textWaitsAllowQuietIntervalsBeforePromptChanges() throws Exception {
+        textPollMillis = 20;
         final var command = newUiCommand(container, deps);
         uiThread = new Thread(command::run, "tui-headless-delayed-input");
         uiThread.setDaemon(true);
@@ -613,16 +617,20 @@ class TuiCommandHeadlessTest {
         drainFrames();
 
         // A static screen emits no frames. A delayed update must still be allowed
-        // the full overall deadline, rather than failing after one quiet second.
+        // the full overall deadline, rather than failing after one quiet poll.
         try (final var scheduler = Executors.newSingleThreadScheduledExecutor()) {
             final var paste = scheduler.schedule(
-                    () -> tuiRef.get().dispatch(new PasteEvent("delayed-input-marker")), 1_200, TimeUnit.MILLISECONDS);
+                    afterQuietTextPoll(() -> tuiRef.get().dispatch(new PasteEvent("delayed-input-marker"))),
+                    3 * textPollMillis,
+                    TimeUnit.MILLISECONDS);
             awaitText("delayed-input-marker");
             paste.get();
             drainFrames();
 
             final var clear = scheduler.schedule(
-                    () -> tuiRef.get().dispatch(KeyEvent.ofChar('u', KeyModifiers.CTRL)), 1_200, TimeUnit.MILLISECONDS);
+                    afterQuietTextPoll(() -> tuiRef.get().dispatch(KeyEvent.ofChar('u', KeyModifiers.CTRL))),
+                    3 * textPollMillis,
+                    TimeUnit.MILLISECONDS);
             awaitTextGone("delayed-input-marker");
             clear.get();
         }
@@ -827,7 +835,7 @@ class TuiCommandHeadlessTest {
             }
             // Frame signals are only wake-ups, not the condition: unchanged frames
             // are suppressed, and a draw can race with the preceding screen snapshot.
-            backend.awaitFrame(50);
+            awaitTextFrame();
             screen = backend.text();
         }
     }
@@ -841,8 +849,25 @@ class TuiCommandHeadlessTest {
                         "'" + expected + "' never disappeared within " + TIMEOUT_MS + "ms; last screen:\n" + screen;
                 throw new AssertionError(message);
             }
-            backend.awaitFrame(50);
+            awaitTextFrame();
             screen = backend.text();
+        }
+    }
+
+    /** Arms a fresh quiet-boundary handshake for each scheduled mutation. */
+    private Callable<Void> afterQuietTextPoll(final Runnable mutation) {
+        final var quiet = new CountDownLatch(1);
+        quietTextPoll = quiet;
+        return () -> {
+            assertTrue(quiet.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "text helper never crossed a quiet poll");
+            mutation.run();
+            return null;
+        };
+    }
+
+    private void awaitTextFrame() throws InterruptedException {
+        if (!backend.awaitFrame(textPollMillis) && quietTextPoll != null) {
+            quietTextPoll.countDown();
         }
     }
 

@@ -26,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -247,12 +248,10 @@ public final class CacheIndex {
     }
 
     private String readHex(final DataInputStream input, final int length) throws IOException {
-        final var bytes = input.readNBytes(length);
-        if (bytes.length != length) {
-            throw new IOException("Truncated index node");
-        }
+        final var bytes = new byte[length];
+        input.readFully(bytes);
         for (final var value : bytes) {
-            if (value < 0 || HEX.indexOf((char) value) < 0) {
+            if ((value < '0' || value > '9') && (value < 'a' || value > 'f')) {
                 throw new IOException("Invalid hexadecimal index field");
             }
         }
@@ -323,7 +322,12 @@ public final class CacheIndex {
         }
         final byte[] bytes;
         try (final var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
-            bytes = input.readNBytes(MAX_BYTES + 1);
+            // Nodes are immutable: reject size changes as well as digest corruption.
+            // Size the allocation to the checked node, not MAX_BYTES for every small leaf.
+            bytes = input.readNBytes((int) attributes.size());
+            if (bytes.length != attributes.size() || input.read() != -1) {
+                throw new IOException("Index node size changed while reading: " + digest);
+            }
         }
         if (bytes.length > MAX_BYTES || !hash(bytes).equals(digest)) {
             throw new IOException("Invalid index node size or digest: " + digest);
@@ -339,13 +343,24 @@ public final class CacheIndex {
         var current = path.getRoot();
         for (final var component : path) {
             current = current.resolve(component);
-            if (create) {
-                try {
-                    Files.createDirectory(current);
-                    forceDirectory(current.getParent());
-                } catch (final FileAlreadyExistsException exists) {
-                    // Validate the existing entry without following links below.
+            try {
+                if (!Files.readAttributes(current, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS)
+                        .isDirectory()) {
+                    throw new IOException("Index path is not a real directory: " + current);
                 }
+                continue;
+            } catch (final NoSuchFileException missing) {
+                if (!create) {
+                    throw missing;
+                }
+            }
+            // Only attempt creation for a missing entry, not every existing ancestor.
+            // Concurrent creators are accepted only after the same NOFOLLOW validation.
+            try {
+                Files.createDirectory(current);
+                forceDirectory(current.getParent());
+            } catch (final FileAlreadyExistsException exists) {
+                // Validate the existing entry without following links below.
             }
             if (!Files.readAttributes(current, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS)
                     .isDirectory()) {

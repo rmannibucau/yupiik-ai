@@ -93,12 +93,15 @@ class AttemptPreparationTest {
                             "skills", Map.of("enabled", enabled, "custom", "skills-setting"),
                             "subagents", Map.of("enabled", enabled, "custom", "subagents-setting"),
                             "notifications", Map.of("enabled", enabled, "custom", "notifications-setting"),
-                            "mcp", Map.of(
-                                    "enabled", enabled,
-                                    "servers", List.of(Map.of(
-                                            "name", "documentation",
-                                            "url", "https://docs.example.test/mcp",
-                                            "apiKey", "fake-api-key"))));
+                            "mcp",
+                                    Map.of(
+                                            "enabled",
+                                            enabled,
+                                            "servers",
+                                            List.of(Map.of(
+                                                    "name", "documentation",
+                                                    "url", "https://docs.example.test/mcp",
+                                                    "apiKey", "fake-api-key"))));
                     final var trusted = new LinkedHashMap<String, Object>(optional);
                     trusted.put("permissions", Map.of("mode", "ASK"));
                     trusted.put("hooks", Map.of("beforeTool", "host-command"));
@@ -133,8 +136,10 @@ class AttemptPreparationTest {
                         expected.put("mode", "BUILD");
                         assertEquals(
                                 Map.of(
-                                        "yca", expected,
-                                        "run", Map.of("result-correction-prompt", "Correct the result")),
+                                        "yca",
+                                        expected,
+                                        "run",
+                                        Map.of("result-correction-prompt", "Correct the result")),
                                 json.fromString(Object.class, Files.readString(attempt.resolve("configuration.json"))));
                         assertEquals(source, Files.readString(config));
                     } finally {
@@ -264,13 +269,7 @@ class AttemptPreparationTest {
             trusted.put("compression", Map.of("enabled", true));
             final var retained = new LinkedHashMap<>(trusted);
             for (final var key : List.of(
-                    "hooks",
-                    "permissions",
-                    "home",
-                    "storageHome",
-                    "workingDir",
-                    "mode",
-                    "unknownHostSetting")) {
+                    "hooks", "permissions", "home", "storageHome", "workingDir", "mode", "unknownHostSetting")) {
                 trusted.put(key, Map.of("hostSecret", "must-not-be-copied"));
             }
             final var configuration = home.resolve("trusted.json");

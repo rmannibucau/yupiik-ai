@@ -173,6 +173,7 @@ These host-only settings are independent of the persisted executor fingerprint; 
 |`github.context.repositories` |Empty |Exact comma-separated additional code grants; primary and verified PR head remain available
 |`github.context.maxRequests` |`256` |Shared authenticated-request budget across filesystem, HTTP control and native Git adapters; range 1 through 4096
 |`github.context.maxResponseBytes` |`1073741824` |Shared response-byte budget; range 1 MiB through 16 GiB
+|`github.context.maxHttpBufferBytes` |`67108864` |Git compatibility HTTP buffer cap in bytes; range 1 through 2147483639 (Java array-safe bound), sized for the worker heap; bounds request input and buffered responses, not streamed responses
 |`github.fix.enabled` |`false` |Explicit opt-in to existing open PR head updates
 |`github.fix.repositories` |Empty |Exact canonical head-repository allowlist; empty denies all, independent of code grants
 |===
@@ -458,6 +459,7 @@ Optional archived and fork exclusions apply after inclusion, even for explicitly
 |`github.authorization.allowRepositoryWriters` |`true` |Allows nonlisted users with effective write or admin permission on the exact target repository, subject to optional configured teams
 |`github.authorization.teams` |Empty |Optional active-team-membership restriction for nonlisted repository writers only; never restricts explicitly listed IDs
 |`github.authorization.permissionsCacheTtlSeconds` |`7200` |Fixed authorization decision TTL in seconds; zero disables caching and negative values are rejected
+|`github.authorization.permissionsCacheMaxEntries` |`4096` |Maximum cached authorization decisions per process; must be between `1` and `65536`, inclusive
 |===
 
 Authorization uses immutable numeric user IDs, not mutable login names.
@@ -469,6 +471,8 @@ An empty `userIds` list works with repository-writer authorization enabled; sett
 
 Aggregate authorization decisions, including identity resolution and team checks, use a bounded, thread-safe, process-local cache with a fixed two-hour TTL by default.
 Cache hits do not extend the TTL, and there is no cross-process persistence or cache sharing.
+Decisions are isolated by repository and immutable actor ID; expired entries are removed on insertion, then the oldest inserted decision is evicted if the configured capacity is reached.
+Cache hits do not change eviction order, and an evicted decision requires fresh API checks even before its TTL would have expired.
 Permission grants and revocations, including identity or team changes affecting the decision, can take up to two hours to be reflected with the default TTL.
 The worker applies authorization again before execution but reuses an unexpired decision in the same process rather than forcing fresh API checks.
 Set `github.authorization.permissionsCacheTtlSeconds=0` to disable this caching.

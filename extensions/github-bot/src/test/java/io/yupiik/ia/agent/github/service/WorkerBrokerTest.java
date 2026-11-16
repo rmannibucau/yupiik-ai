@@ -277,7 +277,7 @@ class WorkerBrokerTest {
                     0,
                     new GithubBotConfiguration.Auth(
                             GithubBotConfiguration.AuthType.pat, "GH_TOKEN", "", 0, "", "GH_AGENT_TOKEN"),
-                    new GithubBotConfiguration.Authorization("42", "", false, 7200),
+                    new GithubBotConfiguration.Authorization("42", "", false, 7200, 4096),
                     new GithubBotConfiguration.Repositories(
                             "owner/repo", "", "", "", List.of(RepositorySelector.Visibility.values()), false, false));
             github = new GitHubClient(URI.create(api), json, () -> "host-secret", BotTestConfiguration.CLOCK);
@@ -332,7 +332,8 @@ class WorkerBrokerTest {
                             "git",
                             "",
                             256,
-                            1073741824L),
+                            1073741824L,
+                            67108864L),
                     new FixPublisher(github, store, json, new FixConfiguration(false, "")),
                     BotTestConfiguration.CLOCK);
         }

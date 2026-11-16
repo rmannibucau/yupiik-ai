@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.github.context;
 
+import static java.util.stream.Collectors.joining;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
@@ -26,6 +27,7 @@ import io.yupiik.ia.agent.github.context.git.TrustedGitStore;
 import io.yupiik.ia.agent.github.store.MutableTask;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
+import io.yupiik.ia.agent.github.support.TestJava;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -109,7 +111,8 @@ final class ContextTestSupport implements AutoCloseable {
                 "/usr/bin/git",
                 repositories,
                 4096,
-                16 * 1024 * 1024);
+                16 * 1024 * 1024,
+                67108864L);
     }
 
     ContextService service(
@@ -122,6 +125,7 @@ final class ContextTestSupport implements AutoCloseable {
                 executable,
                 Duration.ofSeconds(30),
                 8 * 1024 * 1024,
+                conf.maxHttpBufferBytes(),
                 () -> "test-upstream-token");
         final var service = new ContextService(
                 github,
@@ -156,6 +160,11 @@ final class ContextTestSupport implements AutoCloseable {
     record GitFixture(Path directory, String head, String old, Path executable) {}
 
     GitFixture gitFixture() throws Exception {
+        return gitFixture(root);
+    }
+
+    static GitFixture gitFixture(final Path root) throws Exception {
+        Files.createDirectories(root);
         final var repo = Files.createDirectory(root.resolve("repository with 'quotes'"));
         git(repo, "init", "--template=");
         git(
@@ -176,6 +185,31 @@ final class ContextTestSupport implements AutoCloseable {
         final var wrapper = root.resolve("Transport with 'quotes'");
         transport(wrapper, repo.toUri().toASCIIString(), "https://github.com/acme/primary.git");
         return new GitFixture(repo, head, old, wrapper);
+    }
+
+    /** Construct completely before publishing to concurrent readers; callers must not mutate it. */
+    static GitFixture sourceFixture(final Path root) throws Exception {
+        final var repository = gitFixture(root);
+        final var repo = repository.directory();
+        Files.createDirectories(repo.resolve("src"));
+        Files.createDirectories(repo.resolve("docs"));
+        Files.writeString(repo.resolve("src/code.txt"), "source\n");
+        Files.writeString(repo.resolve("docs/guide.txt"), "guide\n");
+        git(repo, "add", ".");
+        git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--amend", "--no-edit");
+        git(
+                repo,
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "tag",
+                "-a",
+                "v1",
+                "-m",
+                "release",
+                repository.old());
+        return new GitFixture(repo, git(repo, "rev-parse", "HEAD").strip(), repository.old(), repository.executable());
     }
 
     private static Path transport(final Path executable, final String repository, final String remotes)
@@ -208,11 +242,16 @@ final class ContextTestSupport implements AutoCloseable {
         Files.writeString(
                 executable,
                 "#!/bin/sh\nexec "
-                        + quote(Path.of(System.getProperty("java.home"), "bin/java")
-                                .toString())
-                        + " -XX:TieredStopAtLevel=1 -cp "
-                        + quote(System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")))
-                        + " " + quote(main.getName()) + " " + quote(argument) + " \"$@\"\n");
+                        + TestJava.javaCommand(
+                                        "-cp",
+                                        System.getProperty(
+                                                "surefire.test.class.path", System.getProperty("java.class.path")),
+                                        main.getName(),
+                                        argument)
+                                .stream()
+                                .map(ContextTestSupport::quote)
+                                .collect(joining(" "))
+                        + " \"$@\"\n");
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
         return executable;
     }

@@ -197,7 +197,7 @@ class WorkerTest {
                 0,
                 new GithubBotConfiguration.Auth(
                         GithubBotConfiguration.AuthType.pat, "GH_TOKEN", "", 0, "", "GH_AGENT_TOKEN"),
-                new GithubBotConfiguration.Authorization("42", "", false, 7200),
+                new GithubBotConfiguration.Authorization("42", "", false, 7200, 4096),
                 new GithubBotConfiguration.Repositories(
                         "owner/repo", "", "", "", List.of(RepositorySelector.Visibility.values()), false, false));
         github = new GitHubClient(URI.create(api), json, () -> "test", BotTestConfiguration.CLOCK);
@@ -435,19 +435,24 @@ class WorkerTest {
                         + "'; exit 9;;\ncontainer) printf 'false\\n';;\n*) exit 0;;\nesac\n");
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
         final var values = Map.of(
-                "github.executor.docker.executable", executable.toString(),
-                "github.executor.docker.image", "trusted-agent",
-                "github.executor.timeoutSeconds", "5",
-                "github.executor.showToolOutput", visibility);
-        final var executor = new ExecutorConfiguration$FusionConfigurationFactory(
-                        key -> Optional.ofNullable(values.get(key)))
-                .get();
+                "github.executor.docker.executable",
+                executable.toString(),
+                "github.executor.docker.image",
+                "trusted-agent",
+                "github.executor.timeoutSeconds",
+                "5",
+                "github.executor.showToolOutput",
+                visibility);
+        final var executor =
+                new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
         BotTestConfiguration.worker(conf, store, github, json, executor).run(id, DEFAULT_OPTIONS);
         final var arguments = Files.readAllLines(invocations);
         assertEquals(1, arguments.stream().filter("--show-tool-output"::equals).count());
         assertEquals(visibility, arguments.get(arguments.indexOf("--show-tool-output") + 1));
-        assertEquals(TaskState.pending, store.transaction(state -> state.task(id).state()));
-        final var directory = Path.of(store.<String>transaction(state -> state.task(id).attemptDirectory()));
+        assertEquals(
+                TaskState.pending, store.transaction(state -> state.task(id).state()));
+        final var directory =
+                Path.of(store.<String>transaction(state -> state.task(id).attemptDirectory()));
         AttemptPreparation.delete(directory);
     }
 
@@ -992,7 +997,7 @@ class WorkerTest {
                                             .get()),
                             new StrictSolvePublisher(github, store, json),
                             new DiscussionPublisher(new DiscussionClient(github), store, strict),
-                            new ContextConfiguration("127.0.0.1", 0, "", "", "git", "", 256, 1073741824L),
+                            new ContextConfiguration("127.0.0.1", 0, "", "", "git", "", 256, 1073741824L, 67108864L),
                             new FixPublisher(github, store, json, new FixConfiguration(false, "")),
                             BotTestConfiguration.CLOCK)
                     .run(id, commandOptions.worker());

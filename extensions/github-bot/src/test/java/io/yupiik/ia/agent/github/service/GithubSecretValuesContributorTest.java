@@ -27,6 +27,7 @@ import io.yupiik.ia.agent.core.security.SecretRegistry;
 import io.yupiik.ia.agent.core.security.SecretSessionModes;
 import io.yupiik.ia.agent.core.security.SecretVault;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.support.TestJava;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -40,12 +41,8 @@ import org.junit.jupiter.api.io.TempDir;
 class GithubSecretValuesContributorTest {
     @Test
     void contributesCredentialsAndUsesSharedRedactor(@TempDir final Path directory) throws Exception {
-        final var builder = new ProcessBuilder(
-                        Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                        "-cp",
-                        System.getProperty("java.class.path"),
-                        Probe.class.getName(),
-                        directory.toString())
+        final var builder = new ProcessBuilder(TestJava.javaCommand(
+                        "-cp", System.getProperty("java.class.path"), Probe.class.getName(), directory.toString()))
                 .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                 .redirectError(ProcessBuilder.Redirect.DISCARD);
         // Deliberately use names which do not look like secrets to generic environment harvesting.

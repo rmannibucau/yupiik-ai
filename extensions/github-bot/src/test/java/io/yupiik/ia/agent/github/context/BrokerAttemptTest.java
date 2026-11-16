@@ -386,7 +386,15 @@ class BrokerAttemptTest {
 
         private ContextConfiguration configuration(final Path root) {
             return new ContextConfiguration(
-                    "127.0.0.1", 0, "https://worker.example", root.toString(), git.toString(), "", 256, 1073741824L);
+                    "127.0.0.1",
+                    0,
+                    "https://worker.example",
+                    root.toString(),
+                    git.toString(),
+                    "",
+                    256,
+                    1073741824L,
+                    67108864L);
         }
 
         private BrokerAttempt open(final TaskDocument task, final ContextConfiguration conf, final Clock clock)

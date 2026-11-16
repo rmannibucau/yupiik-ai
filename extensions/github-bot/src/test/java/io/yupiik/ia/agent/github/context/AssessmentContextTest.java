@@ -281,9 +281,18 @@ class AssessmentContextTest {
                     Instant.now().plusSeconds(60),
                     new ContextBudget(100, 1024 * 1024),
                     new ContextConfiguration(
-                            "127.0.0.1", 0, "https://worker.invalid", "", "/not/executed", "", 100, 1024 * 1024),
+                            "127.0.0.1",
+                            0,
+                            "https://worker.invalid",
+                            "",
+                            "/not/executed",
+                            "",
+                            100,
+                            1024 * 1024,
+                            67108864L),
                     new WorkerOptions.Source(WorkerOptions.SourceMode.broker, "", 8, 1024 * 1024, 5),
-                    new TrustedGitStore(root, "/not/executed", Duration.ofSeconds(5), 1024 * 1024, () -> "test-only"));
+                    new TrustedGitStore(
+                            root, "/not/executed", Duration.ofSeconds(5), 1024 * 1024, 67108864L, () -> "test-only"));
         }
 
         @Override

@@ -181,7 +181,12 @@ class DockerExecutionBackendTest {
                 () -> assertThrows(
                         IllegalStateException.class,
                         () -> new DockerExecutionBackend(
-                                        executable.toString(), "trusted-image", Duration.ofMillis(50), "", null, "shown")
+                                        executable.toString(),
+                                        "trusted-image",
+                                        Duration.ofMillis(50),
+                                        "",
+                                        null,
+                                        "shown")
                                 .execute(directory, "yca-timeout-stop-failure", "review", Map.of(), Map.of())));
     }
 
@@ -204,12 +209,14 @@ class DockerExecutionBackendTest {
         assertEquals("restricted-egress", args.get(args.indexOf("--network") + 1));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new DockerExecutionBackend("docker", "image", Duration.ofSeconds(1), "bad network", null, "shown"));
+                () -> new DockerExecutionBackend(
+                        "docker", "image", Duration.ofSeconds(1), "bad network", null, "shown"));
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"shown", "collapsed", "hidden"})
-    void executesConcreteBackendWithIsolatedMountsArgumentsAndCredentials(final String showToolOutput) throws Exception {
+    void executesConcreteBackendWithIsolatedMountsArgumentsAndCredentials(final String showToolOutput)
+            throws Exception {
         final var directory = attempt();
         assumeNonRoot(directory);
         final var executable = script("""
@@ -591,6 +598,7 @@ class DockerExecutionBackendTest {
     }
 
     private DockerExecutionBackend backend(final Path executable) {
-        return new DockerExecutionBackend(executable.toString(), "trusted-image", Duration.ofSeconds(5), "", null, "shown");
+        return new DockerExecutionBackend(
+                executable.toString(), "trusted-image", Duration.ofSeconds(5), "", null, "shown");
     }
 }

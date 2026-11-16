@@ -47,8 +47,10 @@ class AttemptServicesTest {
         try (final var json = BotJsonMapper.create(
                 List.of(new RestrictedServicesGateway$Settings$FusionJsonCodec()), key -> Optional.empty())) {
             final var mcp = Map.of(
-                    "enabled", true,
-                    "servers", List.of(Map.of(
+                    "enabled",
+                    true,
+                    "servers",
+                    List.of(Map.of(
                             "name", "documentation",
                             "url", "https://docs.example.test/mcp",
                             "apiKey", "agent-only-documentation-key",

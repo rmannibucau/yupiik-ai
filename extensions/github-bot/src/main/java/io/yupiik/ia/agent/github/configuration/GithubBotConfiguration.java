@@ -111,10 +111,18 @@ public record GithubBotConfiguration(
             @Property(
                     defaultValue = "7200L",
                     documentation = "Repository permission cache TTL in seconds; zero disables caching.")
-            long permissionsCacheTtlSeconds) {
+            long permissionsCacheTtlSeconds,
+
+            @Property(
+                    defaultValue = "4096",
+                    documentation = "Maximum cached repository authorization decisions, from 1 to 65536.")
+            int permissionsCacheMaxEntries) {
         public Authorization {
             if (permissionsCacheTtlSeconds < 0) {
                 throw new IllegalArgumentException("permissionsCacheTtlSeconds must be nonnegative");
+            }
+            if (permissionsCacheMaxEntries < 1 || permissionsCacheMaxEntries > 65536) {
+                throw new IllegalArgumentException("permissionsCacheMaxEntries must be between 1 and 65536");
             }
         }
     }

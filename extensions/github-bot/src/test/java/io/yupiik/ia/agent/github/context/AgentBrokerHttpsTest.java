@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
 import io.yupiik.ia.agent.github.context.agent.AgentBrokerSource;
+import io.yupiik.ia.agent.github.support.TestJava;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -31,9 +32,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.security.cert.CertificateFactory;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -43,6 +43,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -51,56 +53,48 @@ class AgentBrokerHttpsTest {
     private static final String STORE_PASSWORD = "changeit";
 
     @TempDir
+    private static Path shared;
+
+    private static TlsTestSupport.Material material;
+    private static ContextTestSupport.GitFixture repository;
+
+    @BeforeAll
+    static void immutableFixtures() throws Exception {
+        material = TlsTestSupport.create(shared.resolve("tls"), STORE_PASSWORD);
+        repository = ContextTestSupport.sourceFixture(shared.resolve("upstream with 'quotes'"));
+    }
+
+    @AfterAll
+    static void releaseFixtures() {
+        material = null;
+        repository = null;
+    }
+
+    @Test
+    void exportedCertificateMatchesKeyStore() throws Exception {
+        final var keys = KeyStore.getInstance("PKCS12");
+        try (final var input = Files.newInputStream(material.store())) {
+            keys.load(input, STORE_PASSWORD.toCharArray());
+        }
+        assertTrue(keys.isKeyEntry("localhost"));
+        try (final var input = Files.newInputStream(material.certificate())) {
+            final var certificate = CertificateFactory.getInstance("X.509").generateCertificate(input);
+            assertArrayEquals(keys.getCertificate("localhost").getEncoded(), certificate.getEncoded());
+            certificate.verify(certificate.getPublicKey());
+        }
+    }
+
+    @TempDir
     Path temporary;
 
     @Test
     void independentHelperPreservesAgentWorkAcrossVerifiedHttpsSourceOperations() throws Exception {
-        final var store = temporary.resolve("test.p12");
-        final var certificate = temporary.resolve("test.pem");
-        final var keytool =
-                Path.of(System.getProperty("java.home"), "bin/keytool").toString();
-        assertEquals(
-                0,
-                run(
-                                temporary,
-                                List.of(
-                                        keytool,
-                                        "-J-XX:TieredStopAtLevel=1",
-                                        "-genkeypair",
-                                        "-alias",
-                                        "localhost",
-                                        "-keyalg",
-                                        "EC",
-                                        "-groupname",
-                                        "secp256r1",
-                                        "-validity",
-                                        "2",
-                                        "-dname",
-                                        "CN=localhost",
-                                        "-ext",
-                                        "SAN=dns:localhost,ip:127.0.0.1",
-                                        "-storetype",
-                                        "PKCS12",
-                                        "-keystore",
-                                        store.toString(),
-                                        "-storepass",
-                                        STORE_PASSWORD,
-                                        "-noprompt"),
-                                Map.of(),
-                                "")
-                        .exit());
+        final var store = material.store();
+        final var certificate = material.certificate();
         final var keys = KeyStore.getInstance("PKCS12");
         try (final var input = Files.newInputStream(store)) {
             keys.load(input, STORE_PASSWORD.toCharArray());
         }
-        // Export the same self-signed leaf for native Git without another keytool JVM.
-        Files.writeString(
-                certificate,
-                "-----BEGIN CERTIFICATE-----\n"
-                        + Base64.getMimeEncoder(64, new byte[] {'\n'})
-                                .encodeToString(keys.getCertificate("localhost").getEncoded())
-                        + "\n-----END CERTIFICATE-----\n",
-                StandardCharsets.US_ASCII);
         final var managers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         managers.init(keys, STORE_PASSWORD.toCharArray());
         final var tls = SSLContext.getInstance("TLS");
@@ -113,34 +107,7 @@ class AgentBrokerHttpsTest {
                 final var forward = HttpClient.newBuilder()
                         .version(HttpClient.Version.HTTP_1_1)
                         .build()) {
-            final var repository = fixture.gitFixture();
-            Files.createDirectories(repository.directory().resolve("src"));
-            Files.createDirectories(repository.directory().resolve("docs"));
-            Files.writeString(repository.directory().resolve("src/code.txt"), "source\n");
-            Files.writeString(repository.directory().resolve("docs/guide.txt"), "guide\n");
-            git(repository.directory(), "add", ".");
-            git(
-                    repository.directory(),
-                    "-c",
-                    "user.name=Test",
-                    "-c",
-                    "user.email=test@example.invalid",
-                    "commit",
-                    "--amend",
-                    "--no-edit");
-            final var head = git(repository.directory(), "rev-parse", "HEAD").strip();
-            git(
-                    repository.directory(),
-                    "-c",
-                    "user.name=Test",
-                    "-c",
-                    "user.email=test@example.invalid",
-                    "tag",
-                    "-a",
-                    "v1",
-                    "-m",
-                    "release",
-                    repository.old());
+            final var head = repository.head();
             final var tag =
                     git(repository.directory(), "rev-parse", "refs/tags/v1").strip();
             final var service = fixture.service(
@@ -354,49 +321,48 @@ class AgentBrokerHttpsTest {
 
     @Test
     void nativeFixtureTransportsPreserveQuotedArgumentsAndExactRemoteMapping() throws Exception {
-        try (final var fixture = new ContextTestSupport(temporary.resolve("transport with 'quotes'"))) {
-            final var repository = fixture.gitFixture();
-            final var fork = launcher(
-                    temporary.resolve("fork with 'quotes'"),
-                    ContextServiceTest.ForkTransport.class,
-                    repository.directory().toUri().toASCIIString());
-            int index = 0;
-            for (final var transport : List.of(
-                    List.of(repository.executable().toString(), "https://github.com/acme/primary.git"),
-                    List.of(fork.toString(), "https://github.com/acme/primary.git"),
-                    List.of(fork.toString(), "https://github.com/acme/extra.git"))) {
-                final var target = temporary.resolve("clone 'quoted' " + index++);
-                final var cloned = run(
-                        temporary,
-                        List.of(transport.getFirst(), "clone", "--template=", transport.getLast(), target.toString()),
-                        Map.of(),
-                        "");
-                assertEquals(0, cloned.exit(), cloned.output());
-                assertEquals(repository.head(), git(target, "rev-parse", "HEAD").strip());
-                // Spaces, quotes, shell syntax and URL substrings must remain one literal argument.
-                final var literal = "https://github.com/acme/primary.git 'quoted' ; $(touch unexpected)";
-                final var configured = run(
-                        temporary,
-                        List.of(transport.getFirst(), "-C", target.toString(), "config", "test.literal", literal),
-                        Map.of(),
-                        "");
-                assertEquals(0, configured.exit(), configured.output());
-                assertEquals(literal, git(target, "config", "test.literal").strip());
-                assertFalse(Files.exists(temporary.resolve("unexpected")));
-            }
+        final var fork = launcher(
+                temporary.resolve("fork with 'quotes'"),
+                ContextServiceTest.ForkTransport.class,
+                repository.directory().toUri().toASCIIString());
+        int index = 0;
+        for (final var transport : List.of(
+                List.of(repository.executable().toString(), "https://github.com/acme/primary.git"),
+                List.of(fork.toString(), "https://github.com/acme/primary.git"),
+                List.of(fork.toString(), "https://github.com/acme/extra.git"))) {
+            final var target = temporary.resolve("clone 'quoted' " + index++);
+            final var cloned = run(
+                    temporary,
+                    List.of(transport.getFirst(), "clone", "--template=", transport.getLast(), target.toString()),
+                    Map.of(),
+                    "");
+            assertEquals(0, cloned.exit(), cloned.output());
+            assertEquals(repository.head(), git(target, "rev-parse", "HEAD").strip());
+            assertEquals(repository.old(), git(target, "rev-parse", "v1^{}").strip());
+            assertEquals("tag", git(target, "cat-file", "-t", "v1").strip());
+            assertEquals("source\n", Files.readString(target.resolve("src/code.txt")));
+            assertEquals("guide\n", Files.readString(target.resolve("docs/guide.txt")));
+            // Spaces, quotes, shell syntax and URL substrings must remain one literal argument.
+            final var literal = "https://github.com/acme/primary.git 'quoted' ; $(touch unexpected)";
+            final var configured = run(
+                    temporary,
+                    List.of(transport.getFirst(), "-C", target.toString(), "config", "test.literal", literal),
+                    Map.of(),
+                    "");
+            assertEquals(0, configured.exit(), configured.output());
+            assertEquals(literal, git(target, "config", "test.literal").strip());
+            assertFalse(Files.exists(temporary.resolve("unexpected")));
         }
     }
 
     private static List<String> helper(final Path store, final List<String> flags, final String... operation) {
-        final var command = new ArrayList<>(List.of(
-                Path.of(System.getProperty("java.home"), "bin/java").toString(),
-                "-XX:TieredStopAtLevel=1",
+        final var command = TestJava.javaCommand(
                 "-Djavax.net.ssl.trustStore=" + store,
                 "-Djavax.net.ssl.trustStorePassword=" + STORE_PASSWORD,
                 "-Djavax.net.ssl.trustStoreType=PKCS12",
                 "-cp",
                 System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
-                AgentBrokerSource.class.getName()));
+                AgentBrokerSource.class.getName());
         command.addAll(flags);
         command.addAll(List.of(operation));
         return command;

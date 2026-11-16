@@ -25,6 +25,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -37,12 +38,23 @@ import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class TrustedGitStoreTest {
     private static final String URL = "https://github.com/yupiik/fixture.git";
     private static final long BUDGET = 8 * 1024 * 1024;
+
+    @TempDir
+    static Path seedTemporary;
+
+    private static Fixture seed;
+
+    @BeforeAll
+    static void buildSeed() throws Exception {
+        seed = buildFixture(seedTemporary);
+    }
 
     @TempDir
     Path temporary;
@@ -53,7 +65,7 @@ class TrustedGitStoreTest {
         final var root = temporary.resolve("private");
         final Path serving;
         try (final var store = new TrustedGitStore(
-                root, transport(fixture).toString(), Duration.ofSeconds(45), BUDGET, () -> "secret-value")) {
+                root, transport(fixture).toString(), Duration.ofSeconds(45), BUDGET, 67108864L, () -> "secret-value")) {
             final var view = store.prepare(URL, fixture.head(), 2, true);
             serving = view.directory();
             assertEquals(fixture.head(), view.headSha());
@@ -97,7 +109,8 @@ class TrustedGitStoreTest {
                     new HashSet<>(git(serving, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)")
                             .lines()
                             .toList());
-            // rev-list exclusions can also exclude trees shared with older history; use the actual shallow traversal.
+            // rev-list exclusions can also exclude trees shared with older history; use the actual
+            // shallow traversal.
             final var reachable = new HashSet<>(git(serving, "rev-list", "--objects", "--no-object-names", "HEAD")
                     .lines()
                     .toList());
@@ -140,6 +153,7 @@ class TrustedGitStoreTest {
                 transport(fixture).toString(),
                 Duration.ofSeconds(15),
                 BUDGET,
+                67108864L,
                 () -> "secret-value")) {
             final var view = store.prepare(URL, fixture.head(), 1, false);
             assertEquals(fixture.head(), view.headSha());
@@ -155,6 +169,7 @@ class TrustedGitStoreTest {
                 transport(fixture).toString(),
                 Duration.ofSeconds(15),
                 BUDGET,
+                67108864L,
                 () -> "secret-value")) {
             final var view = store.prepare(URL, fixture.head(), 1, false);
             final var info = store.http(view, "GET", "service=git-upload-pack", new byte[0], null);
@@ -199,7 +214,7 @@ class TrustedGitStoreTest {
     @Test
     void rejectsUntrustedInputsGlobalsAndWriteOrExecutionOptions() throws Exception {
         try (final var store = new TrustedGitStore(
-                temporary.resolve("private"), "/does/not/exist/git", Duration.ofSeconds(1), BUDGET, null)) {
+                temporary.resolve("private"), "/does/not/exist/git", Duration.ofSeconds(1), BUDGET, 67108864L, null)) {
             for (final var url : List.of(
                     "file:///tmp/r",
                     "https://token@github.com/o/r.git",
@@ -232,7 +247,7 @@ class TrustedGitStoreTest {
         final var outside = Files.createDirectory(temporary.resolve("outside"));
         final var link = Files.createSymbolicLink(temporary.resolve("link"), outside);
         try (final var store =
-                new TrustedGitStore(link.resolve("private"), "git", Duration.ofSeconds(1), BUDGET, null)) {
+                new TrustedGitStore(link.resolve("private"), "git", Duration.ofSeconds(1), BUDGET, 67108864L, null)) {
             assertThrows(IOException.class, () -> store.prepare(URL, "a".repeat(40), 1, false));
         }
         assertFalse(Files.exists(outside.resolve("private")));
@@ -242,7 +257,8 @@ class TrustedGitStoreTest {
     void wrongHeadAndDiskOverflowAreNotPublished() throws Exception {
         final var fixture = fixture();
         final var wrapper = transport(fixture);
-        // Deliberately make a faulty trusted transport return a different commit, to test the independent head check.
+        // Deliberately make a faulty trusted transport return a different commit, to test the
+        // independent head check.
         Files.writeString(
                 wrapper,
                 Files.readString(wrapper)
@@ -251,7 +267,8 @@ class TrustedGitStoreTest {
                                 "case \"$argument\" in\n        " + "a".repeat(40) + ") argument="
                                         + shell(fixture.head()) + " ;;"));
         final var root = temporary.resolve("private");
-        try (final var store = new TrustedGitStore(root, wrapper.toString(), Duration.ofSeconds(15), BUDGET, null)) {
+        try (final var store =
+                new TrustedGitStore(root, wrapper.toString(), Duration.ofSeconds(15), BUDGET, 67108864L, null)) {
             final var error = assertThrows(IOException.class, () -> store.prepare(URL, "a".repeat(40), 1, false));
             assertTrue(error.getMessage().contains("failed"));
         }
@@ -261,8 +278,8 @@ class TrustedGitStoreTest {
         git(fixture.directory(), "add", "large");
         git(fixture.directory(), "commit", "-m", "large");
         final var head = git(fixture.directory(), "rev-parse", "HEAD").strip();
-        try (final var store =
-                new TrustedGitStore(root, transport(fixture).toString(), Duration.ofSeconds(15), 64 * 1024, null)) {
+        try (final var store = new TrustedGitStore(
+                root, transport(fixture).toString(), Duration.ofSeconds(15), 64 * 1024, 67108864L, null)) {
             assertThrows(IOException.class, () -> store.prepare(URL, head, 1, false));
         }
         try (final var paths = Files.list(root)) {
@@ -276,12 +293,13 @@ class TrustedGitStoreTest {
         Files.writeString(slow, "#!/bin/sh\nexec /bin/sleep 30\n");
         Files.setPosixFilePermissions(slow, PosixFilePermissions.fromString("rwx------"));
         final var root = temporary.resolve("private");
-        try (final var store = new TrustedGitStore(root, slow.toString(), Duration.ofMillis(100), BUDGET, null)) {
+        try (final var store =
+                new TrustedGitStore(root, slow.toString(), Duration.ofMillis(100), BUDGET, 67108864L, null)) {
             assertTimeoutPreemptively(
                     Duration.ofSeconds(3),
                     () -> assertThrows(IOException.class, () -> store.prepare(URL, "a".repeat(40), 1, false)));
         }
-        final var store = new TrustedGitStore(root, slow.toString(), Duration.ofSeconds(30), BUDGET, null);
+        final var store = new TrustedGitStore(root, slow.toString(), Duration.ofSeconds(30), BUDGET, 67108864L, null);
         try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             final var future = executor.submit(() ->
                     assertThrows(IOException.class, () -> store.prepare(URL, "a".repeat(40), 1, false)));
@@ -299,11 +317,21 @@ class TrustedGitStoreTest {
         final var fixture = fixture();
         final var executable = transport(fixture);
         try (final var store = new TrustedGitStore(
-                temporary.resolve("private"), executable.toString(), Duration.ofSeconds(15), 128 * 1024, null)) {
+                temporary.resolve("private"),
+                executable.toString(),
+                Duration.ofSeconds(15),
+                128 * 1024,
+                67108864L,
+                null)) {
             final var view = store.prepare(URL, fixture.head(), 1, false);
             Files.write(
                     temporary.resolve("cgi-response"),
-                    ("Status: 418 Teapot\r\nContent-Type: application/octet-stream\r\nX-Secret: hidden\r\nLocation: https://evil.invalid\r\nWWW-Authenticate: Basic\r\n\r\n\u0000\u00ff")
+                    ("Status: 418 Teapot\r\n"
+                                    + "Content-Type: application/octet-stream\r\n"
+                                    + "X-Secret: hidden\r\n"
+                                    + "Location: https://evil.invalid\r\n"
+                                    + "WWW-Authenticate: Basic\r\n\r\n"
+                                    + "\u0000\u00ff")
                             .getBytes(StandardCharsets.ISO_8859_1));
             final var result = store.http(view, "GET", "service=git-upload-pack", new byte[0], null);
             assertEquals(418, result.status());
@@ -339,6 +367,7 @@ class TrustedGitStoreTest {
                         transport(fixture).toString(),
                         Duration.ofSeconds(15),
                         BUDGET,
+                        67108864L,
                         null);
                 final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             final var first = executor.submit(() -> store.prepare(URL, head, 1, false));
@@ -361,7 +390,12 @@ class TrustedGitStoreTest {
         final var fixture = fixture();
         final var policy = new GitReadPolicy();
         try (final var store = new TrustedGitStore(
-                temporary.resolve("private"), transport(fixture).toString(), Duration.ofSeconds(15), BUDGET, null)) {
+                temporary.resolve("private"),
+                transport(fixture).toString(),
+                Duration.ofSeconds(15),
+                BUDGET,
+                67108864L,
+                null)) {
             final var view = store.prepare(URL, fixture.head(), 2, true, fixture.parent());
             for (final var argv : List.of(
                     List.of("log", "-2", "--format=%h %s", "BASE..HEAD"),
@@ -406,7 +440,12 @@ class TrustedGitStoreTest {
     void combinedRootsHaveExactFullTreesAndNativeShallowBoundaries() throws Exception {
         final var fixture = fixture();
         try (final var store = new TrustedGitStore(
-                temporary.resolve("private"), transport(fixture).toString(), Duration.ofSeconds(15), BUDGET, null)) {
+                temporary.resolve("private"),
+                transport(fixture).toString(),
+                Duration.ofSeconds(15),
+                BUDGET,
+                67108864L,
+                null)) {
             final var view = store.prepare(URL, fixture.head(), 1, true, fixture.unrelated());
             assertEquals(fixture.head(), read(store, view, "rev-parse", "HEAD").strip());
             assertEquals(
@@ -474,6 +513,7 @@ class TrustedGitStoreTest {
                         transport(fixture, upstream).toString(),
                         Duration.ofSeconds(15),
                         BUDGET,
+                        67108864L,
                         () -> "host-secret");
                 final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             final var view =
@@ -593,6 +633,7 @@ class TrustedGitStoreTest {
                 transport(fixture, upstream).toString(),
                 Duration.ofSeconds(15),
                 BUDGET,
+                67108864L,
                 null)) {
             final var view = store.prepare(
                     URL, fixture.head(), 1, true, fixture.old(), "https://github.com/yupiik/upstream.git");
@@ -635,7 +676,12 @@ class TrustedGitStoreTest {
     void rejectsMovedPreviouslyEligibleTagWithoutChangingPublishedGeneration() throws Exception {
         final var fixture = fixture();
         try (final var store = new TrustedGitStore(
-                temporary.resolve("private"), transport(fixture).toString(), Duration.ofSeconds(15), BUDGET, null)) {
+                temporary.resolve("private"),
+                transport(fixture).toString(),
+                Duration.ofSeconds(15),
+                BUDGET,
+                67108864L,
+                null)) {
             final var original = store.prepare(URL, fixture.head(), 2, true);
             git(fixture.directory(), "tag", "-f", "-a", "inside", "-m", "rebound", fixture.head());
             final var failure = assertThrows(IOException.class, () -> store.prepare(URL, fixture.head(), 2, true));
@@ -653,20 +699,66 @@ class TrustedGitStoreTest {
     }
 
     @Test
-    void binarySpoolingExceedsCompatibilityLimitWithoutHeapSizedBuffersAndCleansOnClose() throws Exception {
+    void validatesHttpBufferCapBeforeCreatingPrivateStorage() throws Exception {
+        final var root = temporary.resolve("private");
+        for (final long cap : new long[] {Long.MIN_VALUE, -1, 0, Integer.MAX_VALUE - 7L, Long.MAX_VALUE}) {
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new TrustedGitStore(root, "git", Duration.ofSeconds(1), BUDGET, cap, null));
+        }
+        for (final long cap : new long[] {1, 67108864L, Integer.MAX_VALUE - 8L}) {
+            try (final var store = new TrustedGitStore(root, "git", Duration.ofSeconds(1), BUDGET, cap, null)) {
+                assertFalse(Files.exists(root)); // Validation does not allocate cap-sized buffers or storage.
+            }
+        }
+    }
+
+    @Test
+    void acceptsExactHttpBufferBoundaryAndRejectsRequestOneByteOverForBothApis() throws Exception {
+        final var fixture = fixture();
+        final var root = temporary.resolve("private");
+        final int cap = 32;
+        try (final var store =
+                new TrustedGitStore(root, transport(fixture).toString(), Duration.ofSeconds(15), BUDGET, cap, null)) {
+            final var view = store.prepare(URL, fixture.head(), 1, false);
+            final var payload = new byte[cap];
+            Arrays.fill(payload, (byte) 0xa5);
+            try (final var output = Files.newOutputStream(temporary.resolve("cgi-response"))) {
+                output.write("Content-Type: application/octet-stream\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                output.write(payload);
+            }
+            final var response = store.http(view, "POST", "", payload, null);
+            assertEquals(200, response.status());
+            assertArrayEquals(payload, response.body());
+            assertNull(spool(root));
+            try (final var stream = store.httpStream(view, "POST", "", payload, null)) {
+                assertEquals(cap, stream.length());
+                assertArrayEquals(payload, stream.body().readAllBytes());
+            }
+            assertNull(spool(root));
+            assertThrows(IllegalArgumentException.class, () -> store.http(view, "POST", "", new byte[cap + 1], null));
+            assertThrows(
+                    IllegalArgumentException.class, () -> store.httpStream(view, "POST", "", new byte[cap + 1], null));
+            assertNull(spool(root));
+        }
+    }
+
+    @Test
+    void binarySpoolingExceedsConfiguredCompatibilityLimitAndCleansOnCloseOrRejection() throws Exception {
         final var fixture = fixture();
         final var root = temporary.resolve("private");
         final var executable = transport(fixture);
+        final int cap = 32 * 1024;
         try (final var store =
-                new TrustedGitStore(root, executable.toString(), Duration.ofSeconds(30), 256L * 1024 * 1024, null)) {
+                new TrustedGitStore(root, executable.toString(), Duration.ofSeconds(30), BUDGET, cap, null)) {
             final var view = store.prepare(URL, fixture.head(), 1, false);
-            final long length = 65L * 1024 * 1024;
+            final long length = cap + 1;
             try (final var output = Files.newOutputStream(temporary.resolve("cgi-response"))) {
                 output.write("Content-Type: application/octet-stream\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
                 final var buffer = new byte[8192];
                 Arrays.fill(buffer, (byte) 0xa5);
                 for (long written = 0; written < length; written += buffer.length) {
-                    output.write(buffer);
+                    output.write(buffer, 0, (int) Math.min(buffer.length, length - written));
                 }
             }
             try (final var response = store.httpStream(view, "GET", "service=git-upload-pack", new byte[0], null)) {
@@ -679,8 +771,9 @@ class TrustedGitStoreTest {
                 assertTrue(Files.exists(spool));
             }
             assertNull(spool(root));
-            assertThrows(
+            final var failure = assertThrows(
                     IOException.class, () -> store.http(view, "GET", "service=git-upload-pack", new byte[0], null));
+            assertEquals("Compatibility HTTP output exceeds limit; use httpStream", failure.getMessage());
             assertNull(spool(root));
             final var response = store.httpStream(view, "GET", "service=git-upload-pack", new byte[0], null);
             final var spool = spool(root);
@@ -691,11 +784,12 @@ class TrustedGitStoreTest {
     }
 
     @Test
-    void createsLargeIndependentPackWithoutBinaryHeapBuffer() throws Exception {
+    void createsIndependentPackLargerThanConfiguredHttpBufferCap() throws Exception {
         final var fixture = fixture();
-        // Cross the 64MiB boundary without spending CPU generating and compressing random data.
+        // Cross the configured boundary, not the default 64 MiB cap or the JVM heap size.
         // The other pack/transport tests retain Git's normal compression settings.
-        final long length = 64L * 1024 * 1024 + 8192;
+        final int cap = 1024 * 1024;
+        final long length = cap + 8192L;
         git(fixture.directory(), "config", "core.compression", "0");
         try (final var output = Files.newOutputStream(fixture.directory().resolve("binary"))) {
             final var buffer = new byte[8192];
@@ -713,11 +807,7 @@ class TrustedGitStoreTest {
                 Files.readString(executable)
                         .replace("exec /usr/bin/git \"$@\"", "exec /usr/bin/git -c core.compression=0 \"$@\""));
         try (final var store = new TrustedGitStore(
-                temporary.resolve("private"),
-                executable.toString(),
-                Duration.ofSeconds(45),
-                512L * 1024 * 1024,
-                null)) {
+                temporary.resolve("private"), executable.toString(), Duration.ofSeconds(45), BUDGET, cap, null)) {
             final var view = store.prepare(URL, head, 1, false);
             assertEquals(
                     Long.toString(length),
@@ -726,7 +816,7 @@ class TrustedGitStoreTest {
             try (final var paths = Files.list(view.directory().resolve("objects/pack"))) {
                 assertTrue(paths.anyMatch(path -> {
                     try {
-                        return path.toString().endsWith(".pack") && Files.size(path) > 64L * 1024 * 1024;
+                        return path.toString().endsWith(".pack") && Files.size(path) > cap;
                     } catch (final IOException e) {
                         throw new UncheckedIOException(e);
                     }
@@ -747,8 +837,8 @@ class TrustedGitStoreTest {
     void pendingResponsesCountTowardDiskBudgetAndFailedSpoolsAreRemoved() throws Exception {
         final var fixture = fixture();
         final var root = temporary.resolve("private");
-        try (final var store =
-                new TrustedGitStore(root, transport(fixture).toString(), Duration.ofSeconds(15), BUDGET, null)) {
+        try (final var store = new TrustedGitStore(
+                root, transport(fixture).toString(), Duration.ofSeconds(15), BUDGET, 67108864L, null)) {
             final var first = store.prepare(URL, fixture.head(), 1, false);
             store.prepare(URL, fixture.head(), 2, true); // Old and current generations share the disk budget.
             try (final var output = Files.newOutputStream(temporary.resolve("cgi-response"))) {
@@ -787,8 +877,8 @@ class TrustedGitStoreTest {
         Files.writeString(message, "x".repeat(65536));
         git(fixture.directory(), "tag", "-a", "large", "-F", message.toString(), fixture.head());
         final var root = temporary.resolve("private");
-        try (final var store =
-                new TrustedGitStore(root, transport(fixture).toString(), Duration.ofSeconds(15), BUDGET, null)) {
+        try (final var store = new TrustedGitStore(
+                root, transport(fixture).toString(), Duration.ofSeconds(15), BUDGET, 67108864L, null)) {
             assertThrows(IOException.class, () -> store.prepare(URL, fixture.head(), 2, true));
             try (final var paths = Files.walk(root)) {
                 assertFalse(paths.anyMatch(path -> path.getFileName().toString().startsWith("generation-")));
@@ -809,6 +899,7 @@ class TrustedGitStoreTest {
                 transport(fixture).toString(),
                 Duration.ofSeconds(30),
                 32L * 1024 * 1024,
+                67108864L,
                 null)) {
             final var error = assertThrows(IOException.class, () -> store.prepare(URL, fixture.head(), 1, true));
             assertEquals("Too many Git tags", error.getMessage());
@@ -827,7 +918,12 @@ class TrustedGitStoreTest {
             }
         }
         try (final var store = new TrustedGitStore(
-                temporary.resolve("private"), executable.toString(), Duration.ofSeconds(15), 32L * 1024 * 1024, null)) {
+                temporary.resolve("private"),
+                executable.toString(),
+                Duration.ofSeconds(15),
+                32L * 1024 * 1024,
+                67108864L,
+                null)) {
             final var error = assertThrows(IOException.class, () -> store.prepare(URL, fixture.head(), 1, false));
             assertEquals("Invalid Git object metadata", error.getMessage());
             Files.delete(metadata);
@@ -841,7 +937,52 @@ class TrustedGitStoreTest {
     private record Fixture(
             Path directory, String old, String parent, String head, String unrelated, String tag, String nested) {}
 
-    private Fixture fixture() throws Exception {
+    private Fixture fixture() throws IOException {
+        return copyFixture(temporary.resolve("fixture with 'quotes'"));
+    }
+
+    private static Fixture copyFixture(final Path directory) throws IOException {
+        // Copy all worktree and Git metadata bytes; never clone, link, or share writable objects with
+        // the seed.
+        try (final var paths = Files.walk(seed.directory())) {
+            for (final var source : paths.toList()) {
+                final var target = directory.resolve(seed.directory().relativize(source));
+                if (Files.isDirectory(source)) {
+                    Files.createDirectories(target);
+                } else {
+                    Files.copy(source, target, StandardCopyOption.COPY_ATTRIBUTES);
+                }
+            }
+        }
+        return new Fixture(
+                directory, seed.old(), seed.parent(), seed.head(), seed.unrelated(), seed.tag(), seed.nested());
+    }
+
+    @Test
+    void fixtureCopiesKeepAllMetadataAndObjectsIndependentAtQuotedPaths() throws Exception {
+        final var first = fixture();
+        final var second = copyFixture(temporary.resolve("second fixture with 'quotes'"));
+        try (final var paths = Files.walk(seed.directory())) {
+            for (final var source : paths.filter(Files::isRegularFile).toList()) {
+                final var relative = seed.directory().relativize(source);
+                final var original = Files.readAllBytes(source);
+                final var firstFile = first.directory().resolve(relative);
+                final var secondFile = second.directory().resolve(relative);
+                assertFalse(Files.isSameFile(source, firstFile), relative.toString());
+                assertFalse(Files.isSameFile(firstFile, secondFile), relative.toString());
+                assertArrayEquals(original, Files.readAllBytes(firstFile), relative.toString());
+                // Loose Git objects are read-only; make only this private copy writable before mutation.
+                Files.setPosixFilePermissions(firstFile, PosixFilePermissions.fromString("rw-------"));
+                Files.writeString(firstFile, "copy-only mutation\n");
+                assertArrayEquals(original, Files.readAllBytes(source), relative.toString());
+                assertArrayEquals(original, Files.readAllBytes(secondFile), relative.toString());
+            }
+        }
+        assertFalse(Files.exists(second.directory().resolve(".git/objects/info/alternates")));
+        assertEquals(seed.head(), git(second.directory(), "rev-parse", "HEAD").strip());
+    }
+
+    private static Fixture buildFixture(final Path temporary) throws Exception {
         final var repo = Files.createDirectory(temporary.resolve("fixture with 'quotes'"));
         git(repo, "init", "--template=");
         git(repo, "config", "user.name", "Test");
@@ -877,51 +1018,52 @@ class TrustedGitStoreTest {
     private Path transport(final Fixture fixture, final Path upstream) throws IOException {
         final var wrapper = temporary.resolve("git-wrapper with 'quotes'");
         // Keep ordinary calls native: no JVM and no environment-dump subprocess outside HTTP serving.
-        // Fixed test-only substitution; all other commands still exec real Git with their original argv/stdin.
+        // Fixed test-only substitution; all other commands still exec real Git with their original
+        // argv/stdin.
         Files.writeString(wrapper, """
-                #!/bin/sh
-                response=%s
-                metadata=%s
-                if [ -e "$response" ]; then
-                    exec /bin/cat "$response"
+            #!/bin/sh
+            response=%s
+            metadata=%s
+            if [ -e "$response" ]; then
+                exec /bin/cat "$response"
+            fi
+            fetch=false
+            serving=false
+            for argument do
+                if [ "$argument" = rev-list ] && [ -e "$metadata" ]; then
+                    exec /bin/cat "$metadata"
                 fi
-                fetch=false
-                serving=false
+                if [ "$argument" = fetch ]; then
+                    fetch=true
+                fi
+                if [ "$argument" = http-backend ]; then
+                    serving=true
+                fi
+            done
+            if [ "$fetch" = true ]; then
+                if [ "${YCA_GIT_TOKEN+x}" = x ]; then
+                    credential=$(printf 'protocol=https\\nhost=github.com\\n\\n' |
+                        /usr/bin/git -c credential.helper= -c "credential.helper=$YCA_GIT_CREDENTIAL_HELPER" credential fill) || exit 1
+                    case "$credential" in
+                        *"password=$YCA_GIT_TOKEN"*) ;;
+                        *) exit 1 ;;
+                    esac
+                fi
                 for argument do
-                    if [ "$argument" = rev-list ] && [ -e "$metadata" ]; then
-                        exec /bin/cat "$metadata"
-                    fi
-                    if [ "$argument" = fetch ]; then
-                        fetch=true
-                    fi
-                    if [ "$argument" = http-backend ]; then
-                        serving=true
-                    fi
+                    shift
+                    case "$argument" in
+                        https://github.com/yupiik/fixture.git) argument=%s ;;
+                        https://github.com/yupiik/upstream.git) argument=%s ;;
+                    esac
+                    set -- "$@" "$argument"
                 done
-                if [ "$fetch" = true ]; then
-                    if [ "${YCA_GIT_TOKEN+x}" = x ]; then
-                        credential=$(printf 'protocol=https\\nhost=github.com\\n\\n' |
-                            /usr/bin/git -c credential.helper= -c "credential.helper=$YCA_GIT_CREDENTIAL_HELPER" credential fill) || exit 1
-                        case "$credential" in
-                            *"password=$YCA_GIT_TOKEN"*) ;;
-                            *) exit 1 ;;
-                        esac
-                    fi
-                    for argument do
-                        shift
-                        case "$argument" in
-                            https://github.com/yupiik/fixture.git) argument=%s ;;
-                            https://github.com/yupiik/upstream.git) argument=%s ;;
-                        esac
-                        set -- "$@" "$argument"
-                    done
-                    printf '%%s' "${YCA_GIT_TOKEN-anonymous}" > %s
-                    set -- -c protocol.file.allow=always "$@"
-                elif [ "$serving" = true ]; then
-                    /usr/bin/env > %s
-                fi
-                exec /usr/bin/git "$@"
-                """.formatted(
+                printf '%%s' "${YCA_GIT_TOKEN-anonymous}" > %s
+                set -- -c protocol.file.allow=always "$@"
+            elif [ "$serving" = true ]; then
+                /usr/bin/env > %s
+            fi
+            exec /usr/bin/git "$@"
+            """.formatted(
                         shell(temporary.resolve("cgi-response").toString()),
                         shell(temporary.resolve("object-metadata").toString()),
                         shell(fixture.directory().toUri().toASCIIString()),
@@ -936,22 +1078,51 @@ class TrustedGitStoreTest {
         return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
-    private String git(final Path directory, final String... args) throws Exception {
+    private static String git(final Path directory, final String... args) throws Exception {
         final var command = new ArrayList<>(List.of("/usr/bin/git", "-c", "core.hooksPath=/dev/null"));
         if (Files.exists(directory.resolve("HEAD"))) {
             command.add("--git-dir=" + directory);
         }
         command.addAll(Arrays.asList(args));
+        final var outputFile = Files.createTempFile("trusted-git-test-", ".output");
         final var builder = new ProcessBuilder(command)
                 .directory(directory.toFile())
+                .redirectOutput(outputFile.toFile())
                 .redirectError(ProcessBuilder.Redirect.DISCARD);
         builder.environment().put("GIT_CONFIG_NOSYSTEM", "1");
         builder.environment().put("GIT_CONFIG_GLOBAL", "/dev/null");
-        final var process = builder.start();
-        process.getOutputStream().close();
-        final var output = process.getInputStream().readAllBytes();
-        assertTrue(process.waitFor(10, TimeUnit.SECONDS));
-        assertEquals(0, process.exitValue(), String.join(" ", command));
-        return new String(output, StandardCharsets.UTF_8);
+        Process process = null;
+        try {
+            process = builder.start();
+            process.getOutputStream().close();
+            assertTrue(process.waitFor(10, TimeUnit.SECONDS), "Git subprocess deadline: " + String.join(" ", command));
+            final var output = Files.readString(outputFile, StandardCharsets.UTF_8);
+            assertEquals(0, process.exitValue(), String.join(" ", command) + "\n" + output);
+            return output;
+        } finally {
+            try {
+                if (process != null) {
+                    process.descendants().forEach(ProcessHandle::destroyForcibly);
+                    process.destroyForcibly();
+                    boolean interrupted = false;
+                    try {
+                        while (true) {
+                            try {
+                                process.waitFor();
+                                break;
+                            } catch (final InterruptedException ignored) {
+                                interrupted = true;
+                            }
+                        }
+                    } finally {
+                        if (interrupted) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                }
+            } finally {
+                Files.deleteIfExists(outputFile);
+            }
+        }
     }
 }

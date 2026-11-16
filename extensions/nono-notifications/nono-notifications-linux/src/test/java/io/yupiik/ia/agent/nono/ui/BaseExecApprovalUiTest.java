@@ -110,11 +110,15 @@ class BaseExecApprovalUiTest {
     @ParameterizedTest
     @EnumSource(Adapter.class)
     void deadlineKillsAndReapsProcess(final Adapter adapter) throws Exception {
-        final var executable = script("while :; do :; done");
-        // Allow startup and PID publication on a loaded runner before deadline cleanup.
+        // exec keeps the published PID without a busy loop or a child left behind.
+        final var executable = script("exec sleep 30");
         try (final ApprovalUi ui = adapter.create(executable);
-                final var handle = ui.present("test", Duration.ofSeconds(5))) {
+                final var handle = ui.present("test", Duration.ofMillis(500))) {
             final var pid = awaitPids(executable, 1).getFirst();
+            // PID publication is the startup handshake: exercise a live process, not
+            // merely an expired presentation that never successfully launched.
+            assertTrue(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
+            assertFalse(handle.decision().toCompletableFuture().isDone());
             assertFalse(handle.decision().toCompletableFuture().get(7, TimeUnit.SECONDS));
             assertReaped(pid);
         }

@@ -268,7 +268,7 @@ class RepositoryWriterAuthorizationTest {
                     "bot",
                     0,
                     null,
-                    new GithubBotConfiguration.Authorization(ids, teams, writers, 7200),
+                    new GithubBotConfiguration.Authorization(ids, teams, writers, 7200, 4096),
                     new GithubBotConfiguration.Repositories(
                             String.join(",", REPOSITORIES),
                             "",

@@ -25,21 +25,12 @@ import io.yupiik.fusion.framework.handlebars.spi.Template;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.security.MavenSecretService;
 import io.yupiik.ia.agent.core.test.TestJvm;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.SecureRandom;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
-import javax.crypto.Cipher;
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -54,6 +45,9 @@ class MavenServerPasswordTemplateHelperTest {
 
     private static final String MASTER = "YCA_HELPER_MASTER_SECRET";
     private static final String SERVER_PASSWORD = "YCA_HELPER_SERVER_PASSWORD";
+    // Independent OpenSSL known-answer vector; inputs and recipe: src/test/resources/maven4-known-answers.md.
+    private static final String SERVER_CIPHERTEXT =
+            "{[name=master,cipher=AES/GCM/NoPadding,version=4.0]MDEyMzQ1Njc4OTo7ICEiIyQlJicoKSorLC0uL3wGicWimiArTLNFI2W3zICctKr13Oq7RQTgB8zlUzRZm/EehIWxTODOhg==}";
 
     @TempDir
     Path tmp;
@@ -61,7 +55,7 @@ class MavenServerPasswordTemplateHelperTest {
     @Test
     void decryptsMaven4CiphertextAndPlainPassword() throws Exception {
         final var m2 = new FakeM2(tmp);
-        m2.writeSettings(MASTER, m2.cipher(SERVER_PASSWORD), """
+        m2.writeSettings(MASTER, SERVER_CIPHERTEXT, """
                 <server>
                   <id>other</id>
                   <username>u</username>
@@ -140,7 +134,7 @@ class MavenServerPasswordTemplateHelperTest {
     void rejectedWhenNoMasterSecretIsResolvable() throws Exception {
         // a settings-security4.xml with no resolvable source -> must fail rather than leak ciphertext
         final var m2 = new FakeM2(tmp);
-        m2.writeSettings(MASTER, m2.cipher(SERVER_PASSWORD), "");
+        m2.writeSettings(MASTER, SERVER_CIPHERTEXT, "");
         // overwrite the security file produced by writeSettings with a dispatcher carrying no source
         Files.writeString(m2.security(), """
                 <settingsSecurity>
@@ -192,10 +186,6 @@ class MavenServerPasswordTemplateHelperTest {
             return root.resolve("settings-security4.xml");
         }
 
-        private String cipher(final String plaintext) throws Exception {
-            return encryptV4(plaintext, MASTER);
-        }
-
         private void writeSettings(final String master, final String centralPassword, final String extraServers)
                 throws Exception {
             final var masterFile = root.resolve("master.txt");
@@ -232,24 +222,6 @@ class MavenServerPasswordTemplateHelperTest {
                       </servers>
                     </settings>
                     """.formatted(centralPassword, extraServers));
-        }
-
-        /** Reference encrypt matching Maven 4 plexus-sec-dispatcher AESGCMNoPadding (iv||salt||ct). */
-        private static String encryptV4(final String plaintext, final String master) throws Exception {
-            final var salt = new byte[16];
-            final var iv = new byte[12];
-            new SecureRandom().nextBytes(salt);
-            new SecureRandom().nextBytes(iv);
-            final var keySpec = new PBEKeySpec(master.toCharArray(), salt, 310_000, 256);
-            final var key = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA512").generateSecret(keySpec);
-            final var aes = new SecretKeySpec(key.getEncoded(), "AES");
-            final var cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, aes, new GCMParameterSpec(128, iv));
-            final var ct = cipher.doFinal(plaintext.getBytes(StandardCharsets.UTF_8));
-            final var buf = ByteBuffer.allocate(iv.length + salt.length + ct.length);
-            buf.put(iv).put(salt).put(ct);
-            return "{[name=master,cipher=AES/GCM/NoPadding,version=4.0]"
-                    + Base64.getEncoder().encodeToString(buf.array()) + "}";
         }
     }
 }

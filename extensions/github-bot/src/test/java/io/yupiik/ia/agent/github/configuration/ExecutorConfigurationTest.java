@@ -40,11 +40,13 @@ class ExecutorConfigurationTest {
         for (final var visibility : List.of("shown", "collapsed", "hidden")) {
             assertEquals(
                     visibility,
-                    configuration(Map.of("github.executor.showToolOutput", visibility)).showToolOutput());
+                    configuration(Map.of("github.executor.showToolOutput", visibility))
+                            .showToolOutput());
         }
         assertEquals(
                 "shown",
-                configuration(Map.of("github.executor.showToolOutput", " SHOW ")).showToolOutput());
+                configuration(Map.of("github.executor.showToolOutput", " SHOW "))
+                        .showToolOutput());
         assertEquals(
                 "hidden",
                 configuration(Map.of("github.executor.showToolOutput", "false")).showToolOutput());

@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.github.configuration.DependencyCacheConfiguration;
 import io.yupiik.ia.agent.github.configuration.DependencyCacheConfiguration.Entry;
 import io.yupiik.ia.agent.github.configuration.DependencyCacheConfiguration.Kind;
 import io.yupiik.ia.agent.github.configuration.DependencyCacheConfiguration.Limits;
+import io.yupiik.ia.agent.github.support.TestJava;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
@@ -505,13 +506,8 @@ class CacheSnapshotTest {
                 configuration.toString(),
                 junit.toString());
         final var log = temporary.resolve("child.log");
-        final var process = new ProcessBuilder(
-                        Path.of(System.getProperty("java.home"), "bin/java").toString(),
-                        "-Xmx24m",
-                        "-cp",
-                        classpath,
-                        CacheSnapshotTest.class.getName(),
-                        temporary.toString())
+        final var process = new ProcessBuilder(TestJava.javaCommand(
+                        "-Xmx24m", "-cp", classpath, CacheSnapshotTest.class.getName(), temporary.toString()))
                 .redirectErrorStream(true)
                 .redirectOutput(log.toFile())
                 .start();
@@ -531,14 +527,14 @@ class CacheSnapshotTest {
         }
     }
 
-    // Child JVM: the file is larger than its maximum heap; no source/blob content is buffered whole.
+    // Child JVM: 40 MiB exceeds its 24 MiB heap by 16 MiB; whole-file buffering must still fail.
     public static void main(final String[] args) throws Exception {
         final var temporary = Path.of(args[0]);
         final var source = Files.createDirectory(temporary.resolve("large-source"));
         final var data = source.resolve("large");
         try (final var out = Files.newOutputStream(data)) {
             final var buffer = new byte[64 * 1024];
-            for (int i = 0; i < 1024; i++) {
+            for (int i = 0; i < 640; i++) {
                 out.write(buffer);
             }
         }
@@ -552,7 +548,7 @@ class CacheSnapshotTest {
         final var destination = temporary.resolve("large-destination");
         snapshot.restore(manifest, destination, GENERIC, objects::acquire);
         if (result.files() != 1001
-                || result.bytes() != 64L * 1024 * 1024 + 7000
+                || result.bytes() != 40L * 1024 * 1024 + 7000
                 || Files.mismatch(data, destination.resolve("large")) != -1) {
             throw new IllegalStateException("Streaming roundtrip failed");
         }

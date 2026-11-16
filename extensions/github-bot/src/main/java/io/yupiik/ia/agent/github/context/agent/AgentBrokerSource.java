@@ -172,7 +172,8 @@ public final class AgentBrokerSource {
                 new AgentContextConfiguration(
                         true, options.endpoint().toASCIIString(), CONTROL_TOKEN, GIT_TOKEN, options.repository()),
                 json);
-        final var started = client.call(
+        long requestedAt = System.nanoTime();
+        var status = client.call(
                 Map.of(
                         "operation",
                         "prepare_source",
@@ -183,21 +184,32 @@ public final class AgentBrokerSource {
                         "tags",
                         tags,
                         "revision",
-                        revision),
+                        revision,
+                        "waitMillis",
+                        1000),
                 this::expired);
-        if (!"pending".equals(started.get("status"))
-                || !(started.get("operationId") instanceof String id)
-                || !id.matches("[A-Za-z0-9-]{1,80}")) {
+        if (!(status.get("operationId") instanceof String id) || !id.matches("[A-Za-z0-9-]{1,80}")) {
             throw new IOException("Invalid preparation.");
         }
-        // At most 1 request/sec, never more than 256 requests including prepare_source.
-        for (int request = 1; request < 256; request++) {
+        // Long-polling returns fast completions immediately. Slow/legacy servers still get at most
+        // one request/sec and never more than 256 requests including prepare_source.
+        for (int request = 1; request <= 256; request++) {
             if (expired()) {
                 bounds();
             }
-            Thread.sleep(Math.min(1000, Math.max(1, remainingMillis())));
-            final var status = client.call(Map.of("operation", "operation_status", "operationId", id), this::expired);
             if ("pending".equals(status.get("status"))) {
+                if (request == 256) {
+                    break;
+                }
+                final long pause = TimeUnit.SECONDS.toNanos(1) - (System.nanoTime() - requestedAt);
+                if (pause > 0) {
+                    TimeUnit.NANOSECONDS.sleep(
+                            Math.min(pause, TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMillis()))));
+                }
+                bounds();
+                requestedAt = System.nanoTime();
+                status = client.call(
+                        Map.of("operation", "operation_status", "operationId", id, "waitMillis", 1000), this::expired);
                 continue;
             }
             if (!"complete".equals(status.get("status"))

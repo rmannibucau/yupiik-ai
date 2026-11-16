@@ -9,6 +9,7 @@
   <properties>
     <frontend.node.version>v26.9.0</frontend.node.version>
     <frontend.npm.version>11.21.0</frontend.npm.version>
+    <frontend.npm.install.arguments>install</frontend.npm.install.arguments>
     <frontend.working.directory>${project.basedir}/src/main/frontend</frontend.working.directory>
     <!-- set -Dskip.frontend=true for offline backend-only builds/dev -->
     <skip.frontend>false</skip.frontend>
@@ -114,13 +115,13 @@
             <phase>generate-resources</phase>
           </execution>
           <execution>
-            <id>npm-ci</id>
+            <id>npm-install</id>
             <goals>
               <goal>npm</goal>
             </goals>
             <phase>generate-resources</phase>
             <configuration>
-              <arguments>ci</arguments>
+              <arguments>${frontend.npm.install.arguments}</arguments>
             </configuration>
           </execution>
           <execution>
@@ -149,4 +150,19 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <profile>
+      <id>frontend-ci</id>
+      <activation>
+        <property>
+          <!-- Presence is intentional: even CI=false must retain strict lockfile checks. -->
+          <name>env.CI</name>
+        </property>
+      </activation>
+      <properties>
+        <frontend.npm.install.arguments>ci</frontend.npm.install.arguments>
+      </properties>
+    </profile>
+  </profiles>
 </project>

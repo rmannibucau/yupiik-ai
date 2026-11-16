@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.ia.agent.github.context.agent.AgentBrokerSource;
 import io.yupiik.ia.agent.github.execution.RestrictedServicesGateway;
+import io.yupiik.ia.agent.github.support.TestJava;
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -41,6 +42,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPOutputStream;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.Execution;
@@ -54,81 +57,49 @@ class AgentBrokerGatewayTest {
     private static final String PASSWORD = "test-password";
 
     @TempDir
+    private static Path shared;
+
+    private static TlsTestSupport.Material tls;
+    private static ContextTestSupport.GitFixture repository;
+
+    @BeforeAll
+    static void immutableFixtures() throws Exception {
+        tls = TlsTestSupport.create(shared.resolve("tls"), PASSWORD);
+        repository = ContextTestSupport.gitFixture(shared.resolve("upstream"));
+        git(
+                repository.directory(),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "tag",
+                "-a",
+                "v1",
+                "-m",
+                "release",
+                repository.old());
+    }
+
+    @AfterAll
+    static void releaseFixtures() {
+        tls = null;
+        repository = null;
+    }
+
+    @TempDir
     Path temporary;
 
     @ParameterizedTest
-    // Every invocation owns its directories, listeners and subprocesses. Overlap the CPU
+    // Only immutable TLS and upstream Git files are shared; each invocation owns its writable
+    // directories, listeners, credentials and subprocesses. Overlap the CPU
     // matrix instead of serializing six independent end-to-end workflows.
     @Execution(ExecutionMode.CONCURRENT)
     @CsvSource({"true, 1", "false, 1", "true, 2", "false, 2", "true, 3", "false, 3"})
     void nativeGitInitializesThroughActualGatewayAndContextService(final boolean explicitPaths, final int processors)
             throws Exception {
-        final var store = temporary.resolve("tls.p12");
-        final var certificate = temporary.resolve("tls.pem");
-        final var keytool =
-                Path.of(System.getProperty("java.home"), "bin/keytool").toString();
-        assertEquals(
-                0,
-                run(
-                                temporary,
-                                List.of(
-                                        keytool,
-                                        "-J-XX:TieredStopAtLevel=1",
-                                        "-genkeypair",
-                                        "-alias",
-                                        "leaf",
-                                        "-keyalg",
-                                        "EC",
-                                        "-groupname",
-                                        "secp256r1",
-                                        "-dname",
-                                        "CN=localhost",
-                                        "-ext",
-                                        "SAN=dns:localhost",
-                                        "-validity",
-                                        "2",
-                                        "-storetype",
-                                        "PKCS12",
-                                        "-keystore",
-                                        store.toString(),
-                                        "-storepass",
-                                        PASSWORD,
-                                        "-noprompt"),
-                                Map.of())
-                        .exit());
-        assertEquals(
-                0,
-                run(
-                                temporary,
-                                List.of(
-                                        keytool,
-                                        "-J-XX:TieredStopAtLevel=1",
-                                        "-exportcert",
-                                        "-rfc",
-                                        "-alias",
-                                        "leaf",
-                                        "-keystore",
-                                        store.toString(),
-                                        "-storepass",
-                                        PASSWORD,
-                                        "-file",
-                                        certificate.toString()),
-                                Map.of())
-                        .exit());
+        final var store = tls.store();
+        final var certificate = tls.certificate();
         try (final var fixture = new ContextTestSupport(temporary.resolve("upstream"))) {
-            final var repository = fixture.gitFixture();
-            git(
-                    repository.directory(),
-                    "-c",
-                    "user.name=Test",
-                    "-c",
-                    "user.email=test@example.invalid",
-                    "tag",
-                    "-a",
-                    "v1",
-                    "-m",
-                    "release",
-                    repository.old());
             final var service = fixture.service(
                     fixture.configuration(""),
                     new ContextBudget(4096, 16 * 1024 * 1024),
@@ -155,9 +126,7 @@ class AgentBrokerGatewayTest {
                                 16 * 1024 * 1024),
                         secrets)) {
                     final var workspace = Files.createDirectory(temporary.resolve("agent"));
-                    final var command = new ArrayList<>(List.of(
-                            Path.of(System.getProperty("java.home"), "bin/java").toString(),
-                            "-XX:TieredStopAtLevel=1",
+                    final var command = TestJava.javaCommand(
                             "-XX:ActiveProcessorCount=" + processors,
                             "-Djavax.net.ssl.trustStore=" + store,
                             "-Djavax.net.ssl.trustStorePassword=" + PASSWORD,
@@ -178,7 +147,7 @@ class AgentBrokerGatewayTest {
                             "--timeout",
                             "20",
                             "--ca-file",
-                            certificate.toString()));
+                            certificate.toString());
                     final var operationFlags = List.copyOf(command);
                     command.add("init");
                     if (explicitPaths) {

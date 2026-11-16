@@ -40,6 +40,7 @@ class GithubBotConfigurationTest {
         assertEquals("", shared.authorization().userIds());
         assertTrue(shared.authorization().allowRepositoryWriters());
         assertEquals(7200, shared.authorization().permissionsCacheTtlSeconds());
+        assertEquals(4096, shared.authorization().permissionsCacheMaxEntries());
         assertEquals(
                 List.of(RepositorySelector.Visibility.values()),
                 shared.repositories().visibility());
@@ -68,6 +69,7 @@ class GithubBotConfigurationTest {
                 Map.entry("github.authorization.teams", "acme/dev"),
                 Map.entry("github.authorization.allowRepositoryWriters", "false"),
                 Map.entry("github.authorization.permissionsCacheTtlSeconds", "60"),
+                Map.entry("github.authorization.permissionsCacheMaxEntries", "16"),
                 Map.entry("github.repositories.explicit", "acme/repo"),
                 Map.entry("github.repositories.discovery", "org:acme"),
                 Map.entry("github.repositories.includes", "acme/*"),
@@ -111,6 +113,7 @@ class GithubBotConfigurationTest {
         assertEquals("acme/dev", shared.authorization().teams());
         assertFalse(shared.authorization().allowRepositoryWriters());
         assertEquals(60, shared.authorization().permissionsCacheTtlSeconds());
+        assertEquals(16, shared.authorization().permissionsCacheMaxEntries());
         assertEquals("acme/repo", shared.repositories().explicit());
         assertEquals("org:acme", shared.repositories().discovery());
         assertEquals("acme/*", shared.repositories().includes());
@@ -144,7 +147,34 @@ class GithubBotConfigurationTest {
                 IllegalArgumentException.class,
                 () -> new GithubBotConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key)))
                         .get());
-        assertThrows(IllegalArgumentException.class, () -> new GithubBotConfiguration.Authorization("", "", true, -1));
+        assertThrows(
+                IllegalArgumentException.class, () -> new GithubBotConfiguration.Authorization("", "", true, -1, 4096));
+    }
+
+    @Test
+    void rejectsInvalidPermissionsCacheCapacity() {
+        for (final var capacity : List.of(-1, 0, 65537, Integer.MAX_VALUE)) {
+            final var values = Map.of("github.authorization.permissionsCacheMaxEntries", Integer.toString(capacity));
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new GithubBotConfiguration$FusionConfigurationFactory(
+                                    key -> Optional.ofNullable(values.get(key)))
+                            .get());
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new GithubBotConfiguration.Authorization("", "", true, 7200, capacity));
+        }
+    }
+
+    @Test
+    void acceptsPermissionsCacheCapacityBounds() {
+        for (final var capacity : List.of(1, 65536)) {
+            final var values = Map.of("github.authorization.permissionsCacheMaxEntries", Integer.toString(capacity));
+            final var shared = new GithubBotConfiguration$FusionConfigurationFactory(
+                            key -> Optional.ofNullable(values.get(key)))
+                    .get();
+            assertEquals(capacity.intValue(), shared.authorization().permissionsCacheMaxEntries());
+        }
     }
 
     @Test

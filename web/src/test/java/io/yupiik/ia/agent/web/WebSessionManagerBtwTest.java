@@ -45,7 +45,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -117,13 +119,36 @@ class WebSessionManagerBtwTest {
                 answerer);
     }
 
+    @AfterEach
+    void cleanup() {
+        try {
+            if (manager != null) {
+                manager.close();
+            }
+        } finally {
+            try {
+                if (answerer != null) {
+                    answerer.pending.values().forEach(future -> future.cancel(false));
+                    answerer.pending.clear();
+                    answerer.cancelled.clear();
+                }
+            } finally {
+                if (broker != null) {
+                    broker.close();
+                }
+            }
+        }
+    }
+
     @Test
-    void btwBroadcastsRunningThenAnswerWithoutBlocking() {
+    void btwBroadcastsRunningThenAnswerWithoutBlocking() throws Exception {
         manager.attach("s1");
 
         // dispatch does not block: the RPC future completes immediately, before the answer resolves
         final var future = manager.slash("s1", "/btw what is xyz?");
-        assertTrue(future.isDone() && Boolean.TRUE.equals(future.join()), "slash must return without blocking");
+        assertTrue(
+                future.isDone() && Boolean.TRUE.equals(future.get(5, TimeUnit.SECONDS)),
+                "slash must return without blocking");
 
         // a running frame was broadcast first, carrying the question
         final var runningFrame = broker.frames.poll();
@@ -145,35 +170,35 @@ class WebSessionManagerBtwTest {
     }
 
     @Test
-    void btwWithNoQuestionReportsUsageAndDoesNotBroadcast() {
+    void btwWithNoQuestionReportsUsageAndDoesNotBroadcast() throws Exception {
         manager.attach("s1");
         final var future = manager.slash("s1", "/btw");
-        assertEquals(Boolean.FALSE, future.join());
+        assertEquals(Boolean.FALSE, future.get(5, TimeUnit.SECONDS));
         assertEquals(0, broker.frames.size());
         assertNull(manager.btwState("s1"));
     }
 
     @Test
-    void btwRequiresAnExactCommandNameAndIsCaseInsensitive() {
+    void btwRequiresAnExactCommandNameAndIsCaseInsensitive() throws Exception {
         manager.attach("s1");
-        manager.slash("s1", "/btw-other not a side question").join();
+        manager.slash("s1", "/btw-other not a side question").get(5, TimeUnit.SECONDS);
         assertNull(manager.btwState("s1"));
         assertTrue(answerer.pending.isEmpty());
         assertTrue(broker.frames.stream().noneMatch(frame -> frame.contains("\"type\":\"btw\"")));
-        manager.slash("s1", "/BTW a side question").join();
+        manager.slash("s1", "/BTW a side question").get(5, TimeUnit.SECONDS);
         assertEquals("a side question", manager.btwState("s1").question());
         answerer.complete("a side question", "answer");
     }
 
     @Test
-    void aNewerBtwCancelsAnInflightOneAndIsNotOverwrittenByTheStaleAnswer() {
+    void aNewerBtwCancelsAnInflightOneAndIsNotOverwrittenByTheStaleAnswer() throws Exception {
         manager.attach("s1");
-        manager.slash("s1", "/btw first question").join();
+        manager.slash("s1", "/btw first question").get(5, TimeUnit.SECONDS);
         broker.frames.poll(); // first running frame
 
         // second /btw overrides: the first answerer loop is cancelled
         final var second = manager.slash("s1", "/btw second question");
-        assertEquals(Boolean.TRUE, second.join());
+        assertEquals(Boolean.TRUE, second.get(5, TimeUnit.SECONDS));
         assertTrue(answerer.cancelledSupplier("first question").getAsBoolean(), "first btw must be cancelled");
         broker.frames.poll(); // discard the "second question" running frame
 
@@ -193,11 +218,11 @@ class WebSessionManagerBtwTest {
     }
 
     @Test
-    void aStaleOverrideAnswerNeverOverwritesTheNewerSlot() {
+    void aStaleOverrideAnswerNeverOverwritesTheNewerSlot() throws Exception {
         manager.attach("s1");
-        manager.slash("s1", "/btw q1").join();
+        manager.slash("s1", "/btw q1").get(5, TimeUnit.SECONDS);
         broker.frames.poll();
-        manager.slash("s1", "/btw q2").join();
+        manager.slash("s1", "/btw q2").get(5, TimeUnit.SECONDS);
         broker.frames.poll();
 
         // q1 completes AFTER q2 already settled -> its completion must be discarded
@@ -211,9 +236,9 @@ class WebSessionManagerBtwTest {
     }
 
     @Test
-    void clearBtwCancelsTheInflightAnswerAndClearsTheSlot() {
+    void clearBtwCancelsTheInflightAnswerAndClearsTheSlot() throws Exception {
         manager.attach("s1");
-        manager.slash("s1", "/btw question").join();
+        manager.slash("s1", "/btw question").get(5, TimeUnit.SECONDS);
         assertNotNull(answerer.cancelledSupplier("question"));
         answerer.complete("question", "an answer");
         broker.awaitFrame();
@@ -223,9 +248,9 @@ class WebSessionManagerBtwTest {
     }
 
     @Test
-    void btwErrorIsBroadcastAndHeldInTheSlot() {
+    void btwErrorIsBroadcastAndHeldInTheSlot() throws Exception {
         manager.attach("s1");
-        manager.slash("s1", "/btw why?").join();
+        manager.slash("s1", "/btw why?").get(5, TimeUnit.SECONDS);
         broker.frames.poll();
         answerer.fail("why?", new IllegalStateException("boom"));
         final var doneFrame = broker.awaitFrame();
@@ -236,9 +261,9 @@ class WebSessionManagerBtwTest {
     }
 
     @Test
-    void retryableAnswerIsBroadcastAndHeldInTheSlot() {
+    void retryableAnswerIsBroadcastAndHeldInTheSlot() throws Exception {
         manager.attach("s1");
-        manager.slash("s1", "/btw retry me").join();
+        manager.slash("s1", "/btw retry me").get(5, TimeUnit.SECONDS);
         broker.frames.poll();
         answerer.completeRetryable("retry me", "could not answer, retry");
         final var doneFrame = broker.awaitFrame();
@@ -251,9 +276,9 @@ class WebSessionManagerBtwTest {
     }
 
     @Test
-    void snapshotForReseedsALiveAnswer() {
+    void snapshotForReseedsALiveAnswer() throws Exception {
         manager.attach("s1");
-        manager.slash("s1", "/btw reseed me").join();
+        manager.slash("s1", "/btw reseed me").get(5, TimeUnit.SECONDS);
         // let it settle
         answerer.complete("reseed me", "persisted answer");
         broker.awaitFrame();

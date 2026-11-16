@@ -28,6 +28,8 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -50,13 +52,13 @@ class TeamAuthorizationTest {
     @Test
     void explicitIdAlwaysWinsWithoutAnyLookupsOrRestrictions() throws Exception {
         try (final var fixture = new Fixture()) {
-            final var policy = fixture.policy(" 42 , 7 ", "invalid/team/slug", false, 7200);
+            final var policy = fixture.policy(" 42 , 7 ", "invalid/team/slug", false, 7200, 4096);
             assertTrue(policy.allows(null, 42, "untrusted-login"));
             assertTrue(policy.allows("other/repository", "7", null));
             assertFalse(policy.allows("owner/repo", 43, "alice"));
             assertFalse(policy.allows("owner/repo", null, null));
             assertTrue(fixture.requests.isEmpty());
-            assertTrue(fixture.policy("42", "acme/dev", true, 7200).allows("owner/repo", 42, "alice"));
+            assertTrue(fixture.policy("42", "acme/dev", true, 7200, 4096).allows("owner/repo", 42, "alice"));
             assertTrue(fixture.requests.isEmpty());
         }
     }
@@ -64,7 +66,7 @@ class TeamAuthorizationTest {
     @Test
     void effectiveBasePermissionNotCustomRoleNameDeterminesWriterAccess() throws Exception {
         try (final var fixture = new Fixture()) {
-            final var policy = fixture.policy("", "", true, 0);
+            final var policy = fixture.policy("", "", true, 0, 4096);
             for (final var permission : List.of("write", "admin")) {
                 for (final var role : List.of("write", "maintain", "custom-team-writer")) {
                     fixture.responses.put(PERMISSION, permission(permission, role, 42, "alice"));
@@ -83,7 +85,7 @@ class TeamAuthorizationTest {
     @Test
     void bindsBothLookupResponsesToImmutableIdAndCurrentLogin() throws Exception {
         try (final var fixture = new Fixture()) {
-            final var policy = fixture.policy("", "", true, 0);
+            final var policy = fixture.policy("", "", true, 0, 4096);
             assertTrue(policy.allows("owner/repo", 42, null));
             assertFalse(policy.allows("owner/repo", 42, "old-or-reused-login"));
             fixture.responses.put("/user/42", user(99, "alice"));
@@ -109,7 +111,7 @@ class TeamAuthorizationTest {
     @Test
     void optionalTeamsRestrictOnlyWriterPathAndRequireAnActiveMembership() throws Exception {
         try (final var fixture = new Fixture()) {
-            final var policy = fixture.policy("", "acme/missing,acme/dev", true, 0);
+            final var policy = fixture.policy("", "acme/missing,acme/dev", true, 0, 4096);
             assertTrue(policy.allows("owner/repo", 42, "alice"));
             fixture.responses.put(MEMBERSHIP, Map.of("state", "pending"));
             assertFalse(policy.allows("owner/repo", 42, "alice"));
@@ -120,14 +122,14 @@ class TeamAuthorizationTest {
             assertFalse(fixture.requests.contains(MEMBERSHIP), "Team membership alone cannot grant access");
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> fixture.policy("", "../../bad", true, 0).allows("owner/repo", 42, "alice"));
+                    () -> fixture.policy("", "../../bad", true, 0, 4096).allows("owner/repo", 42, "alice"));
         }
     }
 
     @Test
     void cacheIncludesRepositoryActorIdentityAndTeamsWithFixedExpiration() throws Exception {
         try (final var fixture = new Fixture()) {
-            final var policy = fixture.policy("", "acme/dev", true, 7200);
+            final var policy = fixture.policy("", "acme/dev", true, 7200, 4096);
             assertTrue(policy.allows("Owner/Repo", 42, "alice"));
             assertEquals(List.of("/user/42", PERMISSION, MEMBERSHIP), fixture.requests);
             assertTrue(policy.allows("owner/repo", 42, null));
@@ -154,7 +156,7 @@ class TeamAuthorizationTest {
     @Test
     void suppliedLoginMismatchDoesNotPoisonCachedPermission() throws Exception {
         try (final var fixture = new Fixture()) {
-            final var policy = fixture.policy("", "", true, 7200);
+            final var policy = fixture.policy("", "", true, 7200, 4096);
             assertFalse(policy.allows("owner/repo", 42, "old-login"));
             assertTrue(policy.allows("owner/repo", 42, "alice"));
             assertEquals(2, fixture.requests.size());
@@ -164,11 +166,11 @@ class TeamAuthorizationTest {
     @Test
     void zeroTtlDisablesCacheAndMembershipRevocationTakesEffectAfterExpiry() throws Exception {
         try (final var fixture = new Fixture()) {
-            final var uncached = fixture.policy("", "", true, 0);
+            final var uncached = fixture.policy("", "", true, 0, 4096);
             assertTrue(uncached.allows("owner/repo", 42, null));
             assertTrue(uncached.allows("owner/repo", 42, null));
             assertEquals(4, fixture.requests.size());
-            final var cached = fixture.policy("", "acme/dev", true, 7200);
+            final var cached = fixture.policy("", "acme/dev", true, 7200, 4096);
             assertTrue(cached.allows("owner/repo", 42, null));
             fixture.responses.put(MEMBERSHIP, Map.of("state", "pending"));
             assertTrue(cached.allows("owner/repo", 42, null));
@@ -201,14 +203,14 @@ class TeamAuthorizationTest {
             // Other test classes can authorize actors concurrently against the same global logger.
             fixture.statuses.put(PERMISSION, 403);
             try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-                assertFalse(executor.submit(
-                                () -> fixture.policy("", "acme/dev", true, 7200).allows("owner/repo", 42, "alice"))
+                assertFalse(executor.submit(() ->
+                                fixture.policy("", "acme/dev", true, 7200, 4096).allows("owner/repo", 42, "alice"))
                         .get());
             }
             fixture.statuses.remove(PERMISSION);
             for (final var path : List.of("/user/42", PERMISSION, MEMBERSHIP)) {
                 for (final var status : List.of(401, 403)) {
-                    final var policy = fixture.policy("", "acme/dev", true, 7200);
+                    final var policy = fixture.policy("", "acme/dev", true, 7200, 4096);
                     fixture.statuses.put(path, status);
                     assertFalse(policy.allows("owner/repo", 42, "alice"));
                     assertFalse(policy.allows("owner/repo", 42, "alice"));
@@ -216,7 +218,8 @@ class TeamAuthorizationTest {
                     assertTrue(policy.allows("owner/repo", 42, "alice"), "Capability failure must not be cached");
                     fixture.requests.clear();
                     fixture.statuses.put(path, status);
-                    assertTrue(fixture.policy("42", "acme/dev", true, 7200).allows("owner/repo", 42, null));
+                    assertTrue(
+                            fixture.policy("42", "acme/dev", true, 7200, 4096).allows("owner/repo", 42, null));
                     assertTrue(fixture.requests.isEmpty());
                     fixture.statuses.remove(path);
                 }
@@ -234,7 +237,7 @@ class TeamAuthorizationTest {
     @Test
     void missingResourcesDenyOtherFailuresPropagateAndExpiredAllowIsNeverFallback() throws Exception {
         try (final var fixture = new Fixture()) {
-            final var policy = fixture.policy("", "", true, 7200);
+            final var policy = fixture.policy("", "", true, 7200, 4096);
             assertTrue(policy.allows("owner/repo", 42, "alice"));
             fixture.clock.advanceSeconds(7200);
             fixture.statuses.put(PERMISSION, 403);
@@ -256,7 +259,7 @@ class TeamAuthorizationTest {
         try (final var fixture = new Fixture()) {
             fixture.statuses.put(PERMISSION, 403);
             fixture.retryAfter.set("3600");
-            final var policy = fixture.policy("", "", true, 7200);
+            final var policy = fixture.policy("", "", true, 7200, 4096);
             final var error = assertThrows(
                     GitHubClient.DeferredRequestException.class, () -> policy.allows("owner/repo", 42, "alice"));
             assertEquals(403, error.status());
@@ -271,7 +274,7 @@ class TeamAuthorizationTest {
     void concurrentCallersShareCompletedDecisionsSafely() throws Exception {
         try (final var fixture = new Fixture();
                 final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            final var policy = fixture.policy("", "", true, 7200);
+            final var policy = fixture.policy("", "", true, 7200, 4096);
             final var results = executor.invokeAll(IntStream.range(0, 20)
                     .<Callable<Boolean>>mapToObj(ignored -> () -> policy.allows("owner/repo", 42, "alice"))
                     .toList());
@@ -286,25 +289,57 @@ class TeamAuthorizationTest {
 
     @Test
     void cacheEvictsOldDecisionsInsteadOfGrowingWithoutBound() throws Exception {
-        try (final var fixture = new Fixture();
-                final var executor =
-                        Executors.newFixedThreadPool(8, Thread.ofVirtual().factory())) {
-            final var policy = fixture.policy("", "", true, 7200);
+        try (final var fixture = new Fixture()) {
+            final var capacity = 8;
+            final var policy = fixture.policy("", "", true, 7200, capacity);
             assertTrue(policy.allows("owner/repo", 42, "alice"));
-            // Keep real HTTP lookups, but overlap their latency with a bounded number of callers.
-            // Every denial completes before checking eviction; their relative insertion order is irrelevant.
-            final var results = executor.invokeAll(IntStream.range(10000, 14096)
-                    .<Callable<Boolean>>mapToObj(actor -> () -> {
-                        // One mismatched immutable identity response per entry avoids a permission lookup.
-                        fixture.responses.put("/user/" + actor, user(42, "alice"));
-                        return policy.allows("owner/repo", actor, "alice");
-                    })
-                    .toList());
-            for (final var result : results) {
-                assertFalse(result.get());
+            for (var actor = 10000; actor < 10000 + capacity - 1; actor++) {
+                // A completed identity-mismatch denial needs just one real HTTP request.
+                fixture.responses.put("/user/" + actor, user(42, "alice"));
+                assertFalse(policy.allows("owner/repo", actor, "alice"));
             }
+            assertEquals(capacity + 1, fixture.requests.size());
+            assertTrue(policy.allows("owner/repo", 42, "alice"));
+            assertEquals(capacity + 1, fixture.requests.size(), "Exactly capacity decisions fit without eviction");
+            fixture.responses.put("/user/20000", user(42, "alice"));
+            assertFalse(policy.allows("owner/repo", 20000, "alice"));
+            assertEquals(capacity + 2, fixture.requests.size());
+            assertFalse(policy.allows("owner/repo", 10000, "alice"));
+            assertEquals(capacity + 2, fixture.requests.size(), "The second-oldest decision is still cached");
             fixture.responses.put(PERMISSION, permission("read", "read", 42, "alice"));
-            assertFalse(policy.allows("owner/repo", 42, "alice"), "Old allow was evicted before its TTL");
+            assertFalse(policy.allows("owner/repo", 42, "alice"), "A hit does not protect the oldest insertion");
+            assertEquals(capacity + 4, fixture.requests.size(), "Evicted allow re-fetches identity and permission");
+            assertFalse(policy.allows("owner/repo", 10000, "alice"));
+            assertEquals(capacity + 5, fixture.requests.size(), "Reinsertion evicts and re-fetches the next oldest");
+            assertFalse(policy.allows("owner/repo", 42, "alice"));
+            assertEquals(capacity + 5, fixture.requests.size(), "The re-fetched denial is cached");
+        }
+    }
+
+    @Test
+    void expiredDecisionsAreRemovedBeforeEvictingLiveDecisions() throws Exception {
+        try (final var fixture = new Fixture()) {
+            final var capacity = 8;
+            final var policy = fixture.policy("", "", true, 10, capacity);
+            assertTrue(policy.allows("owner/repo", 42, "alice"));
+            fixture.clock.advanceSeconds(1);
+            fixture.responses.put("/user/43", user(42, "alice"));
+            assertFalse(policy.allows("owner/repo", 43, null));
+            for (var actor = 10000; actor < 10000 + capacity - 2; actor++) {
+                fixture.responses.put("/user/" + actor, user(42, "alice"));
+                assertFalse(policy.allows("owner/repo", actor, null));
+            }
+            fixture.clock.advanceSeconds(9);
+            fixture.responses.put("/user/20000", user(42, "alice"));
+            assertFalse(policy.allows("owner/repo", 20000, null));
+            final var count = fixture.requests.size();
+            assertFalse(policy.allows("owner/repo", 43, null));
+            assertEquals(
+                    count, fixture.requests.size(), "Expired decisions free space before live decisions are evicted");
+            fixture.responses.put(PERMISSION, permission("read", "read", 42, "alice"));
+            assertFalse(policy.allows("owner/repo", 42, "alice"));
+            assertEquals(
+                    count + 2, fixture.requests.size(), "The expired allow requires fresh identity and permission");
         }
     }
 
@@ -322,7 +357,7 @@ class TeamAuthorizationTest {
         private final JsonMapperImpl json = new JsonMapperImpl(List.of(), key -> Optional.empty());
         private final Map<String, Object> responses = new ConcurrentHashMap<>();
         private final Map<String, Integer> statuses = new ConcurrentHashMap<>();
-        private final List<String> requests = new CopyOnWriteArrayList<>();
+        private final List<String> requests = Collections.synchronizedList(new ArrayList<>());
         private final AtomicReference<String> retryAfter = new AtomicReference<>();
         private final HttpServer server;
         private final GitHubClient github;
@@ -338,7 +373,7 @@ class TeamAuthorizationTest {
                 final var response = responses.get(path);
                 final var bytes =
                         json.toString(response == null ? Map.of() : response).getBytes(StandardCharsets.UTF_8);
-                // Avoid keep-alive delayed ACK overhead in the high-volume eviction test.
+                // Avoid keep-alive delayed ACK overhead in HTTP-backed tests.
                 exchange.getResponseHeaders().set("Connection", "close");
                 final var retry = retryAfter.get();
                 if (retry != null && statuses.containsKey(path)) {
@@ -353,7 +388,8 @@ class TeamAuthorizationTest {
                     URI.create("http://127.0.0.1:" + server.getAddress().getPort()), json, () -> "test", clock);
         }
 
-        private TeamAuthorization policy(final String ids, final String teams, final boolean writers, final long ttl) {
+        private TeamAuthorization policy(
+                final String ids, final String teams, final boolean writers, final long ttl, final int capacity) {
             final var configuration = new GithubBotConfiguration(
                     "",
                     "https://api.github.com",
@@ -361,7 +397,7 @@ class TeamAuthorizationTest {
                     0,
                     new GithubBotConfiguration.Auth(
                             GithubBotConfiguration.AuthType.pat, "GH_TOKEN", "", 0, "", "GH_AGENT_TOKEN"),
-                    new GithubBotConfiguration.Authorization(ids, teams, writers, ttl),
+                    new GithubBotConfiguration.Authorization(ids, teams, writers, ttl, capacity),
                     new GithubBotConfiguration.Repositories(
                             "owner/repo", "", "", "", List.of(RepositorySelector.Visibility.values()), false, false));
             return new TeamAuthorization(github, configuration, clock);

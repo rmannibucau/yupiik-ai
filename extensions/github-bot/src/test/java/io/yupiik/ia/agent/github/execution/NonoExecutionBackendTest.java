@@ -126,9 +126,7 @@ class NonoExecutionBackendTest {
             final var args = Files.readAllLines(Path.of(executable + ".args"));
             final var agentRun = args.indexOf(home.resolve("runtime/agent").toString()) + 1;
             assertTrue(agentRun > 0);
-            assertEquals(
-                    List.of("run", "--show-tool-output", showToolOutput),
-                    args.subList(agentRun, agentRun + 3));
+            assertEquals(List.of("run", "--show-tool-output", showToolOutput), args.subList(agentRun, agentRun + 3));
             assertEquals(1, args.stream().filter("--show-tool-output"::equals).count());
             assertEquals("run", args.getFirst());
             assertTrue(args.contains("--profile"));

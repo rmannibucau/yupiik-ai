@@ -98,6 +98,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -155,6 +156,8 @@ class TuiCommandRenderTest {
     private MockLlmServer llm2;
     private Function<String, AgentLoop> sessionAgentLoopFactory;
     private HeadlessBackend backend;
+    private long textPollMillis = 50;
+    private CountDownLatch quietTextPoll;
     private final AtomicReference<TuiRunner> tuiRef = new AtomicReference<>();
     private Thread uiThread;
     private Duration tickRate = TICK_RATE;
@@ -194,6 +197,7 @@ class TuiCommandRenderTest {
 
     @Test
     void textWaitsAllowQuietIntervalsBeforePromptChanges() throws Exception {
+        textPollMillis = 20;
         final var command = command(testRegistry(), stubAgentLoop());
         uiThread = new Thread(command, "tui-render-delayed-input");
         uiThread.setDaemon(true);
@@ -206,12 +210,11 @@ class TuiCommandRenderTest {
 
         try (final var scheduler = Executors.newSingleThreadScheduledExecutor()) {
             for (var wait = 0; wait < 3; wait++) {
-                // Exercise both presence helpers across a quiet interval once. The third
-                // paste only restores the marker for awaitNoText's delayed-clear coverage;
-                // awaitTextWithin already had its delayed-presence check at wait == 1.
+                // Exercise both presence helpers, then all three absence helpers.
+                // Every mutation waits for an actual quiet poll, even on a loaded runner.
                 final var paste = scheduler.schedule(
-                        () -> tuiRef.get().dispatch(new PasteEvent("delayed-render-marker")),
-                        wait < 2 ? 1_200 : 0,
+                        afterQuietTextPoll(() -> tuiRef.get().dispatch(new PasteEvent("delayed-render-marker"))),
+                        3 * textPollMillis,
                         TimeUnit.MILLISECONDS);
                 if (wait == 0) {
                     awaitText("delayed-render-marker");
@@ -223,8 +226,8 @@ class TuiCommandRenderTest {
                     // Discard frames from the completed mutation.
                 }
                 final var clear = scheduler.schedule(
-                        () -> tuiRef.get().dispatch(KeyEvent.ofChar('u', KeyModifiers.CTRL)),
-                        1_200,
+                        afterQuietTextPoll(() -> tuiRef.get().dispatch(KeyEvent.ofChar('u', KeyModifiers.CTRL))),
+                        3 * textPollMillis,
                         TimeUnit.MILLISECONDS);
                 if (wait == 0) {
                     awaitTextGone("delayed-render-marker");
@@ -6434,6 +6437,23 @@ class TuiCommandRenderTest {
         awaitTextWithin(expected, TIMEOUT_MS);
     }
 
+    /** Arms a fresh quiet-boundary handshake for each scheduled mutation. */
+    private Callable<Void> afterQuietTextPoll(final Runnable mutation) {
+        final var quiet = new CountDownLatch(1);
+        quietTextPoll = quiet;
+        return () -> {
+            assertTrue(quiet.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "text helper never crossed a quiet poll");
+            mutation.run();
+            return null;
+        };
+    }
+
+    private void awaitTextFrame() throws InterruptedException {
+        if (!backend.awaitFrame(textPollMillis) && quietTextPoll != null) {
+            quietTextPoll.countDown();
+        }
+    }
+
     /** Waits for stale text to leave the screen, allowing frames from before the mutation. */
     private void awaitNoText(final String unexpected) throws InterruptedException {
         awaitTextGoneWithin(unexpected, 2_000);
@@ -6452,7 +6472,7 @@ class TuiCommandRenderTest {
                     System.nanoTime() < deadline,
                     () -> "'" + expected + "' did not appear within " + timeoutMillis + " ms; last screen:\n"
                             + snapshot);
-            backend.awaitFrame(50);
+            awaitTextFrame();
             screen = backend.text();
         }
     }
@@ -6466,7 +6486,7 @@ class TuiCommandRenderTest {
                     System.nanoTime() < deadline,
                     () -> "'" + expected + "' did not clear within " + timeoutMillis + " ms; last screen:\n"
                             + snapshot);
-            backend.awaitFrame(50);
+            awaitTextFrame();
             screen = backend.text();
         }
     }

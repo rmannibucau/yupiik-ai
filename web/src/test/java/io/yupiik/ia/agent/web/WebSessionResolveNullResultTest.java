@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import io.yupiik.fusion.httpserver.jre.JreHttpServer;
@@ -59,6 +60,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -137,6 +139,19 @@ class WebSessionResolveNullResultTest {
                 answerer);
     }
 
+    @AfterEach
+    void cleanup() {
+        try {
+            if (manager != null) {
+                manager.close();
+            }
+        } finally {
+            if (broker != null) {
+                broker.close();
+            }
+        }
+    }
+
     @Test
     void aNullResultCancelResolvesThroughTheGeneratedSessionResolveMapping() throws Exception {
         manager.attach("s1");
@@ -157,52 +172,61 @@ class WebSessionResolveNullResultTest {
             }
         });
 
-        for (int i = 0; i < 100; i++) {
-            if (frames.stream().anyMatch(f -> f.contains("session.ask"))) {
-                break;
+        try {
+            for (int i = 0; i < 100; i++) {
+                if (frames.stream().anyMatch(f -> f.contains("session.ask"))) {
+                    break;
+                }
+                Thread.sleep(20);
+                if (i == 99) {
+                    throw new AssertionError("no session.ask frame arrived");
+                }
             }
-            Thread.sleep(20);
-            if (i == 99) {
-                throw new AssertionError("no session.ask frame arrived");
+
+            // capture the request id the frame carries so the resolve targets the actual pending request
+            final long requestId = frames.stream()
+                    .filter(f -> f.contains("session.ask"))
+                    .flatMap(f -> Arrays.stream(f.split("\\R")))
+                    .filter(l -> l.startsWith("data:") && l.contains("\"id\""))
+                    .map(l -> l.substring("data:".length()))
+                    .map(l -> (Map<?, ?>) mapper.read(Map.class, new StringReader(l)))
+                    .map(m -> ((Number) m.get("id")).longValue())
+                    .findFirst()
+                    .orElseThrow();
+
+            // the frontend's cancel: session.resolve with result:null. This goes through the real
+            // fusion-generated param mapping for resolveRequest - the exact path that used to throw
+            // "Missing 'result' parameter." because result was marked required.
+            final var webJsonRpc =
+                    new WebJsonRpc(null, null, manager, null, null, null, null, null, null, null, null, null);
+            final var generated = new WebJsonRpc$resolveRequest$FusionJsonRpcMethod(webJsonRpc, mapper);
+            final Map<String, Object> params = new HashMap<>();
+            params.put("id", "s1");
+            params.put("requestId", String.valueOf(requestId));
+            params.put("result", null); // the browser cancel - null is a valid resolution
+            final CompletionStage<?> dispatched = generated.invoke(new JsonRpcMethod.Context(null, params));
+            final var response = (Map<?, ?>) dispatched.toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+            done.get(5, TimeUnit.SECONDS);
+
+            // the JSON-RPC call succeeded (no Missing 'result' error) and marked the resolve as handled
+            assertEquals(Map.of("resolved", true), response);
+            // and the pending ask got the documented cancelled answer instead of spinning forever
+            assertNotNull(result.get(), "the ask must have returned (not hang) after the null-result resolve");
+            assertEquals(Map.of("cancelled", true), result.get());
+        } finally {
+            try {
+                manager.cancel("s1");
+            } finally {
+                asking.interrupt();
+                asking.join(5_000);
+                assertFalse(asking.isAlive(), "asking thread must terminate");
             }
         }
-
-        // capture the request id the frame carries so the resolve targets the actual pending request
-        final long requestId = frames.stream()
-                .filter(f -> f.contains("session.ask"))
-                .flatMap(f -> Arrays.stream(f.split("\\R")))
-                .filter(l -> l.startsWith("data:") && l.contains("\"id\""))
-                .map(l -> l.substring("data:".length()))
-                .map(l -> (Map<?, ?>) mapper.read(Map.class, new StringReader(l)))
-                .map(m -> ((Number) m.get("id")).longValue())
-                .findFirst()
-                .orElseThrow();
-
-        // the frontend's cancel: session.resolve with result:null. This goes through the real
-        // fusion-generated param mapping for resolveRequest - the exact path that used to throw
-        // "Missing 'result' parameter." because result was marked required.
-        final var webJsonRpc =
-                new WebJsonRpc(null, null, manager, null, null, null, null, null, null, null, null, null);
-        final var generated = new WebJsonRpc$resolveRequest$FusionJsonRpcMethod(webJsonRpc, mapper);
-        final Map<String, Object> params = new HashMap<>();
-        params.put("id", "s1");
-        params.put("requestId", String.valueOf(requestId));
-        params.put("result", null); // the browser cancel - null is a valid resolution
-        final CompletionStage<?> dispatched = generated.invoke(new JsonRpcMethod.Context(null, params));
-        final var response = (Map<?, ?>) dispatched.toCompletableFuture().join();
-
-        done.join();
-        asking.join();
-
-        // the JSON-RPC call succeeded (no Missing 'result' error) and marked the resolve as handled
-        assertEquals(Map.of("resolved", true), response);
-        // and the pending ask got the documented cancelled answer instead of spinning forever
-        assertNotNull(result.get(), "the ask must have returned (not hang) after the null-result resolve");
-        assertEquals(Map.of("cancelled", true), result.get());
     }
 
     @Test
-    void readLineUsesAnInteractiveRequestAndSupportsEmptyInputAndCancel() {
+    void readLineUsesAnInteractiveRequestAndSupportsEmptyInputAndCancel() throws Exception {
         final var session = manager.attach("s1");
         final var requests = new ConcurrentLinkedQueue<Map<?, ?>>();
         final SseBroker.SseSubscription subscription = bytes -> {
@@ -226,18 +250,18 @@ class WebSessionResolveNullResultTest {
             assertNotNull(params.get("questions"));
             assertEquals(false, line.isDone());
             manager.resolve("s1", String.valueOf(request.get("id")), "");
-            assertEquals(Optional.of(""), line.join());
+            assertEquals(Optional.of(""), line.get(5, TimeUnit.SECONDS));
 
             final var cancelled = session.env().io().readLine("Cancel").toCompletableFuture();
             manager.resolve("s1", String.valueOf(requests.remove().get("id")), null);
-            assertEquals(Optional.empty(), cancelled.join());
+            assertEquals(Optional.empty(), cancelled.get(5, TimeUnit.SECONDS));
         } finally {
             broker.unsubscribe("s1", subscription);
         }
     }
 
     @Test
-    void pendingQuestionsReplayOnlyToTheirSessionAndDisappearOnResolveOrStop() {
+    void pendingQuestionsReplayOnlyToTheirSessionAndDisappearOnResolveOrStop() throws Exception {
         final var first = manager.attach("s1");
         final var second = manager.attach("s2");
         final var firstResult =
@@ -263,7 +287,7 @@ class WebSessionResolveNullResultTest {
         manager.subscribe("s1", bytes -> assertEquals(original.element(), new String(bytes, StandardCharsets.UTF_8)));
         assertEquals(1, reconnect.size(), "replaying another tab must not broadcast to existing tabs");
         assertEquals(true, manager.resolve("s1", id, "answered"));
-        assertEquals(Optional.of("answered"), firstResult.join());
+        assertEquals(Optional.of("answered"), firstResult.get(5, TimeUnit.SECONDS));
         assertEquals(false, manager.resolve("s1", id, "late answer"));
 
         final var afterResolve = new ConcurrentLinkedQueue<String>();
@@ -274,7 +298,7 @@ class WebSessionResolveNullResultTest {
         assertEquals(1, other.size());
         assertEquals(false, other.element().contains("First pending question"));
         manager.cancel("s2");
-        assertEquals(Optional.empty(), secondResult.join());
+        assertEquals(Optional.empty(), secondResult.get(5, TimeUnit.SECONDS));
         final var afterCancel = new ConcurrentLinkedQueue<String>();
         manager.subscribe("s2", bytes -> afterCancel.add(new String(bytes, StandardCharsets.UTF_8)));
         assertEquals(List.of(), List.copyOf(afterCancel));
@@ -302,7 +326,8 @@ class WebSessionResolveNullResultTest {
             assertEquals(ApprovalGate.Result.ALLOW_ONCE, approval.get(5, TimeUnit.SECONDS));
         } finally {
             approving.interrupt();
-            approving.join();
+            approving.join(5_000);
+            assertFalse(approving.isAlive(), "approving thread must terminate");
         }
 
         final var answer = new CompletableFuture<Map<String, Object>>();
@@ -327,25 +352,26 @@ class WebSessionResolveNullResultTest {
                             false)),
                     ((Map<?, ?>) request.get("params")).get("questions"));
             asking.interrupt();
-            asking.join();
-            assertEquals(Map.of("cancelled", true), answer.join());
+            asking.join(5_000);
+            assertFalse(asking.isAlive(), "asking thread must terminate");
+            assertEquals(Map.of("cancelled", true), answer.get(5, TimeUnit.SECONDS));
             final var after = new ConcurrentLinkedQueue<String>();
             manager.subscribe("s1", bytes -> after.add(new String(bytes, StandardCharsets.UTF_8)));
             assertEquals(List.of(), List.copyOf(after));
             assertEquals(false, manager.resolve("s1", String.valueOf(request.get("id")), Map.of("only", "yes")));
         } finally {
             asking.interrupt();
-            asking.join();
-            manager.close();
+            asking.join(5_000);
+            assertFalse(asking.isAlive(), "asking thread must terminate");
         }
     }
 
     @Test
-    void closingSessionDropsOutstandingRequests() {
+    void closingSessionDropsOutstandingRequests() throws Exception {
         final var session = manager.attach("s1");
         final var pending = session.env().io().readLine("Closing").toCompletableFuture();
         manager.close();
-        assertEquals(Optional.empty(), pending.join());
+        assertEquals(Optional.empty(), pending.get(5, TimeUnit.SECONDS));
         final var frames = new ConcurrentLinkedQueue<String>();
         manager.subscribe("s1", bytes -> frames.add(new String(bytes, StandardCharsets.UTF_8)));
         assertEquals(List.of(), List.copyOf(frames));
@@ -354,7 +380,8 @@ class WebSessionResolveNullResultTest {
     @Test
     void sseBootstrapReplaysPendingRpcAfterSnapshotOnEveryConnection() throws Exception {
         final var pending = manager.attach("s1").env().io().readLine("Survives reload");
-        try (final var client = HttpClient.newHttpClient();
+        try (final var executor = Executors.newVirtualThreadPerTaskExecutor();
+                final var client = HttpClient.newHttpClient();
                 final var server = new JreHttpServer(
                         new JreHttpServerConfiguration(null, 0, true),
                         List.of(new SseExchangeHandler(broker, manager::snapshotFor, 10, manager::subscribe)))) {
@@ -366,10 +393,12 @@ class WebSessionResolveNullResultTest {
             List<String> original = null;
             try {
                 for (int connection = 0; connection < 2; connection++) {
-                    final var response = client.send(request, HttpResponse.BodyHandlers.ofLines());
-                    assertEquals(200, response.statusCode());
+                    final var response = client.sendAsync(request, HttpResponse.BodyHandlers.ofLines())
+                            .get(5, TimeUnit.SECONDS);
                     try (final var body = response.body()) {
-                        final var frames = body.limit(6).toList();
+                        assertEquals(200, response.statusCode());
+                        final var frames =
+                                executor.submit(() -> body.limit(6).toList()).get(5, TimeUnit.SECONDS);
                         assertEquals("event: snapshot", frames.get(0));
                         assertEquals("event: rpc", frames.get(3));
                         assertEquals(true, frames.get(4).contains("Survives reload"));
@@ -386,7 +415,7 @@ class WebSessionResolveNullResultTest {
         } finally {
             manager.close();
         }
-        assertEquals(Optional.empty(), pending.toCompletableFuture().join());
+        assertEquals(Optional.empty(), pending.toCompletableFuture().get(5, TimeUnit.SECONDS));
     }
 
     @Test
@@ -415,7 +444,7 @@ class WebSessionResolveNullResultTest {
                     assertEquals(request, rpcPayload(frame), "duplicates must retain the same id and payload");
                 }
                 manager.resolve("s1", String.valueOf(request.get("id")), "ok");
-                assertEquals(Optional.of("ok"), result.toCompletableFuture().join());
+                assertEquals(Optional.of("ok"), result.toCompletableFuture().get(5, TimeUnit.SECONDS));
                 broker.unsubscribe("s1", tab);
             }
         } finally {

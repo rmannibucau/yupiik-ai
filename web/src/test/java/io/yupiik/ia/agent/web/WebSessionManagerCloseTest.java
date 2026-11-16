@@ -36,6 +36,7 @@ import java.time.Clock;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -59,6 +60,7 @@ class WebSessionManagerCloseTest {
 
     private JsonMapper mapper;
     private WebSessionManager manager;
+    private SseBroker broker;
     private CancelCapturingTurnRunner turnRunner;
 
     @BeforeEach
@@ -95,6 +97,7 @@ class WebSessionManagerCloseTest {
                 null,
                 null);
         this.turnRunner = new CancelCapturingTurnRunner();
+        this.broker = new SseBroker(this.mapper);
         this.manager = new WebSessionManager(
                 runtimeFactory,
                 new NoopShellRegistry(),
@@ -102,10 +105,23 @@ class WebSessionManagerCloseTest {
                 turnRunner,
                 sessionStore,
                 new SessionLifecycle(sessionStore),
-                new SseBroker(this.mapper),
+                broker,
                 this.mapper,
                 new BtwAnswerer(
                         null, null, null, null, null, null, null, null, null, null, null, null, null, null, null));
+    }
+
+    @AfterEach
+    void cleanup() {
+        try {
+            if (manager != null) {
+                manager.close();
+            }
+        } finally {
+            if (broker != null) {
+                broker.close();
+            }
+        }
     }
 
     /** Idle submit starts a turn; busy()=true then queues follow-ups behind it. */

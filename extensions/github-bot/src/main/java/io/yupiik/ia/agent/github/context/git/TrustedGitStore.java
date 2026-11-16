@@ -62,13 +62,13 @@ public final class TrustedGitStore implements AutoCloseable {
     private static final int METADATA_LIMIT = 8 * 1024 * 1024;
     private static final int OBJECT_LIMIT = 100_000;
     private static final int TAG_LIMIT = 10_000;
-    private static final int COMPAT_LIMIT = 64 * 1024 * 1024;
     private static final byte[] EMPTY = new byte[0];
 
     private final Path root;
     private final String git;
     private final long timeoutNanos;
     private final long maxBytes;
+    private final long maxHttpBufferBytes;
     private final int outputLimit;
     private final Supplier<String> token;
     private final ReentrantLock lock = new ReentrantLock();
@@ -84,6 +84,7 @@ public final class TrustedGitStore implements AutoCloseable {
             final String git,
             final Duration timeout,
             final long maxBytes,
+            final long maxHttpBufferBytes,
             final Supplier<String> token) {
         if (root == null
                 || git == null
@@ -91,14 +92,17 @@ public final class TrustedGitStore implements AutoCloseable {
                 || timeout == null
                 || timeout.isNegative()
                 || timeout.isZero()
-                || maxBytes < 1) {
+                || maxBytes < 1
+                || maxHttpBufferBytes < 1
+                || maxHttpBufferBytes > Integer.MAX_VALUE - 8L) {
             throw new IllegalArgumentException(
-                    "Private root, Git executable, positive timeout and byte budget required");
+                    "Private root, Git executable, positive timeout and byte budget, and HTTP buffer cap from 1 to 2147483639 required");
         }
         this.root = root.toAbsolutePath().normalize();
         this.git = git;
         this.timeoutNanos = timeout.toNanos();
         this.maxBytes = maxBytes;
+        this.maxHttpBufferBytes = maxHttpBufferBytes;
         this.outputLimit = (int) Math.min(maxBytes, METADATA_LIMIT);
         this.token = token;
     }
@@ -450,11 +454,11 @@ public final class TrustedGitStore implements AutoCloseable {
     public HttpResult http(
             final View view, final String method, final String query, final byte[] body, final String protocol)
             throws IOException {
-        if (body == null || body.length > COMPAT_LIMIT) {
+        if (body == null || body.length > maxHttpBufferBytes) {
             throw new IllegalArgumentException("Compatibility HTTP input exceeds limit");
         }
         try (final var response = httpStream(view, method, query, body, protocol)) {
-            if (response.length() > COMPAT_LIMIT) {
+            if (response.length() > maxHttpBufferBytes) {
                 throw new IOException("Compatibility HTTP output exceeds limit; use httpStream");
             }
             return new HttpResult(
@@ -470,7 +474,7 @@ public final class TrustedGitStore implements AutoCloseable {
         final boolean post = "POST".equals(method) && (query == null || query.isEmpty());
         if ((!get && !post)
                 || body == null
-                || body.length > Math.min(maxBytes, COMPAT_LIMIT)
+                || body.length > Math.min(maxBytes, maxHttpBufferBytes)
                 || (get && body.length != 0)
                 || (protocol != null
                         && !protocol.isEmpty()

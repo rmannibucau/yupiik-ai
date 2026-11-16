@@ -89,7 +89,8 @@ class DockerLiveTest {
                     new ExecutorConfiguration.Docker.Egress(
                             System.getProperty("github.bot.docker.egress.image"),
                             List.of("api.github.com"),
-                            "127.0.0.1"), "shown");
+                            "127.0.0.1"),
+                    "shown");
             assertEquals(
                     0,
                     backend.execute(

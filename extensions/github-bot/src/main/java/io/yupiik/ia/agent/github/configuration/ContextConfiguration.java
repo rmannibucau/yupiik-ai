@@ -62,7 +62,13 @@ public record ContextConfiguration(
                 defaultValue = "1073741824L",
                 documentation =
                         "Maximum response bytes shared by all context adapters per attempt, from 1 MiB to 16 GiB.")
-        long maxResponseBytes) {
+        long maxResponseBytes,
+
+        @Property(
+                defaultValue = "67108864L",
+                documentation =
+                        "Maximum bytes for Git compatibility HTTP buffers, from 1 to 2147483639. Bounds request input and buffered responses, not streamed responses; size for the worker heap.")
+        long maxHttpBufferBytes) {
     public ContextConfiguration {
         if (bind == null
                 || bind.isBlank()
@@ -76,7 +82,9 @@ public record ContextConfiguration(
                 || maxRequests < 1
                 || maxRequests > 4096
                 || maxResponseBytes < 1024L * 1024
-                || maxResponseBytes > 16L * 1024 * 1024 * 1024) {
+                || maxResponseBytes > 16L * 1024 * 1024 * 1024
+                || maxHttpBufferBytes < 1
+                || maxHttpBufferBytes > Integer.MAX_VALUE - 8L) {
             throw new IllegalArgumentException("Invalid GitHub context settings");
         }
         if (!advertised.isEmpty()) {

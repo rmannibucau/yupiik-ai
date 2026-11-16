@@ -23,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,13 +35,43 @@ class DockerRestrictedServicesTest {
     Path home;
 
     @Test
+    void fakeDockerCapturesDetailsOnlyWhenRequestedButAlwaysRecordsCallsAndResources() throws Exception {
+        for (final var captureDetails : List.of(false, true)) {
+            final var executable = fake(captureDetails, "");
+            final var commands = List.of(
+                    List.of("network", "create", "yca-fixture-services-net"),
+                    List.of("network", "create", "yca-fixture-external"),
+                    List.of("create", "--name", "yca-fixture-services"),
+                    List.of("create", "--name", "yca-fixture-egress"),
+                    List.of("run", "agent"));
+            for (final var command : commands) {
+                final var argv = new ArrayList<String>();
+                argv.add(executable.toString());
+                argv.addAll(command);
+                assertEquals(0, new ProcessBuilder(argv).inheritIO().start().waitFor());
+            }
+            assertEquals(
+                    commands.stream().map(command -> String.join(" ", command)).toList(),
+                    Files.readAllLines(Path.of(executable + ".calls")));
+            for (final var suffix : List.of(".network", ".container", ".yca-fixture-external", ".yca-fixture-egress")) {
+                assertTrue(Files.exists(Path.of(executable + suffix)), suffix);
+            }
+            for (final var kind : List.of("create", "proxy", "run")) {
+                assertEquals(captureDetails, Files.exists(Path.of(executable + "." + kind + ".args")), kind);
+                assertEquals(captureDetails, Files.exists(Path.of(executable + "." + kind + ".env")), kind);
+            }
+        }
+    }
+
+    @Test
     void dependencyProxySharesOnlyTheServicesNetworkAndBypassesOnlyTheServicesName() throws Exception {
         nonRoot();
-        final var executable = fake("");
+        final var executable = fake(true, "");
         final var config = defaultConfiguration();
         assertEquals(
                 0,
-                new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(3), "", null, config, "shown")
+                new DockerExecutionBackend(
+                                executable.toString(), "agent", Duration.ofSeconds(3), "", null, config, "shown")
                         .execute(attempt(), "yca-dependencies", "review", Map.of(), Map.of(), settings(), secrets()));
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertEquals(
@@ -134,9 +165,11 @@ class DockerRestrictedServicesTest {
     @Test
     void foreignDependencyResourcesPreventAnyCleanupMutation() throws Exception {
         for (final var name : List.of("yca-owner-egress", "yca-owner-external")) {
-            final var executable = fake("for last; do :; done\n"
-                    + "if [ \"$2\" = inspect ] && [ \"$last\" = " + name
-                    + " ]; then printf 'yca-other|dependency-egress\\n'; exit 0; fi\n");
+            final var executable = fake(
+                    false,
+                    "for last; do :; done\n"
+                            + "if [ \"$2\" = inspect ] && [ \"$last\" = " + name
+                            + " ]; then printf 'yca-other|dependency-egress\\n'; exit 0; fi\n");
             Files.createFile(Path.of(executable + ".container"));
             Files.createFile(Path.of(executable + ".network"));
             assertThrows(
@@ -156,7 +189,7 @@ class DockerRestrictedServicesTest {
                 "if [ \"$1\" = create ] && [ \"$3\" = yca-partial-egress ]; then exit 1; fi\n",
                 "if [ \"$1 $2 $4\" = 'network connect egress' ]; then exit 1; fi\n",
                 "if [ \"$1 $2\" = 'start yca-partial-egress' ]; then exit 1; fi\n")) {
-            final var executable = fake(failure);
+            final var executable = fake(false, failure);
             assertThrows(
                     IllegalStateException.class,
                     () -> new DockerExecutionBackend(
@@ -165,18 +198,20 @@ class DockerRestrictedServicesTest {
                                     Duration.ofSeconds(2),
                                     "",
                                     null,
-                                    defaultConfiguration(), "shown")
+                                    defaultConfiguration(),
+                                    "shown")
                             .execute(attempt(), "yca-partial", "review", Map.of(), Map.of(), settings, secrets()));
             final var calls = Files.readAllLines(Path.of(executable + ".calls"));
             assertFalse(calls.stream().anyMatch(c -> c.startsWith("run ")));
             assertTrue(calls.indexOf("network rm yca-partial-external")
                     < calls.indexOf("network rm yca-partial-services-net"));
         }
-        final var executable = fake("");
+        final var executable = fake(false, "");
         for (final var suffix : List.of(".container", ".network", ".yca-restart-egress", ".yca-restart-external")) {
             Files.createFile(Path.of(executable + suffix));
         }
-        new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(2), "", null, "shown").stop("yca-restart");
+        new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(2), "", null, "shown")
+                .stop("yca-restart");
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertTrue(calls.indexOf("rm --force yca-restart-egress") < calls.indexOf("network rm yca-restart-external"));
         assertTrue(calls.indexOf("network rm yca-restart-external")
@@ -211,7 +246,8 @@ class DockerRestrictedServicesTest {
                 () -> new ExecutorConfiguration.Docker("docker", "agent", "trusted", null, config));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new DockerExecutionBackend("docker", "agent", Duration.ofSeconds(1), "trusted", null, config, "shown"));
+                () -> new DockerExecutionBackend(
+                        "docker", "agent", Duration.ofSeconds(1), "trusted", null, config, "shown"));
         assertThrows(
                 IllegalArgumentException.class,
                 () -> new DockerExecutionBackend(
@@ -220,7 +256,8 @@ class DockerRestrictedServicesTest {
                         Duration.ofSeconds(1),
                         "",
                         new ExecutorConfiguration.Docker.Egress("egress", List.of("github.com"), "127.0.0.1"),
-                        config, "shown"));
+                        config,
+                        "shown"));
         assertThrows(
                 IllegalArgumentException.class,
                 () -> new ExecutorConfiguration.Docker(
@@ -288,7 +325,7 @@ class DockerRestrictedServicesTest {
     @Test
     void constructsExactIsolationAndKeepsGatewaySecretsOffArgvAndAgentEnvironment() throws Exception {
         nonRoot();
-        final var executable = fake("");
+        final var executable = fake(true, "");
         final var settings = settings();
         final var attempt = attempt();
         final var backend = backend(executable, Duration.ofSeconds(5));
@@ -392,8 +429,9 @@ class DockerRestrictedServicesTest {
 
     @Test
     void rejectsBundlesInUnknownModeAndRequiresExplicitBundleInServicesMode() throws Exception {
-        final var executable = fake("");
-        final var legacy = new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(1), "", null, "shown");
+        final var executable = fake(false, "");
+        final var legacy =
+                new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(1), "", null, "shown");
         assertThrows(
                 IllegalArgumentException.class,
                 () -> legacy.execute(
@@ -410,7 +448,7 @@ class DockerRestrictedServicesTest {
 
     @Test
     void cleanupWorksAfterRestartWithoutServicesConfigurationAndNeverDeletesUnknownResources() throws Exception {
-        final var executable = fake("");
+        final var executable = fake(false, "");
         Files.createFile(Path.of(executable + ".container"));
         Files.createFile(Path.of(executable + ".network"));
         new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(2), "", null, "shown")
@@ -424,6 +462,7 @@ class DockerRestrictedServicesTest {
                 "printf 'daemon unavailable\\n'; exit 1",
                 "printf 'Error: No such container: yca-other\\n'; exit 1")) {
             final var collision = fake(
+                    false,
                     "if [ \"$1\" = container ] && [ \"$3\" = --format ] && [ \"$4\" != '{{.State.Running}}' ]; then "
                             + answer + "; exit 0; fi\n");
             assertThrows(
@@ -436,10 +475,12 @@ class DockerRestrictedServicesTest {
 
     @Test
     void ambiguousAgentTerminationRetainsServicesResources() throws Exception {
-        final var executable = fake("if [ \"$4\" = '{{.State.Running}}' ]; then printf 'unknown\\n'; exit 0; fi\n");
+        final var executable =
+                fake(false, "if [ \"$4\" = '{{.State.Running}}' ]; then printf 'unknown\\n'; exit 0; fi\n");
         assertThrows(
                 IllegalStateException.class,
-                () -> new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(1), "", null, "shown")
+                () -> new DockerExecutionBackend(
+                                executable.toString(), "agent", Duration.ofSeconds(1), "", null, "shown")
                         .stop("yca-uncertain"));
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertEquals(1, calls.size());
@@ -449,7 +490,7 @@ class DockerRestrictedServicesTest {
     @Test
     void networkOwnershipIsCheckedBeforeRemovingEvenAnOwnedGateway() throws Exception {
         final var executable =
-                fake("if [ \"$1 $2\" = 'network inspect' ]; then printf 'yca-other|services\\n'; exit 0; fi\n");
+                fake(false, "if [ \"$1 $2\" = 'network inspect' ]; then printf 'yca-other|services\\n'; exit 0; fi\n");
         Files.createFile(Path.of(executable + ".container"));
         assertThrows(
                 IllegalStateException.class,
@@ -462,7 +503,7 @@ class DockerRestrictedServicesTest {
         nonRoot();
         final var settings = settings();
         for (final boolean killFails : List.of(false, true)) {
-            final var executable = fake("""
+            final var executable = fake(false, """
                     if [ "$1" = run ]; then exec sleep 60; fi
                     if [ "$4" = '{{.State.Running}}' ]; then printf 'true\\n'; exit 0; fi
                     """ + (killFails ? "if [ \"$1\" = kill ]; then exit 1; fi\n" : ""));
@@ -499,7 +540,7 @@ class DockerRestrictedServicesTest {
                 "if [ \"$1\" = version ]; then printf '28.0.0\\nextra'; exit 0; fi\n",
                 "if [ \"$1 $2\" = 'network inspect' ] && [ \"$5\" = trusted-control ]; then printf 'host|false\\n'; exit 0; fi\n",
                 "if [ \"$1 $2\" = 'network inspect' ] && [ \"$5\" = trusted-control ]; then printf 'bridge|true\\n'; exit 0; fi\n")) {
-            final var executable = fake(override);
+            final var executable = fake(false, override);
             final var gateway = new DockerRestrictedServices(
                     executable.toString(), configuration("http://172.20.0.1:8080/v1"), Duration.ofSeconds(2));
             assertThrows(IllegalStateException.class, () -> gateway.start("yca-old", settings, secrets()));
@@ -507,7 +548,7 @@ class DockerRestrictedServicesTest {
             assertFalse(calls.contains("network create"));
             assertFalse(calls.contains("create --name"));
         }
-        final var executable = fake("");
+        final var executable = fake(false, "");
         assertThrows(
                 IllegalArgumentException.class,
                 () -> new DockerRestrictedServices(
@@ -524,6 +565,7 @@ class DockerRestrictedServicesTest {
         final var settings = settings();
         for (final var stage : List.of("create", "connect", "start")) {
             final var executable = fake(
+                    false,
                     stage.equals("connect")
                             ? "if [ \"$1 $2\" = 'network connect' ]; then exit 1; fi\n"
                             : "if [ \"$1\" = '" + stage + "' ]; then exit 1; fi\n");
@@ -544,6 +586,7 @@ class DockerRestrictedServicesTest {
     @Test
     void controlDeadlineKillsClientAndDescendantWithoutLeakingDiagnostics() throws Exception {
         final var executable = fake(
+                false,
                 "if [ \"$1\" = container ]; then printf '%s' \"$$\" > \"$0.pid\"; sleep 60 & printf '%s' \"$!\" > \"$0.child\"; wait; fi\n");
         assertTimeoutPreemptively(
                 Duration.ofSeconds(4),
@@ -563,7 +606,7 @@ class DockerRestrictedServicesTest {
         final var settings = settings();
         for (final var override :
                 List.of("if [ \"$1\" = exec ]; then exit 1; fi\n", "if [ \"$1\" = exec ]; then exec sleep 60; fi\n")) {
-            final var executable = fake(override);
+            final var executable = fake(false, override);
             // Leave enough client budget to reach the readiness probe under parallel reactor load.
             // The hung probe still must time out, never launch the agent, and clean owned resources.
             assertTimeoutPreemptively(
@@ -586,7 +629,7 @@ class DockerRestrictedServicesTest {
             assertTrue(calls.contains("network rm yca-notready-services-net"));
         }
         final var executable =
-                fake("if [ \"$1\" = exec ] && [ ! -f \"$0.probed\" ]; then : > \"$0.probed\"; exit 1; fi\n");
+                fake(false, "if [ \"$1\" = exec ] && [ ! -f \"$0.probed\" ]; then : > \"$0.probed\"; exit 1; fi\n");
         assertEquals(
                 0,
                 backend(executable, Duration.ofSeconds(3))
@@ -599,7 +642,7 @@ class DockerRestrictedServicesTest {
     void requiresCompleteOpaqueCredentialsButAcceptsAnonymousUpstreamAndCustomTlsPassword() throws Exception {
         nonRoot();
         final var settings = settings();
-        final var executable = fake("");
+        final var executable = fake(true, "");
         final var gateway = new DockerRestrictedServices(
                 executable.toString(), configuration("http://172.20.0.1:8080/v1"), Duration.ofSeconds(1));
         for (final var key : secrets().keySet()) {
@@ -635,7 +678,7 @@ class DockerRestrictedServicesTest {
         settings();
         final var attempt = attempt();
         final var settings = Files.writeString(attempt.resolve("workspace/settings.json"), "{}");
-        final var executable = fake("");
+        final var executable = fake(false, "");
         assertThrows(
                 IllegalArgumentException.class,
                 () -> backend(executable, Duration.ofSeconds(1))
@@ -691,12 +734,12 @@ class DockerRestrictedServicesTest {
         return directory;
     }
 
-    private Path fake(final String override) throws Exception {
+    private Path fake(final boolean captureDetails, final String override) throws Exception {
         final var executable = Files.createTempFile(home, "docker-", ".sh");
         Files.writeString(executable, """
                 #!/bin/sh
                 printf '%s\\n' "$*" >> "$0.calls"
-                """ + override + """
+                """ + override + "capture_details=" + captureDetails + "\n" + """
                 for last; do :; done
                 case "$last" in
                   *-egress|*-external)
@@ -712,8 +755,10 @@ class DockerRestrictedServicesTest {
                 esac
                 if [ "$1" = create ] && [ "$3" = "${3%-egress}-egress" ]; then
                   : > "$0.$3"
-                  printf '%s\\n' "$@" > "$0.proxy.args"
-                  env > "$0.proxy.env"
+                  if [ "$capture_details" = true ]; then
+                    printf '%s\\n' "$@" > "$0.proxy.args"
+                    env > "$0.proxy.env"
+                  fi
                   exit 0
                 fi
                 runtime=${last%-services-net}
@@ -733,7 +778,10 @@ class DockerRestrictedServicesTest {
                 if [ "$1" = version ]; then printf '28.1.0\\n'; fi
                 if [ "$1" = create ]; then : > "$0.container"; fi
                 if [ "$1" = rm ]; then rm "$0.container"; fi
-                if [ "$1" = create ] || [ "$1" = run ]; then printf '%s\\n' "$@" > "$0.$1.args"; env > "$0.$1.env"; fi
+                if [ "$capture_details" = true ] && { [ "$1" = create ] || [ "$1" = run ]; }; then
+                  printf '%s\\n' "$@" > "$0.$1.args"
+                  env > "$0.$1.env"
+                fi
                 exit 0
                 """);
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));

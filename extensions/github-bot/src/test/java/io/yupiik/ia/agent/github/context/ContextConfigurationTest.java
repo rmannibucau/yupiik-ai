@@ -77,10 +77,25 @@ class ContextConfigurationTest {
         }
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new ContextConfiguration("127.0.0.1", 0, "", null, "git", "", 1, 1024 * 1024));
+                () -> new ContextConfiguration("127.0.0.1", 0, "", null, "git", "", 1, 1024 * 1024, 67108864L));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new ContextConfiguration("127.0.0.1", 0, "", "", "git", null, 1, 1024 * 1024));
+                () -> new ContextConfiguration("127.0.0.1", 0, "", "", "git", null, 1, 1024 * 1024, 67108864L));
+    }
+
+    @Test
+    void validatesHttpBufferCapIncludingExactArraySafeBounds() {
+        for (final long cap : new long[] {Long.MIN_VALUE, -1, 0, Integer.MAX_VALUE - 7L, Long.MAX_VALUE}) {
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new ContextConfiguration("127.0.0.1", 0, "", "", "git", "", 1, 1024 * 1024, cap));
+        }
+        for (final long cap : new long[] {1, 67108864L, Integer.MAX_VALUE - 8L}) {
+            assertEquals(
+                    cap,
+                    new ContextConfiguration("127.0.0.1", 0, "", "", "git", "", 1, 1024 * 1024, cap)
+                            .maxHttpBufferBytes());
+        }
     }
 
     private static ContextConfiguration configuration(
@@ -90,6 +105,6 @@ class ContextConfigurationTest {
             final String git,
             final int requests,
             final long bytes) {
-        return new ContextConfiguration(bind, port, advertised, "", git, "", requests, bytes);
+        return new ContextConfiguration(bind, port, advertised, "", git, "", requests, bytes, 67108864L);
     }
 }

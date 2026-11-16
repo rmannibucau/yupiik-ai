@@ -109,11 +109,20 @@ mvn clean install
 
 The runnable artifact is the fatjar: `yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar`.
 
+The web frontend uses `npm install` locally, which can update `web/src/main/frontend/package-lock.json` when dependencies change; review and commit intentional lockfile changes.
+When the `CI` environment variable is non-empty (including `CI=false`), Maven activates `frontend-ci` and uses `npm ci`, which requires a matching lockfile, does not update it, and cleans existing `node_modules`.
+Maven treats an empty `CI` value like an unset variable for this profile, so both use the local default.
+Use `-Dfrontend.npm.install.arguments=ci` to request the same strict install locally, or explicitly override with `-Dfrontend.npm.install.arguments=install` when intentionally refreshing dependencies in a CI-marked environment.
+Use `-Dskip.frontend=true` for offline backend-only builds; it skips frontend installation, build, and tests.
+
 Use `mvn clean install -T1C` to build independent reactor modules concurrently, including all default tests and checks.
-JUnit runs four test classes concurrently per module; methods remain sequential except explicitly isolated concurrent tests such as the broker CPU matrix.
-Tune the per-module worker count separately with `-Dyca.test.parallelism=8` on a machine with spare capacity, or `-Dyca.test.parallelism=1` when diagnosing contention.
+JUnit targets eight concurrent test classes per module, with at most sixteen workers to accommodate blocking tests; methods remain sequential except explicitly isolated concurrent tests such as the broker CPU matrix.
+Tune per-module concurrency separately with `-Dyca.test.parallelism=4 -Dyca.test.maxPoolSize=8` on a constrained machine, or use `-Dyca.test.parallelism=1 -Dyca.test.maxPoolSize=1` when diagnosing contention.
+The maximum pool size must be at least the requested parallelism.
 Reactor concurrency and test concurrency multiply, so increasing both can make subprocess-heavy tests slower rather than faster.
-Optional fork JVM flags can be supplied with `-Dyca.test.jvmArgs='-XX:ActiveProcessorCount=4'` without replacing the fixed locale and timezone settings.
+Test forks default to `-XX:TieredStopAtLevel=1` to reduce warm-up overhead for short-lived JVMs.
+Use `-Dyca.test.jvmArgs=` to restore normal JVM compilation, or supply other flags with `-Dyca.test.jvmArgs='-XX:TieredStopAtLevel=1 -XX:ActiveProcessorCount=4'` without replacing the fixed locale and timezone settings.
+Broker test subprocesses use the same fast-start compilation default; override them independently with `-Dyca.test.childJvmOptions=` or a whitespace-separated list of JVM flags.
 These settings do not exclude tests or change their timeout assertions; native Git/TLS and bounded readiness checks remain part of the default build.
 
 == Contribute

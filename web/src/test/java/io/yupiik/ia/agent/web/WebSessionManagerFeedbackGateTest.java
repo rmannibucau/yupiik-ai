@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import io.yupiik.fusion.json.JsonMapper;
@@ -43,8 +44,10 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -119,6 +122,19 @@ class WebSessionManagerFeedbackGateTest {
                 answerer);
     }
 
+    @AfterEach
+    void cleanup() {
+        try {
+            if (manager != null) {
+                manager.close();
+            }
+        } finally {
+            if (broker != null) {
+                broker.close();
+            }
+        }
+    }
+
     @Test
     void aCancelledAskIsReportedAsCleanCancelledAnswer() throws Exception {
         manager.attach("s1");
@@ -140,24 +156,33 @@ class WebSessionManagerFeedbackGateTest {
             }
         });
 
-        // a session.ask rpc frame was pushed (put runs before pushRpc, so the future is pending now)
-        for (int i = 0; i < 100; i++) {
-            if (frames.stream().anyMatch(f -> f.contains("session.ask"))) {
-                break;
+        try {
+            // a session.ask rpc frame was pushed (put runs before pushRpc, so the future is pending now)
+            for (int i = 0; i < 100; i++) {
+                if (frames.stream().anyMatch(f -> f.contains("session.ask"))) {
+                    break;
+                }
+                Thread.sleep(20);
+                if (i == 99) {
+                    throw new AssertionError("no session.ask frame arrived");
+                }
             }
-            Thread.sleep(20);
-            if (i == 99) {
-                throw new AssertionError("no session.ask frame arrived");
+
+            // cancel the turn (modal Cancel / Stop): unblocks awaitRpc with null
+            manager.cancel("s1");
+            done.get(5, TimeUnit.SECONDS);
+
+            assertNotNull(result.get(), "the ask must have returned (not hang) after the cancel");
+            assertEquals(Map.of("cancelled", true), result.get());
+        } finally {
+            try {
+                manager.cancel("s1");
+            } finally {
+                asking.interrupt();
+                asking.join(5_000);
+                assertFalse(asking.isAlive(), "asking thread must terminate");
             }
         }
-
-        // cancel the turn (modal Cancel / Stop): unblocks awaitRpc with null
-        manager.cancel("s1");
-        done.join();
-
-        assertNotNull(result.get(), "the ask must have returned (not hang) after the cancel");
-        assertEquals(Map.of("cancelled", true), result.get());
-        asking.join();
     }
 
     private static final class NoopShellRegistry extends ShellRegistry {

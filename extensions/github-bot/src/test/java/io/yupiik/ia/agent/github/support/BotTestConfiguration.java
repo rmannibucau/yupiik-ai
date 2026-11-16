@@ -96,7 +96,13 @@ public final class BotTestConfiguration {
 
     public static GithubBotConfiguration configuration(final String home, final String login, final String teams) {
         return new GithubBotConfiguration(
-                home, null, login, 0, null, new GithubBotConfiguration.Authorization("42", teams, false, 7200), null);
+                home,
+                null,
+                login,
+                0,
+                null,
+                new GithubBotConfiguration.Authorization("42", teams, false, 7200, 4096),
+                null);
     }
 
     public static TaskStore store(final GithubBotConfiguration conf, final JsonMapper json) {
@@ -153,7 +159,7 @@ public final class BotTestConfiguration {
                         new ReviewPresentationConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get()),
                 new StrictSolvePublisher(github, store, json),
                 new DiscussionPublisher(new DiscussionClient(github), store, conf),
-                new ContextConfiguration("127.0.0.1", 0, "", "", "git", "", 256, 1073741824L),
+                new ContextConfiguration("127.0.0.1", 0, "", "", "git", "", 256, 1073741824L, 67108864L),
                 new FixPublisher(github, store, json, new FixConfiguration(false, "")),
                 CLOCK);
     }

@@ -29,6 +29,7 @@ import java.math.BigDecimal;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -42,9 +43,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -53,8 +57,17 @@ import java.util.concurrent.locks.ReentrantLock;
  * All Git processes target private worker-owned repositories, never the live agent worktree.
  */
 public final class ContextService implements AutoCloseable {
-    private static final Set<String> REQUEST_FIELDS =
-            Set.of("operation", "repository", "argv", "page", "depth", "tags", "operationId", "revision", "parentId");
+    private static final Set<String> REQUEST_FIELDS = Set.of(
+            "operation",
+            "repository",
+            "argv",
+            "page",
+            "depth",
+            "tags",
+            "operationId",
+            "revision",
+            "parentId",
+            "waitMillis");
     private static final Set<String> DISCUSSIONS = Set.of(
             "pull",
             "files",
@@ -218,8 +231,10 @@ public final class ContextService implements AutoCloseable {
         final Set<String> arguments =
                 switch (operation) {
                     case "git" -> Set.of("operation", "repository", "argv");
-                    case "prepare_source" -> Set.of("operation", "repository", "depth", "tags", "revision");
-                    case "operation_status", "cancel" -> Set.of("operation", "operationId");
+                    case "prepare_source" ->
+                        Set.of("operation", "repository", "depth", "tags", "revision", "waitMillis");
+                    case "operation_status" -> Set.of("operation", "operationId", "waitMillis");
+                    case "cancel" -> Set.of("operation", "operationId");
                     case "pull",
                             "files",
                             "reviews",
@@ -259,8 +274,10 @@ public final class ContextService implements AutoCloseable {
                                     grant(repo),
                                     integer(request.get("depth"), 1),
                                     bool(request.get("tags")),
-                                    revision(request.get("revision")));
-                case "operation_status" -> operation(text(request.get("operationId"), "operationId"));
+                                    revision(request.get("revision")),
+                                    waitMillis(request.get("waitMillis")));
+                case "operation_status" ->
+                    operation(text(request.get("operationId"), "operationId"), waitMillis(request.get("waitMillis")));
                 case "cancel" -> cancel(text(request.get("operationId"), "operationId"));
                 case "git" ->
                     emptySource(repo)
@@ -331,16 +348,17 @@ public final class ContextService implements AutoCloseable {
         }
     }
 
-    private Object prepare(final Grant grant, final int depth, final boolean tags, final String revision) {
+    private Object prepare(
+            final Grant grant, final int depth, final boolean tags, final String revision, final int waitMillis) {
         if (depth < 1 || depth > source.maxDepth()) {
             throw new IllegalArgumentException("SOURCE_DEPTH_OUT_OF_BOUNDS");
         }
+        final var id = UUID.randomUUID().toString();
         lock.lock();
         try {
             if (operations.size() >= 32 || !preparing.tryAcquire()) {
                 throw new IllegalStateException("SOURCE_PREPARATION_BUSY_OR_LIMITED");
             }
-            final var id = UUID.randomUUID().toString();
             final var op = new Operation();
             operations.put(id, op);
             op.future = CompletableFuture.runAsync(
@@ -402,19 +420,48 @@ public final class ContextService implements AutoCloseable {
                         }
                     },
                     executor);
-            return Map.of("operationId", id, "status", "pending");
         } finally {
             lock.unlock();
         }
+        // Preserve the asynchronous contract unless the caller explicitly opts into waiting.
+        if (waitMillis == 0) {
+            return Map.of("operationId", id, "status", "pending");
+        }
+        final var result = new LinkedHashMap<>(operation(id, waitMillis));
+        result.put("operationId", id);
+        return result;
     }
 
-    private Object operation(final String id) {
+    private Map<String, Object> operation(final String id, final int waitMillis) {
+        final Operation operation;
         lock.lock();
         try {
-            final var operation = operations.get(id);
+            operation = operations.get(id);
             if (operation == null) {
                 throw new IllegalArgumentException("UNKNOWN_CONTEXT_OPERATION_ID");
             }
+        } finally {
+            lock.unlock();
+        }
+        // Waiting must not hold the publication/cancellation lock.
+        if (waitMillis > 0 && !operation.complete && !operation.cancelled) {
+            final long boundedWait = Math.min(
+                    waitMillis,
+                    Math.max(0, Duration.between(clock.instant(), deadline).toMillis()));
+            try {
+                operation.future.get(boundedWait, TimeUnit.MILLISECONDS);
+            } catch (final TimeoutException waiting) {
+                // A slow preparation remains asynchronous.
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("CONTEXT_WAIT_INTERRUPTED");
+            } catch (final ExecutionException failure) {
+                throw new IllegalStateException("SOURCE_PREPARATION_FAILED");
+            }
+            check();
+        }
+        lock.lock();
+        try {
             if (operation.cancelled) {
                 return Map.of("status", "cancelled");
             }
@@ -652,6 +699,24 @@ public final class ContextService implements AutoCloseable {
             throw new IllegalArgumentException("Expected boolean flag");
         }
         return flag;
+    }
+
+    private static int waitMillis(final Object value) {
+        if (value == null) {
+            return 0;
+        }
+        if (!(value instanceof Number)) {
+            throw new IllegalArgumentException("CONTEXT_WAIT_OUT_OF_BOUNDS");
+        }
+        try {
+            final int wait = new BigDecimal(value.toString()).intValueExact();
+            if (wait >= 0 && wait <= 1000) {
+                return wait;
+            }
+        } catch (final ArithmeticException | NumberFormatException invalid) {
+            throw new IllegalArgumentException("CONTEXT_WAIT_OUT_OF_BOUNDS");
+        }
+        throw new IllegalArgumentException("CONTEXT_WAIT_OUT_OF_BOUNDS");
     }
 
     private static String revision(final Object value) {

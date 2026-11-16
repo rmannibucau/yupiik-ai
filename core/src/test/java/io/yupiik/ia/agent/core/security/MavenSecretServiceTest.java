@@ -19,19 +19,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.test.TestJvm;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.SecureRandom;
-import java.util.Base64;
 import java.util.Map;
 import java.util.Set;
-import javax.crypto.Cipher;
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -45,6 +36,9 @@ class MavenSecretServiceTest {
 
     private static final String MASTER = "YCA_TEST_MASTER_SECRET";
     private static final String SERVER_PASSWORD = "YCA_TEST_SERVER_PASSWORD_1234";
+    // Independent OpenSSL known-answer vector; inputs and recipe: src/test/resources/maven4-known-answers.md.
+    private static final String SERVER_CIPHERTEXT =
+            "{[name=master,cipher=AES/GCM/NoPadding,version=4.0]EBESExQVFhcYGRobAAECAwQFBgcICQoLDA0OD6gsNIpbHt5RVOOH8wCKrZfIWvx0XICoi5L02wPNNUYOvcr608O0a24a9B4DHg==}";
 
     @TempDir
     Path tmp;
@@ -77,7 +71,6 @@ class MavenSecretServiceTest {
                 </settingsSecurity>
                 """.formatted(masterFile.toAbsolutePath()));
 
-        final var ciphertext = encryptV4(SERVER_PASSWORD, MASTER);
         Files.writeString(settings, """
                 <settings>
                   <servers>
@@ -88,12 +81,12 @@ class MavenSecretServiceTest {
                     </server>
                   </servers>
                 </settings>
-                """.formatted(ciphertext));
+                """.formatted(SERVER_CIPHERTEXT));
 
         final var service = new MavenSecretService();
         final Set<String> secrets = service.collectSecretNames(settings);
         // both the ciphertext and the decrypted plaintext are treated as secrets
-        assertTrue(secrets.contains(ciphertext), "ciphertext must be a secret: " + secrets);
+        assertTrue(secrets.contains(SERVER_CIPHERTEXT), "ciphertext must be a secret: " + secrets);
         assertTrue(secrets.contains(SERVER_PASSWORD), "decrypted plaintext must be a secret: " + secrets);
         // a legacy {base64} value is detected as a secret too (not decrypted)
         assertTrue(MavenSecretService.isLegacyCiphertext("{BteqUEnqHecHM7MZfnj9FwLcYbdInWxou1C929Txa0A=}"));
@@ -202,23 +195,5 @@ class MavenSecretServiceTest {
             final var secrets = new MavenSecretService().collectSecretNames(Path.of(args[0]));
             assertTrue(secrets.contains("resolved-placeholder-secret"), "placeholder must resolve: " + secrets);
         }
-    }
-
-    /** Reference encrypt matching Maven 4 plexus-sec-dispatcher AESGCMNoPadding (iv||salt||ct). */
-    private static String encryptV4(final String plaintext, final String master) throws Exception {
-        final var salt = new byte[16];
-        final var iv = new byte[12];
-        new SecureRandom().nextBytes(salt);
-        new SecureRandom().nextBytes(iv);
-        final var keySpec = new PBEKeySpec(master.toCharArray(), salt, 310_000, 256);
-        final var key = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA512").generateSecret(keySpec);
-        final var aes = new SecretKeySpec(key.getEncoded(), "AES");
-        final var cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.ENCRYPT_MODE, aes, new GCMParameterSpec(128, iv));
-        final var ct = cipher.doFinal(plaintext.getBytes(StandardCharsets.UTF_8));
-        final var buf = ByteBuffer.allocate(iv.length + salt.length + ct.length);
-        buf.put(iv).put(salt).put(ct);
-        return "{[name=master,cipher=AES/GCM/NoPadding,version=4.0]"
-                + Base64.getEncoder().encodeToString(buf.array()) + "}";
     }
 }

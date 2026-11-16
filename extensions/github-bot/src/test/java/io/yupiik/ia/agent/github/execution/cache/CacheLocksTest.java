@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.github.support.TestJava;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -68,12 +69,11 @@ class CacheLocksTest {
     }
 
     private String probe(final Path file) throws Exception {
-        final var process = new ProcessBuilder(
-                        Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+        final var process = new ProcessBuilder(TestJava.javaCommand(
                         "-cp",
                         System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
                         Probe.class.getName(),
-                        file.toString())
+                        file.toString()))
                 .redirectErrorStream(true)
                 .start();
         try {

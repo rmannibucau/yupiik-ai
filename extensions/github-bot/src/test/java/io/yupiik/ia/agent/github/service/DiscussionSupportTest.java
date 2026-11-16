@@ -736,7 +736,7 @@ class DiscussionSupportTest {
                     "bot",
                     0,
                     null,
-                    new GithubBotConfiguration.Authorization(ids, teams, writers, 7200),
+                    new GithubBotConfiguration.Authorization(ids, teams, writers, 7200, 4096),
                     null);
             return BotTestConfiguration.discussionPoller(conf, store, github, Clock.fixed(NOW, ZoneOffset.UTC), null);
         }

@@ -334,6 +334,12 @@ public class CacheIndexTest {
         // A deterministic reinstall must reject, not overwrite, a corrupt existing file.
         assertThrows(IOException.class, () -> index.put(CacheIndex.EMPTY, A, B));
         assertArrayEquals(altered, Files.readAllBytes(path));
+        Files.write(path, Arrays.copyOf(bytes, bytes.length + 1));
+        assertThrows(IOException.class, () -> index.inspect(root));
+        Files.write(path, Arrays.copyOf(bytes, bytes.length - 1));
+        assertThrows(IOException.class, () -> index.inspect(root));
+        Files.write(path, bytes);
+        assertEquals(B, index.get(root, A));
         Files.write(path, new byte[8193]);
         assertThrows(IOException.class, () -> index.inspect(root));
         Files.delete(path);
@@ -428,6 +434,27 @@ public class CacheIndexTest {
         assertArrayEquals(leafBytes(A, B), Files.readAllBytes(saved));
         assertFalse(Files.exists(outside.resolve("nested")));
         assertFalse(Files.exists(outside.resolve(root.substring(2))));
+    }
+
+    @Test
+    public void revalidatesAncestorsAfterConstructionWithoutCachingTheirState() throws Exception {
+        final var ancestor = Files.createDirectory(temporary.resolve("ancestor"));
+        final var directory = ancestor.resolve("index");
+        final var index = new CacheIndex(directory);
+        final var root = index.put(CacheIndex.EMPTY, A, B);
+        final var moved = Files.move(ancestor, temporary.resolve("moved"));
+        Files.createSymbolicLink(ancestor, moved);
+        assertThrows(IOException.class, () -> index.get(root, A));
+        assertThrows(IOException.class, () -> index.inspect(root));
+        assertThrows(IOException.class, () -> index.put(CacheIndex.EMPTY, C, B));
+        Files.delete(ancestor);
+        Files.move(moved, ancestor);
+        assertEquals(B, index.get(root, A));
+        Files.delete(nodePath(directory, root));
+        Files.delete(nodePath(directory, root).getParent());
+        assertThrows(IOException.class, () -> index.inspect(root));
+        assertEquals(root, index.put(CacheIndex.EMPTY, A, B));
+        assertEquals(B, index.get(root, A));
     }
 
     private Set<String> reachable(final CacheIndex index, final String root) throws IOException {

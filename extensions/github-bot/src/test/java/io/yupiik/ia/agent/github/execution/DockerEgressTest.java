@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.github.support.TestJava;
 import java.net.Proxy;
 import java.net.ProxySelector;
 import java.net.URI;
@@ -27,7 +28,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,8 +51,7 @@ class DockerEgressTest {
                 .findFirst()
                 .orElseThrow()
                 .substring("JAVA_TOOL_OPTIONS=".length());
-        final var command = new ArrayList<String>();
-        command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
+        final var command = TestJava.javaCommand();
         command.addAll(List.of(options.split(" ")));
         command.addAll(List.of(
                 "-cp",
@@ -241,8 +240,8 @@ class DockerEgressTest {
                 if [ "$1" = container ]; then printf 'false\\n'; fi
                 """);
         final var attempt = attempt();
-        final var backend =
-                new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(2), "", configuration(), "shown");
+        final var backend = new DockerExecutionBackend(
+                executable.toString(), "agent", Duration.ofSeconds(2), "", configuration(), "shown");
         final long start = System.nanoTime();
         final var failure = assertTimeoutPreemptively(
                 Duration.ofSeconds(8),
@@ -315,8 +314,8 @@ class DockerEgressTest {
                 if [ "$1" = run ]; then exec sleep 20; fi
                 """);
         final var attempt = attempt();
-        final var backend =
-                new DockerExecutionBackend(executable.toString(), "agent", Duration.ofMillis(100), "", configuration(), "shown");
+        final var backend = new DockerExecutionBackend(
+                executable.toString(), "agent", Duration.ofMillis(100), "", configuration(), "shown");
         assertTimeoutPreemptively(
                 Duration.ofSeconds(5),
                 () -> assertThrows(
@@ -346,7 +345,8 @@ class DockerEgressTest {
     }
 
     private DockerExecutionBackend backend(final Path executable) {
-        return new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(5), "", configuration(), "shown");
+        return new DockerExecutionBackend(
+                executable.toString(), "agent", Duration.ofSeconds(5), "", configuration(), "shown");
     }
 
     private Path attempt() throws Exception {

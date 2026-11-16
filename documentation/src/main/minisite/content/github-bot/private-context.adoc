@@ -368,6 +368,9 @@ See xref:configuration.adoc[canonical settings], xref:egress.adoc[validation evi
 The `github_context` EmbeddedTool exposes `summary`, `repositories`, `request_repository`, `prepare_source`, `operation_status`, `cancel`, `issue`, `pull`, `files`, `reviews`, `reviewComments`, `issueComments`, `discussion`, `discussionComments` and `discussionReplies`.
 `prepare_source` returns a pending `operationId`; poll `operation_status` until complete before reading the resulting generation.
 Pending is not a failure or a complete snapshot.
+The broker source helper opts into bounded waiting with the transport-only `waitMillis` field on `prepare_source` and `operation_status` (integer `0` through `1000`, default `0`).
+Opt-in preparation can return a complete or failed result with its `operationId` immediately; a slow operation still returns pending after the bounded wait.
+The helper limits requests to one per second while pending and 256 requests total, without delaying a completed preparation for an additional polling interval.
 `revision` is `HEAD` by default or explicit `BASE`, and depth and tags must be requested deliberately within host bounds.
 
 PR discussion reads are task-repository/task-number bound, including when the code's primary repository is the verified fork head.
@@ -391,6 +394,7 @@ Omit `repository` or pass JSON `null` to use the primary code grant.
 |Boundary |Current bound
 |Authenticated requests across filesystem, control HTTP and native Git adapters |256 per attempt by default; `github.context.maxRequests` permits 1 through 4096
 |Aggregate response accounting across adapters |1 GiB by default; `github.context.maxResponseBytes` permits 1 MiB through 16 GiB
+|Git compatibility HTTP buffers |64 MiB by default; `github.context.maxHttpBufferBytes` permits 1 through 2147483639 bytes, sized for the worker heap; request input and buffered responses only
 |Control HTTP request / serialized response |16 KiB / 512 KiB
 |Native Git upload request |64 KiB, including the decompressed gzip bound
 |Worker Git stdout |64 KiB with explicit `truncated` and `exitCode`
@@ -404,6 +408,9 @@ Brokered review mailboxes delegate reads to the same `ContextService`, so their 
 Standalone export-mode review mailboxes retain their existing bounds without requiring a network credential.
 HTTP authentication precedes body parsing and upstream work; budget exhaustion fails instead of silently granting a fresh allowance through another adapter.
 Response accounting is not an OS memory limit, disk quota, upstream-request count or global cross-worker quota.
+The Git compatibility HTTP cap is inclusive: buffered responses above it fail with a streaming-required error and their private spool is removed.
+Streaming Git responses may exceed this cap but remain subject to source disk and aggregate response budgets; the cap still bounds their already-buffered request input.
+The array-safe maximum is not a heap guarantee; leave headroom for concurrent requests and other worker allocations when increasing it.
 
 === Worker Git command reference
 

@@ -39,7 +39,6 @@ public class TeamAuthorization {
     private static final Pattern ACTOR_ID = Pattern.compile("[0-9]+");
     private static final Pattern LOGIN = Pattern.compile("[A-Za-z0-9-]+");
     private static final Pattern REPOSITORY = Pattern.compile("[A-Za-z0-9_-]+/[A-Za-z0-9_-][A-Za-z0-9_.-]*");
-    private static final int MAX_CACHE_ENTRIES = 4096;
 
     private final GitHubClient github;
     private final Clock clock;
@@ -185,7 +184,8 @@ public class TeamAuthorization {
         try {
             final var now = clock.instant();
             cache.values().removeIf(value -> !now.isBefore(value.expiresAt()));
-            if (!cache.containsKey(key) && cache.size() >= MAX_CACHE_ENTRIES) {
+            if (!cache.containsKey(key)
+                    && cache.size() >= configuration.authorization().permissionsCacheMaxEntries()) {
                 cache.pollFirstEntry();
             }
             cache.put(key, new CachedDecision(decision, now.plus(cacheTtl)));

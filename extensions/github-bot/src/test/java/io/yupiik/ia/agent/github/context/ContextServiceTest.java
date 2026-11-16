@@ -192,6 +192,37 @@ class ContextServiceTest {
     }
 
     @Test
+    void boundedWaitReturnsPreparationResultAndRejectsInvalidWaits() throws Exception {
+        try (final var fixture = new ContextTestSupport(temporary)) {
+            final var service = fixture.service(
+                    fixture.configuration(""), new ContextBudget(4096, 1024 * 1024), PIN, "/not/executed/git");
+            for (final var invalid : List.of(-1, 1001, new BigDecimal("1.5"), "1000", true)) {
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> service.call(Map.of("operation", "prepare_source", "waitMillis", invalid)));
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> service.call(Map.of(
+                                "operation", "operation_status", "operationId", "unknown", "waitMillis", invalid)));
+            }
+            final var result = body(service.call(Map.of("operation", "prepare_source", "waitMillis", 1000)));
+            assertEquals("failed", result.get("status"));
+            assertEquals("SOURCE_PREPARATION_FAILED", result.get("error"));
+            assertTrue(result.get("operationId") instanceof String);
+            assertEquals(
+                    "failed",
+                    body(service.call(Map.of(
+                                    "operation",
+                                    "operation_status",
+                                    "operationId",
+                                    result.get("operationId"),
+                                    "waitMillis",
+                                    0)))
+                            .get("status"));
+        }
+    }
+
+    @Test
     void cancellationKillsAdmittedProcessAndReturnsTheFixedCancellationResult() throws Exception {
         try (final var fixture = new ContextTestSupport(temporary)) {
             final var pidFile = temporary.resolve("admitted.pid");
@@ -200,18 +231,51 @@ class ContextServiceTest {
                     fixture.configuration(""), new ContextBudget(4096, 1024 * 1024), PIN, executable.toString());
             final var operation = body(service.call(Map.of("operation", "prepare_source")));
             await(() -> Files.exists(pidFile));
+            assertEquals(
+                    "pending",
+                    assertTimeoutPreemptively(
+                                    Duration.ofSeconds(2),
+                                    () -> body(service.call(Map.of(
+                                            "operation",
+                                            "operation_status",
+                                            "operationId",
+                                            operation.get("operationId"),
+                                            "waitMillis",
+                                            1))))
+                            .get("status"));
             final var process =
                     ProcessHandle.of(Long.parseLong(Files.readString(pidFile))).orElseThrow();
+            final var waitFailure = new AtomicReference<Throwable>();
+            final var waiter = Thread.ofVirtual().start(() -> {
+                try {
+                    service.call(Map.of(
+                            "operation",
+                            "operation_status",
+                            "operationId",
+                            operation.get("operationId"),
+                            "waitMillis",
+                            1000));
+                } catch (final Throwable failure) {
+                    waitFailure.set(failure);
+                }
+            });
             try {
+                // Observe the actual timed wait, not just submission, before cancelling concurrently.
+                await(() -> waiter.getState() == Thread.State.TIMED_WAITING);
                 final var cancelled = assertTimeoutPreemptively(
                         Duration.ofSeconds(3),
                         () -> body(service.call(
                                 Map.of("operation", "cancel", "operationId", operation.get("operationId")))));
                 assertEquals("cancelled", cancelled.get("status"));
+                waiter.join(2000);
+                assertFalse(waiter.isAlive(), "Long-poll survived cancellation");
+                assertInstanceOf(IllegalStateException.class, waitFailure.get());
                 await(() -> !process.isAlive());
                 assertThrows(IllegalStateException.class, () -> service.call(Map.of("operation", "summary")));
             } finally {
                 service.close();
+                waiter.interrupt();
+                waiter.join(2000);
                 await(() -> !process.isAlive());
             }
         }
@@ -365,6 +429,7 @@ class ContextServiceTest {
                 executable.toString(),
                 Duration.ofSeconds(30),
                 8 * 1024 * 1024,
+                fixture.configuration("").maxHttpBufferBytes(),
                 null);
         final var task = TaskFixtures.task(
                 Map.of("id", "fork-task", "repository", "acme/primary", "number", 7, "kind", "review"));

@@ -73,7 +73,7 @@ class PollerTest {
                 0,
                 new GithubBotConfiguration.Auth(
                         GithubBotConfiguration.AuthType.pat, "GH_TOKEN", "", 0, "", "GH_AGENT_TOKEN"),
-                new GithubBotConfiguration.Authorization(ids, "", false, 7200),
+                new GithubBotConfiguration.Authorization(ids, "", false, 7200, 4096),
                 new GithubBotConfiguration.Repositories(
                         repositories, "", "", "", List.of(RepositorySelector.Visibility.values()), false, false));
     }

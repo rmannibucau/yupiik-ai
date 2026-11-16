@@ -23,6 +23,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.github.support.TestJava;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -79,9 +80,7 @@ class RestrictedServicesGatewayTest {
     @BeforeAll
     static void certificate() throws Exception {
         keyStore = directory.resolve("tls.p12");
-        final var process = new ProcessBuilder(
-                        Path.of(System.getProperty("java.home"), "bin", "keytool")
-                                .toString(),
+        final var process = new ProcessBuilder(TestJava.keytoolCommand(
                         "-genkeypair",
                         "-alias",
                         "leaf",
@@ -103,7 +102,7 @@ class RestrictedServicesGatewayTest {
                         "test-password",
                         "-keypass",
                         "test-password",
-                        "-noprompt")
+                        "-noprompt"))
                 .redirectErrorStream(true)
                 .redirectOutput(directory.resolve("keytool.log").toFile())
                 .start();
@@ -407,9 +406,7 @@ class RestrictedServicesGatewayTest {
     @Test
     void checkMainPerformsOnlyPinnedTlsAndFailsClosed() throws Exception {
         final var otherStore = directory.resolve("other.p12");
-        final var keytool = new ProcessBuilder(
-                        Path.of(System.getProperty("java.home"), "bin", "keytool")
-                                .toString(),
+        final var keytool = new ProcessBuilder(TestJava.keytoolCommand(
                         "-genkeypair",
                         "-alias",
                         "leaf",
@@ -431,7 +428,7 @@ class RestrictedServicesGatewayTest {
                         "test-password",
                         "-keypass",
                         "test-password",
-                        "-noprompt")
+                        "-noprompt"))
                 .redirectErrorStream(true)
                 .redirectOutput(directory.resolve("other-keytool.log").toFile())
                 .start();
@@ -518,9 +515,7 @@ class RestrictedServicesGatewayTest {
                         .toString())
                 .distinct()
                 .collect(joining(File.pathSeparator));
-        final var builder = new ProcessBuilder(
-                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "-XX:TieredStopAtLevel=1",
+        final var builder = new ProcessBuilder(TestJava.javaCommand(
                 "-XX:ActiveProcessorCount=2",
                 "-XX:+UseSerialGC",
                 "-Xmx32m",
@@ -528,7 +523,7 @@ class RestrictedServicesGatewayTest {
                 classpath,
                 RestrictedServicesGateway.class.getName(),
                 "--check",
-                config.toString());
+                config.toString()));
         builder.environment().clear();
         builder.environment().put(settings.keyStorePasswordEnv(), password);
         final var output = Files.createTempFile(directory, "check-", ".log");
@@ -566,14 +561,8 @@ class RestrictedServicesGatewayTest {
                             .toString())
                     .distinct()
                     .collect(joining(File.pathSeparator));
-            final var builder = new ProcessBuilder(
-                    Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                    "-XX:TieredStopAtLevel=1",
-                    "-cp",
-                    classpath,
-                    RestrictedServicesGateway.class.getName(),
-                    "--config",
-                    config.toString());
+            final var builder = new ProcessBuilder(TestJava.javaCommand(
+                    "-cp", classpath, RestrictedServicesGateway.class.getName(), "--config", config.toString()));
             builder.environment().putAll(secrets());
             builder.redirectErrorStream(true)
                     .redirectOutput(directory.resolve("main.log").toFile());
