@@ -46,8 +46,8 @@ public class AskUserTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Ask the user for a decision, preference or missing input. Each question opens a terminal "
-                + "prompt tab; supports single (radio), multiple (checkbox) and free-text answers.";
+        return "Ask the user for a decision, preference or missing input. "
+                + "Supports single-choice, multiple-choice and free-text answers.";
     }
 
     @Override

@@ -1,0 +1,163 @@
+= Slack admission and configuration
+:minisite-breadcrumb: Home[../index.html] > Slack bot[index.html] > Configuration
+
+The source of truth is `SlackConfiguration`, `SlackExecutorConfiguration`, `SlackProviderConfiguration` and `SlackPrompts` in `extensions/bot-parent/slack-bot/src/main/java/io/yupiik/ia/agent/slack/configuration`.
+These are trusted controller settings, never options accepted from Slack messages.
+Environment names follow the configuration loader's uppercase/dot-to-underscore mapping; for example `slack.botUser` is `SLACK_BOTUSER`, not `SLACK_BOT_USER`.
+The deployment environment sample uses that mapping.
+
+== Installation and admission
+
+[cols="2,1,4",options="header"]
+|===
+|Property |Default |Meaning
+|`slack.workspace` |empty |One exact `T...` workspace ID; required for installation validation.
+|`slack.botUser` |empty |Exact `U...` or `W...` bot user ID, not app ID or display name.
+|`slack.channels` |empty |Exact allowed `C...`/`G...` channel IDs; empty denies all.
+|`slack.users` |empty |Exact allowed `U...`/`W...` requester IDs; empty denies all.
+|`slack.allowSlackConnect` |`false` |Explicitly accept externally shared audiences; verify channel audience independently.
+|`slack.appTokenEnv` |`SLACK_APP_TOKEN` |Name of the controller environment variable containing the `xapp-` token.
+|`slack.botTokenEnv` |`SLACK_BOT_TOKEN` |Name of the controller environment variable containing the `xoxb-` token.
+|`slack.home` |`.yca-slack` |Private durable controller state root; never mount into an agent.
+|`slack.agentConfiguration` |empty |Trusted operator-owned agent JSON configuration path.
+|===
+
+Prefer a single approved channel and requester for initial acceptance.
+Do not use wildcard IDs or substitute human-readable names.
+The sample leaves both lists empty deliberately; before admitting users, verify the assembled CLI's list binding rather than assuming a delimiter syntax.
+
+== Bounded work
+
+[cols="2,1,4",options="header"]
+|===
+|Property |Default |Meaning
+|`slack.maxPending` |`100` |Maximum durable nonterminal tasks (validated range 1-10000).
+|`slack.maxPendingPerUser` |`4` |Maximum nonterminal tasks for one requester; no greater than `maxPending`.
+|`slack.maxInputChars` |`16000` |Mention input character limit (1-100000).
+|`slack.maxAnswerChars` |`12000` |Structured answer character limit (1-30000), not an LLM token budget.
+|`slack.questionTimeoutSeconds` |`600` |Maximum `ask_user` wait (1-3600); waiting retains the worker slot.
+|`slack.retentionSeconds` |`2592000` |Terminal task retention age; minimum 86400 seconds (one day), not a filesystem quota.
+|===
+
+Queue limits do not define worker concurrency, CPU limits, total stored bytes or provider spend.
+The current long-running command is `slack bot run`, with command-local `--parallelism` defaulting to 1 (validated range 1-16).
+Its `@RootConfiguration("-")` options are separate from hierarchical `slack.*` settings.
+Other command options are `apiBase` (default `https://slack.com/api/`), `httpTimeoutSeconds` (20), `maxTransportBytes` (1048576), `reconnectMinSeconds` (1) and `reconnectMaxSeconds` (30).
+Use the assembled CLI help for their exact flag spelling; do not override the trusted Slack API origin from message text.
+The admission store also has a 10000-task ceiling including retained terminal records; retention maintenance matters even if few tasks are active.
+A repeated workspace/event ID is deduplicated before creating another task.
+The transport contract requires prompt durable admission before ACK, not agent execution on the WebSocket delivery callback.
+
+== Executor
+
+`slack.executor` wraps the shared `ExecutorConfiguration` value types without changing the `github.executor` contract.
+The wrapper defaults are `backend=DOCKER`, empty `attemptRoot`, `timeoutSeconds=3600`, `commandTimeoutSeconds=30` and `showToolOutput=hidden`.
+Set a dedicated absolute attempt root disjoint from `slack.home`, `/etc/yca-slack`, GitHub state and GitHub attempts.
+Use `hidden` for private tool activity; neither hidden nor collapsed output is a secret-redaction guarantee.
+
+Nested `docker`, `nono`, `kubernetes` and `relay` shapes are shared types; deployment qualification and live acceptance remain backend-specific.
+Slack integrates Docker restricted services, a qualified Linux Nono pathname Unix-socket bridge, and qualified Kubernetes separate-Pod provider services.
+All three stage only the selected COMPLETIONS provider with an attempt capability instead of handing a permanent provider key to the agent.
+Missing backend prerequisites fail closed; `qualified=true` records an operator assertion, not a probe or certification.
+Direct-credential handoff and an enabled `relay.bind` remain unsupported.
+Override `slack.executor.docker.image`: its inherited default is a GitHub-named agent image, not the Slack image built by the Slack profile.
+An empty Docker `network` with no enforced gateway means default Docker networking, not no networking.
+A named bridge is not an egress boundary either.
+Docker requires `slack.executor.docker.services`; `SlackProviderServices` prepares the neutral `ProviderServicesGateway` from `bot-gateway`.
+See xref:deployment.adoc#_restricted_provider_services[the restricted-services deployment] for Docker's fixed numerical private HTTP upstream behind an exact TLS capability route.
+
+=== Backend-specific provider configuration
+
+`SlackProviderConfiguration` binds the trusted `slack.providerServices` root for Nono and Kubernetes, independently of Docker's nested services settings.
+The selected trusted provider's URL must match the configured upstream, with `/chat/completions` appended when absent.
+Nono accepts a fixed HTTPS upstream with normal TLS validation; Docker and Kubernetes currently accept only canonical numerical private IPv4 HTTP with an explicit port.
+An external HTTPS provider usable through Nono is therefore not directly interchangeable with the Docker/Kubernetes target.
+Do not silently downgrade a public HTTPS API or use a hostname/private DNS workaround for those gateways.
+
+[cols="2,1,4",options="header"]
+|===
+|Property |Default |Meaning
+|`slack.providerServices.upstream` |empty |Required selected upstream for Nono or Kubernetes; never supplied by a Slack message.
+|`slack.providerServices.nativeBridge.socketRoot` |empty |Pre-provisioned private short absolute socket root, disjoint from runtime, attempts, state and provider budget.
+|`slack.providerServices.nativeBridge.qualified` |`false` |Required operator qualification of Linux/Nono pathname mediation and credential-free runtime.
+|`slack.providerServices.nativeBridge.outerIsolationQualified` |`false` |Required stronger outer isolation hiding unrelated host IPC endpoints; pathname mediation alone is not a race-free hostile-workload boundary.
+|`slack.providerServices.kubernetes.image` |empty |Trusted provider gateway image containing Java and the Jib application classpath file.
+|`slack.providerServices.kubernetes.tlsSecret` |empty |Private TLS Secret containing `gateway.p12`.
+|`slack.providerServices.kubernetes.serverName` |`attempt-services.yca.internal` |Pinned TLS identity whose public CA is already trusted by the agent image.
+|`slack.providerServices.kubernetes.nodeName` |empty |Qualified node with the shared local provider-budget filesystem.
+|`slack.providerServices.kubernetes.budgetClaim` |empty |Private node-local budget PVC, distinct from `slack.executor.kubernetes.claim`.
+|`slack.providerServices.kubernetes.serviceAccount` |`default` |Gateway service account; no service-account token is mounted.
+|`slack.providerServices.kubernetes.port` |`8443` |Gateway TLS port, validated range 1024-65535.
+|`slack.providerServices.kubernetes.qualified` |`false` |Required operator assertion of enforcing CNI, no additive allow policies, node/metadata isolation and qualified same-host local budget storage.
+|===
+
+Nono requires exactly `nono 0.81.0`, Linux pathname AF_UNIX mediation and a dedicated non-root, credential-free read-only runtime under `slack.executor.nono.runtimeRoot`, with `agentExecutable` inside it.
+Unsupported platforms/versions have no fallback.
+Nono 0.81.0 has a documented multithreaded sockaddr TOCTOU race: this is not a race-free host IPC boundary; hostile workloads require stronger outer isolation.
+The bridge grants one exact pathname, not general TCP, abstract Unix sockets or arbitrary host IPC, and forwards only to its fixed HTTPS upstream.
+Keep the socket parent mode 0700, controller-owned and symlink-free; the full per-attempt socket path must fit the 100-byte validation limit, including runtime identity and `/provider.sock`.
+The core transport exposes `yca.native.provider.socket` through typed Fusion root configuration; the launcher supplies `YCA_NATIVE_PROVIDER_SOCKET`, which Fusion's environment source maps to that property.
+Leave this launcher-owned setting unset outside the prepared native sandbox; it selects the local bridge socket, not an upstream destination or an isolation policy.
+
+Kubernetes additionally requires explicit `YCA_PROVIDER_BUDGET_ROOT`, `YCA_PROVIDER_BUDGET_ID` and `YCA_PROVIDER_BUDGET_SLOTS` configuration keys.
+The controller reads them through injected Fusion `Configuration`, not direct environment access; environment variables remain the normal deployment source, and trusted custom sources or system properties can override them.
+The root must exist locally for controller validation; the gateway uses its separate PVC mounted at `/budget`, with the same budget identity and slots.
+Mounts must refer to the same qualified local ledger storage for participants intended to share a cap; matching variable values on different filesystems does not share a budget.
+Use private static Kubernetes credentials; kubeconfig `exec` and `auth-provider` authentication are prohibited.
+See xref:deployment.adoc#_qualified_nono_and_kubernetes[backend deployment prerequisites] before asserting qualification.
+
+The shared Docker backend drops capabilities, uses no-new-privileges, a read-only root, bounded tmpfs and private per-attempt mounts.
+Its source defaults include 2 CPUs, 4 GiB RAM and 512 PIDs per agent; these are not controller queue limits or a whole-host resource budget.
+The controller needs a local daemon with identical absolute attempt paths on the host and inside the controller container.
+Docker socket access is privileged controller authority and must never be passed to agents.
+
+== Trusted prompts and output
+
+`slack.prompts.policy`, `main` and `output` are operator-owned templates, each nonblank and at most 32000 characters.
+The main Handlebars template uses `{{{policy}}}`, `{{{output}}}`, `{{{request}}}` and `{{{context}}}`; request/context are JSON data, not template source.
+The default policy forbids implicit history, repository, file and URL retrieval.
+The renderer appends a mandatory `/attempt/output/result.json` contract with exactly `taskId` and `summary`; the worker validates the exact task identity and a nonblank summary bounded by `maxAnswerChars`.
+The default `output` instruction uses the same `taskId` and `summary` contract; custom instructions cannot replace the mandatory contract with an `answer` field.
+A prompt instruction alone does not establish result validity or successful publication.
+Raw execution logs, provider diagnostics, secrets and hidden context must not be published to Slack.
+
+`answerLabel`, `cancelLabel` and `questionTitle` default to `Answer`, `Cancel` and `Assistant question` and are bounded to 24 characters.
+An `ask_user` interaction must remain bound to the exact requester, task and thread, expire, and reject other actors and replayed submissions.
+Treat those as acceptance requirements for the integrated controller, not something granted by enabling manifest interactivity.
+
+== Agent configuration and secrets
+
+The shared preparer reads a regular non-symlink trusted JSON file and creates a private attempt directory.
+It supplies fresh `storage`, `workspace` and `output` directories plus a sanitized configuration, with `home` and `storageHome` set to `/attempt/storage` and `workingDir` to `/attempt/workspace`.
+It does not clone a repository or import Slack history.
+`permissions.mode=YOLO` is internal to the sandbox: filesystem and network containment must therefore be real.
+
+Explicitly disable memory, skills, subagents, MCP and notifications in the trusted agent document unless separately reviewed.
+The preparer defaults these features off when absent but preserves explicit trusted values; do not claim it forcibly disables every supplied feature.
+It clears hooks and copies selected provider/model/LLM tuning; that copy is not a universal secret scrubber.
+Never put Slack tokens, GitHub tokens, operator home paths or permanent provider keys in model prompts or agent-visible configuration.
+For restricted services, prefer supplying the upstream provider key through the controller's `OPENAI_API_KEY` environment rather than the trusted JSON document.
+The selected trusted provider's `apiKey`, if nonblank, takes precedence over that environment fallback; the staged configuration replaces it with a fresh attempt-scoped token.
+The gateway alone receives the upstream key; it is not passed into the agent environment or mounted into the agent.
+Only the selected provider survives staging, with an explicit model and `api=COMPLETIONS`; input `AUTO` is accepted only for this chat-completions route.
+The selected provider's `baseUrl` must match `docker.services.providerTarget` for Docker, or `slack.providerServices.upstream` for Nono/Kubernetes, after appending `/chat/completions` if needed.
+See xref:../bots/cohosting.adoc#_shared_provider_request_budget[the separate provider request budget] for trusted environment forwarding, filesystem ownership and durable debt.
+Other provider APIs, dynamic provider selection and GitHub broker capabilities are not supplied by this route.
+
+== Common host admission
+
+`bot.admission` is a separate trusted root configuration shared by participating GitHub and Slack controllers, not a `slack.*` property or a Slack requester allowlist.
+
+[cols="2,1,4",options="header"]
+|===
+|Property |Default |Meaning
+|`bot.admission.root` |empty (disabled) |Absolute controller-only local filesystem directory shared by participating bots on one host; disjoint from all controller state and attempt roots.
+|`bot.admission.slots` |`1` |Positive common active-attempt budget; identical for all participants, checked against a persistent schema.
+|`bot.admission.trustedGroup` |empty |Empty requires current-user ownership and private permissions; an explicit group permits a pre-provisioned setgid root shared only by trusted controllers.
+|===
+
+Slack workers acquire admission immediately before claiming/preparing work and keep it until runtime termination is positively confirmed, including any pending `ask_user` wait.
+A full budget does not claim queued work; `--parallelism` remains an independent per-controller upper bound.
+The shared directory must never be mounted into agents; its ancestors must remain operator-controlled with no world access or symlink components.
+Cross-user deployments must provision the trusted group and container group membership explicitly; do not make the directory world-writable.
+See xref:../bots/cohosting.adoc#_common_host_admission[common host admission and manual debt reconciliation] before enabling automatic restarts.

@@ -6,7 +6,7 @@
 :minisite-nav-next-link: simple-setup.html
 :minisite-nav-next-label: Simple, functional Linux/Docker setup
 
-The `extensions/github-bot` module is a JVM-only GitHub polling application built on YCA core, without the terminal UI dependencies.
+The `extensions/bot-parent/github-bot` module is a JVM-only GitHub polling application built on YCA core, without the terminal UI dependencies.
 It has no inbound webhook endpoint.
 
 WARNING: This is an initial implementation, not the complete production architecture.
@@ -53,6 +53,8 @@ It leaves unrestricted Docker egress explicit and does not require Nono or Kuber
 * xref:architecture.adoc[Architecture and component sequences]
 * xref:security.adoc[Security and recovery]
 * xref:kubernetes.adoc[Kubernetes dispatcher and agent Job walkthrough]
+* xref:../slack-bot/index.adoc[Slack outbound Socket Mode bot]
+* xref:../bots/cohosting.adoc[Same-machine GitHub and Slack security, resource and LLM caps]
 
 == Current contracts
 

@@ -177,9 +177,9 @@ From the repository root, with reactor dependencies already installed by your tr
 
 [source,bash]
 ----
-mvn spotless:apply -pl extensions/github-bot -Pimage-agent compile jib:dockerBuild \
+mvn spotless:apply -pl extensions/bot-parent/github-bot -Pimage-agent compile jib:dockerBuild \
   -Dgithub-bot.agent.base-image=YOUR_REGISTRY/vetted-agent-toolchain@sha256:YOUR_BASE_DIGEST
-export BOT_JAR="$PWD/extensions/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar"
+export BOT_JAR="$PWD/extensions/bot-parent/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar"
 java -jar "$BOT_JAR" --help
 ----
 
@@ -198,7 +198,7 @@ If selecting Nono instead, prepare the runtime described below and omit the Dock
 
 == Jib image profiles
 
-All bot images use `com.google.cloud.tools:jib-maven-plugin:3.5.2` in `extensions/github-bot/pom.xml`.
+All bot images use `com.google.cloud.tools:jib-maven-plugin:3.5.2` in `extensions/bot-parent/github-bot/pom.xml`.
 Select exactly one image profile per invocation: either one of the individual profiles below or the aggregate `image-all` profile, not a combination.
 
 The individual `image-dispatcher`, `image-agent` and `image-egress` profiles remain supported.
@@ -222,7 +222,7 @@ After reactor dependencies have been installed, build all three images from the 
 
 [source,bash]
 ----
-mvn -pl extensions/github-bot -Pimage-all package \
+mvn -pl extensions/bot-parent/github-bot -Pimage-all package \
   -Dgithub-bot.agent.base-image=YOUR_REGISTRY/vetted-agent-toolchain@sha256:YOUR_BASE_DIGEST
 ----
 
@@ -249,7 +249,7 @@ With the default module build directory, aggregate outputs use separate names so
 |Egress |`target/jib-egress-image.tar` |`target/jib-egress-image.digest` |`target/jib-egress-image.id`
 |===
 
-These paths are relative to `extensions/github-bot`; archive files are produced when using `buildTar`.
+These paths are relative to `extensions/bot-parent/github-bot`; archive files are produced when using `buildTar`.
 The individual profiles retain their legacy `target/jib-image.tar`, `target/jib-image.digest` and `target/jib-image.id` output names.
 
 === Entrypoints and platforms
@@ -262,7 +262,7 @@ No Dockerfile, shell wrapper or fixed in-image JAR path is needed.
 The dispatcher base is already published as `rmannibucau/github-dispatcher-base:25.0.5.0.3-zulu-debian12-docker29.9.2-git1@sha256:a7c49aa4e71618340c0abff2a5ab19afff9c53380e616535ed2f8f247efcde36`.
 This index contains a native Linux AMD64 image only; ARM64 has NOT been published.
 It extends the Zulu Java 25.0.5.0.3 glibc JRE and Docker CLI 29.9.2 base with Git, HTTPS helpers, dispatcher-only `git-http-backend` and native CA certificates, without a Docker daemon, compiler or agent build toolchain.
-`extensions/github-bot/src/main/docker/Dockerfile.dispatcher` is the manual maintenance recipe for that prebuilt base, not a Maven lifecycle binding or a recipe Maven runs automatically.
+`extensions/bot-parent/github-bot/src/main/docker/Dockerfile.dispatcher` is the manual maintenance recipe for that prebuilt base, not a Maven lifecycle binding or a recipe Maven runs automatically.
 The single `github-bot.dispatcher.base-image` property is shared by the individual dispatcher and `image-all` profiles.
 Both accept an approved registry/digest override or `docker://LOCAL_BASE_TAG` for a same-architecture base in the local daemon; a missing base must fail rather than silently use an unrelated image.
 Use an approved ARM64 base override before selecting ARM64; changing the architecture property does not publish a missing base platform.
@@ -332,14 +332,14 @@ For a local dispatcher image using the individual profile, use:
 
 [source,bash]
 ----
-mvn spotless:apply -pl extensions/github-bot -Pimage-dispatcher compile jib:dockerBuild
+mvn spotless:apply -pl extensions/bot-parent/github-bot -Pimage-dispatcher compile jib:dockerBuild
 ----
 
 Keep the explicit `compile jib:<goal>` form for each individual profile.
 
 * `jib:dockerBuild` requires the local Docker CLI/daemon and loads the image there.
 * `jib:build` publishes directly to a registry without a Docker daemon. Supply registry authentication through your trusted credential helper or Maven settings, never committed credentials.
-* `jib:buildTar` creates an image archive at `extensions/github-bot/target/jib-image.tar` with the default build directory.
+* `jib:buildTar` creates an image archive at `extensions/bot-parent/github-bot/target/jib-image.tar` with the default build directory.
 
 Override the appropriate base property with `REGISTRY/BASE@sha256:DIGEST` for each production build.
 
@@ -364,7 +364,7 @@ After building the actual dispatcher image, run the offline container regression
 
 [source,bash]
 ----
-mvn -pl extensions/github-bot \
+mvn -pl extensions/bot-parent/github-bot \
   -Dtest=GithubContextBrokerTest,GithubContextBrokerImageTest,WorkerTest \
   -Dgithub.bot.dispatcher.live.image=yca-github-dispatcher:local test
 ----

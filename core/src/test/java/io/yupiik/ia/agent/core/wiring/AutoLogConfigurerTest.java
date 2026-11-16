@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.logging.ConsoleHandler;
 import java.util.logging.Handler;
 import java.util.logging.Level;
+import java.util.logging.LogManager;
 import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -51,7 +52,41 @@ import org.junit.jupiter.api.parallel.Resources;
 @ResourceLock(Resources.SYSTEM_PROPERTIES)
 class AutoLogConfigurerTest {
     @Test
-    void installsInlineRootHandlerByDefault() {
+    void jdkManagerFallback(@TempDir final Path tmp) throws Exception {
+        TestJvm.run(tmp, JdkManagerPeer.class, Map.of("java.util.logging.manager", LogManager.class.getName()));
+    }
+
+    public static final class JdkManagerPeer {
+        public static void main(final String[] args) {
+            final var tests = new AutoLogConfigurerTest();
+            tests.installsInlineRootHandlerByDefault();
+            tests.stopRestoresTheRootLoggerHandlers();
+            tests.secondStartMustNotStackASecondInlineHandler();
+            tests.replacesTheJdkConsoleHandlerSoRecordsArePrintedOnce();
+        }
+    }
+
+    @Test
+    void leavesYupiikManagerHandlersAlone() {
+        assertEquals(
+                "io.yupiik.logging.jul.YupiikLogManager",
+                LogManager.getLogManager().getClass().getName());
+        final var root = Logger.getLogger("");
+        final var handlers = root.getHandlers();
+        final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
+        try {
+            configurer.onStart(new Start());
+            assertNull(configurer.installedInlineHandler());
+            assertEquals(handlers.length, root.getHandlers().length);
+            for (final var handler : handlers) {
+                assertTrue(contains(root.getHandlers(), handler));
+            }
+        } finally {
+            configurer.onStop(new Stop());
+        }
+    }
+
+    private void installsInlineRootHandlerByDefault() {
         final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
         try {
             configurer.onStart(new Start());
@@ -70,8 +105,7 @@ class AutoLogConfigurerTest {
         assertNull(configurer.installedInlineHandler(), "the Stop listener must clear the handler");
     }
 
-    @Test
-    void stopRestoresTheRootLoggerHandlers() {
+    private void stopRestoresTheRootLoggerHandlers() {
         final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
         configurer.onStart(new Start());
         final var inline = configurer.installedInlineHandler();
@@ -130,8 +164,7 @@ class AutoLogConfigurerTest {
         }
     }
 
-    @Test
-    void secondStartMustNotStackASecondInlineHandler() {
+    private void secondStartMustNotStackASecondInlineHandler() {
         // Regression for the native duplicate-logs issue: the GraalVM build can resolve this
         // @ApplicationScoped bean twice and run onStart twice, which used to stack two inline
         // StandardHandlers and print every JUL record twice with identical timestamps.
@@ -153,8 +186,7 @@ class AutoLogConfigurerTest {
         }
     }
 
-    @Test
-    void replacesTheJdkConsoleHandlerSoRecordsArePrintedOnce() {
+    private void replacesTheJdkConsoleHandlerSoRecordsArePrintedOnce() {
         final var root = Logger.getLogger("");
         final var console = new ConsoleHandler();
         root.addHandler(console);

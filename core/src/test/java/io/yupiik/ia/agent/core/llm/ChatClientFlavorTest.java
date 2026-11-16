@@ -27,6 +27,7 @@ import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -79,18 +80,22 @@ class ChatClientFlavorTest {
             if (body.contains("\"stream\":true")) {
                 final var sse = String.join(
                         "\n",
-                        "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}",
+                        "data:"
+                                + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}",
                         "",
-                        "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}",
+                        "data:"
+                                + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}",
                         "",
-                        "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}",
+                        "data:"
+                                + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}",
                         "",
                         "data: [DONE]",
                         "");
                 respond(exchange, 200, sse, "text/event-stream");
             } else {
                 respond(exchange, 200, """
-                        {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}""", "application/json");
+                    {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\
+                    """, "application/json");
             }
         });
         server.createContext("/v1/models", exchange -> {
@@ -104,7 +109,7 @@ class ChatClientFlavorTest {
                     "application/json");
         });
         server.start();
-        http = new HttpClientProducer().httpClient(configuration());
+        http = new HttpClientProducer().httpClient(configuration(), new NativeProviderConfiguration(null));
         client = new ChatClient(configuration(), mapper, providerManager(), Clock.systemUTC(), http);
     }
 
@@ -226,8 +231,8 @@ class ChatClientFlavorTest {
     @Test
     void anthropicProviderOptionsCanDisablePromptCache() throws Exception {
         final var body = anthropicCacheRequest("""
-                {"promptCache":false}
-                """);
+            {"promptCache":false}
+            """);
         assertFalse(bodies.getLast().contains("\"cache_control\""));
         assertFalse(body.containsKey("promptCache"));
     }
@@ -235,8 +240,8 @@ class ChatClientFlavorTest {
     @Test
     void anthropicProviderOptionsCanCacheOnlySystem() throws Exception {
         final var body = anthropicCacheRequest("""
-                {"promptCache":"system"}
-                """);
+            {"promptCache":"system"}
+            """);
         assertFalse(body.containsKey("cache_control"));
         final var system = (Map<?, ?>) ((List<?>) body.get("system")).getFirst();
         assertEquals(Map.of("type", "ephemeral"), system.get("cache_control"));
@@ -247,8 +252,8 @@ class ChatClientFlavorTest {
     @Test
     void anthropicProviderOptionsPreserveCacheTtl() throws Exception {
         final var body = anthropicCacheRequest("""
-                {"cache_control":{"type":"ephemeral","ttl":"1h"}}
-                """);
+            {"cache_control":{"type":"ephemeral","ttl":"1h"}}
+            """);
         final var control = Map.of("type", "ephemeral", "ttl", "1h");
         assertEquals(control, body.get("cache_control"));
         final var system = (Map<?, ?>) ((List<?>) body.get("system")).getFirst();
@@ -282,8 +287,8 @@ class ChatClientFlavorTest {
         server.createContext("/v1/messages", exchange -> {
             bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(exchange, 200, """
-                    {"id":"m1","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}
-                    """, "application/json");
+                {"id":"m1","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}
+                """, "application/json");
         });
         client.close();
         final var config = configuration(Map.of(
@@ -489,7 +494,8 @@ class ChatClientFlavorTest {
             throw new IllegalStateException("responses endpoint must not be probed for a bare /v1 base URL");
         });
         server.createContext("/v1/chat/completions", exchange -> respond(exchange, 200, """
-                {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}""", "application/json"));
+            {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}\
+            """, "application/json"));
         server.start();
         final var cfg = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
                 Map.entry("yca.storageHome", storageHome.toString()),
@@ -564,7 +570,8 @@ class ChatClientFlavorTest {
             server.createContext("/v1/responses", exchange -> {
                 bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
                 respond(exchange, 200, """
-                        {"id":"r1","model":"test-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\\"facts\\":[]}"}],"usage":{}}]}""", "application/json");
+                    {"id":"r1","model":"test-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\\"facts\\":[]}"}],"usage":{}}]}\
+                    """, "application/json");
             });
             server.start();
             final var cfg = configuration(Map.of("yca.provider.providers.0.api", api));
@@ -578,11 +585,13 @@ class ChatClientFlavorTest {
             assertTrue(body.contains("\"text\":{\"format\":"), api + " must use text.format: " + body);
             assertTrue(body.contains("\"type\":\"json_schema\""), api + " body: " + body);
             assertFalse(body.contains("\"response_format\""), api + " must not send response_format: " + body);
-            // strict mode on, and the schema normalized: additionalProperties:false + every property required
+            // strict mode on, and the schema normalized: additionalProperties:false + every property
+            // required
             assertTrue(body.contains("\"strict\":true"), api + " body: " + body);
             assertTrue(body.contains("\"additionalProperties\":false"), api + " body: " + body);
             assertTrue(body.contains("\"required\":[\"facts\"]"), api + " top object required: " + body);
-            // the optional 'path' property is widened to a nullable type and listed in the item's required
+            // the optional 'path' property is widened to a nullable type and listed in the item's
+            // required
             assertTrue(
                     body.contains("\"path\":{\"type\":[\"string\",\"null\"]}"),
                     api + " optional property must widen to a nullable type: " + body);
@@ -597,9 +606,12 @@ class ChatClientFlavorTest {
 
     @Test
     void chatStructuredStrictifiesSchemaOnCompletionsWire() throws Exception {
-        // the chat-completions response_format wire enforces OpenAI strict-mode schemas (every property in
-        // required, optional ones widened to a nullable type) - a strict validator (eg. Azure / litellm)
-        // rejects the raw caller schema with a 400 e.g. 'required ... Missing p'. The COMPLETIONS branch
+        // the chat-completions response_format wire enforces OpenAI strict-mode schemas (every property
+        // in
+        // required, optional ones widened to a nullable type) - a strict validator (eg. Azure /
+        // litellm)
+        // rejects the raw caller schema with a 400 e.g. 'required ... Missing p'. The COMPLETIONS
+        // branch
         // must therefore normalize with strictSchema() like RESPONSES/CODEX.
         final var schema = Map.of(
                 "type",
@@ -627,7 +639,8 @@ class ChatClientFlavorTest {
         server.createContext("/v1/chat/completions", exchange -> {
             bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(exchange, 200, """
-                    {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"{\\"facts\\":[]}"},"finish_reason":"stop"}],"usage":{}}""", "application/json");
+                {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"{\\"facts\\":[]}"},"finish_reason":"stop"}],"usage":{}}\
+                """, "application/json");
         });
         server.start();
         final var cfg = configuration(Map.of("yca.provider.providers.0.api", "completions"));
@@ -683,24 +696,28 @@ class ChatClientFlavorTest {
                 respond(
                         exchange,
                         400,
-                        "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"json was malformed\"}}",
+                        "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"json"
+                                + " was malformed\"}}",
                         "application/json");
             } else {
                 respond(exchange, 200, """
-                        {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain answer"},"finish_reason":"stop"}]}""", "application/json");
+                    {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain answer"},"finish_reason":"stop"}]}\
+                    """, "application/json");
             }
         });
         server.start();
         final var cfg = configuration();
         client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http);
 
-        // first call: the structured attempt is rejected (one request), then the plain fallback succeeds
+        // first call: the structured attempt is rejected (one request), then the plain fallback
+        // succeeds
         final var first = client.chatStructured(request(), "todo_steps", Map.of("type", "object"));
         assertFalse(first.structured(), "the schema rejection must degrade to the plain request");
         assertEquals("plain answer", first.result().message().content());
         assertEquals(1, structuredHits.get(), "the rejection must not be retried within the call");
 
-        // second call on the same (provider, model, schema): the rejection is remembered, no structured request
+        // second call on the same (provider, model, schema): the rejection is remembered, no structured
+        // request
         final var second = client.chatStructured(request(), "todo_steps", Map.of("type", "object"));
         assertFalse(second.structured());
         assertEquals(1, structuredHits.get(), "the rejection must be memoized per (provider, model, schema)");
@@ -714,8 +731,10 @@ class ChatClientFlavorTest {
     @Test
     void chatStructuredNInferNoConstrainedOutputDegradesOnceAndRemembers() throws Exception {
         // a gateway that cannot provide constrained output (eg. yupiik's local NInfer backend) rejects
-        // the response_format with a 400 'response_format_not_supported ... requires constrained output,
-        // which NInfer cannot guarantee; only {"type":"text"} is available'. That must be recognised as a
+        // the response_format with a 400 'response_format_not_supported ... requires constrained
+        // output,
+        // which NInfer cannot guarantee; only {"type":"text"} is available'. That must be recognised as
+        // a
         // structured-output rejection: degrade once to the plain request (not a hard IOException) and
         // memoize it per (provider, model, schema) so subsequent passes skip the structured round-trip.
         stop();
@@ -730,14 +749,16 @@ class ChatClientFlavorTest {
                 respond(
                         exchange,
                         400,
-                        "{\"error\":{\"code\":\"response_format_not_supported\",\"message\":\"this response_format "
-                                + "requires constrained output, which NInfer cannot guarantee; only {\\\"type\\\":\\\"text\\\"} "
-                                + "is available\",\"param\":\"response_format\",\"type\":\"invalid_request_error\"}}",
+                        "{\"error\":{\"code\":\"response_format_not_supported\",\"message\":\"this"
+                                + " response_format requires constrained output, which NInfer cannot guarantee;"
+                                + " only {\\\"type\\\":\\\"text\\\"} is"
+                                + " available\",\"param\":\"response_format\",\"type\":\"invalid_request_error\"}}",
                         "application/json");
             } else {
                 plainHits.incrementAndGet();
                 respond(exchange, 200, """
-                        {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain answer"},"finish_reason":"stop"}]}""", "application/json");
+                    {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain answer"},"finish_reason":"stop"}]}\
+                    """, "application/json");
             }
         });
         server.start();
@@ -769,7 +790,8 @@ class ChatClientFlavorTest {
             respond(
                     exchange,
                     400,
-                    "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"max_tokens: 4096 > 1024, which is the maximum allowed\"}}",
+                    "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"max_tokens:"
+                            + " 4096 > 1024, which is the maximum allowed\"}}",
                     "application/json");
         });
         server.start();
@@ -788,7 +810,8 @@ class ChatClientFlavorTest {
         // freeinference rejects a request body it cannot validate (eg. max_tokens:-1) with exactly
         // "Invalid JSON or schema in request body" - the word 'schema' is a false positive for the
         // structured-output JSON-Schema rejection markers. It must NOT degrade to a plain fallback:
-        // the plain request reuses the same invalid body and would fail identically, wasting a round-trip.
+        // the plain request reuses the same invalid body and would fail identically, wasting a
+        // round-trip.
         // The 400 surfaces directly.
         stop();
         final var hits = new AtomicInteger();
@@ -799,7 +822,8 @@ class ChatClientFlavorTest {
             respond(
                     exchange,
                     400,
-                    "{\"error\":{\"type\":\"unknown\",\"message\":\"Invalid JSON or schema in request body\",\"code\":400}}",
+                    "{\"error\":{\"type\":\"unknown\",\"message\":\"Invalid JSON or schema in request"
+                            + " body\",\"code\":400}}",
                     "application/json");
         });
         server.start();
@@ -1015,7 +1039,8 @@ class ChatClientFlavorTest {
             throw new IllegalStateException("responses endpoint must not be called");
         });
         server.createContext("/v1/chat/completions", exchange -> respond(exchange, 200, """
-                {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}""", "application/json"));
+            {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}\
+            """, "application/json"));
         server.start();
         final var cfg = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
                 Map.entry("yca.storageHome", storageHome.toString()),
@@ -1064,7 +1089,8 @@ class ChatClientFlavorTest {
         server.createContext("/v1/responses", exchange -> {
             bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(exchange, 200, """
-                    {"id":"r1","model":"test-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello there"}]}],"usage":{}}""", "application/json");
+                {"id":"r1","model":"test-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello there"}]}],"usage":{}}\
+                """, "application/json");
         });
         server.start();
         final var cfg = configuration(Map.of(
@@ -1116,7 +1142,8 @@ class ChatClientFlavorTest {
         server.createContext("/v1/responses", exchange -> {
             bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(exchange, 200, """
-                    {"id":"r1","model":"test-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello there"}]}],"usage":{}}""", "application/json");
+                {"id":"r1","model":"test-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello there"}]}],"usage":{}}\
+                """, "application/json");
         });
         server.start();
         final var cfg = configuration(Map.of(
@@ -1433,7 +1460,8 @@ class ChatClientFlavorTest {
         assertEquals(
                 0,
                 occurrences(bodies.getLast(), "\"reasoning_effort\""),
-                "no implicit reasoning effort must reach the wire (provider default applies, opencode parity): "
+                "no implicit reasoning effort must reach the wire (provider default applies, opencode"
+                        + " parity): "
                         + bodies.getLast());
     }
 
@@ -1446,7 +1474,8 @@ class ChatClientFlavorTest {
             final byte[] sse = ("event: response.created\n"
                             + "data: {\"type\":\"response.created\"}\n\n"
                             + "event: response.output_text.delta\n"
-                            + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\",\"output_index\":0}\n\n"
+                            + "data:"
+                            + " {\"type\":\"response.output_text.delta\",\"delta\":\"hello\",\"output_index\":0}\n\n"
                             + "event: response.completed\n"
                             + "data: {\"type\":\"response.completed\"}\n\n")
                     .getBytes(StandardCharsets.UTF_8);
@@ -1490,7 +1519,8 @@ class ChatClientFlavorTest {
                 final byte[] sse = ("event: response.created\n"
                                 + "data: {\"type\":\"response.created\"}\n\n"
                                 + "event: response.output_text.delta\n"
-                                + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\",\"output_index\":0}\n\n"
+                                + "data:"
+                                + " {\"type\":\"response.output_text.delta\",\"delta\":\"ok\",\"output_index\":0}\n\n"
                                 + "event: response.completed\n"
                                 + "data: {\"type\":\"response.completed\"}\n\n")
                         .getBytes(StandardCharsets.UTF_8);
@@ -1600,7 +1630,8 @@ class ChatClientFlavorTest {
             } else {
                 plainHits.incrementAndGet();
                 respond(exchange, 200, """
-                        {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain"},"finish_reason":"stop"}]}""", "application/json");
+                    {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain"},"finish_reason":"stop"}]}\
+                    """, "application/json");
             }
         });
         server.start();

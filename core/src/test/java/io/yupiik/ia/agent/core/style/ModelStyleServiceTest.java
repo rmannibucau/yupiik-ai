@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
@@ -64,7 +65,8 @@ class ModelStyleServiceTest {
     }
 
     private ChatClient client(final CodingAgentConfiguration configuration, final ProviderManager providers) {
-        final var httpClient = new HttpClientProducer().httpClient(configuration);
+        final var httpClient =
+                new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null));
         httpClients.add(httpClient);
         final var client = new ChatClient(configuration, mapper, providers, Clock.systemUTC(), httpClient);
         chatClients.add(client);

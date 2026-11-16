@@ -33,6 +33,7 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -65,6 +66,7 @@ public final class LlmRelay implements AutoCloseable {
     private final String accessToken;
     private final byte[] authorizationDigest;
     private final Semaphore permits;
+    private final ProviderRequestBudget budget;
     private final HttpServer server;
     private final ExecutorService executor;
     private final ScheduledExecutorService timer;
@@ -79,12 +81,16 @@ public final class LlmRelay implements AutoCloseable {
      * The secret must be a nonempty bearer-token value. Validation errors never include its value.
      * The concurrency limit covers upload, upstream work and streaming; excess requests get 429
      * without entering a blocking work queue. The 120-second deadline covers that entire lifecycle.
+     * The caller supplies trusted provider/account settings through {@link ProviderRequestBudget#fromConfiguration}
+     * to apply an additional shared limit immediately before dispatch. Unknown
+     * upstream outcomes retain durable budget debt, including cancellation on this relay's deadline.
      */
     public LlmRelay(
             final InetSocketAddress bindAddress,
             final URI upstream,
             final String bearerSecret,
-            final int maxConcurrency)
+            final int maxConcurrency,
+            final ProviderRequestBudget budget)
             throws IOException {
         validateUpstream(upstream);
         if (bearerSecret == null || !bearerSecret.matches("[A-Za-z0-9._~+/-]+=*")) {
@@ -94,6 +100,7 @@ public final class LlmRelay implements AutoCloseable {
             throw new IllegalArgumentException("A bind address and positive concurrency limit are required");
         }
         this.upstream = upstream;
+        this.budget = Objects.requireNonNull(budget, "Trusted provider budget required");
         this.bearerSecret = bearerSecret;
         this.permits = new Semaphore(maxConcurrency);
         final var random = new byte[32];
@@ -235,49 +242,66 @@ public final class LlmRelay implements AutoCloseable {
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                 .build();
-        final var pending = client.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream());
-        attempt.pending.set(pending);
-        if (attempt.done.get()) {
-            pending.cancel(true);
-            pending.thenAccept(response -> closeStream(response.body()));
+        final var acquired = budget.tryAcquire();
+        if (acquired.isEmpty()) {
+            reject(exchange, 429);
             return;
         }
-        final var response = pending.get();
-        try (final var input = response.body()) {
-            attempt.input.set(input);
+        try (final var reservation = acquired.orElseThrow()) {
             if (attempt.done.get()) {
                 return;
             }
-            final var contentType =
-                    response.headers().firstValue("Content-Type").orElse("");
-            final var mediaType = contentType.split(";", 2)[0].trim();
-            exchange.getResponseHeaders()
-                    .set(
-                            "Content-Type",
-                            "text/event-stream".equalsIgnoreCase(mediaType)
-                                    ? "text/event-stream"
-                                    : "application/json".equalsIgnoreCase(mediaType)
-                                            ? "application/json"
-                                            : "application/octet-stream");
-            if (response.statusCode() == 204 || response.statusCode() == 304) {
-                exchange.sendResponseHeaders(response.statusCode(), -1);
+            reservation.dispatched();
+            final var pending = client.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream());
+            attempt.pending.set(pending);
+            if (attempt.done.get()) {
+                pending.cancel(true);
+                pending.thenAccept(response -> closeStream(response.body()));
                 return;
             }
-            exchange.sendResponseHeaders(response.statusCode(), 0);
-            final var output = exchange.getResponseBody();
-            final var buffer = new byte[16 * 1024];
-            long remaining = MAX_RESPONSE_BYTES;
-            while (!attempt.done.get()) {
-                final var count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining + 1));
-                if (count < 0) {
-                    break;
-                }
-                if (count > remaining) {
+            final var response = pending.get();
+            boolean upstreamComplete = false;
+            try (final var input = response.body()) {
+                attempt.input.set(input);
+                if (attempt.done.get()) {
                     return;
                 }
-                output.write(buffer, 0, count);
-                output.flush();
-                remaining -= count;
+                final var contentType =
+                        response.headers().firstValue("Content-Type").orElse("");
+                final var mediaType = contentType.split(";", 2)[0].trim();
+                exchange.getResponseHeaders()
+                        .set(
+                                "Content-Type",
+                                "text/event-stream".equalsIgnoreCase(mediaType)
+                                        ? "text/event-stream"
+                                        : "application/json".equalsIgnoreCase(mediaType)
+                                                ? "application/json"
+                                                : "application/octet-stream");
+                if (response.statusCode() == 204 || response.statusCode() == 304) {
+                    upstreamComplete = input.read() == -1;
+                    exchange.sendResponseHeaders(response.statusCode(), -1);
+                } else {
+                    exchange.sendResponseHeaders(response.statusCode(), 0);
+                    final var output = exchange.getResponseBody();
+                    final var buffer = new byte[16 * 1024];
+                    long remaining = MAX_RESPONSE_BYTES;
+                    while (!attempt.done.get()) {
+                        final var count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining + 1));
+                        if (count < 0) {
+                            upstreamComplete = true;
+                            break;
+                        }
+                        if (count > remaining) {
+                            return;
+                        }
+                        output.write(buffer, 0, count);
+                        output.flush();
+                        remaining -= count;
+                    }
+                }
+            }
+            if (upstreamComplete && !attempt.done.get()) {
+                reservation.completed();
             }
         }
     }

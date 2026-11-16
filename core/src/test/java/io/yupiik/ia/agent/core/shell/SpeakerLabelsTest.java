@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.cli.CliPromptTemplate;
 import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
 import io.yupiik.ia.agent.core.cli.PromptHandlebarsHelper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -98,7 +99,8 @@ class SpeakerLabelsTest {
     }
 
     private ChatClient chatClient(final CodingAgentConfiguration configuration) {
-        final var httpClient = new HttpClientProducer().httpClient(configuration);
+        final var httpClient =
+                new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null));
         httpClients.add(httpClient);
         final var client =
                 new ChatClient(configuration, mapper, providerManager(configuration), Clock.systemUTC(), httpClient);

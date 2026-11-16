@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -132,7 +133,7 @@ class ChatClientCompressionBoundaryTest {
         values.put("yca.provider.providers.0.model", "deepseek-v4-flash");
         values.putAll(overrides);
         final var config = TestConfigs.codingAgent(values);
-        final var http = new HttpClientProducer().httpClient(config);
+        final var http = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null));
         httpClients.add(http);
         return new ChatClient(config, mapper, new ProviderManager(config, mapper), Clock.systemUTC(), http);
     }

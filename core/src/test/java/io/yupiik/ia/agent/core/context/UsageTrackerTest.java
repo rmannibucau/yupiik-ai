@@ -22,6 +22,8 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -77,7 +79,7 @@ class UsageTrackerTest {
         this.mapper = mapper;
         configuration = configuration(-1);
         providerManager = new ProviderManager(configuration, mapper);
-        httpClient = new HttpClientProducer().httpClient(configuration);
+        httpClient = new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null));
         client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC(), httpClient);
     }
 
@@ -120,7 +122,7 @@ class UsageTrackerTest {
         entries.put("yca.provider.providers.0.models.length", "1");
         entries.put("yca.provider.providers.0.models.0.model", "test-model");
         entries.put("yca.provider.providers.0.models.0.contextWindow", "1000000");
-        final var cfgOverride = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        final var cfgOverride = TestConfigs.codingAgent(entries);
         final var pm = new ProviderManager(cfgOverride, mapper);
         final var tracker = new UsageTracker(pm, client, null, Clock.systemUTC());
         assertEquals(
@@ -149,7 +151,7 @@ class UsageTrackerTest {
         entries.put("yca.provider.providers.0.models.length", "1");
         entries.put("yca.provider.providers.0.models.0.model", "test-model");
         entries.put("yca.provider.providers.0.models.0.contextWindow", "1000000");
-        final var cfgOverride = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        final var cfgOverride = TestConfigs.codingAgent(entries);
         final var pm = new ProviderManager(cfgOverride, mapper);
         final var cache = new ContextWindowCache(cfgOverride, mapper, Clock.systemUTC());
         // seed a detected entry so the assertion below proves the override was not persisted over,
@@ -432,7 +434,8 @@ class UsageTrackerTest {
         assertEquals(
                 tracker.usableWindow(),
                 tracker.usableWindowForModel(null),
-                "a blank/null compact reference must not change the window (summarizer on the conversation model)");
+                "a blank/null compact reference must not change the window (summarizer on the conversation"
+                        + " model)");
         assertEquals(
                 tracker.usableWindow(),
                 tracker.usableWindowForModel("  "),
@@ -453,10 +456,7 @@ class UsageTrackerTest {
         entries.put("yca.provider.providers.0.api", "auto");
         entries.put("yca.provider.providers.0.timeoutSeconds", "120");
         final var tracker = new UsageTracker(
-                new ProviderManager(io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries), mapper),
-                null,
-                null,
-                Clock.systemUTC());
+                new ProviderManager(TestConfigs.codingAgent(entries), mapper), null, null, Clock.systemUTC());
         assertEquals(1_024, tracker.usableWindowForModel("$nodata/ghost"));
     }
 
@@ -478,18 +478,19 @@ class UsageTrackerTest {
         entries.put("yca.provider.providers.1.api", "auto");
         entries.put("yca.provider.providers.1.contextWindow", "32000");
         entries.put("yca.provider.providers.1.timeoutSeconds", "120");
-        return new ProviderManager(io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries), mapper);
+        return new ProviderManager(TestConfigs.codingAgent(entries), mapper);
     }
 
     @Test
     void equalLiteLLMCapsAreNotATrustedPartition() {
         // the user's /v1/models payload: max_input_tokens == max_output_tokens per model
         modelsBody = """
-                {"data":[
-                 {"id":"qwen3.8-27b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":131072,"max_output_tokens":131072},
-                 {"id":"gemma4-26b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":131072,"max_output_tokens":131072},
-                 {"id":"qwen3-8b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":40960,"max_output_tokens":40960}
-                ],"object":"list"}""";
+            {"data":[
+             {"id":"qwen3.8-27b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":131072,"max_output_tokens":131072},
+             {"id":"gemma4-26b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":131072,"max_output_tokens":131072},
+             {"id":"qwen3-8b","object":"model","created":1677610602,"owned_by":"openai","max_input_tokens":40960,"max_output_tokens":40960}
+            ],"object":"list"}\
+            """;
         // the equal caps are per-side limits, not a partition: the input limit is taken directly
         assertLiteLLMUsable("qwen3.8-27b", 131_072, 131_072);
         assertLiteLLMUsable("gemma4-26b", 131_072, 131_072);
@@ -508,7 +509,7 @@ class UsageTrackerTest {
         entries.put("yca.provider.providers.0.model", model);
         entries.put("yca.provider.providers.0.api", "auto");
         entries.put("yca.provider.providers.0.timeoutSeconds", "5");
-        final var cfg = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        final var cfg = TestConfigs.codingAgent(entries);
         final var pm = new ProviderManager(cfg, mapper);
         final var c = new ChatClient(cfg, mapper, pm, Clock.systemUTC(), httpClient);
         try {
@@ -744,7 +745,7 @@ class UsageTrackerTest {
     }
 
     private CodingAgentConfiguration configuration(final int contextWindow, final int outputTokens) {
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
+        return TestConfigs.codingAgent(Map.ofEntries(
                 Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "1"),
                 Map.entry("yca.provider.providers.0.id", "default"),

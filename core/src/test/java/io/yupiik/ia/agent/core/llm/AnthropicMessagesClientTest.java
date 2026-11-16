@@ -24,10 +24,13 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.llm.client.model.LlmStreamEvent.End;
+import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -65,7 +68,7 @@ class AnthropicMessagesClientTest {
     void start(final JsonMapper mapper) throws IOException {
         this.mapper = mapper;
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
-        http = new HttpClientProducer().httpClient(configuration());
+        http = new HttpClientProducer().httpClient(configuration(), new NativeProviderConfiguration(null));
     }
 
     @AfterEach
@@ -256,7 +259,8 @@ class AnthropicMessagesClientTest {
     void azureAiGatewayAnthropicSendsTheReasoningConfigAndSurfacesThinkingTokens() throws Exception {
         // Azure AI Gateway serves the Anthropic messages API over a Bearer-gated /messages endpoint:
         // the reasoning shape (thinking/output_config) is configured through providerSpecificOptions
-        // and the provider reports the hidden thinking tokens via output_tokens_details.thinking_tokens.
+        // and the provider reports the hidden thinking tokens via
+        // output_tokens_details.thinking_tokens.
         server.createContext("/anthropic/v1/messages", exchange -> {
             final var authz = exchange.getRequestHeaders().getFirst("authorization");
             reqHeaders.set("authz=" + authz);
@@ -320,22 +324,27 @@ class AnthropicMessagesClientTest {
             final var sse = String.join(
                     "\n",
                     "event: message_start",
-                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-v4-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}",
+                    "data:"
+                            + " {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-v4-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}",
                     "",
                     "event: content_block_start",
-                    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+                    "data:"
+                            + " {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
                     "",
                     "event: content_block_delta",
-                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hel\"}}",
+                    "data:"
+                            + " {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hel\"}}",
                     "",
                     "event: content_block_delta",
-                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}",
+                    "data:"
+                            + " {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}",
                     "",
                     "event: content_block_stop",
                     "data: {\"type\":\"content_block_stop\",\"index\":0}",
                     "",
                     "event: message_delta",
-                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}",
+                    "data:"
+                            + " {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}",
                     "",
                     "event: message_stop",
                     "data: {\"type\":\"message_stop\"}",
@@ -363,9 +372,9 @@ class AnthropicMessagesClientTest {
         final var message = client.stream(
                 streamReq,
                 delta -> {
-                    if (delta instanceof io.yupiik.llm.client.model.LlmStreamEvent.TextDelta(final String text)) {
+                    if (delta instanceof TextDelta(final String text)) {
                         streamTexts.add(text);
-                    } else if (delta instanceof io.yupiik.llm.client.model.LlmStreamEvent.End end) {
+                    } else if (delta instanceof End end) {
                         finish.set(end.finishReason());
                     }
                 },
@@ -378,9 +387,9 @@ class AnthropicMessagesClientTest {
     @Test
     void modelsListsIds() throws Exception {
         server.createContext("/anthropic/v1/models", exchange -> {
-            final var body =
-                    "{\"data\":[{\"type\":\"model\",\"id\":\"a-m\",\"display_name\":\"A M\",\"created_at\":\"1970-01-01T00:00:00Z\"},"
-                            + "{\"type\":\"model\",\"id\":\"b-m\",\"display_name\":\"B M\",\"created_at\":\"1970-01-01T00:00:00Z\"}]}";
+            final var body = "{\"data\":[{\"type\":\"model\",\"id\":\"a-m\",\"display_name\":\"A"
+                    + " M\",\"created_at\":\"1970-01-01T00:00:00Z\"},{\"type\":\"model\",\"id\":\"b-m\",\"display_name\":\"B"
+                    + " M\",\"created_at\":\"1970-01-01T00:00:00Z\"}]}";
             final var bytes = body.getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(200, bytes.length);
             exchange.getResponseBody().write(bytes);

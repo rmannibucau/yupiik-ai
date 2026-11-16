@@ -27,6 +27,7 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
+import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.RunShellFrontend;
@@ -65,6 +66,7 @@ public class RunCommand implements Runnable {
 
     private final McpManager mcpManager;
     private final JsonMapper jsonMapper;
+    private final FeedbackGate feedbackGate;
 
     public RunCommand(
             final RunConf conf,
@@ -73,7 +75,9 @@ public class RunCommand implements Runnable {
             final SessionStore sessionStore,
             final AgentProvider agentProvider,
             final McpManager mcpManager,
-            final JsonMapper jsonMapper) {
+            final JsonMapper jsonMapper,
+            final FeedbackGate feedbackGate) {
+        this.feedbackGate = feedbackGate;
         this.jsonMapper = jsonMapper;
         this.mcpManager = mcpManager;
         this.conf = conf;
@@ -234,11 +238,7 @@ public class RunCommand implements Runnable {
                     + "); set yca.permissions.mode=auto_edit/yolo to allow unattended runs, or use the TUI.");
             return ApprovalGate.Result.DENY;
         });
-        runtime.feedback().setGate(questions -> {
-            LOGGER.warning(
-                    "ask_user is not available in headless mode; provide the required input in your prompt and retry.");
-            return null;
-        });
+        runtime.feedback().setGate(feedbackGate);
         final var agentName = conf.agent() == null || conf.agent().isBlank() ? null : conf.agent();
         if (agentName != null && agentProvider.byName(agentName) == null) {
             throw new IllegalArgumentException("Unknown agent: '" + agentName + "' (configure one under yca.agents)");

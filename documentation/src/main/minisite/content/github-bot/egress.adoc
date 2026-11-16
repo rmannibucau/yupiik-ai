@@ -116,7 +116,7 @@ Use the explicit Jib gateway profile from the repository root, after your truste
 
 [source,shell]
 ----
-mvn spotless:apply -pl extensions/github-bot -Pimage-egress compile jib:dockerBuild \
+mvn spotless:apply -pl extensions/bot-parent/github-bot -Pimage-egress compile jib:dockerBuild \
   -Dgithub-bot.egress.base-image=eclipse-temurin@sha256:YOUR_JRE_BASE_DIGEST \
   -Dgithub-bot.egress.image=yca-egress:local
 ----
@@ -128,7 +128,7 @@ Select only one image profile per invocation.
 No image goal is bound to ordinary test/package lifecycles unless the explicit aggregate `image-all` profile is selected, which binds three image goals to `package`.
 
 The base defaults to `eclipse-temurin:25-jre` and the target to `yca-egress:local`; override both properties as shown and pin the base and configured gateway image by digest for production.
-For a registry build, record `extensions/github-bot/target/jib-image.digest` and configure `REGISTRY/IMAGE@sha256:DIGEST`, not a mutable tag.
+For a registry build, record `extensions/bot-parent/github-bot/target/jib-image.digest` and configure `REGISTRY/IMAGE@sha256:DIGEST`, not a mutable tag.
 
 Jib generates the runtime classpath and Java entrypoint for `io.yupiik.ia.agent.github.execution.EgressGateway` with `-Xmx128m` and UID/GID 65532.
 This is not the worker launcher, so no dispatcher credentials or services are initialized.

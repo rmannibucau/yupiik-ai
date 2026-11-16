@@ -21,8 +21,15 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.framework.api.ConfiguringContainer;
+import io.yupiik.fusion.framework.api.RuntimeContainer;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.fusion.framework.api.container.FusionBean;
+import io.yupiik.fusion.framework.api.container.FusionListener;
+import io.yupiik.fusion.framework.api.container.FusionModule;
+import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
@@ -37,6 +44,8 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.question.FeedbackGate;
+import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -46,6 +55,9 @@ import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.todo.InMemoryTodoStore;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
+import io.yupiik.ia.agent.core.tools.builtin.AskUserTool;
+import io.yupiik.ia.agent.core.wiring.FeedbackGateProducer;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -65,6 +77,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.BiPredicate;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
@@ -204,7 +217,8 @@ class RunCommandTest {
                 sessionStore(),
                 null,
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
 
         assertFalse(mcpStarted.get(), "Constructing a command must not start MCP servers");
         command.run();
@@ -287,7 +301,8 @@ class RunCommandTest {
                         store,
                         null,
                         mcpManager(),
-                        mapper)
+                        mapper,
+                        new FeedbackGateProducer().feedbackGate())
                 .run();
         assertEquals(2, prompts.size());
         assertEquals("{\"summary\":\"corrected using task evidence\"}", Files.readString(result));
@@ -334,7 +349,8 @@ class RunCommandTest {
                 sessionStore(),
                 null,
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
         assertTrue(assertThrows(IllegalStateException.class, command::run)
                 .getMessage()
                 .contains("invalid after correction"));
@@ -377,7 +393,8 @@ class RunCommandTest {
                         sessionStore(),
                         null,
                         mcpManager(),
-                        mapper)
+                        mapper,
+                        new FeedbackGateProducer().feedbackGate())
                 .run();
         assertEquals(1, calls.get());
     }
@@ -418,7 +435,8 @@ class RunCommandTest {
                 sessionStore(),
                 null,
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
         assertTrue(assertThrows(IllegalStateException.class, command::run)
                 .getMessage()
                 .contains("provider failed"));
@@ -460,7 +478,8 @@ class RunCommandTest {
                 sessionStore(),
                 null,
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
 
         final var error = assertThrows(IllegalStateException.class, command::run);
 
@@ -516,7 +535,8 @@ class RunCommandTest {
                 sessionStore(),
                 new AgentProvider(configuration),
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
 
         command.run();
 
@@ -561,7 +581,8 @@ class RunCommandTest {
                 sessionStore(),
                 new AgentProvider(configuration),
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
 
         command.run();
 
@@ -608,7 +629,8 @@ class RunCommandTest {
                 sessionStore(),
                 new AgentProvider(configuration),
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
 
         command.run();
 
@@ -661,7 +683,8 @@ class RunCommandTest {
                 sessionStore(),
                 new AgentProvider(configuration),
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
 
         command.run();
 
@@ -698,7 +721,8 @@ class RunCommandTest {
                 sessionStore(),
                 null,
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
 
         command.run();
 
@@ -732,7 +756,8 @@ class RunCommandTest {
                 sessionStore(),
                 null,
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
 
         command.run();
 
@@ -767,7 +792,8 @@ class RunCommandTest {
                 sessionStore(),
                 new AgentProvider(configuration),
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
 
         final var error = assertThrows(IllegalArgumentException.class, command::run);
         assertTrue(error.getMessage().contains("Unknown agent"));
@@ -794,6 +820,146 @@ class RunCommandTest {
         return new RunCommand$RunConf$FusionConfigurationFactory(Configuration.of(Map.of("run.prompt", "task")))
                 .get()
                 .resultCorrectionPrompt();
+    }
+
+    @Test
+    void fusionDefaultFeedbackCancelsWithoutChangingOtherSessions() {
+        verifyFusionFeedback(false);
+    }
+
+    @Test
+    void fusionExactContractOverrideAnswersWithoutApprovingToolsOrChangingOtherSessions() {
+        verifyFusionFeedback(true);
+    }
+
+    private void verifyFusionFeedback(final boolean override) {
+        final var configuration = CodingAgentConfigurations.builder()
+                .storageHome(temp.toString())
+                .permissions(new PermissionsConfiguration(
+                        PermissionMode.ASK,
+                        List.of(),
+                        List.of(),
+                        new BashPermissionsConfiguration(List.of(), "", 1024)))
+                .build();
+        final var questions = List.of(new Question("choice", "Pick?", List.of("yes", "no"), false));
+        final var otherRuntime = runtimeFactory(stubAgentLoop(), new PermissionService(configuration))
+                .create("other");
+        otherRuntime.feedback().setGate(asked -> Map.of("choice", "other-session"));
+        final var active = new AtomicReference<SessionRuntime>();
+        final var overrideCalls = new AtomicInteger();
+        final var turns = new AtomicInteger();
+        final var loop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                turns.incrementAndGet();
+                final var runtime = active.get();
+                final var result = new AskUserTool(mapper)
+                        .execute(
+                                Map.of(
+                                        "questions",
+                                        List.of(Map.of(
+                                                "id", "choice", "prompt", "Pick?", "options", List.of("yes", "no")))),
+                                new ToolContext(
+                                        sessionId,
+                                        null,
+                                        null,
+                                        runtime.permissions(),
+                                        runtime.feedback(),
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        cancelled));
+                assertTrue(result.success());
+                if (override) {
+                    assertEquals("{\"choice\":\"yes\"}", result.output());
+                } else {
+                    assertTrue(result.output().contains("\"cancelled\":true"));
+                    assertTrue(result.output().contains("Do not call"));
+                }
+                assertEquals(
+                        Map.of("choice", "other-session"),
+                        otherRuntime.feedback().ask(questions));
+                assertFalse(
+                        runtime.permissions()
+                                .check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /"))
+                                .allowed(),
+                        "feedback answers must never grant tool approval");
+                return "done";
+            }
+        };
+        final var factory = new SessionRuntimeFactory() {
+            @Override
+            public SessionRuntime create(final String sessionId) {
+                final var runtime = runtimeFactory(loop, new PermissionService(configuration))
+                        .create(sessionId);
+                active.set(runtime);
+                return runtime;
+            }
+        };
+        final var conf =
+                new RunCommand$RunConf$FusionConfigurationFactory(Configuration.of(Map.of("run.prompt", "task"))).get();
+        final var configuring = ConfiguringContainer.of()
+                .register(new ProvidedInstanceBean<>(DefaultScoped.class, RunCommand.RunConf.class, () -> conf))
+                .register(new ProvidedInstanceBean<>(
+                        DefaultScoped.class, ShellRegistry.class, RunCommandTest::testRegistry))
+                .register(new ProvidedInstanceBean<>(DefaultScoped.class, SessionRuntimeFactory.class, () -> factory))
+                .register(new ProvidedInstanceBean<>(DefaultScoped.class, SessionStore.class, this::sessionStore))
+                .register(new ProvidedInstanceBean<>(
+                        DefaultScoped.class, AgentProvider.class, () -> new AgentProvider(configuration)))
+                .register(new ProvidedInstanceBean<>(DefaultScoped.class, McpManager.class, this::mcpManager))
+                .register(new ProvidedInstanceBean<>(DefaultScoped.class, JsonMapper.class, () -> mapper))
+                .register(new FusionModule() {
+                    @Override
+                    public BiPredicate<RuntimeContainer, FusionBean<?>> beanFilter() {
+                        return (container, bean) -> bean instanceof ProvidedInstanceBean<?>
+                                || bean.type() == RunCommand.class
+                                || bean.type() == FeedbackGateProducer.class
+                                || bean.type() == FeedbackGate.class;
+                    }
+
+                    @Override
+                    public BiPredicate<RuntimeContainer, FusionListener<?>> listenerFilter() {
+                        return (container, listener) -> false;
+                    }
+                });
+        if (override) {
+            configuring.register(
+                    new ProvidedInstanceBean<>(DefaultScoped.class, FeedbackGate.class, () -> asked -> {
+                        overrideCalls.incrementAndGet();
+                        assertEquals(questions, asked);
+                        return Map.of("choice", "yes");
+                    }) {
+                        @Override
+                        public int priority() {
+                            return 2000;
+                        }
+                    });
+        }
+        try (final var container = configuring.start();
+                final var command = container.lookup(RunCommand.class)) {
+            assertEquals(
+                    override ? 2 : 1,
+                    container.getBeans().getBeans().get(FeedbackGate.class).size());
+            command.instance().run();
+            assertEquals(1, turns.get());
+            assertEquals(override ? 1 : 0, overrideCalls.get());
+            // Changing the other session's gate must not change the run's feedback service either.
+            otherRuntime.feedback().setGate(asked -> Map.of("choice", "changed-other-session"));
+            assertEquals(
+                    override ? Map.of("choice", "yes") : null,
+                    active.get().feedback().ask(questions));
+            assertEquals(
+                    Map.of("choice", "changed-other-session"),
+                    otherRuntime.feedback().ask(questions));
+        } finally {
+            otherRuntime.close();
+        }
     }
 
     private static SessionRuntimeFactory runtimeFactory(final AgentLoop loop, final PermissionService permissions) {
@@ -868,7 +1034,8 @@ class RunCommandTest {
                 sessionStore(),
                 null,
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
         command.run();
         final var line = Files.readString(metricsFile, StandardCharsets.UTF_8);
         assertTrue(line.contains("llmCalls=1"), "display refresh must not count as a request: " + line);
@@ -920,7 +1087,8 @@ class RunCommandTest {
                 sessionStore(),
                 null,
                 mcpManager(),
-                mapper);
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
         command.run();
         final var line = Files.readString(metricsFile, StandardCharsets.UTF_8);
         assertTrue(line.contains("llmCalls=2"), "only the real requests count, refresh excluded: " + line);

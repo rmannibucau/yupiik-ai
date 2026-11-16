@@ -76,6 +76,18 @@ class ConfigurationJsonSchemaGeneratorTest {
                             || key.toString().contains("github.configuration.PromptConfiguration")
                             || key.toString().contains("ReviewPresentationConfiguration")));
             final var yca = map(map(map(schema.get("properties")).get("yca")).get("properties"));
+            assertFalse(yca.containsKey("bot"), "Host admission is not a yca.* configuration root");
+            final var bot = map(map(map(schema.get("properties")).get("bot")).get("properties"));
+            final var admission = resolve(defs, map(bot.get("admission")));
+            final var admissionProperties = map(admission.get("properties"));
+            assertEquals("string", map(admissionProperties.get("root")).get("type"));
+            assertEquals("integer", map(admissionProperties.get("slots")).get("type"));
+            assertEquals("string", map(admissionProperties.get("trustedGroup")).get("type"));
+            final var nativeProperties = map(map(yca.get("native")).get("properties"));
+            final var nativeProvider = resolve(defs, map(nativeProperties.get("provider")));
+            assertEquals(
+                    "string",
+                    map(map(nativeProvider.get("properties")).get("socket")).get("type"));
             final var provider = resolve(defs, map(yca.get("provider")));
             assertTrue(map(map(provider.get("properties")).get("contextWindow"))
                     .get("description")

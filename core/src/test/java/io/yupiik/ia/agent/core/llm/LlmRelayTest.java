@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import io.yupiik.fusion.framework.api.configuration.Configuration;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -36,6 +37,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -69,7 +71,7 @@ class LlmRelayTest {
                     exchange.getResponseHeaders().add("X-Secret", SECRET);
                     respond(exchange, 422, "application/json; charset=utf-8", "{\"error\":\"invalid\"}");
                 });
-                final var relay = new LlmRelay(loopback(), upstream.uri(), SECRET, 2);
+                final var relay = relay(loopback(), upstream.uri(), SECRET, 2);
                 final var client = HttpClient.newHttpClient()) {
             final var response = client.send(
                     request(relay, "/chat/completions")
@@ -100,8 +102,8 @@ class LlmRelayTest {
                     calls.incrementAndGet();
                     respond(exchange, 200, "application/json", "{}");
                 });
-                final var relay = new LlmRelay(loopback(), upstream.uri(), SECRET, 1);
-                final var other = new LlmRelay(loopback(), upstream.uri(), SECRET, 1);
+                final var relay = relay(loopback(), upstream.uri(), SECRET, 1);
+                final var other = relay(loopback(), upstream.uri(), SECRET, 1);
                 final var client = HttpClient.newHttpClient()) {
             assertNotEquals(relay.accessToken(), other.accessToken());
             for (final var path : List.of(
@@ -161,7 +163,7 @@ class LlmRelayTest {
                     calls.incrementAndGet();
                     respond(exchange, 200, "application/json", "{}");
                 });
-                final var relay = new LlmRelay(loopback(), upstream.uri(), SECRET, 1);
+                final var relay = relay(loopback(), upstream.uri(), SECRET, 1);
                 final var client = HttpClient.newHttpClient()) {
             assertEquals(
                     200,
@@ -202,7 +204,7 @@ class LlmRelayTest {
                     exchange.getResponseHeaders().set("Location", "/redirect-target");
                     respond(exchange, 307, "text/html", "redirect");
                 });
-                final var relay = new LlmRelay(loopback(), upstream.uri(), SECRET, 1);
+                final var relay = relay(loopback(), upstream.uri(), SECRET, 1);
                 final var client = HttpClient.newHttpClient()) {
             final var response = client.send(
                     request(relay, "/chat/completions")
@@ -237,7 +239,7 @@ class LlmRelayTest {
                         exchange.getResponseBody().write("data: [DONE]\n\n".getBytes(UTF_8));
                     }
                 });
-                final var relay = new LlmRelay(loopback(), upstream.uri(), SECRET, 1);
+                final var relay = relay(loopback(), upstream.uri(), SECRET, 1);
                 final var client = HttpClient.newHttpClient()) {
             try {
                 final var response = client.send(
@@ -288,7 +290,7 @@ class LlmRelayTest {
                         disconnected.countDown();
                     }
                 });
-                final var relay = new LlmRelay(loopback(), upstream.uri(), SECRET, 1);
+                final var relay = relay(loopback(), upstream.uri(), SECRET, 1);
                 final var client = HttpClient.newHttpClient()) {
             final var response = client.send(
                     request(relay, "/chat/completions")
@@ -319,7 +321,7 @@ class LlmRelayTest {
     @Test
     void upstreamFailureReturnsOnlyGenericStatus() throws Exception {
         try (final var upstream = new Upstream(HttpExchange::close);
-                final var relay = new LlmRelay(loopback(), upstream.uri(), SECRET, 1);
+                final var relay = relay(loopback(), upstream.uri(), SECRET, 1);
                 final var client = HttpClient.newHttpClient()) {
             final var response = client.send(
                     request(relay, "/chat/completions")
@@ -346,7 +348,7 @@ class LlmRelayTest {
                         // Relay closes upstream at its response cap.
                     }
                 });
-                final var relay = new LlmRelay(loopback(), upstream.uri(), SECRET, 1);
+                final var relay = relay(loopback(), upstream.uri(), SECRET, 1);
                 final var client = HttpClient.newHttpClient()) {
             final var response = client.send(
                     request(relay, "/chat/completions")
@@ -386,7 +388,7 @@ class LlmRelayTest {
                     }
                 });
                 final var client = HttpClient.newHttpClient()) {
-            final var relay = new LlmRelay(loopback(), upstream.uri(), SECRET, 1);
+            final var relay = relay(loopback(), upstream.uri(), SECRET, 1);
             try {
                 final var response = client.send(
                         request(relay, "/chat/completions")
@@ -419,22 +421,32 @@ class LlmRelayTest {
                 "https://example.org/../chat/completions",
                 "https://example.org:0/chat/completions",
                 "https://example.org:99999/chat/completions")) {
-            final var failure = assertThrows(
-                    IllegalArgumentException.class, () -> new LlmRelay(loopback(), URI.create(uri), SECRET, 1));
+            final var failure =
+                    assertThrows(IllegalArgumentException.class, () -> relay(loopback(), URI.create(uri), SECRET, 1));
             assertFalse(failure.getMessage().contains(SECRET));
             assertFalse(failure.getMessage().contains(uri));
         }
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new LlmRelay(loopback(), URI.create("https://example.org/chat/completions"), "bad\r\nsecret", 1));
+                () -> relay(loopback(), URI.create("https://example.org/chat/completions"), "bad\r\nsecret", 1));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new LlmRelay(loopback(), URI.create("https://example.org/chat/completions"), SECRET, 0));
-        try (final var relay =
-                new LlmRelay(loopback(), URI.create("https://example.org/v1/chat/completions"), SECRET, 1)) {
+                () -> relay(loopback(), URI.create("https://example.org/chat/completions"), SECRET, 0));
+        try (final var relay = relay(loopback(), URI.create("https://example.org/v1/chat/completions"), SECRET, 1)) {
             assertNotNull(relay.address());
             assertEquals(43, relay.accessToken().length());
         }
+    }
+
+    private static LlmRelay relay(
+            final InetSocketAddress address, final URI upstream, final String secret, final int concurrency)
+            throws IOException {
+        return new LlmRelay(
+                address,
+                upstream,
+                secret,
+                concurrency,
+                ProviderRequestBudget.fromConfiguration(Configuration.of(Map.of())));
     }
 
     private static InetSocketAddress loopback() {

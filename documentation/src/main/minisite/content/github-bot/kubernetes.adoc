@@ -41,10 +41,10 @@ From the repository root:
 
 [source,bash]
 ----
-mvn spotless:apply -pl extensions/github-bot -Pimage-dispatcher compile jib:build \
+mvn spotless:apply -pl extensions/bot-parent/github-bot -Pimage-dispatcher compile jib:build \
   -Dgithub-bot.dispatcher.base-image=ossyupiik/java-docker@sha256:YOUR_REVIEWED_BASE_INDEX_DIGEST \
   -Dgithub-bot.dispatcher.image=YOUR_REGISTRY/yca-github-dispatcher:YOUR_IMMUTABLE_TAG
-mvn spotless:apply -pl extensions/github-bot -Pimage-agent compile jib:build \
+mvn spotless:apply -pl extensions/bot-parent/github-bot -Pimage-agent compile jib:build \
   -Dgithub-bot.agent.base-image=YOUR_REGISTRY/vetted-agent-toolchain@sha256:YOUR_TOOLCHAIN_BASE_DIGEST \
   -Dgithub-bot.agent.image=YOUR_REGISTRY/yca-github-agent:YOUR_IMMUTABLE_TAG
 ----
@@ -64,7 +64,7 @@ Ensure the image works with writable data only under its attempt directories and
 
 === Prepare the descriptor and volumes
 
-Copy `extensions/github-bot/deploy/kubernetes-poller.yaml` to a private deployment workspace and replace all `YOUR_*` placeholders.
+Copy `extensions/bot-parent/github-bot/deploy/kubernetes-poller.yaml` to a private deployment workspace and replace all `YOUR_*` placeholders.
 The descriptor includes a namespace, three service accounts, executor Role/RoleBinding, two PVCs, configuration and suspended poller/worker CronJobs.
 
 Choose an RWX-capable storage class for both claims; they are separate volumes, not two directories on the same claim.

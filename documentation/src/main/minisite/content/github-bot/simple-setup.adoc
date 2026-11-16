@@ -99,7 +99,7 @@ The native-image build is not needed to launch the JVM bot.
 ----
 mvn spotless:apply clean install -T1C
 mvn -pl documentation yupiik-tools:minisite@doc
-test -s extensions/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar
+test -s extensions/bot-parent/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar
 ----
 
 Build the agent with Jib and a trusted toolchain base for your project.
@@ -113,13 +113,13 @@ Strict mode does not require agent-side `gh` or GitHub credentials.
 ----
 TOOLCHAIN_BASE='registry.example.com/approved-toolchain@sha256:REPLACE_WITH_REAL_DIGEST'
 AGENT_TAG='yca-github-agent:release-v0'
-mvn -pl extensions/github-bot -Pimage-agent compile jib:dockerBuild \
+mvn -pl extensions/bot-parent/github-bot -Pimage-agent compile jib:dockerBuild \
   -Dgithub-bot.agent.base-image="$TOOLCHAIN_BASE" \
   -Dgithub-bot.agent.image="$AGENT_TAG"
 docker image inspect "$AGENT_TAG" --format '{{.Id}}'
 docker image save --output yca-github-agent.tar "$AGENT_TAG"
-sha256sum extensions/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar yca-github-agent.tar \
-  | sed 's#extensions/github-bot/target/##' > release.sha256
+sha256sum extensions/bot-parent/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar yca-github-agent.tar \
+  | sed 's#extensions/bot-parent/github-bot/target/##' > release.sha256
 ----
 
 Build for the target server architecture.
@@ -149,7 +149,7 @@ The staging directory is relative to that account's home; note its absolute serv
 ----
 SERVER='ADMIN@YOUR_SERVER'
 ssh "$SERVER" 'umask 077; mkdir -p "$HOME/yca-release"; chmod 700 "$HOME/yca-release"'
-scp extensions/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar \
+scp extensions/bot-parent/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar \
   yca-github-agent.tar release.sha256 "$SERVER:yca-release/"
 scp "$HOME/.yupiik/coding-agent/configuration.json" "$SERVER:yca-release/agent-configuration.json"
 ssh "$SERVER" 'chmod 600 "$HOME/yca-release/agent-configuration.json"'

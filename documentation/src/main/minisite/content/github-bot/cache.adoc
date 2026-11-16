@@ -566,14 +566,14 @@ From the repository root, run the default opt-in scenarios with:
 
 [source,bash]
 ----
-mvn -pl extensions/github-bot -am test -Dtest=CacheBenchmarkTest -Dsurefire.failIfNoSpecifiedTests=false -Dspotless.skip=true -Dyca.cache.benchmark=true
+mvn -pl extensions/bot-parent/github-bot -am test -Dtest=CacheBenchmarkTest -Dsurefire.failIfNoSpecifiedTests=false -Dspotless.skip=true -Dyca.cache.benchmark=true
 ----
 
 To isolate the 10 GiB scenario on a chosen persistent filesystem, first create a private writable temporary directory there, then use the project's test-JVM argument property rather than assuming a Maven-process `java.io.tmpdir` setting reaches the fork:
 
 [source,bash]
 ----
-mvn -pl extensions/github-bot -am test '-Dtest=CacheBenchmarkTest#largeBlobColdPublishWarmPrivateRestoreAndUnchangedPublish' -Dsurefire.failIfNoSpecifiedTests=false -Dspotless.skip=true -Dyca.cache.benchmark=true -Dyca.cache.benchmark.bytes=10737418240 -Dyca.test.jvmArgs=-Djava.io.tmpdir=/YOUR/PRIVATE/BENCHMARK-TMP
+mvn -pl extensions/bot-parent/github-bot -am test '-Dtest=CacheBenchmarkTest#largeBlobColdPublishWarmPrivateRestoreAndUnchangedPublish' -Dsurefire.failIfNoSpecifiedTests=false -Dspotless.skip=true -Dyca.cache.benchmark=true -Dyca.cache.benchmark.bytes=10737418240 -Dyca.test.jvmArgs=-Djava.io.tmpdir=/YOUR/PRIVATE/BENCHMARK-TMP
 ----
 
 `yca.cache.benchmark.files` and `yca.cache.benchmark.smallFileBytes` select the small-file workload; the test prints CSV measurements and checks available space before creating large payloads.

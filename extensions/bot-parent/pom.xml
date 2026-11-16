@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.1.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.1.0 http://maven.apache.org/xsd/maven-4.1.0.xsd">
+  <modelVersion>4.1.0</modelVersion>
+  <parent />
+  <artifactId>bot-parent</artifactId>
+  <packaging>pom</packaging>
+  <name>YCA :: Bots</name>
+  <properties>
+    <jib.version>3.5.2</jib.version>
+    <jib.arch>amd64</jib.arch>
+    <!-- Children bridge their existing architecture property to this shared Jib setting. -->
+    <bot.image.architecture>${jib.arch}</bot.image.architecture>
+  </properties>
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>com.google.cloud.tools</groupId>
+          <artifactId>jib-maven-plugin</artifactId>
+          <version>${jib.version}</version>
+          <configuration>
+            <from>
+              <platforms>
+                <platform>
+                  <os>linux</os>
+                  <architecture>${bot.image.architecture}</architecture>
+                </platform>
+              </platforms>
+            </from>
+            <container>
+              <mainClass>io.yupiik.fusion.framework.api.main.CliLauncher</mainClass>
+              <user>10001:10001</user>
+            </container>
+          </configuration>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+  <subprojects>
+    <subproject>bot-gateway</subproject>
+    <subproject>bot-runtime</subproject>
+    <subproject>github-bot</subproject>
+    <subproject>slack-bot</subproject>
+  </subprojects>
+</project>

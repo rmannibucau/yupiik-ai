@@ -23,6 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
@@ -30,6 +32,7 @@ import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -63,7 +66,7 @@ class ChatClientMidStreamTest {
         final var received = new CountDownLatch(1);
         final var sendHeaders = new CountDownLatch(1);
         final var cancelled = new AtomicBoolean();
-        final var server = HttpServer.create(new java.net.InetSocketAddress("localhost", 0), 0);
+        final var server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/", exchange -> {
             try (exchange) {
                 exchange.getRequestBody().readAllBytes();
@@ -85,7 +88,7 @@ class ChatClientMidStreamTest {
         server.start();
         try {
             final var cfg = configuration(server.getAddress().getPort());
-            try (final var http = new HttpClientProducer().httpClient(cfg);
+            try (final var http = new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null));
                     final var client =
                             new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http)) {
                 final var result = CompletableFuture.supplyAsync(() ->
@@ -118,9 +121,11 @@ class ChatClientMidStreamTest {
     void midStreamDisconnectSurfacesAsMidStreamFailure(final JsonMapper mapper) throws Exception {
         final var sse = String.join(
                 "\n",
-                "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}",
+                "data:"
+                        + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}",
                 "",
-                "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}",
+                "data:"
+                        + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}",
                 "",
                 "data: [DONE]",
                 "");
@@ -133,7 +138,7 @@ class ChatClientMidStreamTest {
 
             final var port = server.getLocalPort();
             final var cfg = configuration(port);
-            try (final var http = new HttpClientProducer().httpClient(cfg);
+            try (final var http = new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null));
                     final var client =
                             new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http)) {
                 final var deltas = new CopyOnWriteArrayList<LlmStreamEvent>();
@@ -197,7 +202,7 @@ class ChatClientMidStreamTest {
     }
 
     private CodingAgentConfiguration configuration(final int port) {
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
+        return TestConfigs.codingAgent(Map.ofEntries(
                 Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "1"),
                 Map.entry("yca.provider.providers.0.id", "default"),

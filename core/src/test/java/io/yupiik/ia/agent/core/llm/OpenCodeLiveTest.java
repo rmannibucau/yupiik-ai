@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -27,6 +28,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.*;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -71,7 +73,7 @@ class OpenCodeLiveTest {
                 new SystemPromptBuilder(cfg, null, null, null, null, providers, null, null, null).build()));
         messages.add(
                 Message.user("Call read for " + fixture + ". Then reply only with the file content. Do not reason."));
-        try (final var http = new HttpClientProducer().httpClient(cfg);
+        try (final var http = new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null));
                 final var client = new ChatClient(cfg, mapper, providers, Clock.systemUTC(), http)) {
             final var model = System.getProperty("yca.opencode.model", "big-pickle");
             assertTrue(client.models().ids().contains(model), "live catalog must advertise the selected model");

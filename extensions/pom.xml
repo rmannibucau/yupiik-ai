@@ -9,7 +9,7 @@
 
   <subprojects>
     <subproject>maven-repository-indexer-parent</subproject>
-    <subproject>github-bot</subproject>
+    <subproject>bot-parent</subproject>
     <subproject>nono-notifications</subproject>
   </subprojects>
 </project>

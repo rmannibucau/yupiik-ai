@@ -20,15 +20,19 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -77,7 +81,7 @@ class ChatClientInBandToolCallsTest {
                 exchange -> respond(
                         exchange, 200, "{\"data\":[{\"id\":\"test-model\",\"owned_by\":\"x\"}]}", "application/json"));
         server.start();
-        http = new HttpClientProducer().httpClient(configuration());
+        http = new HttpClientProducer().httpClient(configuration(), new NativeProviderConfiguration(null));
         client = new ChatClient(
                 configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC(), http);
     }
@@ -112,7 +116,7 @@ class ChatClientInBandToolCallsTest {
         entries.put("yca.llm.retriesBaseDelayMs", "1");
         entries.put("yca.llm.rateLimitRequestsPerMinute", "0");
         entries.put("yca.llm.maxConcurrent", "1");
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        return TestConfigs.codingAgent(entries);
     }
 
     private ChatCompletionRequest request() {
@@ -121,10 +125,7 @@ class ChatClientInBandToolCallsTest {
     }
 
     private static void respond(
-            final com.sun.net.httpserver.HttpExchange exchange,
-            final int status,
-            final String body,
-            final String contentType) {
+            final HttpExchange exchange, final int status, final String body, final String contentType) {
         try {
             exchange.getRequestBody().readAllBytes();
             final var bytes = body.getBytes(StandardCharsets.UTF_8);
@@ -134,7 +135,7 @@ class ChatClientInBandToolCallsTest {
                 out.write(bytes);
             }
         } catch (final IOException e) {
-            throw new java.io.UncheckedIOException(e);
+            throw new UncheckedIOException(e);
         }
     }
 
@@ -142,11 +143,21 @@ class ChatClientInBandToolCallsTest {
     void hoistsInBandMarkupFromStreamContent() throws Exception {
         chatResponse.set(String.join(
                         "\n",
-                        "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me read it.\\n\"},\"finish_reason\":null}]}",
+                        "data:"
+                                + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let"
+                                + " me read it.\\n"
+                                + "\"},\"finish_reason\":null}]}",
                         "",
-                        "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<\uFF5CDSML\uFF5Ctool_calls>\\n<\uFF5CDSML\uFF5Cinvoke name=read>\\n<\uFF5CDSML\uFF5Cparameter name=path string=true>src/App.java</\uFF5CDSML\uFF5Cparameter>\\n</\uFF5CDSML\uFF5Cinvoke>\\n</\uFF5CDSML\uFF5Ctool_calls>\"},\"finish_reason\":null}]}",
+                        "data:"
+                                + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<\uFF5CDSML\uFF5Ctool_calls>\\n"
+                                + "<\uFF5CDSML\uFF5Cinvoke name=read>\\n"
+                                + "<\uFF5CDSML\uFF5Cparameter name=path"
+                                + " string=true>src/App.java</\uFF5CDSML\uFF5Cparameter>\\n"
+                                + "</\uFF5CDSML\uFF5Cinvoke>\\n"
+                                + "</\uFF5CDSML\uFF5Ctool_calls>\"},\"finish_reason\":null}]}",
                         "",
-                        "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}",
+                        "data:"
+                                + " {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}",
                         "",
                         "data: [DONE]",
                         "")
@@ -164,10 +175,13 @@ class ChatClientInBandToolCallsTest {
     @Test
     void hoistsInBandMarkupFromNonStreamContent() throws Exception {
         chatResponse.set(
-                ("{\"id\":\"c1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Let me read it.\\n"
-                                + "<\uFF5CDSML\uFF5Ctool_calls>\\n<\uFF5CDSML\uFF5Cinvoke name=grep>\\n"
+                ("{\"id\":\"c1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Let"
+                                + " me read it.\\n"
+                                + "<\uFF5CDSML\uFF5Ctool_calls>\\n"
+                                + "<\uFF5CDSML\uFF5Cinvoke name=grep>\\n"
                                 + "<\uFF5CDSML\uFF5Cparameter name=pattern string=true>foo</\uFF5CDSML\uFF5Cparameter>\\n"
-                                + "</\uFF5CDSML\uFF5Cinvoke>\\n</\uFF5CDSML\uFF5Ctool_calls>\"},\"finish_reason\":\"stop\"}]}")
+                                + "</\uFF5CDSML\uFF5Cinvoke>\\n"
+                                + "</\uFF5CDSML\uFF5Ctool_calls>\"},\"finish_reason\":\"stop\"}]}")
                         .getBytes(StandardCharsets.UTF_8));
         final var result = client.chat(request());
         final var message = result.message();
@@ -181,8 +195,8 @@ class ChatClientInBandToolCallsTest {
     @Test
     void repairsNativeToolArgumentsAndHandlesNull() throws Exception {
         chatResponse.set(
-                ("{\"id\":\"c1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"tool_calls\":["
-                                + "{\"id\":\"call1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"} trailing\"}},"
+                ("{\"id\":\"c1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"}"
+                                + " trailing\"}},"
                                 + "{\"id\":\"call2\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":null}}]},\"finish_reason\":\"tool_calls\"}]}")
                         .getBytes(StandardCharsets.UTF_8));
         final var calls = client.chat(request()).message().toolCalls();
@@ -201,7 +215,8 @@ class ChatClientInBandToolCallsTest {
                 respond(
                         exchange,
                         400,
-                        "{\"message\":\"messages[1].tool_calls[0].function.arguments must be a valid JSON object string: trailing characters\"}",
+                        "{\"message\":\"messages[1].tool_calls[0].function.arguments must be a valid JSON"
+                                + " object string: trailing characters\"}",
                         "application/json");
             } else {
                 respond(

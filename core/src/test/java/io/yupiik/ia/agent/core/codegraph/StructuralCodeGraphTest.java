@@ -23,7 +23,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
@@ -140,7 +143,7 @@ class StructuralCodeGraphTest {
     private final List<ExtendedHttpClient> httpClients = new ArrayList<>();
 
     private ChatClient chatClient(final CodingAgentConfiguration config, final JsonMapper mapper) {
-        final var httpClient = new HttpClientProducer().httpClient(config);
+        final var httpClient = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null));
         httpClients.add(httpClient);
         final var client =
                 new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC(), httpClient);
@@ -207,20 +210,20 @@ class StructuralCodeGraphTest {
         final var project = Files.createDirectory(temp.resolve("project"));
         Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.writeString(project.resolve("Foo.java"), """
-                package demo;
-                public class Foo {
-                    public void a() {}
-                }
-                """);
+            package demo;
+            public class Foo {
+                public void a() {}
+            }
+            """);
 
         // a second, independent project the web may point another session at
         final var second = Files.createDirectory(temp.resolve("second"));
         Files.writeString(second.resolve("Baz.java"), """
-                package other;
-                public class Baz {
-                    public void b() {}
-                }
-                """);
+            package other;
+            public class Baz {
+                public void b() {}
+            }
+            """);
 
         final var config = config(project, Map.of());
         final var graph = newGraph(config, mapper);
@@ -256,11 +259,11 @@ class StructuralCodeGraphTest {
         final var work = Files.createDirectory(temp.resolve("work"));
         Files.writeString(work.resolve("pom.xml"), "<project/>");
         Files.writeString(work.resolve("Foo.java"), """
-                package work;
-                public class Foo {
-                    public void a() {}
-                }
-                """);
+            package work;
+            public class Foo {
+                public void a() {}
+            }
+            """);
 
         // first query builds the per-root index lazily
         final var idx1 = graph.queryIndex(work);
@@ -272,12 +275,12 @@ class StructuralCodeGraphTest {
         // not served from an ever-stale snapshot. Force a distinct mtime to be filesystem-agnostic.
         final var foo = work.resolve("Foo.java");
         Files.writeString(foo, """
-                package work;
-                public class Foo {
-                    public void a() {}
-                    public void baz() {}
-                }
-                """);
+            package work;
+            public class Foo {
+                public void a() {}
+                public void baz() {}
+            }
+            """);
         Files.setLastModifiedTime(foo, FileTime.fromMillis(System.currentTimeMillis() + 5000));
         final var idx2 = graph.queryIndex(work);
         assertNotNull(idx2.resolve("work.Foo.baz"), "edited symbol must be visible after refresh-on-access");
@@ -359,18 +362,18 @@ class StructuralCodeGraphTest {
         final var project = Files.createDirectory(temp.resolve("project"));
         Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.writeString(project.resolve("Foo.java"), """
-                package demo;
-                public class Foo {
-                    public int add(int a, int b) { return a + b; }
-                }
-                """);
+            package demo;
+            public class Foo {
+                public int add(int a, int b) { return a + b; }
+            }
+            """);
         Files.createDirectory(project.resolve("other"));
         Files.writeString(project.resolve("other/Bar.java"), """
-                package demo.sub;
-                public class Bar {
-                    public void go() { new demo.Foo().add(1, 2); }
-                }
-                """);
+            package demo.sub;
+            public class Bar {
+                public void go() { new demo.Foo().add(1, 2); }
+            }
+            """);
 
         final var config = config(project, Map.of());
 
@@ -426,12 +429,12 @@ class StructuralCodeGraphTest {
 
         // refresh: mutating a file removes its old symbols and adds new ones
         Files.writeString(project.resolve("Foo.java"), """
-                package demo;
-                public class Foo {
-                    public int add(int a, int b) { return a + b; }
-                    public int sub(int a, int b) { return a - b; }
-                }
-                """);
+            package demo;
+            public class Foo {
+                public int add(int a, int b) { return a + b; }
+                public int sub(int a, int b) { return a - b; }
+            }
+            """);
         graph.refreshFile(project.resolve("Foo.java"));
         final var after = graph.graph();
         assertTrue(
@@ -536,13 +539,15 @@ class StructuralCodeGraphTest {
         final var batchParser = new CapturingBatchParser();
         final var graph = newGraph(config, mapper, List.of(batchParser));
         graph.ensureReady();
-        // sanity: the batch-capable parser owns .java and produced the initial graph through its parseBatch
+        // sanity: the batch-capable parser owns .java and produced the initial graph through its
+        // parseBatch
         assertEquals(1, graph.graph().symbols().size(), "expected the initial graph to index Foo.java");
         assertTrue(
                 batchParser.batchInputs.contains(foo),
                 "the initial build should route Foo.java through the batch parser's parseBatch");
 
-        // write_file/edit_file/apply_patch on a non-Java file (pom.xml) must not reach the java batch parse
+        // write_file/edit_file/apply_patch on a non-Java file (pom.xml) must not reach the java batch
+        // parse
         graph.onBeforeTool(new BeforeToolExecutionEvent(
                 "write_file", Map.of("path", project.resolve("pom.xml").toString())));
         graph.onToolExecuted(new AfterToolExecutionEvent("write_file", true, "ok"));
@@ -591,11 +596,11 @@ class StructuralCodeGraphTest {
         Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.createDirectories(project.resolve("src/main/java/demo"));
         Files.writeString(project.resolve("src/main/java/demo/A.java"), """
-                package demo;
-                public class A {
-                    public void run() {}
-                }
-                """);
+            package demo;
+            public class A {
+                public void run() {}
+            }
+            """);
         // files under default-ignored dirs (pruned via SKIP_SUBTREE) must not be indexed
         Files.createDirectories(project.resolve(".yca/secret"));
         Files.writeString(
@@ -608,11 +613,11 @@ class StructuralCodeGraphTest {
         // gitignore negation re-includes a file NOT under a dir-pruned subtree
         Files.writeString(project.resolve(".gitignore"), "**/*.VEN.java\n!src/main/java/demo/VEN.java\n");
         Files.writeString(project.resolve("src/main/java/demo/VEN.java"), """
-                package demo;
-                public class VEN {
-                    public void run() {}
-                }
-                """);
+            package demo;
+            public class VEN {
+                public void run() {}
+            }
+            """);
 
         final var config = config(project, Map.of());
         final var graph = newGraph(config, mapper);
@@ -636,20 +641,20 @@ class StructuralCodeGraphTest {
         Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.createDirectories(project.resolve("src/main/java/demo"));
         Files.writeString(project.resolve("src/main/java/demo/A.java"), """
-                package demo;
-                public class A {
-                    public void run() {}
-                }
-                """);
+            package demo;
+            public class A {
+                public void run() {}
+            }
+            """);
         // a custom glob not covered by the defaults: config override adds "custom/**"
         Files.createDirectories(project.resolve("custom"));
         Files.writeString(project.resolve("custom/E.java"), "package demo;\npublic class E { public void run() {} }\n");
         Files.writeString(project.resolve("src/main/java/demo/F.java"), """
-                package demo;
-                public class F {
-                    public void run() {}
-                }
-                """);
+            package demo;
+            public class F {
+                public void run() {}
+            }
+            """);
 
         final var config = config(project, Map.of("yca.structuralCodeGraph.ignoreGlobs", "custom/**"));
 
@@ -681,7 +686,8 @@ class StructuralCodeGraphTest {
         final var rel = "Foo.java";
         final var doc = docRoot.resolve("Foo.md");
 
-        // writer emits the structural card (graft format: header + bullet per symbol, no frontmatter/sections)
+        // writer emits the structural card (graft format: header + bullet per symbol, no
+        // frontmatter/sections)
         assertTrue(Files.isRegularFile(doc));
         final var card = Files.readString(doc);
         assertTrue(card.startsWith("# Foo.java"), "expected source-path header, got:\n" + card);
@@ -717,9 +723,9 @@ class StructuralCodeGraphTest {
         final var project = Files.createDirectory(temp.resolve("proj-enum"));
         Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.writeString(project.resolve("Color.java"), """
-                package demo;
-                public enum Color { RED, GREEN, BLUE }
-                """);
+            package demo;
+            public enum Color { RED, GREEN, BLUE }
+            """);
 
         final var config = config(project, Map.of());
 
@@ -737,8 +743,9 @@ class StructuralCodeGraphTest {
         final var indexFile = project.resolve(".yca/generated/graph/index.bin");
         assertTrue(Files.isRegularFile(indexFile), "expected binary code graph index to be persisted");
 
-        // the enum-backed graph must round-trip through the binary index (no codec / graph.json involved)
-        final var idx = io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex.load(indexFile);
+        // the enum-backed graph must round-trip through the binary index (no codec / graph.json
+        // involved)
+        final var idx = CodeGraphIndex.load(indexFile);
         final var stored = idx.toStore();
         assertTrue(
                 stored.symbols().stream().anyMatch(s -> s.kind() == GraphModel.Kind.ENUM),
@@ -756,11 +763,11 @@ class StructuralCodeGraphTest {
         final var project = Files.createDirectory(temp.resolve("proj-deep"));
         Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.writeString(project.resolve("Foo.java"), """
-                package demo;
-                public class Foo {
-                    public int add(int a, int b) { return a + b; }
-                }
-                """);
+            package demo;
+            public class Foo {
+                public int add(int a, int b) { return a + b; }
+            }
+            """);
 
         final var config = config(
                 project,
@@ -812,7 +819,8 @@ class StructuralCodeGraphTest {
             assertEquals("does addition", symEntry.summary());
             assertEquals("careful with overflow", symEntry.crux());
 
-            // the enriched card carries the file one-liner and the per-symbol one-liner inline, no sections
+            // the enriched card carries the file one-liner and the per-symbol one-liner inline, no
+            // sections
             enricher.awaitIdle().get(5, TimeUnit.SECONDS);
             final var card = Files.readString(storeRoot.resolve("Foo.md"));
             assertTrue(card.startsWith("# Foo.java"), "expected source-path header");
@@ -908,7 +916,8 @@ class StructuralCodeGraphTest {
         final var built = newGraph(config, mapper);
         built.ensureReady();
 
-        // add a file offline: every known mtime still matches, only the #count gate can notice the addition
+        // add a file offline: every known mtime still matches, only the #count gate can notice the
+        // addition
         Files.writeString(project.resolve("Baz.java"), "package demo;\npublic class Baz { public void stop() {} }\n");
         final var reloaded = newGraph(config, mapper);
         reloaded.ensureReady();
@@ -936,7 +945,8 @@ class StructuralCodeGraphTest {
         built.ensureReady();
         built.flushPersist();
 
-        // touch without a content change: the gate must fail once, the hash-identical patch must refresh
+        // touch without a content change: the gate must fail once, the hash-identical patch must
+        // refresh
         // the sidecar mtimes (snapshot taken while hashing, never after the whole build) ...
         final var newMtime =
                 Files.getLastModifiedTime(project.resolve("Foo.java")).toMillis() + 60_000;
@@ -975,9 +985,8 @@ class StructuralCodeGraphTest {
             if (prompt.contains("Return ONLY concise JSON")) {
                 return new ChatResult(
                         Message.assistant(
-                                "{\"concepts\":[{\"name\":\"Parsing\",\"slug\":\"parsing\",\"type\":\"feature\","
-                                        + "\"summary\":\"Groups the demo file into a parsing node.\","
-                                        + "\"sources\":[\"docs/Foo.java.md\"],"
+                                "{\"concepts\":[{\"name\":\"Parsing\",\"slug\":\"parsing\",\"type\":\"feature\",\"summary\":\"Groups"
+                                        + " the demo file into a parsing node.\",\"sources\":[\"docs/Foo.java.md\"],"
                                         + "\"links\":[{\"to\":\"docs\",\"relation\":\"DEPENDS_ON\",\"description\":\"related\"}]}]}",
                                 null),
                         null);
@@ -1010,7 +1019,7 @@ class StructuralCodeGraphTest {
         // deletes it, and these tests do not need live external file watching
         map.put("yca.structuralCodeGraph.watch", "false");
         map.putAll(structuralOverrides);
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(map);
+        return TestConfigs.codingAgent(map);
     }
 
     private static ProviderManager providerManager(final CodingAgentConfiguration cfg, final JsonMapper mapper) {

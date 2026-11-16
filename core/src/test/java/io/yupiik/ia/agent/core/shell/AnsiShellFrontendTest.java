@@ -42,9 +42,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
 
+// Ordinary JUL writers do not acquire the stream resource locks. This class captures the
+// JVM-global streams, so even unrelated log output would corrupt its exact-output assertions.
+@Isolated("Captures System.out/System.err, including output from unrelated JUL writers")
 @ResourceLock(Resources.SYSTEM_OUT)
 @ResourceLock(Resources.SYSTEM_ERR)
 @ExtendWith(TestJsonMapper.class)

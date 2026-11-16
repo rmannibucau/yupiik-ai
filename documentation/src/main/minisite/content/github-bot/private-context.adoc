@@ -218,7 +218,7 @@ It requires Maven and the plugin's dependencies in the local Maven cache:
 
 [source,bash]
 ----
-mvn -pl extensions/github-bot \
+mvn -pl extensions/bot-parent/github-bot \
   -Dtest=AgentGitSourceTest,AgentGitBuildTest \
   -Dgithub.bot.git.maven="$(command -v mvn)" test
 ----

@@ -114,7 +114,7 @@ if uppercased, dot/hyphens replaced by underscores and leading hyphens/dots remo
             <preAction>
               <type>io.yupiik.fusion.documentation.DocumentationGenerator</type>
               <configuration>
-                <urls>${project.basedir}/../extensions/github-bot/target/classes/META-INF/fusion/configuration/documentation.json</urls>
+                <urls>${project.basedir}/../extensions/bot-parent/github-bot/target/classes/META-INF/fusion/configuration/documentation.json</urls>
                 <module>github-bot</module>
                 <includeEnvironmentNames>true</includeEnvironmentNames>
                 <formatter>definitionlist</formatter>

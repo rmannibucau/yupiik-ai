@@ -112,6 +112,7 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
                 final var primary = kept.getFirst();
                 final var defs = new LinkedHashMap<String, Object>();
                 final var properties = new LinkedHashMap<String, Object>();
+                final var peerProperties = new LinkedHashMap<String, Object>();
                 for (int i = 0; i < kept.size(); i++) {
                     final var root = kept.get(i);
                     final var name = defName(root.fqcn());
@@ -123,6 +124,12 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
                     if (!defs.containsKey(name)) {
                         defs.put(name, Map.of()); // reserve before recursing to keep discovery order and break cycles
                         defs.put(name, convert(mapper, schemas, docs, root.fqcn(), defs, root.prefix()));
+                    }
+                    if (!primary.prefix().isEmpty()
+                            && !root.prefix().equals(primary.prefix())
+                            && !root.prefix().startsWith(primary.prefix() + '.')) {
+                        insert(peerProperties, List.of(root.prefix().split("\\.")), Map.of("$ref", "#/$defs/" + name));
+                        continue;
                     }
                     final var segments = relativeSegments(primary.prefix(), root.prefix());
                     final var rootProperties = map(map(defs.get(name)).get("properties"));
@@ -158,6 +165,7 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
                     wrapper.put("additionalProperties", false);
                     insert(rootProperties, List.of(primary.prefix().split("\\.")), wrapper);
                 }
+                rootProperties.putAll(peerProperties);
                 rootProperties.put("$schema", Map.of("type", "string")); // editor hint key, tolerate it
                 schema.put("properties", rootProperties);
                 schema.put("additionalProperties", false);

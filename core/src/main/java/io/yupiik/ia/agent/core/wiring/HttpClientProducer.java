@@ -26,6 +26,8 @@ import io.yupiik.fusion.httpclient.core.listener.impl.SetUserAgent;
 import io.yupiik.fusion.httpclient.core.request.UnlockedHttpRequest;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.HttpClientCertificateConfiguration;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
+import io.yupiik.ia.agent.core.llm.UnixProviderHttpClient;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.Authenticator;
@@ -65,7 +67,9 @@ import javax.net.ssl.X509TrustManager;
 public class HttpClientProducer {
     @Bean
     @ApplicationScoped
-    public ExtendedHttpClient httpClient(final CodingAgentConfiguration configuration) {
+    public ExtendedHttpClient httpClient(
+            final CodingAgentConfiguration configuration,
+            final NativeProviderConfiguration nativeProviderConfiguration) {
         final var cfg = configuration.httpClient();
         if (cfg.disableTlsCheck()
                 && System.getProperty("jdk.internal.httpclient.disableHostnameVerification") == null) {
@@ -111,14 +115,15 @@ public class HttpClientProducer {
             listeners.add(new SetHeader(cfg.headers()));
         }
         listeners.add(
-                new SetUserAgent(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"));
+                new SetUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+                        + " Chrome/124.0.0.0 Safari/537.36"));
         if (cfg.debug()) {
             listeners.add(new CurlLoggerListener(
                     new CurlLoggerListener.Configuration(Logger.getLogger("yca.http")).setLogPayload(true)));
         }
         final var transport = new OpenCodeHttpClient(
-                builder.build(), hasCertificates(cfg.certificates()) ? certificateKeyStore(cfg.certificates()) : null);
+                UnixProviderHttpClient.fromConfiguration(builder.build(), nativeProviderConfiguration),
+                hasCertificates(cfg.certificates()) ? certificateKeyStore(cfg.certificates()) : null);
         return new ExtendedHttpClient(
                 new ExtendedHttpClientConfiguration().setDelegate(transport).setRequestListeners(listeners)) {
             @Override

@@ -22,11 +22,13 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
+import io.yupiik.ia.agent.core.configuration.NativeProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -62,9 +64,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -79,7 +83,8 @@ class BtwAnswererTest {
     /** A realistic DSML tool-call block as emitted by DeepSeek V4. */
     private static final String DSML_BLOCK = "<\uFF5CDSML\uFF5Ctool_calls>\n"
             + "<\uFF5CDSML\uFF5Cinvoke name=read>\n"
-            + "<\uFF5CDSML\uFF5Cparameter name=path string=true>src/App.java</\uFF5CDSML\uFF5Cparameter>\n"
+            + "<\uFF5CDSML\uFF5Cparameter name=path"
+            + " string=true>src/App.java</\uFF5CDSML\uFF5Cparameter>\n"
             + "</\uFF5CDSML\uFF5Cinvoke>\n"
             + "</\uFF5CDSML\uFF5Ctool_calls>";
 
@@ -142,7 +147,8 @@ class BtwAnswererTest {
     private BtwAnswerer answerer(final Map<String, String> extra) {
         final var configuration = TestConfigs.codingAgent(config(extra));
         final var providerManager = new ProviderManager(configuration, mapper);
-        final var httpClient = new HttpClientProducer().httpClient(configuration);
+        final var httpClient =
+                new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null));
         httpClients.add(httpClient);
         final var gates = new ProviderConcurrencyGates(configuration);
         gateRegistries.add(gates);
@@ -347,10 +353,7 @@ class BtwAnswererTest {
     }
 
     private static void respond(
-            final com.sun.net.httpserver.HttpExchange exchange,
-            final int status,
-            final String body,
-            final String contentType) {
+            final HttpExchange exchange, final int status, final String body, final String contentType) {
         try {
             final var bytes = body.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("content-type", contentType);
@@ -389,7 +392,7 @@ class BtwAnswererTest {
                             null,
                             null)));
             final var failure = assertThrows(
-                    java.util.concurrent.ExecutionException.class,
+                    ExecutionException.class,
                     () -> bounded.ask("what did I say?", "s1", usageTracker, () -> false, null)
                             .toCompletableFuture()
                             .get(5, TimeUnit.SECONDS));
@@ -422,8 +425,10 @@ class BtwAnswererTest {
         assertTrue(body.contains("\"model\":\"test-model\""), body);
         // the tiny default budget would starve reasoning: when not configured, it follows the provider
         assertFalse(body.contains("\"max_tokens\""), body);
-        // /btw is tool-less in behavior but keeps the session's tool schema in the request (never executed)
-        // so the provider prompt-cache prefix stays byte-identical with the main agent loop; the anti-reflex
+        // /btw is tool-less in behavior but keeps the session's tool schema in the request (never
+        // executed)
+        // so the provider prompt-cache prefix stays byte-identical with the main agent loop; the
+        // anti-reflex
         // "answer directly, never act" direction rides in the system prompt on this fallback path.
         assertFalse(body.contains("\"tools\":[]"), body);
         assertTrue(body.contains("\"read\""), body);
@@ -485,8 +490,8 @@ class BtwAnswererTest {
         assertEquals(expectedSystem, msgs.get(0).get("content"));
         // tools are declared (cache-consistent), never empty
         assertFalse(body.contains("\"tools\":[]"), body);
-        final var actualNames = new java.util.ArrayList<String>();
-        final var m = java.util.regex.Pattern.compile("\"name\":\"([a-z_]+)\"").matcher(body);
+        final var actualNames = new ArrayList<String>();
+        final var m = Pattern.compile("\"name\":\"([a-z_]+)\"").matcher(body);
         while (m.find()) {
             actualNames.add(m.group(1));
         }

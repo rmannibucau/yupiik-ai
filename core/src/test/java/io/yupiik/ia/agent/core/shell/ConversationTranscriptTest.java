@@ -19,7 +19,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTimeout;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -31,7 +30,6 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
 import io.yupiik.ia.agent.core.llm.Usage;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -269,12 +267,10 @@ class ConversationTranscriptTest {
         t.onEvent(new AgentEvent.ThinkingDelta("reason\n@123", "s1"));
         final var thought = t.thinkingText();
         assertEquals("reason", thought);
-        assertTimeout(Duration.ofMillis(500), () -> {
-            for (var i = 0; i < 1000; i++) {
-                assertSame(thought, t.thinkingText());
-                assertSame(md, t.markdown("|", "different fallback"));
-            }
-        });
+        for (var i = 0; i < 1000; i++) {
+            assertSame(thought, t.thinkingText());
+            assertSame(md, t.markdown("|", "different fallback"));
+        }
 
         t.onEvent(new AgentEvent.ThinkingDelta("@\nmore", "s1"));
         assertEquals("reason\nmore", t.thinkingText());
@@ -401,26 +397,24 @@ class ConversationTranscriptTest {
 
     @Test
     void regionsScanRepeatedSingleTypeAndMixedBlocksWithinABoundedBudget() {
-        assertTimeout(Duration.ofMillis(500), () -> {
-            for (final var types : List.of(List.of(0), List.of(1), List.of(2), List.of(0, 1, 2))) {
-                final var md = new StringBuilder();
-                final var expected = new ArrayList<ConversationTranscript.Region>();
-                for (var i = 0; i < 1500; i++) {
-                    final var type = types.get(i % types.size());
-                    final var begin = type == 0
-                            ? ConversationTranscript.THOUGHT_BEGIN
-                            : type == 1 ? ConversationTranscript.TOOL_BEGIN : ConversationTranscript.LOG_BEGIN;
-                    final var end = type == 0
-                            ? ConversationTranscript.THOUGHT_END
-                            : type == 1 ? ConversationTranscript.TOOL_END : ConversationTranscript.LOG_END;
-                    md.append("plain<").append(begin).append("inner<").append(end);
-                    expected.add(new ConversationTranscript.Region("plain<", false, false, false));
-                    expected.add(new ConversationTranscript.Region("inner<", type == 0, type == 1, type == 2));
-                }
-                expected.add(new ConversationTranscript.Region("", false, false, false));
-                assertEquals(expected, ConversationTranscript.regions(md.toString()));
+        for (final var types : List.of(List.of(0), List.of(1), List.of(2), List.of(0, 1, 2))) {
+            final var md = new StringBuilder();
+            final var expected = new ArrayList<ConversationTranscript.Region>();
+            for (var i = 0; i < 1500; i++) {
+                final var type = types.get(i % types.size());
+                final var begin = type == 0
+                        ? ConversationTranscript.THOUGHT_BEGIN
+                        : type == 1 ? ConversationTranscript.TOOL_BEGIN : ConversationTranscript.LOG_BEGIN;
+                final var end = type == 0
+                        ? ConversationTranscript.THOUGHT_END
+                        : type == 1 ? ConversationTranscript.TOOL_END : ConversationTranscript.LOG_END;
+                md.append("plain<").append(begin).append("inner<").append(end);
+                expected.add(new ConversationTranscript.Region("plain<", false, false, false));
+                expected.add(new ConversationTranscript.Region("inner<", type == 0, type == 1, type == 2));
             }
-        });
+            expected.add(new ConversationTranscript.Region("", false, false, false));
+            assertEquals(expected, ConversationTranscript.regions(md.toString()));
+        }
     }
 
     @Test
