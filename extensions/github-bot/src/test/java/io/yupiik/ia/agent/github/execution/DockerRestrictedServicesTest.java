@@ -41,7 +41,7 @@ class DockerRestrictedServicesTest {
         assertEquals(
                 0,
                 new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(3), "", null, config)
-                        .execute(attempt(), "yca-dependencies", "review", Map.of(), settings(), secrets()));
+                        .execute(attempt(), "yca-dependencies", "review", Map.of(), Map.of(), settings(), secrets()));
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertEquals(
                 2, calls.stream().filter(c -> c.startsWith("network create ")).count());
@@ -166,7 +166,7 @@ class DockerRestrictedServicesTest {
                                     "",
                                     null,
                                     defaultConfiguration())
-                            .execute(attempt(), "yca-partial", "review", Map.of(), settings, secrets()));
+                            .execute(attempt(), "yca-partial", "review", Map.of(), Map.of(), settings, secrets()));
             final var calls = Files.readAllLines(Path.of(executable + ".calls"));
             assertFalse(calls.stream().anyMatch(c -> c.startsWith("run ")));
             assertTrue(calls.indexOf("network rm yca-partial-external")
@@ -299,6 +299,7 @@ class DockerRestrictedServicesTest {
                         "yca-services-test",
                         "review",
                         Map.of("YCA_CONTEXT_TOKEN", "ephemeral-agent-token"),
+                        Map.of(),
                         settings,
                         secrets()));
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
@@ -395,13 +396,15 @@ class DockerRestrictedServicesTest {
         final var legacy = new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(1), "", null);
         assertThrows(
                 IllegalArgumentException.class,
-                () -> legacy.execute(home, "yca-mode", "review", Map.of(), home.resolve("settings"), secrets()));
+                () -> legacy.execute(
+                        home, "yca-mode", "review", Map.of(), Map.of(), home.resolve("settings"), secrets()));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> legacy.execute(home, "yca-mode", "review", Map.of(), null, secrets()));
+                () -> legacy.execute(home, "yca-mode", "review", Map.of(), Map.of(), null, secrets()));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> backend(executable, Duration.ofSeconds(1)).execute(home, "yca-mode", "review", Map.of()));
+                () -> backend(executable, Duration.ofSeconds(1))
+                        .execute(home, "yca-mode", "review", Map.of(), Map.of()));
         assertFalse(Files.exists(Path.of(executable + ".calls")));
     }
 
@@ -469,7 +472,14 @@ class DockerRestrictedServicesTest {
                     () -> assertThrows(
                             IllegalStateException.class,
                             () -> backend(executable, Duration.ofMillis(300))
-                                    .execute(attempt, "yca-timeout", "review", Map.of(), settings, secrets())));
+                                    .execute(
+                                            attempt,
+                                            "yca-timeout",
+                                            "review",
+                                            Map.of(),
+                                            Map.of(),
+                                            settings,
+                                            secrets())));
             final var calls = Files.readAllLines(Path.of(executable + ".calls"));
             assertTrue(calls.contains("kill yca-timeout"));
             if (killFails) {
@@ -521,7 +531,7 @@ class DockerRestrictedServicesTest {
             assertThrows(
                     IllegalStateException.class,
                     () -> backend(executable, Duration.ofSeconds(2))
-                            .execute(attempt, "yca-partial", "review", Map.of(), settings, secrets()));
+                            .execute(attempt, "yca-partial", "review", Map.of(), Map.of(), settings, secrets()));
             final var calls = Files.readString(Path.of(executable + ".calls"));
             assertFalse(calls.contains("run --rm"));
             assertTrue(calls.contains("network rm yca-partial-services-net"));
@@ -561,7 +571,14 @@ class DockerRestrictedServicesTest {
                     () -> assertThrows(
                             IllegalStateException.class,
                             () -> backend(executable, Duration.ofSeconds(1))
-                                    .execute(attempt(), "yca-notready", "review", Map.of(), settings, secrets())));
+                                    .execute(
+                                            attempt(),
+                                            "yca-notready",
+                                            "review",
+                                            Map.of(),
+                                            Map.of(),
+                                            settings,
+                                            secrets())));
             final var calls = Files.readAllLines(Path.of(executable + ".calls"));
             assertTrue(calls.stream().anyMatch(c -> c.startsWith("exec --user ")));
             assertFalse(calls.stream().anyMatch(c -> c.startsWith("run ")));
@@ -573,7 +590,7 @@ class DockerRestrictedServicesTest {
         assertEquals(
                 0,
                 backend(executable, Duration.ofSeconds(3))
-                        .execute(attempt(), "yca-retry", "review", Map.of(), settings, secrets()));
+                        .execute(attempt(), "yca-retry", "review", Map.of(), Map.of(), settings, secrets()));
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertEquals(2, calls.stream().filter(c -> c.startsWith("exec --user ")).count());
     }
@@ -622,7 +639,7 @@ class DockerRestrictedServicesTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> backend(executable, Duration.ofSeconds(1))
-                        .execute(attempt, "yca-mount", "review", Map.of(), settings, secrets()));
+                        .execute(attempt, "yca-mount", "review", Map.of(), Map.of(), settings, secrets()));
         assertFalse(Files.exists(Path.of(executable + ".calls")));
     }
 

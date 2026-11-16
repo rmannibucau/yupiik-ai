@@ -14,6 +14,9 @@ The dispatcher and its state directory are trusted.
 Repository files, comments, issue bodies, model output and executor result files are untrusted.
 Prompt instructions are not a security boundary.
 
+See xref:cache.adoc[Dependency cache] before enabling reuse: `READ_WRITE` requires fully trusted source/build inputs, while `RESTORE_ONLY` still requires authorization to disclose cached private bytes.
+Bot-invocation authorization is not cache-writer trust; never mount the host dependency store into an agent.
+
 Do not pass the host GitHub token, queue files, Docker socket or Kubernetes service account token into agent execution.
 The Docker client process receives only a small environment allowlist.
 

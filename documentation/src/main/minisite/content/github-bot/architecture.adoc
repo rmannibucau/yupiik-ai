@@ -42,6 +42,9 @@ The optional credentialed-agent workflow has a different trust boundary and must
 
 See xref:security.adoc[security and recovery] and xref:egress.adoc[egress limitations] before deploying.
 
+The optional xref:cache.adoc[dependency cache] is worker-only filesystem storage: immutable blobs/manifests and a path-compressed radix root restore private attempt copies, never a host-cache agent mount or HTTP endpoint.
+Its page defines whole-entry baseline conflicts, shared coordinator slots, bounded maintenance and I/O costs separately from the authorization and source-clone caches.
+
 == Polling sequence
 
 [mermaid]

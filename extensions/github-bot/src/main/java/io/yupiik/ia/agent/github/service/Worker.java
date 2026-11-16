@@ -36,6 +36,8 @@ import io.yupiik.ia.agent.github.execution.DockerExecutionBackend;
 import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend;
 import io.yupiik.ia.agent.github.execution.NonoExecutionBackend;
 import io.yupiik.ia.agent.github.execution.RepositoryCache;
+import io.yupiik.ia.agent.github.execution.cache.DependencyCache;
+import io.yupiik.ia.agent.github.execution.cache.DependencyCacheProvisioning;
 import io.yupiik.ia.agent.github.model.AgentResult;
 import io.yupiik.ia.agent.github.model.KubeconfigDocument;
 import io.yupiik.ia.agent.github.model.TaskDocument;
@@ -58,6 +60,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -65,7 +68,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
 /**
@@ -76,6 +82,7 @@ import java.util.regex.Pattern;
  */
 @ApplicationScoped
 public class Worker {
+    private static final Logger LOGGER = Logger.getLogger(Worker.class.getName());
     private static final Pattern PULL_NUMBER = Pattern.compile("[0-9]+");
     private static final Pattern TASK_ID = Pattern.compile("[a-zA-Z0-9-]+");
     private static final Pattern FORK_OWNER = Pattern.compile("[A-Za-z0-9-]+");
@@ -509,6 +516,11 @@ public class Worker {
         Path directory = null;
         BrokerAttempt brokerContext = null;
         AttemptServices privateServices = null;
+        Path privateServicesDirectory = null;
+        DependencyCache dependencyCache = null;
+        DependencyCache.Baseline cacheBaseline = null;
+        String cacheIdentity = null;
+        Map<String, String> toolEnvironment = Map.of();
         var stage = "preparation";
         Integer exitCode = null;
         final int attempt = task.attempts() + 1;
@@ -665,16 +677,7 @@ public class Worker {
                                         .normalize()
                                 : null);
                 if (restricted) {
-                    privateServices = new AttemptServices(
-                            directory.resolve("configuration.json"),
-                            Path.of((String) binding.get("path")),
-                            json,
-                            execution.docker().services(),
-                            brokerContext.privateEndpoint(),
-                            brokerContext.endpoint(),
-                            credentials,
-                            System.getenv(),
-                            Duration.ofSeconds(execution.timeoutSeconds()));
+                    privateServicesDirectory = Path.of((String) binding.get("path"));
                 }
             }
             if (options.source().mode() == WorkerOptions.SourceMode.git) {
@@ -699,6 +702,45 @@ public class Worker {
                 } else {
                     verifyFork(String.valueOf(task.repository()), options);
                 }
+            }
+            stage = "dependency-cache";
+            if (options.dependencyCache() != null && options.dependencyCache().enabled()) {
+                validateDependencyCacheRoot(Path.of(options.dependencyCache().root()), directory, options.cacheRoot());
+                // Invalid provisioning is a configuration/safety failure, not a cache miss.
+                // Restore first: provisioning files must not be included in a restored entry.
+                try {
+                    final var repository = TaskStore.map(github.get("/repos/" + task.repository()));
+                    final var repositoryId = String.valueOf(repository.get("id"));
+                    if (!repositoryId.matches("[1-9][0-9]*")) {
+                        throw new IOException("Dependency cache requires an immutable repository identity");
+                    }
+                    cacheIdentity = conf.api() + "#" + repositoryId;
+                    dependencyCache = new DependencyCache(options.dependencyCache(), clock);
+                    dependencyCache.maintain(64);
+                    cacheBaseline = dependencyCache.restore(cacheIdentity, directory.resolve("storage"));
+                } catch (final IOException | RuntimeException cacheFailure) {
+                    dependencyCache = null;
+                    cacheBaseline = null;
+                    LOGGER.warning("Dependency cache unavailable; continuing without cache publication");
+                }
+                toolEnvironment = DependencyCacheProvisioning.provision(
+                        options.dependencyCache(),
+                        directory,
+                        execution.backend() != ExecutorConfiguration.Backend.NONO);
+            }
+            if (privateServicesDirectory != null) {
+                // Launcher-owned proxy settings must win over generated tool configuration.
+                // MAVEN_OPTS can still select the private dependency cache repository.
+                privateServices = new AttemptServices(
+                        directory.resolve("configuration.json"),
+                        privateServicesDirectory,
+                        json,
+                        execution.docker().services(),
+                        brokerContext.privateEndpoint(),
+                        brokerContext.endpoint(),
+                        credentials,
+                        System.getenv(),
+                        Duration.ofSeconds(execution.timeoutSeconds()));
             }
             stage = "launch-preparation";
             final var attemptPath = directory.toString();
@@ -742,18 +784,20 @@ public class Worker {
                 exit = switch (execution.backend()) {
                     case DOCKER ->
                         services == null
-                                ? backend.execute(directory, runtime, prompt, credentials)
+                                ? backend.execute(directory, runtime, prompt, credentials, toolEnvironment)
                                 : backend.execute(
                                         directory,
                                         runtime,
                                         prompt,
                                         credentials,
+                                        toolEnvironment,
                                         services.settings(),
                                         services.credentials());
-                    case NONO -> nono.execute(directory, runtime, prompt, credentials);
+                    case NONO -> nono.execute(directory, runtime, prompt, credentials, toolEnvironment);
                     case KUBERNETES -> {
                         try (final var client = kubernetesClient()) {
-                            yield kubernetesBackend(client).execute(directory, runtime, prompt, credentials);
+                            yield kubernetesBackend(client)
+                                    .execute(directory, runtime, prompt, credentials, toolEnvironment);
                         }
                     }
                 };
@@ -766,7 +810,24 @@ public class Worker {
             stage = "runtime-stop";
             stopRuntime(store.transaction(state -> state.task(id).document()));
             stage = "result-validation";
-            return readResult(task);
+            final var result = readResult(task);
+            if (dependencyCache != null
+                    && cacheBaseline != null
+                    && (result.failure() == null || result.failure().isBlank())) {
+                // execute/stopRuntime have established quiescence. Keep attempt storage until
+                // admitted publications settle; never let a cache failure retry a successful task.
+                try {
+                    final var publication = publishDependencyCache(
+                            dependencyCache, cacheIdentity, directory.resolve("storage"), cacheBaseline, options);
+                    LOGGER.info("Dependency cache: published=" + publication.published()
+                            + ", unchanged=" + publication.unchanged() + ", conflicted=" + publication.conflicted()
+                            + ", timedOut=" + publication.timedOut());
+                    dependencyCache.maintain(64);
+                } catch (final IOException | RuntimeException cacheFailure) {
+                    LOGGER.warning("Dependency cache publication failed; retaining the task result");
+                }
+            }
+            return result;
         } catch (final IOException | RuntimeException e) {
             // Capture before either provisioning cleanup or the outer stop/retry/publication path.
             // Early failures have no durable attempt directory or runtime yet.
@@ -802,6 +863,59 @@ public class Worker {
                 brokerContext.close();
             }
         }
+    }
+
+    private DependencyCache.Publication publishDependencyCache(
+            final DependencyCache cache,
+            final String identity,
+            final Path storage,
+            final DependencyCache.Baseline baseline,
+            final WorkerOptions options)
+            throws IOException {
+        final var settled = new CountDownLatch(1);
+        final var policy = options.dependencyCache();
+        final var shutdown = Thread.ofPlatform().name("github-cache-drain").unstarted(() -> {
+            try {
+                // Protect admitted work against ordinary JVM shutdown, but never claim that
+                // Java can interrupt a blocked filesystem call or survive SIGKILL.
+                settled.await(
+                        (long) policy.gracefulTimeoutSeconds() + policy.limits().operationTimeoutSeconds() + 10,
+                        TimeUnit.SECONDS);
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        Runtime.getRuntime().addShutdownHook(shutdown);
+        try {
+            return cache.publish(identity, storage, baseline);
+        } finally {
+            settled.countDown();
+            try {
+                Runtime.getRuntime().removeShutdownHook(shutdown);
+            } catch (final IllegalStateException shutdownInProgress) {
+                // The hook observes the settled latch; attempt cleanup can now proceed.
+            }
+        }
+    }
+
+    private void validateDependencyCacheRoot(final Path configured, final Path directory, final String sourceCache) {
+        final var protectedRoots = new ArrayList<Path>();
+        protectedRoots.add(Path.of(conf.home()));
+        protectedRoots.add(directory);
+        if (!sourceCache.isBlank()) {
+            protectedRoots.add(Path.of(sourceCache));
+        }
+        if (attemptRoot != null) {
+            protectedRoots.add(attemptRoot);
+        }
+        if (contexts != null && !contexts.storageRoot().isBlank()) {
+            protectedRoots.add(Path.of(contexts.storageRoot()));
+        }
+        if (execution.backend() == ExecutorConfiguration.Backend.NONO) {
+            // Nono's stateRoot constructor argument is conf.home(), already excluded above.
+            protectedRoots.add(Path.of(execution.nono().runtimeRoot()));
+        }
+        DependencyCacheProvisioning.validatePrivateRoot(configured, protectedRoots);
     }
 
     private AgentResult readResult(final TaskDocument task) throws IOException {

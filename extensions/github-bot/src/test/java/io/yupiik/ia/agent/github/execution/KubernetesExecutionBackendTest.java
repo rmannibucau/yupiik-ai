@@ -27,6 +27,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -50,8 +51,59 @@ class KubernetesExecutionBackendTest {
     Path home;
 
     @Test
+    void rejectsProtectedAndNullToolEnvironmentBeforeClusterRequests() throws Exception {
+        final var attempt = attempt();
+        try (final var cluster = new Cluster();
+                final var json = json();
+                final var client = cluster.client()) {
+            final var backend = backend(json, client);
+            for (final var key : List.of(
+                    "HOME",
+                    "PATH",
+                    "GH_CONFIG_DIR",
+                    "TMPDIR",
+                    "GH_TOKEN",
+                    "GITHUB_TOKEN",
+                    "GITHUB_BOT_FORK_TOKEN",
+                    "GITHUB_SOURCE_TOKEN",
+                    "YCA_CONTEXT_TOKEN",
+                    "YCA_CONTEXT_GIT_TOKEN",
+                    "YCA_BROKER_URL",
+                    "YCA_BROKER_TOKEN",
+                    "JAVA_TOOL_OPTIONS",
+                    "JDK_JAVA_OPTIONS",
+                    "_JAVA_OPTIONS",
+                    "DOCKER_HOST",
+                    "DOCKER_CONFIG",
+                    "LD_PRELOAD",
+                    "LD_LIBRARY_PATH")) {
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> backend.execute(attempt, "yca-task", "review", Map.of(), Map.of(key, "must-not-forward")),
+                        key);
+            }
+            final var environment = new HashMap<String, String>();
+            environment.put("MAVEN_OPTS", null);
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> backend.execute(attempt, "yca-task", "review", Map.of(), environment));
+            assertTrue(cluster.calls.isEmpty());
+            assertFalse(Files.exists(attempt.resolve("execution.log")));
+        }
+    }
+
+    @Test
     void createsHardenedJobAndSecretOverAuthenticatedHttp() throws Exception {
         final var attempt = attempt();
+        final var toolEnvironment = Map.of(
+                "MAVEN_OPTS", "-Dmaven.repo.local=/attempt/storage/cache/maven -Dliteral=$(never)",
+                "npm_config_cache", "/attempt/storage/cache/npm",
+                "NPM_CONFIG_USERCONFIG", "/attempt/storage/cache/npmrc",
+                "GRADLE_USER_HOME", "/attempt/storage/cache/gradle",
+                "PIP_CACHE_DIR", "/attempt/storage/cache/pip",
+                "GOMODCACHE", "/attempt/storage/cache/go",
+                "CARGO_HOME", "/attempt/storage/cache/cargo",
+                "NUGET_PACKAGES", "/attempt/storage/cache/nuget");
         try (final var cluster = new Cluster();
                 final var json = json();
                 final var client = cluster.client()) {
@@ -67,7 +119,8 @@ class KubernetesExecutionBackendTest {
                                             "GITHUB_BOT_FORK_TOKEN", "fork-secret",
                                             "GITHUB_SOURCE_TOKEN", "source-secret",
                                             "YCA_CONTEXT_TOKEN", "context-secret",
-                                            "YCA_CONTEXT_GIT_TOKEN", "context-git-secret")));
+                                            "YCA_CONTEXT_GIT_TOKEN", "context-git-secret"),
+                                    toolEnvironment));
             final var job = map(json.fromString(Object.class, cluster.createdJob));
             final var spec = map(job.get("spec"));
             assertEquals(0, ((Number) spec.get("backoffLimit")).intValue());
@@ -78,6 +131,16 @@ class KubernetesExecutionBackendTest {
             assertEquals(false, pod.get("enableServiceLinks"));
             assertEquals("Never", pod.get("restartPolicy"));
             final var agent = map(((List<?>) pod.get("containers")).getFirst());
+            toolEnvironment.forEach((key, value) -> {
+                final var variables = ((List<?>) agent.get("env"))
+                        .stream()
+                                .map(KubernetesExecutionBackendTest::map)
+                                .filter(entry -> key.equals(entry.get("name")))
+                                .toList();
+                assertEquals(1, variables.size());
+                assertEquals(value, variables.getFirst().get("value"));
+                assertNull(variables.getFirst().get("valueFrom"));
+            });
             final var security = map(agent.get("securityContext"));
             assertEquals(true, security.get("runAsNonRoot"));
             assertEquals(true, security.get("readOnlyRootFilesystem"));
@@ -162,7 +225,7 @@ class KubernetesExecutionBackendTest {
             cluster.secret = "existing";
             assertThrows(
                     IllegalStateException.class,
-                    () -> backend(json, client).execute(attempt, "yca-task", "review", Map.of()));
+                    () -> backend(json, client).execute(attempt, "yca-task", "review", Map.of(), Map.of()));
             assertTrue(cluster.calls.stream().noneMatch(c -> c.startsWith("POST ")));
             cluster.job = "{}";
             cluster.retainJob = true;
@@ -182,7 +245,7 @@ class KubernetesExecutionBackendTest {
             cluster.failPost = true;
             final var failure = assertThrows(
                     IllegalStateException.class,
-                    () -> backend(json, client).execute(attempt, "yca-task", "review", Map.of()));
+                    () -> backend(json, client).execute(attempt, "yca-task", "review", Map.of(), Map.of()));
             assertFalse(failure.toString().contains("response-secret"));
             assertNull(failure.getCause());
             assertEquals(
@@ -267,7 +330,9 @@ class KubernetesExecutionBackendTest {
                 final var client = cluster.client()) {
             cluster.logOutput = "x".repeat(8 * 1024 * 1024);
             assertEquals(
-                    7, backend(json, client, Duration.ofSeconds(5)).execute(attempt, "yca-task", "review", Map.of()));
+                    7,
+                    backend(json, client, Duration.ofSeconds(5))
+                            .execute(attempt, "yca-task", "review", Map.of(), Map.of()));
             assertEquals(cluster.logOutput, Files.readString(attempt.resolve("execution.log")));
             assertTrue(cluster.secretDeleted);
         }
@@ -353,17 +418,22 @@ class KubernetesExecutionBackendTest {
                 final var json = json();
                 final var client = cluster.client()) {
             final var backend = backend(json, client);
-            assertThrows(IllegalArgumentException.class, () -> backend.execute(home, "yca-task", "review", Map.of()));
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> backend.execute(attempt, "yca-task", "review", Map.of("AWS_SECRET", "secret")));
+                    () -> backend.execute(home, "yca-task", "review", Map.of(), Map.of()));
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> backend.execute(attempt, "yca-task", "review", Map.of("AWS_SECRET", "secret"), Map.of()));
             assertThrows(IllegalArgumentException.class, () -> backend.stop("--all"));
             cluster.job = "{}";
-            assertThrows(IllegalStateException.class, () -> backend.execute(attempt, "yca-task", "review", Map.of()));
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> backend.execute(attempt, "yca-task", "review", Map.of(), Map.of()));
             Files.delete(attempt.resolve("configuration.json"));
             Files.createSymbolicLink(attempt.resolve("configuration.json"), home.resolve("elsewhere"));
             assertThrows(
-                    IllegalArgumentException.class, () -> backend.execute(attempt, "yca-task", "review", Map.of()));
+                    IllegalArgumentException.class,
+                    () -> backend.execute(attempt, "yca-task", "review", Map.of(), Map.of()));
             assertTrue(cluster.calls.stream().noneMatch(c -> c.startsWith("POST ")));
         }
     }

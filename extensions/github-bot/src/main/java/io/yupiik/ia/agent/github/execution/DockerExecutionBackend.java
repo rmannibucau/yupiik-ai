@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.github.execution;
 
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.github.execution.cache.DependencyCacheProvisioning;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -173,8 +174,12 @@ public final class DockerExecutionBackend {
     }
 
     public int execute(
-            final Path directory, final String runtimeId, final String prompt, final Map<String, String> credentials) {
-        return execute(directory, runtimeId, prompt, credentials, null, Map.of());
+            final Path directory,
+            final String runtimeId,
+            final String prompt,
+            final Map<String, String> credentials,
+            final Map<String, String> toolEnvironment) {
+        return execute(directory, runtimeId, prompt, credentials, toolEnvironment, null, Map.of());
     }
 
     public int execute(
@@ -182,8 +187,10 @@ public final class DockerExecutionBackend {
             final String runtimeId,
             final String prompt,
             final Map<String, String> credentials,
+            final Map<String, String> toolEnvironment,
             final Path serviceSettings,
             final Map<String, String> gatewaySecrets) {
+        DependencyCacheProvisioning.validateEnvironment(toolEnvironment);
         if (services == null && (serviceSettings != null || gatewaySecrets != null && !gatewaySecrets.isEmpty())) {
             throw new IllegalArgumentException("Services bundle supplied without restricted services mode");
         }
@@ -271,6 +278,7 @@ public final class DockerExecutionBackend {
             for (final var key : credentials.keySet()) {
                 command.addAll(List.of("--env", key));
             }
+            toolEnvironment.forEach((key, value) -> command.addAll(List.of("--env", key + "=" + value)));
             command.addAll(List.of(
                     image,
                     "run",

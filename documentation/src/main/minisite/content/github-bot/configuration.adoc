@@ -38,6 +38,9 @@ Use the generated metadata below for supported options and defaults.
 
 See the xref:index.adoc#cli-commands[command directory] for command-line options and the xref:../configuration.adoc[shared YCA configuration reference] for agent settings.
 
+For `worker.dependencyCache` JSON, explicit presets, trust modes and the finite `github bot cache maintain` command, see xref:cache.adoc[Dependency cache].
+That guide complements, rather than replaces, the generated option metadata.
+
 == Bot configuration reference
 
 Trusted agent configuration retains `provider`, `model`, `llm`, `compaction`, `pruning`, `compression` and `todos` for both flat and `yca`-wrapped JSON.

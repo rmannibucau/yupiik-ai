@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.github.execution;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.github.execution.cache.DependencyCacheProvisioning;
 import io.yupiik.ia.agent.github.model.AgentConfigurationDocument;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import java.io.ByteArrayOutputStream;
@@ -95,7 +96,12 @@ public final class NonoExecutionBackend {
     }
 
     public int execute(
-            final Path directory, final String runtimeId, final String prompt, final Map<String, String> credentials) {
+            final Path directory,
+            final String runtimeId,
+            final String prompt,
+            final Map<String, String> credentials,
+            final Map<String, String> toolEnvironment) {
+        DependencyCacheProvisioning.validateEnvironment(toolEnvironment);
         validateRuntimeIdentity(runtimeId);
         if (!Set.of(
                         "GH_TOKEN",
@@ -149,13 +155,14 @@ public final class NonoExecutionBackend {
                             TaskStore.map(relocate(document.completionSettings(), attempt)))),
                     StandardOpenOption.CREATE_NEW);
             final var profile = state.resolve("profile.json");
-            final var env = Map.of(
+            final var env = new LinkedHashMap<>(Map.of(
                     "HOME",
                     attempt.resolve("storage").toString(),
                     "GH_CONFIG_DIR",
                     attempt.resolve("storage/gh").toString(),
                     "TMPDIR",
-                    attempt.resolve("storage/tmp").toString());
+                    attempt.resolve("storage/tmp").toString()));
+            env.putAll(toolEnvironment);
             Files.createDirectory(attempt.resolve("storage/tmp"));
             final var allowed = new ArrayList<>(List.of("PATH"));
             allowed.addAll(credentials.keySet());

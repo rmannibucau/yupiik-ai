@@ -84,6 +84,9 @@ Keep the two storage roles distinct:
 Agents mount only their `configuration.json`, `storage`, `workspace` and `output` subpaths at `/attempt`, plus an empty `/tmp`.
 Never mount `yca-state`, the dispatcher kubeconfig, provider source Secret or the entire attempts volume into an agent.
 
+For optional xref:cache.adoc[dependency caching and a maintenance CronJob], add a separate private cache PVC only to trusted worker/maintenance Pods, never agent Jobs.
+Validate UID 10001 access, cross-node locks, hard links and atomic rename on its CSI filesystem; the cache guide keeps the canonical policy and finite-slice scheduling example.
+
 == Provision identity and secrets
 
 Apply the edited descriptor while both CronJobs remain suspended:

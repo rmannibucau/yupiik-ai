@@ -37,12 +37,27 @@ class MinisiteContentTest {
         for (final var command : List.of("cli", "run", "code-graph-index", "completion-bash", "tui", "web")) {
             assertTrue(cli.contains("xref:cli/" + command + ".adoc["), command);
         }
-        for (final var command :
-                List.of("poll", "list", "show", "create", "worker", "retry", "delete", "purge", "cleanup")) {
+        for (final var command : List.of(
+                "poll", "list", "show", "create", "worker", "retry", "delete", "purge", "cleanup", "cache-maintain")) {
             assertTrue(bot.contains("xref:../cli/github-bot-" + command + ".adoc["), command);
         }
         assertTrue(Files.readString(content.resolve("github-bot/configuration.adoc"))
                 .contains("xref:index.adoc#cli-commands["));
+    }
+
+    @Test
+    void dependencyCacheIsAChildPageLinkedFromTheCanonicalBotGuides() throws Exception {
+        final var cache = Files.readString(content.resolve("github-bot/cache.adoc"));
+        assertTrue(cache.startsWith("= Dependency cache\n"));
+        assertTrue(cache.contains("Home[../index.html]"));
+        assertTrue(cache.contains("GitHub bot[index.html]"));
+        for (final var page :
+                List.of("index", "configuration", "architecture", "security", "installation", "kubernetes")) {
+            assertTrue(
+                    Files.readString(content.resolve("github-bot/" + page + ".adoc"))
+                            .contains("xref:cache.adoc["),
+                    page);
+        }
     }
 
     @Test

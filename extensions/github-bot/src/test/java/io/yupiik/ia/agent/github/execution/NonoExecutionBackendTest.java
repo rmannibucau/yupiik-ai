@@ -25,6 +25,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -38,6 +39,48 @@ import org.junit.jupiter.api.io.TempDir;
 class NonoExecutionBackendTest {
     @TempDir
     Path home;
+
+    @Test
+    void rejectsProtectedAndNullToolEnvironmentBeforeStagingOrLaunch() throws Exception {
+        final var attempt = attempt();
+        final var executable = script("/usr/bin/touch \"$0.called\"\n");
+        try (final var json = json()) {
+            final var backend = backend(json, executable, Duration.ofSeconds(1));
+            for (final var key : List.of(
+                    "HOME",
+                    "PATH",
+                    "GH_CONFIG_DIR",
+                    "TMPDIR",
+                    "GH_TOKEN",
+                    "GITHUB_TOKEN",
+                    "GITHUB_BOT_FORK_TOKEN",
+                    "GITHUB_SOURCE_TOKEN",
+                    "YCA_CONTEXT_TOKEN",
+                    "YCA_CONTEXT_GIT_TOKEN",
+                    "YCA_BROKER_URL",
+                    "YCA_BROKER_TOKEN",
+                    "JAVA_TOOL_OPTIONS",
+                    "JDK_JAVA_OPTIONS",
+                    "_JAVA_OPTIONS",
+                    "DOCKER_HOST",
+                    "DOCKER_CONFIG",
+                    "LD_PRELOAD",
+                    "LD_LIBRARY_PATH")) {
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> backend.execute(attempt, "yca-task", "review", Map.of(), Map.of(key, "must-not-forward")),
+                        key);
+            }
+            final var environment = new HashMap<String, String>();
+            environment.put("MAVEN_OPTS", null);
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> backend.execute(attempt, "yca-task", "review", Map.of(), environment));
+            assertFalse(Files.exists(home.resolve("state/yca-task")));
+            assertFalse(Files.exists(Path.of(executable + ".called")));
+            assertFalse(Files.exists(attempt.resolve("execution.log")));
+        }
+    }
 
     @Test
     void stagesRestrictedProfileClearsEnvironmentAndUsesArgumentList() throws Exception {
@@ -54,6 +97,16 @@ class NonoExecutionBackendTest {
                 """);
         try (final var json = json()) {
             final var backend = backend(json, executable, Duration.ofSeconds(3));
+            final var toolEnvironment = Map.of(
+                    "MAVEN_OPTS", "-Dmaven.repo.local=" + attempt.resolve("storage/cache/maven"),
+                    "npm_config_cache", attempt.resolve("storage/cache/npm").toString(),
+                    "NPM_CONFIG_USERCONFIG",
+                            attempt.resolve("storage/cache/npmrc").toString(),
+                    "GRADLE_USER_HOME", attempt.resolve("storage/cache/gradle").toString(),
+                    "PIP_CACHE_DIR", attempt.resolve("storage/cache/pip").toString(),
+                    "GOMODCACHE", attempt.resolve("storage/cache/go").toString(),
+                    "CARGO_HOME", attempt.resolve("storage/cache/cargo").toString(),
+                    "NUGET_PACKAGES", attempt.resolve("storage/cache/nuget").toString());
             assertEquals(
                     7,
                     backend.execute(
@@ -65,7 +118,8 @@ class NonoExecutionBackendTest {
                                     "GITHUB_BOT_FORK_TOKEN", "fork-secret",
                                     "GITHUB_SOURCE_TOKEN", "source-secret",
                                     "YCA_CONTEXT_TOKEN", "context-secret",
-                                    "YCA_CONTEXT_GIT_TOKEN", "context-git-secret")));
+                                    "YCA_CONTEXT_GIT_TOKEN", "context-git-secret"),
+                            toolEnvironment));
             final var args = Files.readAllLines(Path.of(executable + ".args"));
             assertEquals("run", args.getFirst());
             assertTrue(args.contains("--profile"));
@@ -75,6 +129,13 @@ class NonoExecutionBackendTest {
             final var state = home.resolve("state/yca-task");
             final var profile = map(json.fromString(Object.class, Files.readString(state.resolve("profile.json"))));
             final var environment = map(profile.get("environment"));
+            final var explicit = map(environment.get("set_vars"));
+            toolEnvironment.forEach((key, value) -> assertEquals(value, explicit.get(key)));
+            assertEquals(attempt.resolve("storage").toString(), explicit.get("HOME"));
+            assertEquals(attempt.resolve("storage/gh").toString(), explicit.get("GH_CONFIG_DIR"));
+            assertEquals(attempt.resolve("storage/tmp").toString(), explicit.get("TMPDIR"));
+            assertEquals(toolEnvironment.size() + 3, explicit.size());
+            assertTrue(((List<?>) environment.get("allow_vars")).stream().noneMatch(toolEnvironment::containsKey));
             assertTrue(((List<?>) environment.get("allow_vars"))
                     .containsAll(List.of(
                             "GH_TOKEN",
@@ -135,7 +196,9 @@ class NonoExecutionBackendTest {
             }
             assertEquals("executor output\n", Files.readString(attempt.resolve("execution.log")));
             assertTrue(Files.exists(state.resolve("intent")));
-            assertThrows(IllegalStateException.class, () -> backend.execute(attempt, "yca-task", "again", Map.of()));
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> backend.execute(attempt, "yca-task", "again", Map.of(), Map.of()));
         }
     }
 
@@ -214,7 +277,7 @@ class NonoExecutionBackendTest {
                     Duration.ofSeconds(4),
                     () -> assertThrows(
                             IllegalStateException.class,
-                            () -> backend.execute(attempt, "yca-task", "review", Map.of())));
+                            () -> backend.execute(attempt, "yca-task", "review", Map.of(), Map.of())));
             assertEquals(8L * 1024 * 1024, Files.size(attempt.resolve("execution.log")));
             assertThrows(IllegalStateException.class, () -> backend.stop("yca-task"));
         }
@@ -242,7 +305,7 @@ class NonoExecutionBackendTest {
                     try {
                         assertThrows(
                                 IllegalStateException.class,
-                                () -> backend.execute(attempt, "yca-pipe-" + interrupt, "review", Map.of()));
+                                () -> backend.execute(attempt, "yca-pipe-" + interrupt, "review", Map.of(), Map.of()));
                         result.complete(Thread.currentThread().isInterrupted());
                     } catch (final Throwable e) {
                         result.completeExceptionally(e);
@@ -312,7 +375,7 @@ class NonoExecutionBackendTest {
             final var backend = backend(json, executable, Duration.ofSeconds(1));
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> backend.execute(attempt, "yca-task", "review", Map.of("HOST_TOKEN", "secret")));
+                    () -> backend.execute(attempt, "yca-task", "review", Map.of("HOST_TOKEN", "secret"), Map.of()));
             assertThrows(IllegalArgumentException.class, () -> backend.stop("yca-" + "a".repeat(10000)));
             assertThrows(IllegalArgumentException.class, () -> backend.stop("--all"));
             final var link = home.resolve("link");

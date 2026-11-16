@@ -35,6 +35,49 @@ class DockerExecutionBackendTest {
     Path home;
 
     @Test
+    void rejectsProtectedAndNullToolEnvironmentBeforeAnyLaunch() throws Exception {
+        final var executable = script("touch \"$0.called\"\n");
+        final var backend = backend(executable);
+        for (final var key : List.of(
+                "HOME",
+                "PATH",
+                "GH_CONFIG_DIR",
+                "TMPDIR",
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GITHUB_BOT_FORK_TOKEN",
+                "GITHUB_SOURCE_TOKEN",
+                "YCA_CONTEXT_TOKEN",
+                "YCA_CONTEXT_GIT_TOKEN",
+                "YCA_BROKER_URL",
+                "YCA_BROKER_TOKEN",
+                "JAVA_TOOL_OPTIONS",
+                "JDK_JAVA_OPTIONS",
+                "_JAVA_OPTIONS",
+                "DOCKER_HOST",
+                "DOCKER_CONFIG",
+                "LD_PRELOAD",
+                "LD_LIBRARY_PATH")) {
+            final var environment = Map.of(key, "must-not-forward");
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> backend.execute(home, "yca-task", "review", Map.of(), environment),
+                    key);
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> backend.execute(home, "yca-task", "review", Map.of(), environment, null, Map.of()),
+                    key);
+        }
+        final var environment = new HashMap<String, String>();
+        environment.put("MAVEN_OPTS", null);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> backend.execute(home, "yca-task", "review", Map.of(), environment));
+        assertFalse(Files.exists(Path.of(executable + ".called")));
+        assertFalse(Files.exists(home.resolve("execution.log")));
+    }
+
+    @Test
     void localDaemonProbeInspectsEffectiveContextWithSanitizedEnvironment() throws Exception {
         final var executable = script("""
                 printf '%s\\n' "$@" > "$0.args"
@@ -132,7 +175,7 @@ class DockerExecutionBackendTest {
                         IllegalStateException.class,
                         () -> new DockerExecutionBackend(
                                         executable.toString(), "trusted-image", Duration.ofMillis(50), "", null)
-                                .execute(directory, "yca-timeout-stop-failure", "review", Map.of())));
+                                .execute(directory, "yca-timeout-stop-failure", "review", Map.of(), Map.of())));
     }
 
     @Test
@@ -148,7 +191,7 @@ class DockerExecutionBackendTest {
                                 Duration.ofSeconds(5),
                                 "restricted-egress",
                                 null)
-                        .execute(directory, "yca-network-1", "review", Map.of()));
+                        .execute(directory, "yca-network-1", "review", Map.of(), Map.of()));
         final var args = Files.readAllLines(Path.of(executable + ".args"));
         assertEquals("restricted-egress", args.get(args.indexOf("--network") + 1));
         assertThrows(
@@ -169,6 +212,15 @@ class DockerExecutionBackendTest {
                 exit 7
                 """);
         final var prompt = "Review this; $(touch must-not-exist) 'quoted'";
+        final var toolEnvironment = Map.of(
+                "MAVEN_OPTS", "-Dmaven.repo.local=/attempt/storage/cache/maven -Dliteral=$(never)",
+                "npm_config_cache", "/attempt/storage/cache/npm",
+                "NPM_CONFIG_USERCONFIG", "/attempt/storage/cache/npmrc",
+                "GRADLE_USER_HOME", "/attempt/storage/cache/gradle",
+                "PIP_CACHE_DIR", "/attempt/storage/cache/pip",
+                "GOMODCACHE", "/attempt/storage/cache/go",
+                "CARGO_HOME", "/attempt/storage/cache/cargo",
+                "NUGET_PACKAGES", "/attempt/storage/cache/nuget");
         assertEquals(
                 7,
                 backend(executable)
@@ -181,7 +233,8 @@ class DockerExecutionBackendTest {
                                         "GITHUB_BOT_FORK_TOKEN", "fork-secret",
                                         "GITHUB_SOURCE_TOKEN", "source-secret",
                                         "YCA_CONTEXT_TOKEN", "context-secret",
-                                        "YCA_CONTEXT_GIT_TOKEN", "context-git-secret")));
+                                        "YCA_CONTEXT_GIT_TOKEN", "context-git-secret"),
+                                toolEnvironment));
         final var uid = ((Number) Files.getAttribute(directory, "unix:uid")).intValue();
         final var gid = ((Number) Files.getAttribute(directory, "unix:gid")).intValue();
         final var args = Files.readAllLines(Path.of(executable + ".args"));
@@ -208,6 +261,10 @@ class DockerExecutionBackendTest {
             assertTrue(args.contains(mount), mount);
         }
         assertEquals(4, args.stream().filter("--mount"::equals).count());
+        toolEnvironment.forEach((key, value) -> {
+            assertEquals("--env", args.get(args.indexOf(key + "=" + value) - 1));
+            assertFalse(args.contains(key), "Tool environment must not be inherited by name");
+        });
         assertTrue(args.containsAll(List.of(
                 "HOME=/attempt/storage",
                 "GH_CONFIG_DIR=/attempt/storage/gh",
@@ -294,7 +351,7 @@ class DockerExecutionBackendTest {
         final var directory = attempt();
         assumeNonRoot(directory);
         final var executable = script("head -c 8396800 /dev/zero\nexit 0\n");
-        assertEquals(0, backend(executable).execute(directory, "yca-task-2", "review", Map.of()));
+        assertEquals(0, backend(executable).execute(directory, "yca-task-2", "review", Map.of(), Map.of()));
         assertEquals(8L * 1024 * 1024, Files.size(directory.resolve("execution.log")));
     }
 
@@ -313,7 +370,7 @@ class DockerExecutionBackendTest {
                 IllegalStateException.class,
                 () -> new DockerExecutionBackend(
                                 executable.toString(), "trusted-image", Duration.ofSeconds(1), "", null)
-                        .execute(directory, "yca-timeout-1", "review", Map.of()));
+                        .execute(directory, "yca-timeout-1", "review", Map.of(), Map.of()));
         assertEquals("Execution timeout", error.getMessage());
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertEquals("run", calls.getFirst());
@@ -329,7 +386,8 @@ class DockerExecutionBackendTest {
         final var executable = script("touch \"$0.invoked\"\n");
         assertThrows(
                 IllegalArgumentException.class,
-                () -> backend(executable).execute(directory, "yca-task-3", "review", Map.of("HOST_TOKEN", "secret")));
+                () -> backend(executable)
+                        .execute(directory, "yca-task-3", "review", Map.of("HOST_TOKEN", "secret"), Map.of()));
         assertFalse(Files.exists(Path.of(executable + ".invoked")));
     }
 
@@ -342,7 +400,7 @@ class DockerExecutionBackendTest {
         final var executable = script("touch \"$0.invoked\"\n");
         final var error = assertThrows(
                 IllegalStateException.class,
-                () -> backend(executable).execute(directory, "yca-task-4", "review", Map.of()));
+                () -> backend(executable).execute(directory, "yca-task-4", "review", Map.of(), Map.of()));
         assertTrue(error.getMessage().contains("non-root"));
         assertFalse(Files.exists(Path.of(executable + ".invoked")));
     }

@@ -70,7 +70,10 @@ public record WorkerOptions(
         boolean privateSource,
 
         @Property(documentation = "Source preparation for strict solves; export remains the default.")
-        Source source) {
+        Source source,
+
+        @Property(documentation = "Repository-isolated dependency download cache policy.")
+        DependencyCacheConfiguration dependencyCache) {
     public enum SourceMode {
         export,
         git,

@@ -96,6 +96,7 @@ class DockerLiveTest {
                             attempt,
                             "yca-egress-live-" + ProcessHandle.current().pid(),
                             "probe",
+                            Map.of(),
                             Map.of()));
         } finally {
             final var remove = new ProcessBuilder("docker", "image", "rm", image)
@@ -144,7 +145,12 @@ class DockerLiveTest {
             final var backend = new DockerExecutionBackend("docker", image, Duration.ofSeconds(20), "", null);
             assertEquals(
                     0,
-                    backend.execute(attempt, runtime, "synthetic prompt", Map.of("GH_TOKEN", "synthetic-agent-only")));
+                    backend.execute(
+                            attempt,
+                            runtime,
+                            "synthetic prompt",
+                            Map.of("GH_TOKEN", "synthetic-agent-only"),
+                            Map.of()));
             backend.stop(runtime);
             assertEquals("ok", Files.readString(attempt.resolve("output/security-result")));
             Files.writeString(context.resolve("entrypoint.sh"), "sleep 120\n");
@@ -158,7 +164,7 @@ class DockerLiveTest {
             final var timed = new DockerExecutionBackend("docker", image, Duration.ofMillis(300), "", null);
             assertThrows(
                     IllegalStateException.class,
-                    () -> timed.execute(attempt, runtime + "-timeout", "timeout", Map.of()));
+                    () -> timed.execute(attempt, runtime + "-timeout", "timeout", Map.of(), Map.of()));
             timed.stop(runtime + "-timeout");
         } finally {
             final var remove = new ProcessBuilder("docker", "image", "rm", image)

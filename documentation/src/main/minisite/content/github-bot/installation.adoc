@@ -15,6 +15,9 @@ Docker socket access is equivalent to host administration; run the dispatcher on
 For Nono, use a dedicated non-root OS account, not a human login with unrelated credentials.
 For the centralized validation overview, see xref:index.adoc[validation history and version 0 limits].
 
+Optional xref:cache.adoc[dependency caching] requires a separate private worker-only root and regular finite maintenance; follow that guide for trust policy, copyable worker JSON and a host systemd timer.
+It is disabled by default and does not replace dependency-egress configuration.
+
 == Execution backend and private-routing choices
 
 Docker, Kubernetes and Nono are supported execution backends, not equally implemented or live-accepted private-routing deployments.

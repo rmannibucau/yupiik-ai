@@ -142,7 +142,8 @@ class DockerEgressTest {
                                 "YCA_CONTEXT_TOKEN",
                                 "context-only",
                                 "YCA_CONTEXT_GIT_TOKEN",
-                                "context-git-only")));
+                                "context-git-only"),
+                        Map.of()));
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertTrue(calls.get(1).contains("--internal --opt com.docker.network.bridge.gateway_mode_ipv4=isolated"));
         assertTrue(calls.get(2).endsWith("yca-egress-test-external"));
@@ -247,7 +248,7 @@ class DockerEgressTest {
                 Duration.ofSeconds(8),
                 () -> assertThrows(
                         IllegalStateException.class,
-                        () -> backend.execute(attempt, "yca-readiness-deadline", "review", Map.of())));
+                        () -> backend.execute(attempt, "yca-readiness-deadline", "review", Map.of(), Map.of())));
         assertEquals("Egress gateway readiness timeout", failure.getMessage());
         assertTrue(System.nanoTime() - start >= Duration.ofSeconds(2).toNanos());
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
@@ -278,7 +279,7 @@ class DockerEgressTest {
             final var attempt = attempt();
             assertThrows(
                     IllegalStateException.class,
-                    () -> backend(executable).execute(attempt, "yca-setup-test", "review", Map.of()));
+                    () -> backend(executable).execute(attempt, "yca-setup-test", "review", Map.of(), Map.of()));
             final var calls = Files.readAllLines(Path.of(executable + ".calls"));
             assertFalse(calls.stream().anyMatch(c -> c.startsWith("run ")), stage);
             assertTrue(calls.contains("rm --force yca-setup-test-egress"));
@@ -320,7 +321,7 @@ class DockerEgressTest {
                 Duration.ofSeconds(5),
                 () -> assertThrows(
                         IllegalStateException.class,
-                        () -> backend.execute(attempt, "yca-egress-timeout", "review", Map.of())));
+                        () -> backend.execute(attempt, "yca-egress-timeout", "review", Map.of(), Map.of())));
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertTrue(calls.contains("kill yca-egress-timeout"));
         assertTrue(calls.indexOf("kill yca-egress-timeout") < calls.indexOf("rm --force yca-egress-timeout-egress"));

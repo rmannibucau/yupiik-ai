@@ -34,6 +34,7 @@ Use the generated pages for the exact options and defaults of each command, and 
 * xref:../cli/github-bot-delete.adoc[`github bot delete`] - delete an inactive task.
 * xref:../cli/github-bot-purge.adoc[`github bot purge`] - remove clean terminal tasks older than a retention age.
 * xref:../cli/github-bot-cleanup.adoc[`github bot cleanup`] - remove old unreferenced prepared-only attempts.
+* xref:../cli/github-bot-cache-maintain.adoc[`github bot cache maintain`] - run one bounded dependency-cache maintenance slice.
 
 See the xref:../cli/index.adoc[generated CLI index] for the full command tree.
 There is no handwritten option reference; use the generated metadata for supported options and defaults.
@@ -48,6 +49,7 @@ It leaves unrestricted Docker egress explicit and does not require Nono or Kuber
 
 * xref:installation.adoc[Bare-metal Docker and Nono walkthrough]
 * xref:configuration.adoc[Configuration and CLI]
+* xref:cache.adoc[Dependency cache]
 * xref:architecture.adoc[Architecture and component sequences]
 * xref:security.adoc[Security and recovery]
 * xref:kubernetes.adoc[Kubernetes dispatcher and agent Job walkthrough]

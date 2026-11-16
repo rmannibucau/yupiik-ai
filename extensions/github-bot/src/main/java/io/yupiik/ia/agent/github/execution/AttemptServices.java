@@ -24,6 +24,7 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
@@ -188,15 +189,34 @@ public final class AttemptServices implements AutoCloseable {
         if (!Files.isDirectory(storage, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Dependency settings require a private attempt storage directory");
         }
-        final var maven = Files.createDirectory(storage.resolve(".m2"), directoryPermissions);
+        final var maven = storage.resolve(".m2");
+        if (!Files.exists(maven, LinkOption.NOFOLLOW_LINKS)) {
+            Files.createDirectory(maven, directoryPermissions);
+        }
+        if (!Files.isDirectory(maven, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Maven settings require a real private directory");
+        }
+        Files.setPosixFilePermissions(maven, PosixFilePermissions.fromString("rwx------"));
         final var settings = maven.resolve("settings.xml");
-        // DNS-only, operator-validated servicesHost cannot introduce XML markup.
-        Files.writeString(
-                settings,
-                TEMPLATES.render("mavenProxy", Map.of("servicesHost", servicesHost)),
-                StandardOpenOption.CREATE_NEW,
-                LinkOption.NOFOLLOW_LINKS);
-        Files.setPosixFilePermissions(settings, PosixFilePermissions.fromString("rw-------"));
+        if (Files.exists(settings, LinkOption.NOFOLLOW_LINKS)
+                && !Files.isRegularFile(settings, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Maven settings must be a regular file");
+        }
+        // DNS-only, operator-validated servicesHost cannot introduce XML markup. Replace
+        // generated settings atomically; never truncate a possible preexisting hard link.
+        final var temporary = Files.createTempFile(maven, ".worker-proxy-", ".xml");
+        try {
+            Files.writeString(
+                    temporary,
+                    TEMPLATES.render("mavenProxy", Map.of("servicesHost", servicesHost)),
+                    StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                    LinkOption.NOFOLLOW_LINKS);
+            Files.setPosixFilePermissions(temporary, PosixFilePermissions.fromString("rw-------"));
+            Files.move(temporary, settings, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
     }
 
     private static Map<String, Object> select(final Map<String, Object> provider) {

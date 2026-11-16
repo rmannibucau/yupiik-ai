@@ -182,7 +182,8 @@ class WorkerBrokerTest {
                                 attempt,
                                 "yca-task-1",
                                 "credential-free prompt",
-                                Map.of("YCA_CONTEXT_TOKEN", "control-secret", "YCA_CONTEXT_GIT_TOKEN", "git-secret")));
+                                Map.of("YCA_CONTEXT_TOKEN", "control-secret", "YCA_CONTEXT_GIT_TOKEN", "git-secret"),
+                                Map.of()));
                 final var arguments = Files.readString(fixture.invocations);
                 assertTrue(arguments.contains("YCA_CONTEXT_TOKEN\n"));
                 assertTrue(arguments.contains("YCA_CONTEXT_GIT_TOKEN\n"));
@@ -200,7 +201,7 @@ class WorkerBrokerTest {
                 assertThrows(
                         IllegalArgumentException.class,
                         () -> backend.execute(
-                                attempt, "yca-task-2", "prompt", Map.of("UNTRUSTED_CREDENTIAL", "secret")));
+                                attempt, "yca-task-2", "prompt", Map.of("UNTRUSTED_CREDENTIAL", "secret"), Map.of()));
             } finally {
                 AttemptPreparation.delete(attempt);
             }

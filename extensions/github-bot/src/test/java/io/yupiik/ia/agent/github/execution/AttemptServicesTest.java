@@ -17,7 +17,9 @@ package io.yupiik.ia.agent.github.execution;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.ia.agent.github.command.WorkerCommand$Options$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.github.execution.cache.DependencyCacheProvisioning;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import java.io.IOException;
@@ -89,6 +91,111 @@ class AttemptServicesTest {
                             Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret"),
                             Duration.ofSeconds(60)));
             assertFalse(Files.exists(outside.resolve(".m2")));
+        }
+    }
+
+    @Test
+    void launcherOwnedProxySettingsWinOverFreshDependencyCacheSettings() throws Exception {
+        final var values = Map.of(
+                "worker.dependencyCache.mode",
+                "RESTORE_ONLY",
+                "worker.dependencyCache.root",
+                home.resolveSibling("unused-store-" + home.getFileName()).toString(),
+                "worker.dependencyCache.presets",
+                "MAVEN");
+        final var policy = new WorkerCommand$Options$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .worker()
+                .dependencyCache();
+        final var environment = DependencyCacheProvisioning.provision(policy, home, true);
+        assertEquals("-Dmaven.repo.local=/attempt/storage/caches/maven/repository", environment.get("MAVEN_OPTS"));
+        assertFalse(Files.readString(home.resolve("storage/.m2/settings.xml")).contains("<proxies>"));
+        try (final var json = BotJsonMapper.create(
+                        List.of(new RestrictedServicesGateway$Settings$FusionJsonCodec()), key -> Optional.empty());
+                final var services = new AttemptServices(
+                        minimalConfiguration(),
+                        privateDirectory(),
+                        json,
+                        settings(),
+                        "http://172.30.0.2:12345" + ROUTE,
+                        "https://attempt-services.yca.internal:8443" + ROUTE,
+                        CONTEXT,
+                        Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret"),
+                        Duration.ofSeconds(60))) {
+            final var settings = Files.readString(home.resolve("storage/.m2/settings.xml"));
+            assertTrue(settings.contains("<host>egress</host>"));
+            assertTrue(settings.contains("<port>8080</port>"));
+            assertFalse(settings.contains("tls-secret"));
+        }
+    }
+
+    @Test
+    void proxySettingsReplaceHardLinksWithoutChangingTheOriginal() throws Exception {
+        final var maven = Files.createDirectories(home.resolve("storage/.m2"));
+        final var original = Files.writeString(home.resolve("original-settings"), "keep original bytes");
+        Files.createLink(maven.resolve("settings.xml"), original);
+        try (final var json = BotJsonMapper.create(
+                        List.of(new RestrictedServicesGateway$Settings$FusionJsonCodec()), key -> Optional.empty());
+                final var services = new AttemptServices(
+                        minimalConfiguration(),
+                        privateDirectory(),
+                        json,
+                        settings(),
+                        "http://172.30.0.2:12345" + ROUTE,
+                        "https://attempt-services.yca.internal:8443" + ROUTE,
+                        CONTEXT,
+                        Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret"),
+                        Duration.ofSeconds(60))) {
+            assertEquals("keep original bytes", Files.readString(original));
+            assertFalse(Files.isSameFile(original, maven.resolve("settings.xml")));
+            assertTrue(Files.readString(maven.resolve("settings.xml")).contains("<host>egress</host>"));
+        }
+    }
+
+    @Test
+    void proxySettingsRejectSymbolicMavenDirectory() throws Exception {
+        final var outside = Files.createDirectory(home.resolve("outside"));
+        Files.createDirectory(home.resolve("storage"));
+        Files.createSymbolicLink(home.resolve("storage/.m2"), outside);
+        try (final var json = BotJsonMapper.create(
+                List.of(new RestrictedServicesGateway$Settings$FusionJsonCodec()), key -> Optional.empty())) {
+            assertThrows(
+                    IOException.class,
+                    () -> new AttemptServices(
+                            minimalConfiguration(),
+                            privateDirectory(),
+                            json,
+                            settings(),
+                            "http://172.30.0.2:12345" + ROUTE,
+                            "https://attempt-services.yca.internal:8443" + ROUTE,
+                            CONTEXT,
+                            Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret"),
+                            Duration.ofSeconds(60)));
+            assertFalse(Files.exists(outside.resolve("settings.xml")));
+        }
+    }
+
+    @Test
+    void proxySettingsRejectSymbolicSettingsFile() throws Exception {
+        final var outside = Files.writeString(home.resolve("outside"), "unchanged");
+        Files.createDirectories(home.resolve("storage/.m2"));
+        Files.createSymbolicLink(home.resolve("storage/.m2/settings.xml"), outside);
+        try (final var json = BotJsonMapper.create(
+                List.of(new RestrictedServicesGateway$Settings$FusionJsonCodec()), key -> Optional.empty())) {
+            assertThrows(
+                    IOException.class,
+                    () -> new AttemptServices(
+                            minimalConfiguration(),
+                            privateDirectory(),
+                            json,
+                            settings(),
+                            "http://172.30.0.2:12345" + ROUTE,
+                            "https://attempt-services.yca.internal:8443" + ROUTE,
+                            CONTEXT,
+                            Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret"),
+                            Duration.ofSeconds(60)));
+            assertEquals("unchanged", Files.readString(outside));
         }
     }
 

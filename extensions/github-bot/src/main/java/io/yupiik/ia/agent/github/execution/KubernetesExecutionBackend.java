@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.kubernetes.client.KubernetesClient;
+import io.yupiik.ia.agent.github.execution.cache.DependencyCacheProvisioning;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
@@ -104,7 +105,12 @@ public final class KubernetesExecutionBackend {
     }
 
     public int execute(
-            final Path directory, final String runtimeId, final String prompt, final Map<String, String> credentials) {
+            final Path directory,
+            final String runtimeId,
+            final String prompt,
+            final Map<String, String> credentials,
+            final Map<String, String> toolEnvironment) {
+        DependencyCacheProvisioning.validateEnvironment(toolEnvironment);
         validateRuntimeIdentity(runtimeId);
         if (!Set.of(
                         "GH_TOKEN",
@@ -132,6 +138,7 @@ public final class KubernetesExecutionBackend {
         final var env = new ArrayList<Environment>();
         env.add(new Environment("HOME", "/attempt/storage", null));
         env.add(new Environment("GH_CONFIG_DIR", "/attempt/storage/gh", null));
+        toolEnvironment.forEach((key, value) -> env.add(new Environment(key, value, null)));
         for (final var key : credentials.keySet()) {
             env.add(new Environment(key, null, new EnvironmentSource(new SecretKey(runtimeId, key))));
         }
