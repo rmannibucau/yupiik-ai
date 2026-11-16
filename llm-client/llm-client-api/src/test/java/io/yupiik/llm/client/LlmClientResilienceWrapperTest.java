@@ -53,6 +53,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Flow;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -572,7 +573,7 @@ class LlmClientResilienceWrapperTest {
     @Test
     void cancelDuringRetryBackoffAbortsTheWaitWithoutReRequesting() throws Exception {
         final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30")); // 30s retry-after
-        try (final var scheduler = Executors.newScheduledThreadPool(1)) {
+        try (final var scheduler = cancellationScheduler()) {
             final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null, scheduler);
             final var cancelled = new AtomicBoolean();
             final var future = wrapper.chat(dial, null, cancelled::get);
@@ -591,7 +592,7 @@ class LlmClientResilienceWrapperTest {
     @Test
     void cancelDuringStreamSetupBackoffAbortsTheWaitWithoutReRequesting() throws Exception {
         final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30"));
-        try (final var scheduler = Executors.newScheduledThreadPool(1)) {
+        try (final var scheduler = cancellationScheduler()) {
             final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null, scheduler);
             final var cancelled = new AtomicBoolean();
             final var future = wrapper.stream(dial, null, cancelled::get);
@@ -604,6 +605,14 @@ class LlmClientResilienceWrapperTest {
                     "got: " + failure.getCause());
             assertEquals(1, dial.calls.get(), "the cancelled stream-setup wait must not re-request");
         }
+    }
+
+    private static ScheduledThreadPoolExecutor cancellationScheduler() {
+        final var scheduler = new ScheduledThreadPoolExecutor(1);
+        // The assertions must complete before teardown. Do not drain the 30s retry timer on close,
+        // including when a failed cancellation assertion leaves the timer pending.
+        scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        return scheduler;
     }
 
     @Test

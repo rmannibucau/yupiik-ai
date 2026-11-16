@@ -206,9 +206,12 @@ class TuiCommandRenderTest {
 
         try (final var scheduler = Executors.newSingleThreadScheduledExecutor()) {
             for (var wait = 0; wait < 3; wait++) {
+                // Exercise both presence helpers across a quiet interval once. The third
+                // paste only restores the marker for awaitNoText's delayed-clear coverage;
+                // awaitTextWithin already had its delayed-presence check at wait == 1.
                 final var paste = scheduler.schedule(
                         () -> tuiRef.get().dispatch(new PasteEvent("delayed-render-marker")),
-                        1_200,
+                        wait < 2 ? 1_200 : 0,
                         TimeUnit.MILLISECONDS);
                 if (wait == 0) {
                     awaitText("delayed-render-marker");
