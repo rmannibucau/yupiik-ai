@@ -22,6 +22,7 @@
     <commonmark.version>0.31.0</commonmark.version>
     <junit.version>6.1.3</junit.version>
     <yupiik-tools.version>1.3.0</yupiik-tools.version>
+    <yupiik-logging.version>1.0.9</yupiik-logging.version>
     <spotless.ratchetFrom>origin/main</spotless.ratchetFrom>
     <!-- Per-module JUnit workers; independent from Maven's reactor -T setting. -->
     <yca.test.parallelism>8</yca.test.parallelism>
@@ -107,7 +108,7 @@
       <dependency>
         <groupId>io.yupiik.logging</groupId>
         <artifactId>yupiik-logging-jul</artifactId>
-        <version>1.0.9</version>
+        <version>${yupiik-logging.version}</version>
       </dependency>
       <dependency>
         <groupId>io.yupiik.ia.agent</groupId>
@@ -152,6 +153,14 @@
       </dependency>
     </dependencies>
   </dependencyManagement>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.yupiik.logging</groupId>
+      <artifactId>yupiik-logging-jul</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+  </dependencies>
 
   <build>
     <pluginManagement>
@@ -208,6 +217,7 @@
                 junit.jupiter.execution.timeout.threaddump.enabled = true</configurationParameters>
             </properties>
             <systemPropertyVariables>
+              <java.util.logging.manager>io.yupiik.logging.jul.YupiikLogManager</java.util.logging.manager>
               <!-- jline 3.25: a real tty makes the system terminal spawn PosixPtyTerminal pump
                    threads that outlive the surefire fork JVM and delay its exit by 30s -->
               <org.jline.terminal.type>dumb</org.jline.terminal.type>
@@ -222,7 +232,8 @@
                  just standardize on UTC. Same story for the default locale: number
                  formatting (%.1f, %,d) follows it, so a French dev box would render
                  "10,4s" while CI renders "10.4s". JVM-wide (argLine) on purpose: classes run
-                 concurrently, a per-test TimeZone/Locale.setDefault would race. -->
+                 concurrently, a per-test TimeZone/Locale.setDefault would race. These defaults
+                 can be cached before Surefire applies systemPropertyVariables, so set them at startup. -->
             <argLine>${yca.test.jvmArgs} -Duser.timezone=UTC -Duser.language=en -Duser.country=US</argLine>
           </configuration>
         </plugin>

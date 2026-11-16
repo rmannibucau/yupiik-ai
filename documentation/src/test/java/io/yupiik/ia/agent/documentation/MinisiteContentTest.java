@@ -22,6 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
+import java.util.TimeZone;
+import java.util.logging.LogManager;
 import java.util.regex.Pattern;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.xpath.XPathFactory;
@@ -29,6 +32,15 @@ import org.junit.jupiter.api.Test;
 
 class MinisiteContentTest {
     private final Path content = Path.of("src/main/minisite/content");
+
+    @Test
+    void testJvmUsesConfiguredLoggingAndDefaults() {
+        assertEquals(
+                "io.yupiik.logging.jul.YupiikLogManager",
+                LogManager.getLogManager().getClass().getName());
+        assertEquals("UTC", TimeZone.getDefault().getID());
+        assertEquals(Locale.US, Locale.getDefault());
+    }
 
     @Test
     void testExecutionKeepsIsolationAndBoundsWorkerGrowth() throws Exception {

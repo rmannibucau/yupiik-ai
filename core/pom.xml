@@ -49,6 +49,7 @@
     <dependency>
       <groupId>io.yupiik.logging</groupId>
       <artifactId>yupiik-logging-jul</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>io.yupiik.fusion</groupId>
