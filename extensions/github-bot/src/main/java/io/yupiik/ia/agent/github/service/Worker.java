@@ -183,7 +183,8 @@ public class Worker {
                         timeout,
                         execution.docker().network(),
                         execution.docker().egress(),
-                        execution.docker().services());
+                        execution.docker().services(),
+                        execution.showToolOutput());
                 this.nono = null;
             }
             case NONO -> {
@@ -199,7 +200,8 @@ public class Worker {
                         Path.of(execution.nono().runtimeRoot()),
                         Path.of(conf.home()),
                         timeout,
-                        Duration.ofSeconds(execution.commandTimeoutSeconds()));
+                        Duration.ofSeconds(execution.commandTimeoutSeconds()),
+                        execution.showToolOutput());
             }
             case KUBERNETES -> {
                 if (attemptRoot == null) {
@@ -266,7 +268,8 @@ public class Worker {
                 settings.gid(),
                 Duration.ofSeconds(execution.timeoutSeconds()),
                 Duration.ofSeconds(execution.commandTimeoutSeconds()),
-                settings.serviceAccount());
+                settings.serviceAccount(),
+                execution.showToolOutput());
     }
 
     /** One invocation processes one task, keeping poll scheduling independent from agent latency. */

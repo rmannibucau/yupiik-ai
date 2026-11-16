@@ -34,6 +34,8 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 @Timeout(15)
 class NonoExecutionBackendTest {
@@ -82,8 +84,9 @@ class NonoExecutionBackendTest {
         }
     }
 
-    @Test
-    void stagesRestrictedProfileClearsEnvironmentAndUsesArgumentList() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"shown", "collapsed", "hidden"})
+    void stagesRestrictedProfileClearsEnvironmentAndUsesArgumentList(final String showToolOutput) throws Exception {
         final var attempt = attempt();
         nonRoot(attempt);
         final var executable = script("""
@@ -96,7 +99,7 @@ class NonoExecutionBackendTest {
                 printf '[{"session_id":"0123456789abcdef","status":"exited","exit_code":7}]'
                 """);
         try (final var json = json()) {
-            final var backend = backend(json, executable, Duration.ofSeconds(3));
+            final var backend = backend(json, executable, Duration.ofSeconds(3), showToolOutput);
             final var toolEnvironment = Map.of(
                     "MAVEN_OPTS", "-Dmaven.repo.local=" + attempt.resolve("storage/cache/maven"),
                     "npm_config_cache", attempt.resolve("storage/cache/npm").toString(),
@@ -121,6 +124,12 @@ class NonoExecutionBackendTest {
                                     "YCA_CONTEXT_GIT_TOKEN", "context-git-secret"),
                             toolEnvironment));
             final var args = Files.readAllLines(Path.of(executable + ".args"));
+            final var agentRun = args.indexOf(home.resolve("runtime/agent").toString()) + 1;
+            assertTrue(agentRun > 0);
+            assertEquals(
+                    List.of("run", "--show-tool-output", showToolOutput),
+                    args.subList(agentRun, agentRun + 3));
+            assertEquals(1, args.stream().filter("--show-tool-output"::equals).count());
             assertEquals("run", args.getFirst());
             assertTrue(args.contains("--profile"));
             assertTrue(args.contains("--no-audit"));
@@ -389,7 +398,8 @@ class NonoExecutionBackendTest {
                             link,
                             home.resolve("state"),
                             Duration.ofSeconds(1),
-                            Duration.ofSeconds(1)));
+                            Duration.ofSeconds(1),
+                            "shown"));
             assertFalse(Files.exists(Path.of(executable + ".called")));
         }
     }
@@ -416,6 +426,12 @@ class NonoExecutionBackendTest {
 
     private NonoExecutionBackend backend(final JsonMapperImpl json, final Path executable, final Duration timeout)
             throws Exception {
+        return backend(json, executable, timeout, "shown");
+    }
+
+    private NonoExecutionBackend backend(
+            final JsonMapperImpl json, final Path executable, final Duration timeout, final String showToolOutput)
+            throws Exception {
         Files.createDirectories(home.resolve("runtime/bin"));
         Files.writeString(home.resolve("runtime/agent"), "trusted agent");
         Files.createDirectories(home.resolve("state"));
@@ -427,7 +443,8 @@ class NonoExecutionBackendTest {
                 home.resolve("runtime"),
                 home.resolve("state"),
                 timeout,
-                Duration.ofSeconds(3));
+                Duration.ofSeconds(3),
+                showToolOutput);
     }
 
     private Path script(final String body) throws Exception {

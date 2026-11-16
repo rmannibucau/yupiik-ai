@@ -242,7 +242,7 @@ class DockerEgressTest {
                 """);
         final var attempt = attempt();
         final var backend =
-                new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(2), "", configuration());
+                new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(2), "", configuration(), "shown");
         final long start = System.nanoTime();
         final var failure = assertTimeoutPreemptively(
                 Duration.ofSeconds(8),
@@ -301,7 +301,7 @@ class DockerEgressTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> new DockerExecutionBackend(
-                        "docker", "image", Duration.ofSeconds(1), "custom-network", configuration()));
+                        "docker", "image", Duration.ofSeconds(1), "custom-network", configuration(), "shown"));
         assertThrows(IllegalArgumentException.class, () -> egress.start("x".repeat(1_000_000)));
         assertThrows(IllegalArgumentException.class, () -> egress.remove("bad;name"));
     }
@@ -316,7 +316,7 @@ class DockerEgressTest {
                 """);
         final var attempt = attempt();
         final var backend =
-                new DockerExecutionBackend(executable.toString(), "agent", Duration.ofMillis(100), "", configuration());
+                new DockerExecutionBackend(executable.toString(), "agent", Duration.ofMillis(100), "", configuration(), "shown");
         assertTimeoutPreemptively(
                 Duration.ofSeconds(5),
                 () -> assertThrows(
@@ -346,7 +346,7 @@ class DockerEgressTest {
     }
 
     private DockerExecutionBackend backend(final Path executable) {
-        return new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(5), "", configuration());
+        return new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(5), "", configuration(), "shown");
     }
 
     private Path attempt() throws Exception {

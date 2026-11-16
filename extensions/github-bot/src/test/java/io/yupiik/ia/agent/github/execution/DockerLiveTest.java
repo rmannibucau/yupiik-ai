@@ -89,7 +89,7 @@ class DockerLiveTest {
                     new ExecutorConfiguration.Docker.Egress(
                             System.getProperty("github.bot.docker.egress.image"),
                             List.of("api.github.com"),
-                            "127.0.0.1"));
+                            "127.0.0.1"), "shown");
             assertEquals(
                     0,
                     backend.execute(
@@ -142,7 +142,7 @@ class DockerLiveTest {
                 Files.createDirectory(attempt.resolve(name));
             }
             final var runtime = "yca-live-" + ProcessHandle.current().pid();
-            final var backend = new DockerExecutionBackend("docker", image, Duration.ofSeconds(20), "", null);
+            final var backend = new DockerExecutionBackend("docker", image, Duration.ofSeconds(20), "", null, "shown");
             assertEquals(
                     0,
                     backend.execute(
@@ -161,7 +161,7 @@ class DockerLiveTest {
             assertEquals(0, rebuild.exitValue());
             // A real timeout must stop the container before the caller can discard its attempt.
             Files.delete(attempt.resolve("execution.log"));
-            final var timed = new DockerExecutionBackend("docker", image, Duration.ofMillis(300), "", null);
+            final var timed = new DockerExecutionBackend("docker", image, Duration.ofMillis(300), "", null, "shown");
             assertThrows(
                     IllegalStateException.class,
                     () -> timed.execute(attempt, runtime + "-timeout", "timeout", Map.of(), Map.of()));

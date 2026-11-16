@@ -46,6 +46,7 @@ public final class DockerExecutionBackend {
     private final String image;
     private final Duration timeout;
     private final String network;
+    private final String showToolOutput;
 
     private final DockerEgress egress;
     private final DockerRestrictedServices services;
@@ -56,8 +57,9 @@ public final class DockerExecutionBackend {
             final String image,
             final Duration timeout,
             final String network,
-            final ExecutorConfiguration.Docker.Egress egress) {
-        this(executable, image, timeout, network, egress, null);
+            final ExecutorConfiguration.Docker.Egress egress,
+            final String showToolOutput) {
+        this(executable, image, timeout, network, egress, null, showToolOutput);
     }
 
     public DockerExecutionBackend(
@@ -66,13 +68,15 @@ public final class DockerExecutionBackend {
             final Duration timeout,
             final String network,
             final ExecutorConfiguration.Docker.Egress egress,
-            final ExecutorConfiguration.Docker.Services services) {
+            final ExecutorConfiguration.Docker.Services services,
+            final String showToolOutput) {
         if (executable.isBlank() || image.isBlank() || timeout.isNegative() || timeout.isZero()) {
             throw new IllegalArgumentException("Docker executable, image and positive timeout required");
         }
         this.executable = executable;
         this.image = image;
         this.timeout = timeout;
+        this.showToolOutput = showToolOutput;
         if (!network.isEmpty() && !NETWORK_NAME.matcher(network).matches()) {
             throw new IllegalArgumentException("Invalid pre-created Docker network name");
         }
@@ -282,6 +286,8 @@ public final class DockerExecutionBackend {
             command.addAll(List.of(
                     image,
                     "run",
+                    "--show-tool-output",
+                    showToolOutput,
                     "--yca-configuration-json",
                     "/attempt/configuration.json",
                     "--yca-configuration-project-enabled",

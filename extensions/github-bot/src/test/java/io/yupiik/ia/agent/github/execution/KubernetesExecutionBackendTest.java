@@ -44,6 +44,8 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 @Timeout(15)
 class KubernetesExecutionBackendTest {
@@ -92,8 +94,9 @@ class KubernetesExecutionBackendTest {
         }
     }
 
-    @Test
-    void createsHardenedJobAndSecretOverAuthenticatedHttp() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"shown", "collapsed", "hidden"})
+    void createsHardenedJobAndSecretOverAuthenticatedHttp(final String showToolOutput) throws Exception {
         final var attempt = attempt();
         final var toolEnvironment = Map.of(
                 "MAVEN_OPTS", "-Dmaven.repo.local=/attempt/storage/cache/maven -Dliteral=$(never)",
@@ -109,7 +112,7 @@ class KubernetesExecutionBackendTest {
                 final var client = cluster.client()) {
             assertEquals(
                     7,
-                    backend(json, client)
+                    backend(json, client, Duration.ofMillis(300), showToolOutput)
                             .execute(
                                     attempt,
                                     "yca-task",
@@ -148,7 +151,28 @@ class KubernetesExecutionBackendTest {
             assertEquals(List.of("ALL"), map(security.get("capabilities")).get("drop"));
             assertEquals("RuntimeDefault", map(security.get("seccompProfile")).get("type"));
             assertTrue(map(agent.get("resources")).containsKey("limits"));
-            assertTrue(((List<?>) agent.get("args")).contains("Review '$(never)'"));
+            assertEquals(
+                    List.of(
+                            "run",
+                            "--show-tool-output",
+                            showToolOutput,
+                            "--yca-configuration-json",
+                            "/attempt/configuration.json",
+                            "--yca-configuration-project-enabled",
+                            "false",
+                            "--yca-storage-home",
+                            "/attempt/storage",
+                            "--yca-workingDir",
+                            "/attempt/workspace",
+                            "--result-file",
+                            "/attempt/output/result.json",
+                            "--result-required-fields",
+                            "taskId,summary|failure",
+                            "--result-max-bytes",
+                            "6291456",
+                            "--prompt",
+                            "Review '$(never)'"),
+                    agent.get("args"));
             final var credentials = Map.of(
                     "GH_TOKEN", "agent-secret",
                     "GITHUB_BOT_FORK_TOKEN", "fork-secret",
@@ -454,6 +478,15 @@ class KubernetesExecutionBackendTest {
 
     private KubernetesExecutionBackend backend(
             final JsonMapperImpl json, final KubernetesClient client, final Duration commandTimeout) throws Exception {
+        return backend(json, client, commandTimeout, "shown");
+    }
+
+    private KubernetesExecutionBackend backend(
+            final JsonMapperImpl json,
+            final KubernetesClient client,
+            final Duration commandTimeout,
+            final String showToolOutput)
+            throws Exception {
         Files.createDirectories(home.resolve("shared"));
         return new KubernetesExecutionBackend(
                 json,
@@ -466,7 +499,8 @@ class KubernetesExecutionBackendTest {
                 1000,
                 Duration.ofSeconds(3),
                 commandTimeout,
-                "yca-agent");
+                "yca-agent",
+                showToolOutput);
     }
 
     private JsonMapperImpl json() {

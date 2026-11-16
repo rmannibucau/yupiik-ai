@@ -29,6 +29,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class DockerExecutionBackendTest {
     @TempDir
@@ -148,7 +150,12 @@ class DockerExecutionBackendTest {
                     () -> assertThrows(
                             IllegalStateException.class,
                             () -> new DockerExecutionBackend(
-                                            executable.toString(), "trusted-image", Duration.ofMillis(500), "", null)
+                                            executable.toString(),
+                                            "trusted-image",
+                                            Duration.ofMillis(500),
+                                            "",
+                                            null,
+                                            "shown")
                                     .requireLocalDaemon()));
             for (final var suffix : List.of(".pid", ".child")) {
                 final long pid = Long.parseLong(Files.readString(Path.of(executable + suffix)));
@@ -174,7 +181,7 @@ class DockerExecutionBackendTest {
                 () -> assertThrows(
                         IllegalStateException.class,
                         () -> new DockerExecutionBackend(
-                                        executable.toString(), "trusted-image", Duration.ofMillis(50), "", null)
+                                        executable.toString(), "trusted-image", Duration.ofMillis(50), "", null, "shown")
                                 .execute(directory, "yca-timeout-stop-failure", "review", Map.of(), Map.of())));
     }
 
@@ -190,17 +197,19 @@ class DockerExecutionBackendTest {
                                 "trusted-image",
                                 Duration.ofSeconds(5),
                                 "restricted-egress",
-                                null)
+                                null,
+                                "shown")
                         .execute(directory, "yca-network-1", "review", Map.of(), Map.of()));
         final var args = Files.readAllLines(Path.of(executable + ".args"));
         assertEquals("restricted-egress", args.get(args.indexOf("--network") + 1));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new DockerExecutionBackend("docker", "image", Duration.ofSeconds(1), "bad network", null));
+                () -> new DockerExecutionBackend("docker", "image", Duration.ofSeconds(1), "bad network", null, "shown"));
     }
 
-    @Test
-    void executesConcreteBackendWithIsolatedMountsArgumentsAndCredentials() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"shown", "collapsed", "hidden"})
+    void executesConcreteBackendWithIsolatedMountsArgumentsAndCredentials(final String showToolOutput) throws Exception {
         final var directory = attempt();
         assumeNonRoot(directory);
         final var executable = script("""
@@ -223,7 +232,14 @@ class DockerExecutionBackendTest {
                 "NUGET_PACKAGES", "/attempt/storage/cache/nuget");
         assertEquals(
                 7,
-                backend(executable)
+                new DockerExecutionBackend(
+                                executable.toString(),
+                                "trusted-image",
+                                Duration.ofSeconds(5),
+                                "",
+                                null,
+                                null,
+                                showToolOutput)
                         .execute(
                                 directory,
                                 "yca-task-1",
@@ -287,6 +303,8 @@ class DockerExecutionBackendTest {
                 List.of(
                         "trusted-image",
                         "run",
+                        "--show-tool-output",
+                        showToolOutput,
                         "--yca-configuration-json",
                         "/attempt/configuration.json",
                         "--yca-configuration-project-enabled",
@@ -303,7 +321,7 @@ class DockerExecutionBackendTest {
                         "6291456",
                         "--prompt",
                         prompt),
-                args.subList(args.size() - 18, args.size()));
+                args.subList(args.size() - 20, args.size()));
         for (final var secret :
                 List.of("agent-secret", "fork-secret", "source-secret", "context-secret", "context-git-secret")) {
             assertFalse(args.toString().contains(secret));
@@ -369,7 +387,7 @@ class DockerExecutionBackendTest {
         final var error = assertThrows(
                 IllegalStateException.class,
                 () -> new DockerExecutionBackend(
-                                executable.toString(), "trusted-image", Duration.ofSeconds(1), "", null)
+                                executable.toString(), "trusted-image", Duration.ofSeconds(1), "", null, "shown")
                         .execute(directory, "yca-timeout-1", "review", Map.of(), Map.of()));
         assertEquals("Execution timeout", error.getMessage());
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
@@ -529,16 +547,16 @@ class DockerExecutionBackendTest {
     void requiresExecutableImageAndPositiveBudget() {
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new DockerExecutionBackend(" ", "image", Duration.ofSeconds(1), "", null));
+                () -> new DockerExecutionBackend(" ", "image", Duration.ofSeconds(1), "", null, "shown"));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new DockerExecutionBackend("docker", "", Duration.ofSeconds(1), "", null));
+                () -> new DockerExecutionBackend("docker", "", Duration.ofSeconds(1), "", null, "shown"));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new DockerExecutionBackend("docker", "image", Duration.ZERO, "", null));
+                () -> new DockerExecutionBackend("docker", "image", Duration.ZERO, "", null, "shown"));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new DockerExecutionBackend("docker", "image", Duration.ofSeconds(-1), "", null));
+                () -> new DockerExecutionBackend("docker", "image", Duration.ofSeconds(-1), "", null, "shown"));
     }
 
     private Path attempt() throws Exception {
@@ -573,6 +591,6 @@ class DockerExecutionBackendTest {
     }
 
     private DockerExecutionBackend backend(final Path executable) {
-        return new DockerExecutionBackend(executable.toString(), "trusted-image", Duration.ofSeconds(5), "", null);
+        return new DockerExecutionBackend(executable.toString(), "trusted-image", Duration.ofSeconds(5), "", null, "shown");
     }
 }

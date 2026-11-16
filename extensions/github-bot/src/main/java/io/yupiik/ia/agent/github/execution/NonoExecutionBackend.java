@@ -63,6 +63,7 @@ public final class NonoExecutionBackend {
     private final Path stateRoot;
     private final Duration timeout;
     private final Duration commandTimeout;
+    private final String showToolOutput;
 
     public NonoExecutionBackend(
             final JsonMapper json,
@@ -71,7 +72,8 @@ public final class NonoExecutionBackend {
             final Path runtimeRoot,
             final Path stateRoot,
             final Duration timeout,
-            final Duration commandTimeout) {
+            final Duration commandTimeout,
+            final String showToolOutput) {
         if (json == null
                 || executable.isBlank()
                 || timeout.isNegative()
@@ -93,6 +95,7 @@ public final class NonoExecutionBackend {
         }
         this.timeout = timeout;
         this.commandTimeout = commandTimeout;
+        this.showToolOutput = showToolOutput;
     }
 
     public int execute(
@@ -201,6 +204,8 @@ public final class NonoExecutionBackend {
                     "--",
                     agent.toString(),
                     "run",
+                    "--show-tool-output",
+                    showToolOutput,
                     "--yca-configuration-json",
                     staged.toString(),
                     "--yca-configuration-project-enabled",

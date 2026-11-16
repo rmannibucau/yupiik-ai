@@ -65,6 +65,7 @@ public final class KubernetesExecutionBackend {
     private final long uid;
     private final long gid;
     private final String serviceAccount;
+    private final String showToolOutput;
 
     public KubernetesExecutionBackend(
             final JsonMapper json,
@@ -77,7 +78,8 @@ public final class KubernetesExecutionBackend {
             final long gid,
             final Duration timeout,
             final Duration commandTimeout,
-            final String serviceAccount) {
+            final String serviceAccount,
+            final String showToolOutput) {
         if (json == null
                 || client == null
                 || image.isBlank()
@@ -92,6 +94,7 @@ public final class KubernetesExecutionBackend {
         validateName(claim);
         validateName(serviceAccount);
         this.serviceAccount = serviceAccount;
+        this.showToolOutput = showToolOutput;
         this.json = json;
         this.client = client;
         this.sharedRoot = checked(sharedRoot, true);
@@ -154,6 +157,8 @@ public final class KubernetesExecutionBackend {
                 "/attempt/workspace",
                 List.of(
                         "run",
+                        "--show-tool-output",
+                        showToolOutput,
                         "--yca-configuration-json",
                         "/attempt/configuration.json",
                         "--yca-configuration-project-enabled",

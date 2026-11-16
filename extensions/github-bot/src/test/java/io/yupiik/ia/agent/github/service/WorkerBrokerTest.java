@@ -175,7 +175,7 @@ class WorkerBrokerTest {
                                 + "test -z \"${GITHUB_SOURCE_TOKEN-}\"\nexit 0\n");
                 Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
                 final var backend = new DockerExecutionBackend(
-                        executable.toString(), "trusted-agent", Duration.ofSeconds(5), "", null);
+                        executable.toString(), "trusted-agent", Duration.ofSeconds(5), "", null, "shown");
                 assertEquals(
                         0,
                         backend.execute(

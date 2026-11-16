@@ -18,10 +18,12 @@ package io.yupiik.ia.agent.github.configuration;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -44,6 +46,13 @@ public record ExecutorConfiguration(
 
         @Property(defaultValue = "30", documentation = "Maximum executor control request duration in seconds.")
         int commandTimeoutSeconds,
+        @Property(
+                defaultValue = "\"shown\"",
+                documentation = "Agent tool visibility: shown prints requested arguments, streams and results; "
+                        + "collapsed prints lifecycle summaries; hidden suppresses ordinary tool activity. "
+                        + "Shown includes shell commands and can expose sensitive tool data in execution logs.")
+        String showToolOutput,
+
 
         @Property(documentation = "Docker launcher settings.")
         Docker docker,
@@ -55,6 +64,14 @@ public record ExecutorConfiguration(
 
         @Property(documentation = "Credential relay settings.")
         Relay relay) {
+    public ExecutorConfiguration {
+        final var visibility = ToolOutputVisibility.parse(showToolOutput);
+        if (visibility == null) {
+            throw new IllegalArgumentException("github.executor.showToolOutput must be shown, collapsed or hidden");
+        }
+        showToolOutput = visibility.name().toLowerCase(Locale.ROOT);
+    }
+
     @JsonModel
     public enum Backend {
         DOCKER,

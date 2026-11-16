@@ -31,6 +31,36 @@ import org.junit.jupiter.api.Test;
 
 class ExecutorConfigurationTest {
     @Test
+    void toolOutputIsShownByDefault() {
+        assertEquals("shown", configuration(Map.of()).showToolOutput());
+    }
+
+    @Test
+    void bindsAndNormalizesToolOutputVisibility() {
+        for (final var visibility : List.of("shown", "collapsed", "hidden")) {
+            assertEquals(
+                    visibility,
+                    configuration(Map.of("github.executor.showToolOutput", visibility)).showToolOutput());
+        }
+        assertEquals(
+                "shown",
+                configuration(Map.of("github.executor.showToolOutput", " SHOW ")).showToolOutput());
+        assertEquals(
+                "hidden",
+                configuration(Map.of("github.executor.showToolOutput", "false")).showToolOutput());
+    }
+
+    @Test
+    void rejectsInvalidToolOutputVisibility() {
+        for (final var value : List.of("", " ", "verbose", "not-a-mode")) {
+            final var failure = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> configuration(Map.of("github.executor.showToolOutput", value)));
+            assertEquals("github.executor.showToolOutput must be shown, collapsed or hidden", failure.getMessage());
+        }
+    }
+
+    @Test
     void unconfiguredDockerDoesNotEnableEitherGateway() {
         final var docker = configuration(Map.of()).docker();
         assertNull(docker.services());

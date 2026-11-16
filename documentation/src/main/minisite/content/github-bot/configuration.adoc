@@ -53,6 +53,19 @@ The following settings, defaults and environment variable names are generated fr
 
 include::content/_partials/generated/documentation.github-bot.adoc[]
 
+=== Agent tool visibility
+
+`github.executor.showToolOutput` defaults to `shown`, so Docker, Nono and Kubernetes executions pass `--show-tool-output shown` to the agent's `run` command without a deployment override.
+This shows shell commands as well as all tool request arguments, streamed output and results in execution logs, not GitHub comments.
+The agent's Java Util Logging configuration must allow `INFO` messages for tool activity to appear.
+
+Set `GITHUB_EXECUTOR_SHOWTOOLOUTPUT=collapsed` (or `--github-executor-showToolOutput collapsed`) for lifecycle summaries without full arguments and output.
+Set `GITHUB_EXECUTOR_SHOWTOOLOUTPUT=hidden` (or `--github-executor-showToolOutput hidden`) to suppress ordinary tool activity.
+This bot setting does not change the standalone `run` command's default or permit arbitrary `run` settings through the isolated agent configuration filter.
+
+WARNING: The enabled default can expose sensitive tool arguments and output in private execution logs and consume existing bounded log capacity faster.
+Existing output limits, retention rules and access controls remain unchanged; this setting does not add redaction.
+
 === Trusted prompt templates
 
 `PromptConfiguration` uses `github.prompts` for all static prompt text, with defaults declared by `@Property(defaultValue)` and compiled using Fusion Handlebars.

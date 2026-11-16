@@ -40,7 +40,7 @@ class DockerRestrictedServicesTest {
         final var config = defaultConfiguration();
         assertEquals(
                 0,
-                new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(3), "", null, config)
+                new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(3), "", null, config, "shown")
                         .execute(attempt(), "yca-dependencies", "review", Map.of(), Map.of(), settings(), secrets()));
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertEquals(
@@ -165,7 +165,7 @@ class DockerRestrictedServicesTest {
                                     Duration.ofSeconds(2),
                                     "",
                                     null,
-                                    defaultConfiguration())
+                                    defaultConfiguration(), "shown")
                             .execute(attempt(), "yca-partial", "review", Map.of(), Map.of(), settings, secrets()));
             final var calls = Files.readAllLines(Path.of(executable + ".calls"));
             assertFalse(calls.stream().anyMatch(c -> c.startsWith("run ")));
@@ -176,7 +176,7 @@ class DockerRestrictedServicesTest {
         for (final var suffix : List.of(".container", ".network", ".yca-restart-egress", ".yca-restart-external")) {
             Files.createFile(Path.of(executable + suffix));
         }
-        new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(2), "", null).stop("yca-restart");
+        new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(2), "", null, "shown").stop("yca-restart");
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertTrue(calls.indexOf("rm --force yca-restart-egress") < calls.indexOf("network rm yca-restart-external"));
         assertTrue(calls.indexOf("network rm yca-restart-external")
@@ -211,7 +211,7 @@ class DockerRestrictedServicesTest {
                 () -> new ExecutorConfiguration.Docker("docker", "agent", "trusted", null, config));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new DockerExecutionBackend("docker", "agent", Duration.ofSeconds(1), "trusted", null, config));
+                () -> new DockerExecutionBackend("docker", "agent", Duration.ofSeconds(1), "trusted", null, config, "shown"));
         assertThrows(
                 IllegalArgumentException.class,
                 () -> new DockerExecutionBackend(
@@ -220,7 +220,7 @@ class DockerRestrictedServicesTest {
                         Duration.ofSeconds(1),
                         "",
                         new ExecutorConfiguration.Docker.Egress("egress", List.of("github.com"), "127.0.0.1"),
-                        config));
+                        config, "shown"));
         assertThrows(
                 IllegalArgumentException.class,
                 () -> new ExecutorConfiguration.Docker(
@@ -393,7 +393,7 @@ class DockerRestrictedServicesTest {
     @Test
     void rejectsBundlesInUnknownModeAndRequiresExplicitBundleInServicesMode() throws Exception {
         final var executable = fake("");
-        final var legacy = new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(1), "", null);
+        final var legacy = new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(1), "", null, "shown");
         assertThrows(
                 IllegalArgumentException.class,
                 () -> legacy.execute(
@@ -413,7 +413,7 @@ class DockerRestrictedServicesTest {
         final var executable = fake("");
         Files.createFile(Path.of(executable + ".container"));
         Files.createFile(Path.of(executable + ".network"));
-        new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(2), "", null)
+        new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(2), "", null, "shown")
                 .stop("yca-recovery");
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertTrue(calls.contains("rm --force yca-recovery-services"));
@@ -439,7 +439,7 @@ class DockerRestrictedServicesTest {
         final var executable = fake("if [ \"$4\" = '{{.State.Running}}' ]; then printf 'unknown\\n'; exit 0; fi\n");
         assertThrows(
                 IllegalStateException.class,
-                () -> new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(1), "", null)
+                () -> new DockerExecutionBackend(executable.toString(), "agent", Duration.ofSeconds(1), "", null, "shown")
                         .stop("yca-uncertain"));
         final var calls = Files.readAllLines(Path.of(executable + ".calls"));
         assertEquals(1, calls.size());
@@ -656,7 +656,7 @@ class DockerRestrictedServicesTest {
 
     private DockerExecutionBackend backend(final Path executable, final Duration timeout) {
         return new DockerExecutionBackend(
-                executable.toString(), "agent", timeout, "", null, configuration("http://172.20.0.1:8080/v1"));
+                executable.toString(), "agent", timeout, "", null, configuration("http://172.20.0.1:8080/v1"), "shown");
     }
 
     private Map<String, String> secrets() {

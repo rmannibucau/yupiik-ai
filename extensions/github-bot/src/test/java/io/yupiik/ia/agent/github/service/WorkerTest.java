@@ -87,6 +87,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class WorkerTest {
     private static final WorkerOptions DEFAULT_OPTIONS = new WorkerCommand$Options$FusionConfigurationFactory(
@@ -418,6 +420,34 @@ class WorkerTest {
         assertTrue(posts.isEmpty());
         final var directory = Path.of(
                 store.<String>transaction(state -> String.valueOf(state.task(id).attemptDirectory())));
+        AttemptPreparation.delete(directory);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"shown", "collapsed", "hidden"})
+    void forwardsConfiguredToolVisibilityToAgent(final String visibility) throws Exception {
+        enqueue("review");
+        Files.writeString(home.resolve("agent-configuration.json"), "{}");
+        final var executable = home.resolve("visibility-docker");
+        writeDockerFixture(
+                executable,
+                "#!/bin/sh\ncase \"$1\" in\nrun) printf '%s\\n' \"$@\" > '" + invocations
+                        + "'; exit 9;;\ncontainer) printf 'false\\n';;\n*) exit 0;;\nesac\n");
+        Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
+        final var values = Map.of(
+                "github.executor.docker.executable", executable.toString(),
+                "github.executor.docker.image", "trusted-agent",
+                "github.executor.timeoutSeconds", "5",
+                "github.executor.showToolOutput", visibility);
+        final var executor = new ExecutorConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get();
+        BotTestConfiguration.worker(conf, store, github, json, executor).run(id, DEFAULT_OPTIONS);
+        final var arguments = Files.readAllLines(invocations);
+        assertEquals(1, arguments.stream().filter("--show-tool-output"::equals).count());
+        assertEquals(visibility, arguments.get(arguments.indexOf("--show-tool-output") + 1));
+        assertEquals(TaskState.pending, store.transaction(state -> state.task(id).state()));
+        final var directory = Path.of(store.<String>transaction(state -> state.task(id).attemptDirectory()));
         AttemptPreparation.delete(directory);
     }
 
