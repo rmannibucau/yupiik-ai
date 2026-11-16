@@ -229,6 +229,104 @@ The scope does not follow a mutable repository name alone.
 Keys use logical definitions before backend-specific placeholder rendering, so a new Nono attempt path does not invalidate reusable data.
 An internal format version and reset epoch fence incompatible or expired state; there is no branch archive, arbitrary namespace or user generation setting.
 
+=== On-disk layout
+
+The following illustrative tree shows the private host store, not the directory mounted into an agent.
+Object names are SHA-256 digests split into a two-character directory and the remaining 62 hexadecimal characters; the bracketed names below are placeholders, not literal filenames.
+Transient files and additional objects are omitted.
+
+[source,text]
+----
+dependency-cache/
+|-- state                                  <1>
+|-- locks                                  <2>
+|-- inventory                              <3>
+|-- publications                           <4>
+|-- blobs/                                 <5>
+|   `-- aa/
+|       |-- <remaining-62-hex-digits-A>
+|       `-- <remaining-62-hex-digits-A>.allocation
+|-- manifests/                             <6>
+|   `-- bb/
+|       |-- <remaining-62-hex-digits-M>
+|       `-- <remaining-62-hex-digits-M>.allocation
+|-- index/                                 <7>
+|   `-- cc/
+|       |-- <remaining-62-hex-digits-I>
+|       `-- <remaining-62-hex-digits-I>.allocation
+`-- work/                                  <8>
+----
+<1> Published index root, reset epoch, quota accounting and maintenance progress; atomic state replacement publishes a new version.
+<2> A single file whose byte-range locks coordinate metadata, foreground operation slots and folder publication stripes; it is not a directory of per-repository locks.
+<3> Allocation records used for object accounting, reservation tracking, reclamation and record reuse.
+<4> The bounded publication FIFO used to select eviction candidates; it is not an archive of builds to replay during restore.
+<5> File contents addressed by their SHA-256 digest, rather than Maven coordinates or original filenames; identical bytes can reuse the same blob within this store.
+<6> Versioned manifests describing each cached folder's tree, relative paths, supported metadata and blob references.
+<7> Immutable, path-compressed radix index nodes mapping logical cache keys to manifest revisions; updates replace the affected index path rather than rewriting every mapping.
+<8> Temporary staging files associated with bounded operation slots, not persistent agent homes or build workspaces.
+
+The `.allocation` sidecar beside an object points to its allocation record in `inventory`; it is not a second copy of the artifact.
+The `aa`, `bb` and `cc` prefixes above illustrate independent object digests, not repository partitions.
+Repository isolation is enforced by logical keys and worker policy, not by a separate top-level directory for each repository.
+WARNING: This layout is an internal format, not an operator-editable interface; do not edit or delete individual objects, sidecars, state or lock files while the store is in use.
+
+=== Example: two Maven artifacts across three builds
+
+Assume three sequential, successful builds of the same repository use the same compatibility label and Maven entry policy, with no concurrent publisher or reset.
+The agent-facing Maven repository can contain these ordinary paths:
+
+[source,text]
+----
+attempt/storage/caches/maven/repository/
+`-- org/example/
+    |-- library-a/1.0/library-a-1.0.jar       <1>
+    `-- library-b/2.0/library-b-2.0.jar       <2>
+----
+<1> Artifact A, whose file bytes have a digest called `hash-A` in this example.
+<2> Artifact B, with different bytes and a different digest called `hash-B`.
+
+A real Maven repository also contains POMs, checksums and resolver metadata; this example omits them to show the relationship between paths and stored bytes.
+`hash-A`, `hash-B`, `M1` and `M2` are explanatory labels, not actual digests or on-disk manifest filenames.
+
+. Build `b1` starts cold and downloads A into its private Maven repository.
+After successful result validation and confirmed runtime stop, publication stores blob A, creates manifest `M1` describing the selected folder, and publishes an index mapping to `M1`.
+. Build `b2` restores `M1` into a fresh private attempt, then downloads B while retaining A.
+Publication reuses blob A, adds blob B, creates manifest `M2` describing A+B, and updates the current mapping to `M2`.
+. Build `b3` follows the current mapping to `M2` and restores A+B directly.
+It does not restore `M1` first or replay the downloads performed by earlier builds.
+
+After `b2`, the logical lookup is:
+
+[source,text]
+----
+GitHub API + immutable repository ID + compatibility + entry policy
+                              |
+                              v
+                         Cache key                         <1>
+                              |
+                              v
+                    Current index mapping
+                              |
+                              v
+                         Manifest M2                       <2>
+                              |
+                 +------------+------------+
+                 |                         |
+       library-a-1.0.jar          library-b-2.0.jar
+                 |                         |
+                 v                         v
+           Blob hash-A                Blob hash-B           <3>
+----
+<1> The key also incorporates the internal format and the logical policy definitions described above; this is a lookup diagram, not the serialized key format.
+<2> The manifest records full entry-relative paths, including `org/example/...`; basenames are shortened here for readability.
+<3> Restore verifies and copies the referenced bytes into the new attempt's ordinary Maven paths; those files are not writable hard links into the shared store.
+
+Once no live root or active restore requires the old manifest and superseded index nodes, they can be reclaimed by maintenance.
+Blob A remains needed by `M2`, so replacing `M1` does not make A eligible for deletion.
+Deduplication saves shared-store writes and space, but each restore still reads, verifies and writes private attempt copies.
+
+=== Publication, consistency and cost
+
 For sequential builds of the same repository, build `b1` can publish downloads A+B, `b2` restores that state and publishes A+B+C, and `b3` restores the single current state.
 The worker does not replay or merge a history of branch archives.
 Read authorization still applies to every cached artifact; a successful build or a repository-scoped key is not permission to publish untrusted data.
