@@ -36,6 +36,9 @@ public record TaskDocument(
         @Property(documentation = "Task kind: solve, review or help.")
         TaskKind kind,
 
+        @Property(documentation = "Host-resolved review target: pull_request, issue or discussion.")
+        String reviewTarget,
+
         @Property(documentation = "Untrusted request text.") String request,
         @Property(documentation = "Creation instant.") String createdAt,
 

@@ -139,10 +139,19 @@ public class DiscussionClient {
     }
 
     private Node node(final String query, final String id) {
-        return required(
-                execute(query, new Variables(null, null, null, requireId(id), null))
-                        .node(),
-                "node");
+        final var node = execute(query, new Variables(null, null, null, requireId(id), null))
+                .node();
+        if (node == null) {
+            throw new MissingDiscussionNodeException();
+        }
+        return node;
+    }
+
+    /** GitHub deliberately does not distinguish a deleted node from an inaccessible one. */
+    public static final class MissingDiscussionNodeException extends IllegalStateException {
+        public MissingDiscussionNodeException() {
+            super("Discussion or related comment is missing or inaccessible to the host token");
+        }
     }
 
     private Data execute(final String query, final Variables variables) {

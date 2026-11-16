@@ -181,7 +181,7 @@ public final class GitHubClient implements AutoCloseable {
         if (envelope == null
                 || (envelope.extensions() != null && envelope.extensions().containsKey("errors"))
                 || envelope.data() == null) {
-            throw new IllegalStateException("GitHub GraphQL request failed or returned partial data");
+            throw new DiscussionGraphqlException();
         }
         return envelope;
     }
@@ -638,6 +638,13 @@ public final class GitHubClient implements AutoCloseable {
                 done = true;
                 delegate.onComplete();
             }
+        }
+    }
+
+    /** Sanitized Discussion GraphQL errors never identify an inaccessible node as deleted. */
+    public static final class DiscussionGraphqlException extends IllegalStateException {
+        private DiscussionGraphqlException() {
+            super("GitHub GraphQL request failed or returned partial data");
         }
     }
 

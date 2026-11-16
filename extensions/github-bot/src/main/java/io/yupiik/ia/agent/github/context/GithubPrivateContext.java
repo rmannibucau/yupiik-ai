@@ -81,7 +81,13 @@ public class GithubPrivateContext {
         }
         final long number = integer(task.number());
         if (number <= 0) {
-            throw new IllegalArgumentException("Expected a positive pull request number");
+            throw new IllegalArgumentException("Expected a positive review target number");
+        }
+        if (AssessmentBase.isAssessment(task)) {
+            return stageAssessment(task, attempt, SourceMode.export);
+        }
+        if (!"pull_request".equals(task.reviewTarget())) {
+            throw new IllegalArgumentException("Expected an explicit review target");
         }
         final var workspace = attempt.toAbsolutePath().normalize().resolve("workspace");
         checkWorkspace(workspace);
@@ -95,6 +101,28 @@ public class GithubPrivateContext {
         }
         final var head = sha(snapshot.pull().head().sha());
         return export(attempt, repo, number, head);
+    }
+
+    /** Advisory assessments never create solve metadata or publication authority; null means no source was exported. */
+    public SourceSnapshot stageAssessment(final TaskDocument task, final Path attempt, final SourceMode mode)
+            throws IOException {
+        if (!AssessmentBase.isAssessment(task)
+                || mode == null
+                || mode == SourceMode.git
+                || task.repository() == null
+                || !REPOSITORY.matcher(task.repository()).matches()
+                || task.repository().endsWith("/.")
+                || task.repository().endsWith("/..")) {
+            throw new IllegalArgumentException("Expected an advisory review using export or broker source");
+        }
+        final var base = AssessmentBase.pin(github, task);
+        checkWorkspace(attempt.toAbsolutePath().normalize().resolve("workspace"));
+        vacant(attempt.resolve("workspace/repository"));
+        vacant(attempt.resolve("workspace/github-source.json"));
+        if (base.emptyRepository() || mode == SourceMode.broker) {
+            return null;
+        }
+        return export(attempt, task.repository(), integer(task.number()), base.sha());
     }
 
     /** Git mode pins metadata only; source materialization is deferred to the isolated agent. */

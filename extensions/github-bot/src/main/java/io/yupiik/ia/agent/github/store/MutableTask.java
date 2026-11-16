@@ -31,6 +31,7 @@ public final class MutableTask {
     private String repository;
     private Long number;
     private TaskKind kind;
+    private String reviewTarget;
     private String request;
     private String createdAt;
     private String reference;
@@ -77,6 +78,7 @@ public final class MutableTask {
         this.repository = document.repository();
         this.number = document.number();
         this.kind = document.kind();
+        this.reviewTarget = document.reviewTarget();
         this.request = document.request();
         this.createdAt = document.createdAt();
         this.reference = document.reference();
@@ -123,7 +125,7 @@ public final class MutableTask {
         return new MutableTask(new TaskDocument(
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null));
+                null, null, null, null, null, null, null, null, null, null, null));
     }
 
     public TaskDocument document() {
@@ -132,6 +134,7 @@ public final class MutableTask {
                 repository,
                 number,
                 kind,
+                reviewTarget,
                 request,
                 createdAt,
                 reference,
@@ -212,6 +215,14 @@ public final class MutableTask {
 
     public void kind(final TaskKind value) {
         kind = value;
+    }
+
+    public String reviewTarget() {
+        return reviewTarget;
+    }
+
+    public void reviewTarget(final String value) {
+        reviewTarget = value;
     }
 
     public String request() {

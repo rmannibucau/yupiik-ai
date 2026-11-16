@@ -19,9 +19,11 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
+import io.yupiik.ia.agent.github.context.GithubContextSnapshot;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
@@ -30,6 +32,7 @@ import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
@@ -158,11 +161,11 @@ class DiscussionSupportTest {
     }
 
     @Test
-    void rejectsBotsSelfUnknownIdsReviewQuotedCodeAndMarkedOutput() throws Exception {
+    void rejectsBotsSelfUnknownIdsQuotedCodeAndMarkedOutput() throws Exception {
         try (final var fixture = new Fixture()) {
             final var items = new ArrayList<Map<String, Object>>();
             final var bodies = List.of(
-                    "@bot review unsupported",
+                    "@bot fix unsupported",
                     "> @bot solve quoted",
                     "`@bot help`",
                     "<!-- yca-task:old:discussion -->\n@bot solve output",
@@ -183,6 +186,38 @@ class DiscussionSupportTest {
                     .transaction(state ->
                             state.list().stream().map(TaskFixtures::map).toList())
                     .isEmpty());
+        }
+    }
+
+    @Test
+    void reviewsPreserveAuthorizationOptInReceiptsAndThreadTargets() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.discussion.put("body", "@bot review root");
+            fixture.addComment("C1", 1, null, "@bot review comment");
+            fixture.addComment("R1", 2, "C1", "@bot review reply");
+            fixture.comments = connection(List.of(fixture.nodes.get("C1")), null);
+            fixture.replies.put("C1", connection(List.of(fixture.nodes.get("R1")), null));
+            assertEquals(0, fixture.poll(false, "42", "", 1));
+            assertTrue(fixture.requests.isEmpty());
+            assertEquals(0, fixture.poll(true, "99", "", 1));
+            assertEquals(3, fixture.poll(true, "42", "", 1));
+            final var tasks = fixture.store.transaction(state -> state.list());
+            assertEquals(3, tasks.size());
+            for (final var task : tasks) {
+                assertEquals(TaskKind.review, task.kind());
+                assertEquals("discussion", task.reviewTarget());
+                assertEquals("discussion", task.sourceType());
+                assertEquals("D1", task.discussionId());
+                assertEquals("42", task.actorId());
+                assertEquals(task.commentId() == null ? null : "C1", task.replyToId());
+            }
+            fixture.store = new TaskStore(BotTestConfiguration.home(home), fixture.json);
+            assertEquals(0, fixture.poll(true, "42", "", 1));
+            assertEquals(
+                    3,
+                    fixture.store.<Integer>transaction(state -> state.receipts().size()));
+            assertTrue(fixture.store.transaction(state -> state.list()).stream()
+                    .allMatch(task -> "discussion".equals(task.reviewTarget())));
         }
     }
 
@@ -302,6 +337,92 @@ class DiscussionSupportTest {
             input = TaskStore.map(
                     TaskStore.map(fixture.lastMutation.get("variables")).get("input"));
             assertEquals("C1", input.get("replyToId"));
+        }
+    }
+
+    @Test
+    void advisoryReviewPublishesAndReconcilesInTheExactRootOrReplyThread() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.addComment("C1", 1, null, "@bot review");
+            fixture.addComment("R1", 2, "C1", "@bot review");
+            for (final var origin : List.of("root", "C1", "R1")) {
+                final var task =
+                        fixture.task("root".equals(origin) ? null : origin, "root".equals(origin) ? null : "C1");
+                final var id = String.valueOf(task.get("id"));
+                fixture.store.transaction(state -> {
+                    state.task(id).kind(TaskKind.review);
+                    state.task(id).reviewTarget("discussion");
+                    return null;
+                });
+                final var review =
+                        fixture.store.transaction(state -> state.task(id).document());
+                fixture.publisher().publish(review, "## Summary\n\nRecommendation: reconsider");
+                final var input = TaskStore.map(
+                        TaskStore.map(fixture.lastMutation.get("variables")).get("input"));
+                assertEquals("D1", input.get("discussionId"));
+                assertEquals("root".equals(origin) ? null : "C1", input.get("replyToId"));
+                assertTrue(fixture.intentAtMutation);
+            }
+            assertEquals(3, fixture.mutations.get());
+        }
+    }
+
+    @Test
+    void advisorySnapshotIncludesInvocationRepliesWithoutRestPrCalls() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.addComment("C1", 1, null, "Proposal details");
+            fixture.addComment("R1", 2, "C1", "@bot review nested requirements");
+            fixture.comments = connection(List.of(fixture.nodes.get("C1")), null);
+            fixture.replies.put("C1", connection(List.of(fixture.nodes.get("R1")), null));
+            final var value = fixture.task("R1", "C1");
+            value.put("kind", "review");
+            value.put("reviewTarget", "discussion");
+            value.put("assessmentBaseBranch", "main");
+            value.put("assessmentBaseSha", "a".repeat(40));
+            value.put("assessmentEmptyRepository", false);
+            final var attempt = home.resolve("assessment-export");
+            Files.createDirectories(attempt.resolve("workspace"));
+            new GithubContextSnapshot(fixture.github, fixture.json).stage(TaskFixtures.task(value), attempt);
+            final var snapshot = TaskStore.map(fixture.json.fromString(
+                    Object.class, Files.readString(attempt.resolve("workspace/github-context.json"))));
+            assertEquals("discussion", snapshot.get("reviewTarget"));
+            assertEquals(true, snapshot.get("conversationComplete"));
+            assertTrue(String.valueOf(snapshot.get("discussionReplies")).contains("nested requirements"));
+            assertFalse(snapshot.containsKey("pull"));
+        }
+    }
+
+    @Test
+    void revokedDiscussionReviewCanReconcileButCannotCreateAResponse() throws Exception {
+        try (final var fixture = new Fixture()) {
+            final var value = fixture.task(null, null);
+            final var id = String.valueOf(value.get("id"));
+            fixture.store.transaction(state -> {
+                state.task(id).kind(TaskKind.review);
+                state.task(id).reviewTarget("discussion");
+                return null;
+            });
+            final var task = fixture.store.transaction(state -> state.task(id).document());
+            assertThrows(
+                    IllegalStateException.class, () -> fixture.publisher().publish(task, "Assessment", () -> false));
+            assertEquals(0, fixture.mutations.get());
+            assertNull(fixture.store.transaction(state -> state.task(id).discussionPublishIntent()));
+            fixture.publisher().publish(task, "Assessment", () -> true);
+            fixture.comments = connection(List.of(fixture.nodes.get("posted")), null);
+            assertEquals(ROOT + "#discussioncomment-90", fixture.publisher().publish(task, "Assessment", () -> false));
+            assertEquals(1, fixture.mutations.get());
+        }
+    }
+
+    @Test
+    void missingDiscussionNodeIsNotClassifiedAsDeletedOrAsAPr() throws Exception {
+        try (final var fixture = new Fixture()) {
+            fixture.missingDiscussion = true;
+            final var error = assertThrows(
+                    DiscussionClient.MissingDiscussionNodeException.class,
+                    () -> new DiscussionClient(fixture.github).discussion("D1"));
+            assertTrue(error.getMessage().contains("missing or inaccessible"));
+            assertTrue(fixture.restPaths.isEmpty());
         }
     }
 
@@ -473,6 +594,7 @@ class DiscussionSupportTest {
                 "author",
                 actor("User", "alice", 42)));
         private final Map<String, Map<String, Object>> nodes = new ConcurrentHashMap<>();
+        private boolean missingDiscussion;
         private volatile Map<String, Object> discovery = connection(List.of(discussion), null);
         private volatile Map<String, Object> comments = connection(List.of(), null);
         private final Map<String, Map<String, Object>> replies = new ConcurrentHashMap<>();
@@ -553,7 +675,7 @@ class DiscussionSupportTest {
                     } else if (query.startsWith("query DiscussionCommentRead")) {
                         data = Map.of("node", nodes.getOrDefault(nodeId, Map.of()));
                     } else if (query.startsWith("query DiscussionRead")) {
-                        data = Map.of("node", discussion);
+                        data = missingDiscussion ? Map.of() : Map.of("node", discussion);
                     } else {
                         status = 400;
                         data = Map.of();

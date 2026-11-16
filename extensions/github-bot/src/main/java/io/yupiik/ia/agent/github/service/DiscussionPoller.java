@@ -235,7 +235,8 @@ public class DiscussionPoller {
         final var parsed = MentionParser.parse(body, conf.login());
         if (updated.isBefore(since)
                 || parsed.isEmpty()
-                || !Set.of("help", "solve").contains(parsed.orElseThrow().kind())) {
+                || !Set.of("help", "solve", "review")
+                        .contains(parsed.orElseThrow().kind())) {
             return 0;
         }
         final var actor = comment == null ? discussion.author() : comment.author();
@@ -272,6 +273,9 @@ public class DiscussionPoller {
         task.discussionContext("Discussion: " + discussion.title() + "\n" + discussion.url() + "\n\n"
                 + discussion.body() + (comment == null ? "" : "\n\nInvocation comment:\n" + body));
         task.kind(TaskKind.valueOf(invocation.kind()));
+        if (task.kind() == TaskKind.review) {
+            task.reviewTarget("discussion");
+        }
         task.request(invocation.request());
         task.actorId(actor.databaseId());
         task.batchId(batch);

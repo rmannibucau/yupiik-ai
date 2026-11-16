@@ -30,8 +30,10 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -74,6 +76,16 @@ class StrictSolvePublisherTest {
             assertEquals("main", fixture.posts.get(4).get("base"));
             assertEquals("repo", fixture.posts.get(4).get("head_repo"));
             assertEquals(Boolean.FALSE, fixture.posts.get(4).get("maintainer_can_modify"));
+            final var body = (String) fixture.posts.get(4).get("body");
+            assertEquals(
+                    PullRequestRenderer.render(
+                            TaskFixtures.result(fixture.result), "<!-- yca-task:" + fixture.id + " -->"),
+                    body);
+            assertTrue(body.contains("## Summary"));
+            assertTrue(body.contains("## Changes"));
+            assertTrue(body.contains("## Validation / test evidence"));
+            assertTrue(body.contains("## Risks / follow-up"));
+            assertEquals(fingerprint(body), fixture.publication().get("fingerprint"));
             final var saved = fixture.task();
             assertEquals("retained-attempt", saved.get("attemptDirectory"));
             assertEquals(fixture.result, saved.get("result"));
@@ -84,12 +96,52 @@ class StrictSolvePublisherTest {
     }
 
     @Test
+    void renderedEvidenceIsBoundBeforeWritesAndCannotChangeDuringRecovery() throws Exception {
+        for (final var field : List.of("body", "summary", "tests")) {
+            try (final var fixture = new Fixture()) {
+                fixture.fail = "prIntent";
+                assertThrows(IllegalStateException.class, fixture::publish);
+                final var fingerprint = fixture.publication().get("fingerprint");
+                final var changed = new LinkedHashMap<>(fixture.result);
+                if ("body".equals(field)) {
+                    final var solve = new LinkedHashMap<>(TaskStore.map(changed.get("strictSolve")));
+                    solve.put("body", "Different supplied description");
+                    changed.put("strictSolve", solve);
+                } else {
+                    changed.put(field, "tests".equals(field) ? List.of("New test claim") : "New summary");
+                }
+                fixture.result = changed;
+                fixture.listed = true;
+                final int reads = fixture.gets.size();
+                assertThrows(IllegalStateException.class, fixture::publish, field);
+                assertEquals(reads, fixture.gets.size(), field);
+                assertEquals(5, fixture.posts.size(), field);
+                assertEquals(fingerprint, fixture.publication().get("fingerprint"), field);
+            }
+        }
+    }
+
+    @Test
+    void oversizedRenderedEvidenceCannotWriteOrBindPublication() throws Exception {
+        try (final var fixture = new Fixture()) {
+            final var result = new LinkedHashMap<>(fixture.result);
+            result.put("tests", List.of("x".repeat(65000)));
+            fixture.result = result;
+            assertThrows(IllegalArgumentException.class, fixture::publish);
+            assertTrue(fixture.posts.isEmpty());
+            assertNull(fixture.task().get("strictSolvePublication"));
+        }
+    }
+
+    @Test
     void uncertainPrIsReconciledAcrossRestartIncludingClosedPrWithoutAnotherPost() throws Exception {
         try (final var fixture = new Fixture()) {
             fixture.fail = "prIntent";
             assertThrows(IllegalStateException.class, fixture::publish);
             assertTrue(fixture.publication().containsKey("prIntent"));
             assertFalse(fixture.publication().containsKey("prUrl"));
+            final var fingerprint = fixture.publication().get("fingerprint");
+            assertEquals(fingerprint((String) fixture.posts.getLast().get("body")), fingerprint);
             fixture.fail = null;
             fixture.listed = true;
             fixture.stale = true; // Reconciliation must work after the upstream advances.
@@ -107,6 +159,7 @@ class StrictSolvePublisherTest {
                     URL,
                     restarted.publish(TaskFixtures.task(fixture.task()), TaskFixtures.result(fixture.result), "bot"));
             assertEquals(5, fixture.posts.size());
+            assertEquals(fingerprint, fixture.publication().get("fingerprint"));
             assertTrue(fixture.gets.stream()
                     .anyMatch(path -> path.contains("state=all")
                             && path.contains("head=bot%3Agithub-bot%2F")
@@ -449,6 +502,17 @@ class StrictSolvePublisherTest {
                 assertTrue(f.posts.isEmpty(), malformed);
             }
         }
+    }
+
+    private static String fingerprint(final String body) throws Exception {
+        final var digest = MessageDigest.getInstance("SHA-256");
+        for (final var field : List.of(BASE, "Fix the issue", body, "run.sh", "ZWNobyBvaw==", "false")) {
+            final var bytes = field.getBytes(StandardCharsets.UTF_8);
+            digest.update(Integer.toString(bytes.length).getBytes(StandardCharsets.US_ASCII));
+            digest.update((byte) ':');
+            digest.update(bytes);
+        }
+        return HexFormat.of().formatHex(digest.digest());
     }
 
     private static Map<String, Object> result(final List<Map<String, Object>> changes) {

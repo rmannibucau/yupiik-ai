@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.github.model;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.ia.agent.github.store.MutableTask;
 import io.yupiik.ia.agent.github.store.StateDocument;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
@@ -29,6 +30,25 @@ import org.junit.jupiter.api.Test;
 
 class TaskDocumentTest {
     @Test
+    void reviewTargetIsAnExplicitDurableFieldPreservedByMutableSnapshots() {
+        try (final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty())) {
+            for (final var target : List.of("pull_request", "issue", "discussion")) {
+                final var task = MutableTask.create();
+                task.kind(TaskKind.review);
+                task.reviewTarget(target);
+                assertEquals(target, task.reviewTarget());
+                final var decoded = json.fromString(TaskDocument.class, json.toString(task.document()));
+                assertEquals(target, decoded.reviewTarget());
+                assertTrue(decoded.recovery() == null || !decoded.recovery().containsKey("reviewTarget"));
+                final var restored = new MutableTask(decoded);
+                assertEquals(target, restored.document().reviewTarget());
+                restored.reviewTarget(null);
+                assertNull(restored.document().reviewTarget());
+            }
+        }
+    }
+
+    @Test
     void roundTripsTaskRecoveryFieldsWithoutChangingDurableShape() {
         try (final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty())) {
             final var source = Map.<String, Object>of(
@@ -38,6 +58,8 @@ class TaskDocumentTest {
                     "acme/repo",
                     "kind",
                     "review",
+                    "reviewTarget",
+                    "pull_request",
                     "state",
                     "publishing",
                     "attempts",

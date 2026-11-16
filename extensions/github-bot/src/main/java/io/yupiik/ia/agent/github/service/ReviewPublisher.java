@@ -58,6 +58,9 @@ public class ReviewPublisher {
     }
 
     public String publish(final TaskDocument taskDocument, final AgentResult agentResult) {
+        if (!"pull_request".equals(taskDocument.reviewTarget()) || agentResult.assessment() != null) {
+            throw new IllegalArgumentException("Native review publication requires a pull request review target");
+        }
         final var task = taskDocument;
         final var id = String.valueOf(task.id());
         final var prefix = "/repos/" + task.repository() + "/pulls/" + task.number();

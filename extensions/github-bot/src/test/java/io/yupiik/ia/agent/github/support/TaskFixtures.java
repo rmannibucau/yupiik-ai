@@ -30,6 +30,10 @@ public final class TaskFixtures {
 
     public static TaskDocument task(final Map<String, Object> source) {
         final var copy = new LinkedHashMap<>(source);
+        if ("review".equals(String.valueOf(copy.get("kind")))) {
+            copy.putIfAbsent(
+                    "reviewTarget", "discussion".equals(copy.get("sourceType")) ? "discussion" : "pull_request");
+        }
         if (copy.get("actorId") != null) {
             copy.put("actorId", String.valueOf(copy.get("actorId")));
         }

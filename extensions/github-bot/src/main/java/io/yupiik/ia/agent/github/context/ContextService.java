@@ -84,6 +84,7 @@ public final class ContextService implements AutoCloseable {
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final String primary;
+    private final AssessmentBase assessment;
 
     public ContextService(
             final GitHubClient github,
@@ -106,11 +107,20 @@ public final class ContextService implements AutoCloseable {
         this.git = git;
         this.discussions = new TaskDiscussionContext(github, task);
         final var upstream = repository(task.repository());
+        assessment = AssessmentBase.isAssessment(task) ? AssessmentBase.pin(github, task) : null;
         if (task.kind() == TaskKind.solve) {
             final var head = sha(task.strictSolveBaseSha());
             add(upstream, head, head);
             primary = name(upstream);
+        } else if (assessment != null) {
+            primary = name(upstream);
+            if (!assessment.emptyRepository()) {
+                add(upstream, assessment.sha(), assessment.sha());
+            }
         } else {
+            if (task.kind() != TaskKind.fix && !"pull_request".equals(task.reviewTarget())) {
+                throw new IllegalArgumentException("Expected an explicit review target");
+            }
             final var pull = object(github.get("/repos/" + task.repository() + "/pulls/" + number(task.number())));
             final var base = object(pull.get("base"));
             final var head = object(pull.get("head"));
@@ -142,6 +152,27 @@ public final class ContextService implements AutoCloseable {
 
     public Map<String, Object> metadata() {
         check();
+        if (assessment != null && assessment.emptyRepository()) {
+            return Map.of(
+                    "scope",
+                    "worker-pinned-snapshot",
+                    "taskId",
+                    task.id(),
+                    "repository",
+                    primary,
+                    "reviewTarget",
+                    task.reviewTarget(),
+                    "baseBranch",
+                    assessment.branch(),
+                    "source",
+                    "unavailable",
+                    "sourceStatus",
+                    "EMPTY_REPOSITORY",
+                    "localWorktree",
+                    false,
+                    "expiresAt",
+                    deadline.toString());
+        }
         final var grant = grant(null);
         final var metadata = new LinkedHashMap<String, Object>();
         metadata.putAll(Map.of(
@@ -166,6 +197,12 @@ public final class ContextService implements AutoCloseable {
         metadata.put("attempt", task.attempts());
         metadata.put("runtime", task.runtimeId());
         metadata.put("sourceType", task.sourceType());
+        if (task.kind() == TaskKind.review) {
+            metadata.put("reviewTarget", task.reviewTarget());
+        }
+        if (assessment != null) {
+            metadata.put("baseBranch", assessment.branch());
+        }
         return Collections.unmodifiableMap(metadata);
     }
 
@@ -216,14 +253,19 @@ public final class ContextService implements AutoCloseable {
                 case "repositories" -> repositories();
                 case "request_repository" -> requestRepository(repo);
                 case "prepare_source" ->
-                    prepare(
-                            grant(repo),
-                            integer(request.get("depth"), 1),
-                            bool(request.get("tags")),
-                            revision(request.get("revision")));
+                    emptySource(repo)
+                            ? Map.of("status", "EMPTY_REPOSITORY", "sourceAvailable", false)
+                            : prepare(
+                                    grant(repo),
+                                    integer(request.get("depth"), 1),
+                                    bool(request.get("tags")),
+                                    revision(request.get("revision")));
                 case "operation_status" -> operation(text(request.get("operationId"), "operationId"));
                 case "cancel" -> cancel(text(request.get("operationId"), "operationId"));
-                case "git" -> read(grant(repo), argv(request.get("argv")));
+                case "git" ->
+                    emptySource(repo)
+                            ? Map.of("status", "EMPTY_REPOSITORY", "sourceAvailable", false)
+                            : read(grant(repo), argv(request.get("argv")));
                 default -> throw new IllegalArgumentException("UNKNOWN_CONTEXT_OPERATION");
             };
         }
@@ -433,6 +475,9 @@ public final class ContextService implements AutoCloseable {
             throw new IllegalArgumentException("REPOSITORY_REQUIRED");
         }
         final var requested = key(repository);
+        if (emptySource(repository)) {
+            return Map.of("status", "EMPTY_REPOSITORY", "sourceAvailable", false);
+        }
         final var allowed = new HashSet<String>();
         for (final var name : conf.repositories().split(",")) {
             if (!name.isBlank()) {
@@ -523,6 +568,12 @@ public final class ContextService implements AutoCloseable {
         } finally {
             lock.unlock();
         }
+    }
+
+    private boolean emptySource(final String repository) {
+        return assessment != null
+                && assessment.emptyRepository()
+                && (repository == null || primary.equalsIgnoreCase(repository));
     }
 
     private void add(final Map<String, Object> repository, final String sha, final String baseSha) {

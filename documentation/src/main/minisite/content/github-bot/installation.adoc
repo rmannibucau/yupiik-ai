@@ -460,10 +460,11 @@ Repeat polling and worker invocation, checking that:
 
 * Each invocation creates one task and one correctly threaded response.
 * Self, unauthorized-user and task-marked mentions enqueue nothing.
-* Discussion `review` requests enqueue nothing because reviews are unsupported there.
+* An authorized Discussion `review` request creates an advisory assessment task, not a native PR review or a solve.
 * Polling invokes no LLM or executor, and help launches neither.
 
 Only then test a solve with a verified fork, confirming that the new PR is independently verified and linked back into the originating thread.
+For `review`, verify a structured assessment in the originating thread, with no code change, PR creation, closure or answer selection.
 Do not substitute an issue comment or a matching marker from another thread as publication evidence.
 
 Per-connection scan budgets do not bound the whole poll; retained Discussion/thread history increases API cost and needs operator capacity planning.

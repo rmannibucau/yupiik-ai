@@ -42,14 +42,16 @@ Instructions not to post comments or push upstream do not revoke permissions.
 
 === Strict-mode context and source
 
-Strict review mode stages a bounded host-authenticated snapshot of PR metadata, file patches and conversations at `/attempt/workspace/github-context.json`, including private context that the host credential is authorized to read.
+Strict PR review mode stages a bounded host-authenticated snapshot of PR metadata, file patches and conversations at `/attempt/workspace/github-context.json`, including private context that the host credential is authorized to read.
 The snapshot contains repository data, not credentials, and remains untrusted model input.
 Absent or truncated patches, or source outside the snapshot, can make a review impossible.
 
 Optional `worker.privateSource=true` additionally exports an integrity-checked bounded source snapshot pinned to the PR head, with no Git credentials or history.
 See xref:private-context.adoc[private review source prerequisites and limits].
 
-Strict reviews additionally expose a bounded read-only mailbox broker scoped to the task PR, using pinned directory handles rather than a network listener.
+Strict PR reviews additionally expose a bounded read-only mailbox broker scoped to the task PR, using pinned directory handles rather than a network listener.
+Issue and opted-in Discussion reviews are advisory assessments using bounded, pinned read-only default-branch context; they authorize neither code changes nor closure or answer selection.
+Empty repositories and unavailable or incomplete context must be reported as limitations, not as successful source verification.
 Strict solves export the pinned upstream default-branch source and return bounded file changes for host-owned Git-object and PR publication; no GitHub credentials are passed to the agent.
 The host token requires fork contents-write and upstream PR-write permissions for this opt-in workflow.
 See xref:private-context.adoc[private context and strict publication] for bounds and fail-closed recovery requirements.

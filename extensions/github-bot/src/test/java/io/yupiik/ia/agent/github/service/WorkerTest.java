@@ -215,6 +215,83 @@ class WorkerTest {
     }
 
     @Test
+    void issueAssessmentPublishesOneStructuredCommentAndNoNativeReview() {
+        stageAssessment("reconsider");
+        worker().run(id, workerOptions(1));
+        assertEquals(TaskState.done, store.transaction(state -> state.task(id).state()));
+        assertEquals(URL, store.transaction(state -> state.task(id).commentUrl()));
+        assertEquals(1, posts.size());
+        assertTrue(String.valueOf(posts.getFirst().get("body")).contains("reconsider"));
+        assertTrue(String.valueOf(posts.getFirst().get("body")).contains("Assess the proposal"));
+        assertFalse(requests.stream().anyMatch(request -> request.contains("/pulls/")));
+        assertFalse(Files.exists(invocations));
+    }
+
+    @Test
+    void issueAssessmentRejectsNativeReviewPayloadWithoutWritingOrRerunning() {
+        stageAssessment("proceed");
+        store.transaction(state -> {
+            state.task(id)
+                    .result(TaskFixtures.result(Map.of("summary", "Review", "review", Map.of("body", "Invalid"))));
+            return null;
+        });
+        assertThrows(IllegalArgumentException.class, () -> worker().run(id, workerOptions(1)));
+        assertEquals(
+                TaskState.publishing, store.transaction(state -> state.task(id).state()));
+        assertTrue(posts.isEmpty());
+        assertFalse(Files.exists(invocations));
+    }
+
+    @Test
+    void issueAssessmentUncertainWriteDoesNotReplayAndReconcilesMarker() {
+        stageAssessment("proceed_with_conditions");
+        postStatus = 500;
+        assertThrows(RuntimeException.class, () -> worker().run(id, workerOptions(1)));
+        postStatus = 200;
+        assertThrows(IllegalStateException.class, () -> worker().run(id, workerOptions(1)));
+        assertEquals(1, posts.size());
+        comments = List.of(Map.of(
+                "body", "<!-- yca-task:" + id + " -->\nAssessment", "user", Map.of("login", "bot"), "html_url", URL));
+        worker().run(id, workerOptions(1));
+        assertEquals(TaskState.done, store.transaction(state -> state.task(id).state()));
+        assertEquals(1, posts.size());
+        assertFalse(Files.exists(invocations));
+    }
+
+    @Test
+    void revokedActorCannotPublishIssueAssessment() {
+        stageAssessment("clarification_needed");
+        store.transaction(state -> {
+            state.task(id).actorId("99");
+            return null;
+        });
+        assertThrows(IllegalStateException.class, () -> worker().run(id, workerOptions(1)));
+        assertTrue(posts.isEmpty());
+        assertFalse(Files.exists(invocations));
+    }
+
+    private void stageAssessment(final String recommendation) {
+        enqueue("review");
+        store.transaction(state -> {
+            final var task = state.task(id);
+            task.reviewTarget("issue");
+            task.state(TaskState.publishing);
+            task.result(TaskFixtures.result(Map.of(
+                    "summary",
+                    "Proposal assessment",
+                    "assessment",
+                    Map.of(
+                            "recommendation", recommendation,
+                            "assessment", "Assess the proposal before implementation.",
+                            "concerns", List.of("Scope risk"),
+                            "suggestedApproach", List.of("Confirm scope"),
+                            "acceptanceCriteria", List.of("Document expected behavior"),
+                            "openQuestions", List.of("Which users need this?")))));
+            return null;
+        });
+    }
+
+    @Test
     void strictSolveRetainsPublicationFailureWithoutExecutingOrPostingFinalComment() {
         enqueue("solve");
         final var base = "a".repeat(40);
@@ -342,6 +419,28 @@ class WorkerTest {
         final var directory = Path.of(
                 store.<String>transaction(state -> String.valueOf(state.task(id).attemptDirectory())));
         AttemptPreparation.delete(directory);
+    }
+
+    @Test
+    void inaccessibleAssessmentContextReportsActionableSafeFailureWithoutExecution() throws Exception {
+        enqueue("review");
+        Files.writeString(home.resolve("agent-configuration.json"), "{}");
+        store.transaction(state -> {
+            state.task(id).reviewTarget("issue");
+            return null;
+        });
+        worker().run(id, workerOptions(1));
+        final var task = store.transaction(state -> state.task(id).document());
+        assertEquals(TaskState.failed, task.state());
+        assertEquals("source-staging", task.lastFailure().stage());
+        assertTrue(task.lastFailure().message().contains("target or required repository context"));
+        assertTrue(task.lastFailure().message().contains("missing or inaccessible"));
+        assertTrue(task.lastFailure().diagnosticsRetained());
+        assertFalse(Files.exists(invocations));
+        assertFalse(requests.stream().anyMatch(request -> request.contains("/pulls/")));
+        assertEquals(1, posts.size());
+        assertTrue(String.valueOf(posts.getFirst().get("body")).contains("Check the target and repository access"));
+        assertFalse(String.valueOf(posts.getFirst().get("body")).contains("HttpException"));
     }
 
     @Test
@@ -1155,7 +1254,7 @@ class WorkerTest {
                         Map.of(
                                 "body",
                                 marker()
-                                        + "\nMention `@bot review` on a pull request, or `@bot solve <request>` on an issue or enabled Discussion.")),
+                                        + "\nMention `@bot review` on a pull request for code review, or on an issue or enabled Discussion for an advisory assessment. Use `@bot solve <request>` on an issue or enabled Discussion.")),
                 posts);
         assertTrue(MentionParser.parse(String.valueOf(posts.getFirst().get("body")), "bot")
                 .isEmpty());
@@ -1214,7 +1313,8 @@ class WorkerTest {
                         "body",
                         marker()
                                 + "\n"
-                                + "I could not complete the requested task. The operator can inspect the task diagnostics."),
+                                + "I could not complete the requested task. The operator can inspect the retained private task"
+                                + " diagnostics."),
                 posts.getFirst());
         final var finished =
                 TaskFixtures.map(store.transaction(state -> state.task(id).document()));

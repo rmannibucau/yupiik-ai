@@ -25,6 +25,8 @@ import io.yupiik.ia.agent.github.support.TaskFixtures;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -39,6 +41,67 @@ import org.junit.jupiter.api.Test;
 /** Real loopback transport and DiscussionClient codecs, with no external GitHub or global properties. */
 class TaskDiscussionContextTest {
     private static final String ROOT = "https://github.com/owner/repo/discussions/12";
+
+    @Test
+    void advisoryDiscussionSnapshotNeverUsesRestEvenWithIssueSourceType(
+            @org.junit.jupiter.api.io.TempDir final Path temporary) throws Exception {
+        try (final var fixture = new Fixture()) {
+            final var task = TaskFixtures.task(Map.of(
+                    "id",
+                    "assessment",
+                    "repository",
+                    "owner/repo",
+                    "number",
+                    12,
+                    "kind",
+                    "review",
+                    "reviewTarget",
+                    "discussion",
+                    "sourceType",
+                    "issue",
+                    "discussionId",
+                    "D1",
+                    "assessmentBaseBranch",
+                    "main",
+                    "assessmentEmptyRepository",
+                    true));
+            Files.createDirectory(temporary.resolve("workspace"));
+            fixture.connection = variables ->
+                    connection("D1".equals(variables.get("id")) ? List.of(comment("C1", "D1", null)) : List.of(), null);
+            new GithubContextSnapshot(fixture.github, fixture.json).stage(task, temporary);
+            final var snapshot = map(fixture.json.fromString(
+                    Object.class, Files.readString(temporary.resolve("workspace/github-context.json"))));
+            assertTrue(snapshot.containsKey("discussion"));
+            assertTrue(snapshot.containsKey("discussionComments"));
+            assertFalse(snapshot.containsKey("issue"));
+            assertFalse(snapshot.containsKey("pull"));
+            assertFalse(snapshot.toString().contains("raw-secret"));
+            assertNull(new GithubPrivateContext(fixture.github, fixture.json).stage(task, temporary));
+            assertTrue(fixture.paths.stream().allMatch(it -> it.equals("POST /graphql")));
+        }
+    }
+
+    @Test
+    void explicitIssueReviewRejectsPrOperationsEvenWithPullReference() throws Exception {
+        try (final var fixture = new Fixture()) {
+            final var task = TaskFixtures.task(Map.of(
+                    "repository",
+                    "owner/repo",
+                    "number",
+                    12,
+                    "kind",
+                    "review",
+                    "reviewTarget",
+                    "issue",
+                    "reference",
+                    "https://github.com/owner/repo/pull/12"));
+            final var context = new TaskDiscussionContext(fixture.github, task);
+            for (final var operation : List.of("pull", "files", "reviews", "reviewComments", "discussion")) {
+                assertThrows(IllegalArgumentException.class, () -> context.read(operation, 1, null));
+            }
+            assertTrue(fixture.paths.isEmpty());
+        }
+    }
 
     @Test
     void domainDenialsNeverRequestAnIssueWithACollidingDiscussionNumber() throws Exception {

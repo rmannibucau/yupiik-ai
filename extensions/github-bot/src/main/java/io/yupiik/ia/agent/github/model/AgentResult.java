@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.framework.build.api.json.JsonOthers;
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -53,12 +54,64 @@ public record AgentResult(
         @Property(documentation = "Previously published native review identifier.")
         BigDecimal reviewId,
 
+        @Property(documentation = "Advisory issue or Discussion assessment, validated before publication.")
+        Assessment assessment,
+
         @JsonOthers @Property(documentation = "Unknown agent evidence preserved for diagnostics.")
         Map<String, Object> evidence) {
 
     public AgentResult {
         evidence = snapshot(evidence);
         tests = tests == null ? null : List.copyOf(tests);
+    }
+
+    /** Source compatibility for callers which do not produce advisory assessments. */
+    public AgentResult(
+            final BigDecimal schemaVersion,
+            final String taskId,
+            final String summary,
+            final String failure,
+            final String prUrl,
+            final Review review,
+            final StrictSolve strictSolve,
+            final List<String> tests,
+            final BigDecimal reviewId,
+            final Map<String, Object> evidence) {
+        this(schemaVersion, taskId, summary, failure, prUrl, review, strictSolve, tests, reviewId, null, evidence);
+    }
+
+    @JsonModel
+    public record Assessment(
+            @Property(
+                    documentation =
+                            "Recommendation: proceed, proceed_with_conditions, reconsider or clarification_needed.")
+            String recommendation,
+
+            @Property(documentation = "Advisory assessment Markdown, required and bounded by the renderer.")
+            String assessment,
+
+            @Property(documentation = "Optional bounded concerns.")
+            List<String> concerns,
+
+            @Property(documentation = "Optional bounded suggested approach steps.")
+            List<String> suggestedApproach,
+
+            @Property(documentation = "Optional bounded acceptance criteria.")
+            List<String> acceptanceCriteria,
+
+            @Property(documentation = "Optional bounded open questions.")
+            List<String> openQuestions) {
+        public Assessment {
+            concerns = assessmentList(concerns);
+            suggestedApproach = assessmentList(suggestedApproach);
+            acceptanceCriteria = assessmentList(acceptanceCriteria);
+            openQuestions = assessmentList(openQuestions);
+        }
+
+        private static List<String> assessmentList(final List<String> values) {
+            // Keep malformed entries for renderer validation rather than failing during JSON decoding.
+            return values == null ? null : Collections.unmodifiableList(new ArrayList<>(values));
+        }
     }
 
     private static Map<String, Object> snapshot(final Map<String, Object> values) {

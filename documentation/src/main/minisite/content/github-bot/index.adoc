@@ -17,7 +17,7 @@ It supports PAT or GitHub App authentication and authorizes users through explic
 
 Workers execute tasks through Docker, Nono or Kubernetes.
 Choose strict host publication or separately provisioned agent credentials.
-Success requires a verified task-branch pull request or a native review pinned to the PR head.
+Solve success requires a verified task-branch pull request; review success requires a head-pinned native PR review or a published advisory issue/Discussion assessment, according to the target.
 
 [[cli-commands]]
 == Generated command reference
@@ -76,12 +76,21 @@ Help examples use inline code so copying the example text alone does not invoke 
 
 === Reviews, solves and Discussions
 
-Successful reviews finish with the native review itself; no additional comment announces that a review was published.
+`review` is target-aware: on a PR it remains a native code review pinned to the PR head, with no additional comment announcing publication.
+On an issue or opted-in Discussion it publishes an advisory structured assessment: recommendation, assessment, concerns, suggested approach, acceptance criteria and open questions.
+An assessment does not change code, create a PR, close the issue/Discussion or mark an answer.
+Use `@YOUR_BOT_LOGIN review [request]` with the command immediately after the mention; use `solve` instead when requesting implementation.
 Solve responses link the verified new pull request back to the originating issue or enabled Discussion thread.
 
 Discussion polling is opt-in with `poll.discussions.enabled=false` by default.
-Bodies, top-level comments and replies support `help` and `solve`, not `review`.
+Bodies, top-level comments and replies support `help`, `solve` and `review`.
 Discussion access uses GraphQL and requires host Discussions read permission for polling and write permission for responses.
+
+Review tasks persist `reviewTarget` as `pull_request`, `issue` or `discussion`, based on the validated target, not the wording of the request or the comment feed.
+This classification is required; there is no legacy compatibility fallback for unclassified review tasks.
+Issue and Discussion assessments use pinned, read-only default-branch repository context within bounded source and conversation budgets, not a proposed PR diff.
+An empty repository supplies no source evidence; unavailable, truncated or out-of-budget context must be disclosed as a limitation, not treated as evidence that code is absent or correct.
+See xref:private-context.adoc#_advisory_review_results[the advisory result contract and JSON example].
 
 === Durable state and recovery
 

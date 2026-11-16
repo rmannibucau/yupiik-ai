@@ -46,6 +46,7 @@ public class CreateCommand implements Runnable {
     private final BotAudit audit;
     private final Clock clock;
     private final FixRequestAuthority fixRequests;
+    private final GitHubClient github;
 
     public CreateCommand(
             final Options options,
@@ -60,6 +61,7 @@ public class CreateCommand implements Runnable {
         this.clock = clock;
         this.store = store;
         this.audit = audit;
+        this.github = github;
         this.fixRequests = new FixRequestAuthority(github, fix);
     }
 
@@ -98,6 +100,11 @@ public class CreateCommand implements Runnable {
         task.request(options.request());
         task.createdAt(clock.instant().toString());
         task.reference("https://github.com/" + options.repository() + "/issues/" + options.number());
+        if (options.kind() == TaskKind.review) {
+            final var parent =
+                    TaskStore.map(github.get("/repos/" + options.repository() + "/issues/" + options.number()));
+            task.reviewTarget(parent.get("pull_request") instanceof Map<?, ?> ? "pull_request" : "issue");
+        }
         if (options.kind() == TaskKind.fix) {
             task.reference("https://github.com/" + options.repository() + "/pull/" + options.number());
             task.recovery(Map.of("fixTarget", fixRequests.pinRequest(task.document())));

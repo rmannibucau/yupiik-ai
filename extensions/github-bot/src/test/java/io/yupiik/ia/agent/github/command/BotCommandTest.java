@@ -67,6 +67,103 @@ class BotCommandTest {
     Path home;
 
     @Test
+    void manualReviewResolvesParentMetadataAndFailsWithoutEnqueueOnLookupError() throws Exception {
+        final var conf = BotTestConfiguration.home(home);
+        final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final var requests = new ArrayList<String>();
+        try (final var json =
+                BotJsonMapper.create(List.of(new BotAudit$AuditEntry$FusionJsonCodec()), ignored -> Optional.empty())) {
+            server.createContext("/", exchange -> {
+                final var path = exchange.getRequestURI().getPath();
+                requests.add(path);
+                final var body =
+                        switch (path) {
+                            case "/repos/acme/repo/issues/1" ->
+                                Map.of("number", 1, "html_url", "https://github.com/acme/repo/pull/1");
+                            case "/repos/acme/repo/issues/2" ->
+                                Map.of(
+                                        "number",
+                                        2,
+                                        "pull_request",
+                                        Map.of(),
+                                        "html_url",
+                                        "https://github.com/acme/repo/issues/2");
+                            default -> Map.of("message", "Not Found");
+                        };
+                final var bytes = json.toString(body).getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(body.containsKey("message") ? 404 : 200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+                exchange.close();
+            });
+            server.start();
+            final var store = new TaskStore(conf, json);
+            final var clock = BotTestConfiguration.CLOCK;
+            final var audit = new BotAudit(conf, json, clock);
+            final var fix = new FixConfiguration(false, "");
+            try (final var github = new GitHubClient(
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()), json, () -> "test", clock)) {
+                new CreateCommand(
+                                new CreateCommand.Options("acme/repo", 2, TaskKind.review, "preview", true),
+                                json,
+                                store,
+                                audit,
+                                clock,
+                                github,
+                                fix)
+                        .run();
+                assertTrue(store.transaction(state -> state.list()).isEmpty());
+                assertFalse(Files.exists(home.resolve("audit.jsonl")));
+                for (final var number : List.of(1, 2)) {
+                    new CreateCommand(
+                                    new CreateCommand.Options("acme/repo", number, TaskKind.review, "review", false),
+                                    json,
+                                    store,
+                                    audit,
+                                    clock,
+                                    github,
+                                    fix)
+                            .run();
+                }
+                final var tasks = store.transaction(state -> state.list());
+                assertEquals(2, tasks.size());
+                for (final var task : tasks) {
+                    assertEquals(task.number() == 1 ? "issue" : "pull_request", task.reviewTarget());
+                    assertEquals(TaskKind.review, task.kind());
+                }
+                assertThrows(
+                        GitHubClient.HttpException.class,
+                        () -> new CreateCommand(
+                                        new CreateCommand.Options("acme/repo", 3, TaskKind.review, "failed", false),
+                                        json,
+                                        store,
+                                        audit,
+                                        clock,
+                                        github,
+                                        fix)
+                                .run());
+                assertEquals(2, store.transaction(state -> state.list()).size());
+                assertEquals(
+                        2, store.<Integer>transaction(state -> state.receipts().size()));
+                final var before = requests.size();
+                for (final var kind : List.of(TaskKind.solve, TaskKind.help)) {
+                    new CreateCommand(
+                                    new CreateCommand.Options("acme/repo", 4, kind, "unchanged", false),
+                                    json,
+                                    store,
+                                    audit,
+                                    clock,
+                                    github,
+                                    fix)
+                            .run();
+                }
+                assertEquals(before, requests.size());
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void manualFixValidatesPolicyAndCanonicalOpenPullBeforeEnqueue() throws Exception {
         final var conf = BotTestConfiguration.home(home);
         final var requests = new AtomicInteger();

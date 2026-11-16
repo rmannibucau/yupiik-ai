@@ -164,6 +164,9 @@ public class AttemptPreparation {
         final boolean broker = sourceMode == SourceMode.broker;
         final boolean git = sourceMode == SourceMode.git;
         final boolean fix = task.kind() == TaskKind.fix;
+        final var reviewTarget = task.reviewTarget();
+        final boolean assessment =
+                task.kind() == TaskKind.review && ("issue".equals(reviewTarget) || "discussion".equals(reviewTarget));
         if ((broker || fix) && (agentCommenting || (fix && git))) {
             throw new IllegalArgumentException(
                     "Brokered context and PR fixes require credential-free strict execution");
@@ -177,6 +180,11 @@ public class AttemptPreparation {
         model.put("gitSourceMode", git);
         model.put("exportSourceMode", sourceMode == SourceMode.export);
         model.put("review", task.kind() == TaskKind.review);
+        model.put("reviewTarget", reviewTarget == null ? "" : reviewTarget);
+        model.put("assessment", assessment);
+        model.put("issueReview", assessment && "issue".equals(reviewTarget));
+        model.put("discussionReview", assessment && "discussion".equals(reviewTarget));
+        model.put("pullRequestReview", task.kind() == TaskKind.review && "pull_request".equals(reviewTarget));
         model.put("solve", task.kind() == TaskKind.solve);
         model.put("fix", fix);
         model.put("taskId", task.id());
@@ -191,13 +199,16 @@ public class AttemptPreparation {
         identity.put("repository", task.repository());
         identity.put("number", task.number());
         identity.put("kind", task.kind().name());
+        identity.put("reviewTarget", reviewTarget);
         model.put("taskJson", json.toString(identity));
         model.put(
                 "referenceJson",
                 json.toString("https://github.com/" + task.repository()
-                        + ("discussion".equals(task.sourceType())
+                        + ("discussion".equals(reviewTarget) || "discussion".equals(task.sourceType())
                                 ? "/discussions/"
-                                : task.kind() == TaskKind.fix ? "/pull/" : "/issues/")
+                                : "pull_request".equals(reviewTarget) || task.kind() == TaskKind.fix
+                                        ? "/pull/"
+                                        : "/issues/")
                         + task.number()));
         model.put("requestJson", json.toString(new UserRequest(task.request() == null ? "" : task.request())));
         // Each component sees only the explicit runtime model; rendered components are data to main.

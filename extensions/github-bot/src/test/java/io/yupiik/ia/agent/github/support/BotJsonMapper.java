@@ -67,6 +67,7 @@ import io.yupiik.ia.agent.github.execution.NonoExecutionBackend$ProfileWorkdir$F
 import io.yupiik.ia.agent.github.execution.NonoExecutionBackend$Session$FusionJsonCodec;
 import io.yupiik.ia.agent.github.execution.NonoExecutionBackend$Sessions$FusionJsonCodec;
 import io.yupiik.ia.agent.github.model.AgentConfigurationDocument$FusionJsonCodec;
+import io.yupiik.ia.agent.github.model.AgentResult$Assessment$FusionJsonCodec;
 import io.yupiik.ia.agent.github.model.AgentResult$Change$FusionJsonCodec;
 import io.yupiik.ia.agent.github.model.AgentResult$Finding$FusionJsonCodec;
 import io.yupiik.ia.agent.github.model.AgentResult$FusionJsonCodec;
@@ -109,6 +110,7 @@ public final class BotJsonMapper {
         all.add(new DiscussionClient$Author$FusionJsonCodec());
         all.add(new DiscussionClient$Node$FusionJsonCodec());
         all.add(new AgentResult$FusionJsonCodec());
+        all.add(new AgentResult$Assessment$FusionJsonCodec());
         all.add(new AgentResult$Review$FusionJsonCodec());
         all.add(new AgentResult$Finding$FusionJsonCodec());
         all.add(new AgentResult$StrictSolve$FusionJsonCodec());

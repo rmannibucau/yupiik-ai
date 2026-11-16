@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.github.store.TaskStore;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 
 /**
  * A single comment publication with durable write intent, never an uncertain-write replay.
@@ -46,13 +47,18 @@ public class DiscussionPublisher {
     }
 
     public String publish(final TaskDocument taskDocument, final String body) {
+        return publish(taskDocument, body, () -> true);
+    }
+
+    public String publish(final TaskDocument taskDocument, final String body, final BooleanSupplier allowWrite) {
         final var task = taskDocument;
         final var id = required(task.id(), "id");
         final var persisted = store.transaction(state -> state.task(id).document());
         checkBindings(task, persisted);
         if (!"discussion".equals(persisted.sourceType())
-                || !Set.of(TaskKind.solve, TaskKind.help).contains(persisted.kind())) {
-            throw new IllegalArgumentException("Only discussion solve/help publication is supported");
+                || !Set.of(TaskKind.solve, TaskKind.help, TaskKind.review).contains(persisted.kind())
+                || (persisted.kind() == TaskKind.review && !"discussion".equals(persisted.reviewTarget()))) {
+            throw new IllegalArgumentException("Only discussion solve/help/advisory review publication is supported");
         }
         final var discussion = discussions.discussion(required(persisted.discussionId(), "discussionId"));
         if (!discussion.repository().equalsIgnoreCase(required(persisted.repository(), "repository"))
@@ -111,6 +117,9 @@ public class DiscussionPublisher {
             throw new IllegalArgumentException(
                     "Discussion comment must be nonblank and at most 30000 characters including marker");
         }
+        if (!allowWrite.getAsBoolean()) {
+            throw new IllegalStateException("Publication blocked: the requesting user is no longer authorized");
+        }
         // Atomic claim: concurrent publishers can reconcile, but only one may perform a mutation.
         store.transaction(state -> {
             final var current = state.task(id);
@@ -149,6 +158,9 @@ public class DiscussionPublisher {
     }
 
     private void checkBindings(final TaskDocument expected, final TaskDocument actual) {
+        if (!Objects.equals(expected.reviewTarget(), actual.reviewTarget())) {
+            throw new IllegalArgumentException("Task publication binding changed: reviewTarget");
+        }
         if (!Objects.equals(expected.sourceType(), actual.sourceType())) {
             throw new IllegalArgumentException("Task publication binding changed: sourceType");
         }

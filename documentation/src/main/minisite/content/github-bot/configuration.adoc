@@ -645,8 +645,8 @@ Repositories with Discussions disabled are logged at INFO and skipped; other sel
 
 Provision host Discussions read permission to discover and read threads, and Discussions write permission to publish responses; issue and pull-request permissions alone are insufficient.
 
-The poller recognizes `help` and `solve` mentions in Discussion bodies, top-level comments and replies.
-Discussion `review` requests are unsupported and do not enqueue work.
+The poller recognizes `help`, `solve` and `review` mentions in Discussion bodies, top-level comments and replies.
+Discussion `review` requests enqueue advisory structured assessments, not native PR reviews or implementation work; see xref:index.adoc#_reviews_solves_and_discussions[target-aware review].
 
 Only `User` actors with an immutable numeric user ID satisfying the shared request authorization policy are eligible.
 Explicitly listed IDs bypass repository-permission and optional team checks; nonlisted users require enabled repository-writer authorization and any configured teams restriction.
@@ -656,6 +656,7 @@ Authorization is checked again by the worker, reusing an unexpired process-local
 Polling only discovers and enqueues tasks: it makes no LLM call and launches no executor.
 Help is published without model execution.
 Solve follows the existing worker/fork workflow and links the independently verified PR back into the originating Discussion thread.
+Review publishes its assessment in that same originating thread without code changes, closure or answer selection.
 
 Discussion discovery, each Discussion's comments and each top-level comment's replies have independent persistent cursors.
 Each connection reads at most `min(poll.pageBudget, 20)` pages of 50 nodes per poll; this is not a global request or runtime bound.

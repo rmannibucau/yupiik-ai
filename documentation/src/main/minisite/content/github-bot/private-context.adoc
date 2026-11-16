@@ -26,7 +26,7 @@ new GithubContextSnapshot(github, json).stage(task, attempt);
 final var source = new GithubPrivateContext(github, json).stage(task, attempt);
 ----
 
-The source API accepts only a `review` task with a validated `repository` and positive integral `number` matching `workspace/github-context.json`.
+For native PR reviews, the source API accepts a `review` task classified as `reviewTarget=pull_request`, with a validated `repository` and positive integral `number` matching `workspace/github-context.json`.
 It reads the immutable head SHA from that host snapshot, not from task URLs, branch names or a later PR response.
 
 It requests `/repos/{repository}/git/commits/{headSha}`, the returned root tree with `?recursive=1`, and validated blob SHA endpoints within that same repository.
@@ -109,6 +109,54 @@ Filesystems without secure directory handles fail closed; validate this prerequi
 
 Shutdown interrupts the host request and requires confirmed broker-thread termination before normal completion.
 
+== Structured pull request descriptions
+
+Host-published solve pull requests use Summary, Changes, Validation / test evidence, and Risks / follow-up sections.
+The supplied description is preserved as Markdown under Changes rather than parsed or rewritten as trusted evidence.
+Summaries and test evidence remain agent-reported, and missing checks or risks are not presented as host-verified success or absence of risk.
+The exact rendered body, including the task marker, is bound to the publication fingerprint, so changed evidence cannot silently alter an uncertain publication on retry.
+Agent-commenting mode receives equivalent PR-format guidance in the solve publication prompt.
+
+== Advisory review results
+
+An issue or opted-in Discussion `review` returns a structured advisory assessment, not native PR findings or solve changes.
+The host uses the task's explicit `reviewTarget` classification (`issue` or `discussion`); missing classification has no legacy compatibility fallback.
+Repository context is read-only and pinned to the default branch and immutable commit selected by the host, subject to bounded source and conversation access.
+No branch, commit, PR, code change, issue/Discussion closure or answer selection is authorized by this assessment.
+Advisory executions always withhold agent and fork publishing credentials, even when agent commenting is enabled globally.
+Exported conversations share a ten-page budget across comments and replies, prioritize the invocation thread, and set `conversationComplete=false` when that budget omits context.
+Brokered reads retain their per-attempt budgets and observed-parent/thread restrictions.
+An empty repository has no source to inspect; report that limitation and assess the supplied proposal without inventing implementation evidence.
+Likewise, disclose unavailable source, truncation and exhausted context budgets rather than claiming a complete repository or conversation review.
+
+The schema-version-1 result has an optional top-level `assessment` object, required for a successful advisory review; it is not a replacement for the native PR `review` object and is not required for other task kinds.
+Its `recommendation` is one of `proceed`, `proceed_with_conditions`, `reconsider` or `clarification_needed`, and `assessment` is required nonblank Markdown.
+The optional lists `concerns`, `suggestedApproach`, `acceptanceCriteria` and `openQuestions` contain nonblank strings.
+Assessment text is limited to 16,000 Java string characters, each list to 32 entries, each entry to 2,000 characters, and the rendered report to 28,000 characters before publication markers.
+Destination-specific publication limits still apply, including the Discussion response limit documented in xref:configuration.adoc#_optional_discussion_polling[Discussion polling].
+For example, an advisory result in `output/result.json` can be:
+
+[source,json]
+----
+{
+  "schemaVersion": 1,
+  "taskId": "TASK_ID_FROM_TASK_JSON",
+  "summary": "Assessed the proposal; clarification is needed before implementation.",
+  "assessment": {
+    "recommendation": "clarification_needed",
+    "assessment": "The goal is clear, but the supplied context does not establish the compatibility requirements. No source evidence is available in this empty repository.",
+    "concerns": ["Existing consumer expectations are unspecified."],
+    "suggestedApproach": ["Agree on the public contract before implementing it."],
+    "acceptanceCriteria": ["Document expected inputs, outputs and error behavior."],
+    "openQuestions": ["Which consumers must remain compatible?"]
+  },
+  "tests": []
+}
+----
+
+Replace the example task ID with the attempt's actual task ID.
+The host validates and renders the assessment for an issue comment or the bound Discussion thread; the result does not authorize agent-side publication.
+
 == Strict solves and source modes
 
 Set `--worker-agentCommenting false --worker-forkOwner YOUR_ORGANIZATION` to use host-owned solve publication.
@@ -118,7 +166,7 @@ The fork must exist unless organization provisioning is explicitly enabled.
 Private upstream repositories are supported within the default bounded source-export contract when the host has the required read access and can verify the fork.
 Agent-side private checkout credentials are not required in export mode.
 
-An enabled Discussion solve uses this existing strict-solve workflow and links the verified PR back to its originating Discussion thread; Discussion review is not supported.
+An enabled Discussion solve uses this existing strict-solve workflow and links the verified PR back to its originating Discussion thread; Discussion review instead returns an advisory assessment as described above.
 
 === Source and result contract
 

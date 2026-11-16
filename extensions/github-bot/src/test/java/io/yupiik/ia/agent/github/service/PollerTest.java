@@ -53,6 +53,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -75,6 +76,144 @@ class PollerTest {
                 new GithubBotConfiguration.Authorization(ids, "", false, 7200),
                 new GithubBotConfiguration.Repositories(
                         repositories, "", "", "", List.of(RepositorySelector.Visibility.values()), false, false));
+    }
+
+    @Test
+    void reviewsUseParentMetadataRatherThanReferencePathsAndLeaveOtherKindsAlone() throws Exception {
+        final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try (final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty())) {
+            final var requests = new CopyOnWriteArrayList<String>();
+            final var actor = Map.of("id", 42, "login", "human", "type", "User");
+            server.createContext("/", exchange -> {
+                final var path = exchange.getRequestURI().getPath();
+                requests.add(path);
+                final Object body =
+                        switch (path) {
+                            case "/repos/owner/repo/issues" ->
+                                List.of(
+                                        Map.of(
+                                                "id",
+                                                1,
+                                                "user",
+                                                actor,
+                                                "body",
+                                                "@bot review description PR",
+                                                "html_url",
+                                                "https://github.com/owner/repo/issues/11",
+                                                "pull_request",
+                                                Map.of()),
+                                        Map.of(
+                                                "id",
+                                                2,
+                                                "user",
+                                                actor,
+                                                "body",
+                                                "@bot review description issue",
+                                                "html_url",
+                                                "https://github.com/owner/repo/pull/12"));
+                            case "/repos/owner/repo/issues/comments" ->
+                                List.of(
+                                        Map.of(
+                                                "id",
+                                                3,
+                                                "user",
+                                                actor,
+                                                "body",
+                                                "@bot review comment PR",
+                                                "html_url",
+                                                "https://github.com/owner/repo/issues/13#issuecomment-3"),
+                                        Map.of(
+                                                "id",
+                                                4,
+                                                "user",
+                                                actor,
+                                                "body",
+                                                "@bot review comment issue",
+                                                "html_url",
+                                                "https://github.com/owner/repo/pull/14#issuecomment-4"),
+                                        Map.of(
+                                                "id",
+                                                5,
+                                                "user",
+                                                actor,
+                                                "body",
+                                                "@bot help unchanged",
+                                                "html_url",
+                                                "https://github.com/owner/repo/issues/15#issuecomment-5"),
+                                        Map.of(
+                                                "id",
+                                                6,
+                                                "user",
+                                                actor,
+                                                "body",
+                                                "@bot solve unchanged",
+                                                "html_url",
+                                                "https://github.com/owner/repo/pull/16#issuecomment-6"));
+                            case "/repos/owner/repo/pulls/comments" ->
+                                List.of(Map.of(
+                                        "id",
+                                        7,
+                                        "user",
+                                        actor,
+                                        "body",
+                                        "@bot review inline",
+                                        "html_url",
+                                        "https://github.com/owner/repo/pull/17#discussion_r7"));
+                            case "/repos/owner/repo/issues/13", "/repos/owner/repo/issues/17" ->
+                                Map.of("pull_request", Map.of());
+                            case "/repos/owner/repo/issues/14" -> Map.of("number", 14);
+                            default -> Map.of("message", "Unexpected request");
+                        };
+                final var bytes = json.toString(body).getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(
+                        body instanceof Map<?, ?> map && map.containsKey("message") ? 404 : 200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+                exchange.close();
+            });
+            server.start();
+            final var conf =
+                    configuration("http://127.0.0.1:" + server.getAddress().getPort(), "42");
+            final var store = new TaskStore(conf, json);
+            final var options = new PollCommand$Options$FusionConfigurationFactory(
+                            key -> "poll.search.enabled".equals(key) ? Optional.of("false") : Optional.empty())
+                    .get()
+                    .poll();
+            try (final var github =
+                    new GitHubClient(URI.create(conf.api()), json, () -> "test", BotTestConfiguration.CLOCK)) {
+                final var poller = BotTestConfiguration.poller(conf, store, github, BotTestConfiguration.CLOCK, null);
+                assertEquals(7, poller.poll(options));
+                final var targets = store.transaction(state -> state.list()).stream()
+                        .filter(task -> task.kind() == TaskKind.review)
+                        .collect(Collectors.toMap(task -> task.number(), task -> task.reviewTarget()));
+                assertEquals(
+                        Map.of(
+                                11L,
+                                "pull_request",
+                                12L,
+                                "issue",
+                                13L,
+                                "pull_request",
+                                14L,
+                                "issue",
+                                17L,
+                                "pull_request"),
+                        targets);
+                assertTrue(store.transaction(state -> state.list()).stream()
+                        .filter(task -> task.kind() != TaskKind.review)
+                        .allMatch(task -> task.reviewTarget() == null));
+                assertEquals(
+                        Set.of(
+                                "/repos/owner/repo/issues/13",
+                                "/repos/owner/repo/issues/14",
+                                "/repos/owner/repo/issues/17"),
+                        requests.stream()
+                                .filter(path -> path.matches(".*/issues/[0-9]+$"))
+                                .collect(toSet()));
+                assertEquals(0, poller.poll(options));
+            }
+        } finally {
+            server.stop(0);
+        }
     }
 
     @Test

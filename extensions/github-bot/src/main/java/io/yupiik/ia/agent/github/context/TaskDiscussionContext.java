@@ -58,6 +58,11 @@ public final class TaskDiscussionContext {
     public TaskDiscussionContext(final GitHubClient github, final TaskDocument task) {
         this.github = Objects.requireNonNull(github);
         Objects.requireNonNull(task);
+        if (task.kind() == TaskKind.review
+                && !Set.of("issue", "discussion", "pull_request")
+                        .contains(task.reviewTarget() == null ? "" : task.reviewTarget())) {
+            throw new IllegalArgumentException("Expected an explicit review target");
+        }
         if (task.number() == null) {
             throw new IllegalArgumentException("Missing fixed task number");
         }
@@ -65,7 +70,9 @@ public final class TaskDiscussionContext {
         number = task.number();
         rest = new GithubDiscussionContext(github, repository, number);
         discussions = new DiscussionClient(github);
-        discussionSource = "discussion".equals(task.sourceType());
+        discussionSource = task.kind() == TaskKind.review
+                ? "discussion".equals(task.reviewTarget())
+                : "discussion".equals(task.sourceType());
         discussionId = task.discussionId();
         invocationId = task.commentId();
         initialParentId = task.replyToId() == null ? invocationId : task.replyToId();
@@ -73,7 +80,9 @@ public final class TaskDiscussionContext {
             throw new IllegalArgumentException("Missing fixed discussion identity");
         }
         pull = !discussionSource
-                && (task.kind() == TaskKind.review || task.kind() == TaskKind.fix || pullReference(task.reference()));
+                && (task.kind() == TaskKind.review
+                        ? "pull_request".equals(task.reviewTarget())
+                        : task.kind() == TaskKind.fix || pullReference(task.reference()));
     }
 
     public Object read(final String operation, final int page, final String parentId) {

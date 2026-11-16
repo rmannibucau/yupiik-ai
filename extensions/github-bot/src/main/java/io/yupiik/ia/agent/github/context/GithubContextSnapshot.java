@@ -21,6 +21,7 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.model.TaskDocument;
+import io.yupiik.ia.agent.github.model.TaskKind;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.URI;
@@ -67,29 +68,37 @@ public class GithubContextSnapshot {
         checkDestination(workspace, target);
 
         final var budget = new Budget();
-        final var prefix = "/repos/" + repo + "/pulls/" + number;
-        final var pull = object(budget.read(prefix).body());
-        final var selectedPull = fields(pull, "title", "body");
-        for (final var ref : List.of("head", "base")) {
-            selectedPull.put(ref, fields(object(pull.get(ref)), "sha"));
+        final Object snapshot;
+        if (AssessmentBase.isAssessment(task)) {
+            snapshot = assessment(task);
+        } else {
+            if (task.kind() != TaskKind.fix && !"pull_request".equals(task.reviewTarget())) {
+                throw new IllegalArgumentException("Expected an explicit review target");
+            }
+            final var prefix = "/repos/" + repo + "/pulls/" + number;
+            final var pull = object(budget.read(prefix).body());
+            final var selectedPull = fields(pull, "title", "body");
+            for (final var ref : List.of("head", "base")) {
+                selectedPull.put(ref, fields(object(pull.get(ref)), "sha"));
+            }
+            snapshot = new Snapshot(
+                    1,
+                    repo,
+                    number,
+                    Pull.from(selectedPull),
+                    pages(prefix + "/files", budget, "filename", "status", "patch").stream()
+                            .map(ChangedFile::from)
+                            .toList(),
+                    pages(prefix + "/reviews", budget, "body", "state", "commit_id").stream()
+                            .map(Review::from)
+                            .toList(),
+                    pages(prefix + "/comments", budget, "path", "line", "side", "body").stream()
+                            .map(Comment::from)
+                            .toList(),
+                    pages("/repos/" + repo + "/issues/" + number + "/comments", budget, "body").stream()
+                            .map(Conversation::from)
+                            .toList());
         }
-        final var snapshot = new Snapshot(
-                1,
-                repo,
-                number,
-                Pull.from(selectedPull),
-                pages(prefix + "/files", budget, "filename", "status", "patch").stream()
-                        .map(ChangedFile::from)
-                        .toList(),
-                pages(prefix + "/reviews", budget, "body", "state", "commit_id").stream()
-                        .map(Review::from)
-                        .toList(),
-                pages(prefix + "/comments", budget, "path", "line", "side", "body").stream()
-                        .map(Comment::from)
-                        .toList(),
-                pages("/repos/" + repo + "/issues/" + number + "/comments", budget, "body").stream()
-                        .map(Conversation::from)
-                        .toList());
         final var bytes = encoded(snapshot);
         if (bytes.length > MAX_BYTES) {
             throw new IllegalStateException("GitHub context exceeds encoded JSON limit");
@@ -114,6 +123,75 @@ public class GithubContextSnapshot {
             }
             throw e;
         }
+    }
+
+    private Map<String, Object> assessment(final TaskDocument task) {
+        final var reader = new TaskDiscussionContext(github, task);
+        final var discussion = "discussion".equals(task.reviewTarget());
+        final var result = new LinkedHashMap<String, Object>();
+        result.put("schemaVersion", 1);
+        result.put("repo", task.repository());
+        result.put("number", task.number());
+        result.put("reviewTarget", task.reviewTarget());
+        final var base = AssessmentBase.pin(github, task);
+        result.putAll(base.recovery());
+        result.put("sourceStatus", base.emptyRepository() ? "EMPTY_REPOSITORY" : "PINNED");
+        result.put(discussion ? "discussion" : "issue", reader.read(discussion ? "discussion" : "issue", 1, null));
+        final var comments = new ArrayList<Object>();
+        result.put(discussion ? "discussionComments" : "issueComments", comments);
+        final var remaining = new int[] {MAX_PAGES};
+        final var replies = new LinkedHashMap<String, Object>();
+        if (discussion) {
+            result.put("discussionReplies", replies);
+            final var thread = task.replyToId() == null ? task.commentId() : task.replyToId();
+            if (thread != null) {
+                final var pages = new ArrayList<Object>();
+                replies.put(thread, pages);
+                if (!assessmentConnection(reader, "discussionReplies", thread, pages, result, remaining)) {
+                    result.put("conversationComplete", false);
+                    return result;
+                }
+            }
+        }
+        boolean complete = assessmentConnection(
+                reader, discussion ? "discussionComments" : "issueComments", null, comments, result, remaining);
+        if (discussion) {
+            for (final var rawPage : comments) {
+                for (final var rawEntry : (List<?>) object(rawPage).get("entries")) {
+                    final var parent = String.valueOf(object(rawEntry).get("id"));
+                    if (!replies.containsKey(parent)) {
+                        final var pages = new ArrayList<Object>();
+                        replies.put(parent, pages);
+                        if (!assessmentConnection(reader, "discussionReplies", parent, pages, result, remaining)) {
+                            complete = false;
+                        }
+                    }
+                }
+            }
+        }
+        result.put("conversationComplete", complete);
+        return result;
+    }
+
+    private boolean assessmentConnection(
+            final TaskDiscussionContext reader,
+            final String operation,
+            final String parent,
+            final List<Object> pages,
+            final Map<String, Object> result,
+            final int[] remaining) {
+        for (int page = 1; page <= MAX_PAGES && remaining[0] > 0; page++) {
+            remaining[0]--;
+            final var response = object(reader.read(operation, page, parent));
+            pages.add(response);
+            if (encoded(result).length > MAX_BYTES) {
+                throw new IllegalStateException("GitHub context exceeds encoded JSON limit");
+            }
+            if (Boolean.TRUE.equals(response.get("complete"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private List<Map<String, Object>> pages(final String endpoint, final Budget budget, final String... names) {
@@ -208,7 +286,7 @@ public class GithubContextSnapshot {
         }
     }
 
-    private byte[] encoded(final Snapshot value) {
+    private byte[] encoded(final Object value) {
         return json.toString(value).getBytes(StandardCharsets.UTF_8);
     }
 

@@ -167,7 +167,7 @@ A second unchanged poll must not enqueue the same mention.
 An unauthorized account must not enqueue work.
 
 Discussion polling is disabled by default; enable `POLL_DISCUSSIONS_ENABLED=true` only after provisioning host GraphQL Discussions read/write permissions and enabling Discussions on the selected repositories.
-Validate bodies, comments and replies independently with `help` before a solve, including exact-thread responses and duplicate suppression; Discussion review is unsupported.
+Validate bodies, comments and replies independently with `help` before a solve or advisory `review`, including exact-thread responses and duplicate suppression.
 
 The per-connection cursor budget does not bound total GraphQL calls per poll, and retained Discussion/thread history grows over time.
 

@@ -381,6 +381,12 @@ public class Poller {
                     task.number((long) number);
                     task.reference(ref);
                     task.kind(TaskKind.valueOf(invocation.kind()));
+                    if (task.kind() == TaskKind.review) {
+                        final var parent = endpoint.equals("issues")
+                                ? item
+                                : TaskStore.map(github.get("/repos/" + repo + "/issues/" + number));
+                        task.reviewTarget(parent.get("pull_request") instanceof Map<?, ?> ? "pull_request" : "issue");
+                    }
                     task.request(invocation.request());
                     task.actorId(String.valueOf(user.get("id")));
                     task.batchId(batch);

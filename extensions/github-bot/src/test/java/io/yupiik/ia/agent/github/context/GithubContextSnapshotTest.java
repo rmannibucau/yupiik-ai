@@ -243,11 +243,29 @@ class GithubContextSnapshotTest {
     }
 
     @Test
+    void fixSnapshotRetainsPrContextWithoutReviewTarget() throws Exception {
+        try (final var stub = new Stub(path -> new Reply(path.equals(PREFIX) ? PULL : "[]", null, 200))) {
+            final var attempt = attempt("fix");
+            stub.snapshot.stage(
+                    TaskFixtures.task(Map.of("repository", "acme/private", "number", 7, "kind", "fix")), attempt);
+            assertTrue(Files.readString(target(attempt)).contains("\"pull\""));
+            assertEquals(PREFIX, stub.requests.getFirst());
+        }
+    }
+
+    @Test
     void acceptsIntegralJsonNumber() throws Exception {
         try (final var stub = new Stub(path -> new Reply(path.equals(PREFIX) ? PULL : "[]", null, 200))) {
             final var attempt = attempt("integral");
             stub.snapshot.stage(
-                    TaskFixtures.task(Map.of("repository", "acme/private", "number", new BigDecimal("7.0"))), attempt);
+                    TaskFixtures.task(Map.of(
+                            "repository",
+                            "acme/private",
+                            "number",
+                            new BigDecimal("7.0"),
+                            "reviewTarget",
+                            "pull_request")),
+                    attempt);
             assertTrue(Files.isRegularFile(target(attempt)));
         }
     }

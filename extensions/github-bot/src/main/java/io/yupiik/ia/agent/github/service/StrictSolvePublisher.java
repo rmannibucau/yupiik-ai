@@ -114,7 +114,8 @@ public class StrictSolvePublisher {
         final var branch = "github-bot/" + id;
         final var fork = forkOwner + "/" + parts[1];
         final var marker = "<!-- yca-task:" + id + " -->";
-        final var fingerprint = fingerprint(base, title, body, changes);
+        final var renderedBody = PullRequestRenderer.render(agentResult, marker);
+        final var fingerprint = fingerprint(base, title, renderedBody, changes);
         final var binding = new TaskDocument.SolvePublication(
                 forkOwner,
                 upstream,
@@ -239,7 +240,7 @@ public class StrictSolvePublisher {
         final var pr = TaskStore.map(github.post(
                 "/repos/" + upstream + "/pulls",
                 new GitHubClient.PullRequestRequest(
-                        title, body + "\n\n" + marker, forkOwner + ":" + branch, parts[1], baseBranch, false)));
+                        title, renderedBody, forkOwner + ":" + branch, parts[1], baseBranch, false)));
         return complete(
                 id, pr, upstream, fork, branch, baseBranch, marker, update(id, MutableSolvePublication::document));
     }

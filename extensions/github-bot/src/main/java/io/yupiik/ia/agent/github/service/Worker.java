@@ -19,11 +19,13 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.kubernetes.client.KubernetesClient;
 import io.yupiik.fusion.kubernetes.client.KubernetesClientConfiguration;
+import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
 import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
+import io.yupiik.ia.agent.github.context.AssessmentBase;
 import io.yupiik.ia.agent.github.context.BrokerAttempt;
 import io.yupiik.ia.agent.github.context.GithubContextBroker;
 import io.yupiik.ia.agent.github.context.GithubContextSnapshot;
@@ -305,18 +307,18 @@ public class Worker {
                         continue;
                     }
                     if (options.source().mode() == WorkerOptions.SourceMode.git
-                            && (options.agentCommenting() || task.kind() != TaskKind.solve)) {
+                            && (agentCommenting(task, options) || task.kind() != TaskKind.solve)) {
                         throw new IllegalArgumentException(
                                 "Git source mode requires a strict solve (agentCommenting=false)");
                     }
                     if (options.source().mode() == WorkerOptions.SourceMode.broker
-                            && (options.agentCommenting()
+                            && (agentCommenting(task, options)
                                     || !options.cacheRoot().isBlank()
                                     || options.privateSource())) {
                         throw new IllegalArgumentException(
                                 "Broker mode requires a strict solve/review/fix and cannot share export or anonymous cache staging");
                     }
-                    if (task.kind() == TaskKind.fix && options.agentCommenting()) {
+                    if (task.kind() == TaskKind.fix && agentCommenting(task, options)) {
                         throw new IllegalArgumentException(
                                 "Fix requires agentCommenting=false; only the host may update an existing PR");
                     }
@@ -334,6 +336,15 @@ public class Worker {
                         .contains(task.state())
                 || (Set.of(TaskState.done, TaskState.failed).contains(task.state())
                         && (task.attemptDirectory() != null));
+    }
+
+    private boolean agentCommenting(final TaskDocument task, final WorkerOptions options) {
+        // Advisory reviews are always read-only; even compatibility credential mode cannot grant
+        // an assessment agent permission to implement the proposal or mutate the target.
+        return options.agentCommenting()
+                && !(task.kind() == TaskKind.review
+                        && Set.of("issue", "discussion")
+                                .contains(task.reviewTarget() == null ? "" : task.reviewTarget()));
     }
 
     private Lease acquireSlot(final Path home, final WorkerOptions options) throws IOException {
@@ -529,7 +540,7 @@ public class Worker {
                     && execution.docker().services() != null;
             if (restricted
                     && (options.source().mode() != WorkerOptions.SourceMode.broker
-                            || options.agentCommenting()
+                            || agentCommenting(task, options)
                             || !execution.relay().bind().isBlank())) {
                 throw new IllegalArgumentException(
                         "Private services require credential-free broker mode without a second relay");
@@ -539,12 +550,28 @@ public class Worker {
                     ? Path.of(conf.home()).resolve("agent-configuration.json")
                     : Path.of(options.agentConfiguration());
             directory = preparation.prepare(config.toAbsolutePath().normalize(), attemptRoot);
-            if (!options.agentCommenting() && task.kind() == TaskKind.review) {
+            if (!agentCommenting(task, options) && task.kind() == TaskKind.review) {
                 stage = "runtime-preflight";
                 GithubContextBroker.verifyRuntime(directory.resolve("workspace"));
             }
             stage = "source-staging";
-            if (!options.agentCommenting() && (task.kind() == TaskKind.solve)) {
+            if (AssessmentBase.isAssessment(task)) {
+                if (!options.cacheRoot().isBlank()) {
+                    throw new IllegalArgumentException(
+                            "Advisory reviews require pinned context and cannot use the moving anonymous clone cache");
+                }
+                final var base = AssessmentBase.pin(github, task);
+                store.transaction(state -> {
+                    final var actual = state.task(id);
+                    final var recovery =
+                            new LinkedHashMap<String, Object>(actual.recovery() == null ? Map.of() : actual.recovery());
+                    recovery.putAll(base.recovery());
+                    actual.recovery(recovery);
+                    return null;
+                });
+                task = store.transaction(state -> state.task(id).document());
+            }
+            if (!agentCommenting(task, options) && (task.kind() == TaskKind.solve)) {
                 if (options.forkOwner().isBlank() || !options.cacheRoot().isBlank()) {
                     throw new IllegalArgumentException(
                             "Strict solve requires a fork owner and cannot use the anonymous clone cache");
@@ -577,7 +604,7 @@ public class Worker {
                 });
                 task = store.transaction(state -> state.task(id).document());
             }
-            if (!options.agentCommenting() && task.kind() == TaskKind.fix) {
+            if (!agentCommenting(task, options) && task.kind() == TaskKind.fix) {
                 final var target = fixes.prepare(task);
                 privateContext.stageFix(
                         task,
@@ -594,7 +621,7 @@ public class Worker {
                 });
                 task = store.transaction(state -> state.task(id).document());
             }
-            if (!options.agentCommenting()
+            if (!agentCommenting(task, options)
                     && (task.kind() == TaskKind.review)
                     && options.source().mode() != WorkerOptions.SourceMode.broker) {
                 snapshot.stage(task, directory);
@@ -684,16 +711,16 @@ public class Worker {
                 credentials.putAll(AgentGitSource.credentials(options.source(), conf.auth(), System.getenv()));
             }
             final var agentToken = System.getenv(conf.auth().agentTokenEnv());
-            if (options.agentCommenting() && agentToken != null && !agentToken.isBlank()) {
+            if (agentCommenting(task, options) && agentToken != null && !agentToken.isBlank()) {
                 credentials.put("GH_TOKEN", agentToken);
             }
             final var forkToken = System.getenv("GITHUB_BOT_FORK_TOKEN");
-            if (options.agentCommenting() && forkToken != null && !forkToken.isBlank()) {
+            if (agentCommenting(task, options) && forkToken != null && !forkToken.isBlank()) {
                 credentials.put("GITHUB_BOT_FORK_TOKEN", forkToken);
             }
             if ((task.kind() == TaskKind.solve)) {
                 if (options.forkOwner().isBlank()
-                        || (options.agentCommenting() && (agentToken == null || agentToken.isBlank()))) {
+                        || (agentCommenting(task, options) && (agentToken == null || agentToken.isBlank()))) {
                     throw new IllegalArgumentException(
                             "Solving requires a configured fork owner and separate agent token");
                 }
@@ -762,7 +789,7 @@ public class Worker {
             final var prompt = preparation.prompt(
                     task,
                     options.forkOwner(),
-                    options.agentCommenting(),
+                    agentCommenting(task, options),
                     options.source().mode());
             final int exit;
             stage = "relay-and-context";
@@ -775,7 +802,7 @@ public class Worker {
                                     json,
                                     execution.relay().bind(),
                                     execution.relay().advertised());
-                    final var broker = !options.agentCommenting() && (task.kind() == TaskKind.review)
+                    final var broker = !agentCommenting(task, options) && (task.kind() == TaskKind.review)
                             ? (context == null
                                     ? new GithubContextBroker(github, json, task, directory)
                                     : new GithubContextBroker(context.service(), json, task, directory))
@@ -951,7 +978,33 @@ public class Worker {
                         && (parsed.failure() == null || parsed.failure().isBlank())) {
             throw new IllegalArgumentException("Structured result schema/task identity mismatch");
         }
+        validateReviewResult(task, parsed);
         return parsed;
+    }
+
+    private void validateReviewResult(final TaskDocument task, final AgentResult result) {
+        if (task.kind() != TaskKind.review) {
+            if (result.assessment() != null) {
+                throw new IllegalArgumentException("Assessments are only valid for advisory reviews");
+            }
+            return;
+        }
+        if (!Set.of("pull_request", "issue", "discussion")
+                .contains(task.reviewTarget() == null ? "" : task.reviewTarget())) {
+            throw new IllegalArgumentException("Review target classification is required");
+        }
+        final boolean advisory = !"pull_request".equals(task.reviewTarget());
+        if (result.prUrl() != null
+                || result.strictSolve() != null
+                || (advisory && (result.review() != null || result.reviewId() != null))
+                || (result.failure() != null && result.assessment() != null)
+                || (!advisory && result.assessment() != null)) {
+            throw new IllegalArgumentException("Result payload does not match the review target");
+        }
+        if (advisory && result.failure() == null) {
+            // Rendering also performs bounded semantic validation, before any publication intent.
+            new AssessmentRenderer().render(result.assessment());
+        }
     }
 
     private void verifyFork(final String repository, final WorkerOptions options) {
@@ -970,7 +1023,7 @@ public class Worker {
 
     private String existingPullRequest(final TaskDocument task, final WorkerOptions options) {
         if (!(task.kind() == TaskKind.solve)
-                || !options.agentCommenting()
+                || !agentCommenting(task, options)
                 || (task.strictSolveBaseSha() != null)
                 || ((Number) task.attempts()).intValue() == 0
                 || options.forkOwner().isBlank()) {
@@ -1101,23 +1154,26 @@ public class Worker {
         }
         // Existing comments may be reconciled after revocation, but no new privileged write is allowed.
         // Preserve staged results and intents so an operator can restore authorization or reconcile them.
-        if (!authorized(task)) {
+        if (!authorized(task) && !discussion) {
             audit.record("authorization-denied", task);
             throw new IllegalStateException("Publication blocked: the requesting user is no longer authorized");
         }
         final var result = task.result();
+        validateReviewResult(task, result);
         boolean failure = result.failure() != null;
-        String outcome = failure
-                ? "I could not complete the requested task. The operator can inspect the task diagnostics."
-                : "";
+        String outcome = failure ? publicFailure(task) : "";
         if (!failure && (task.kind() == TaskKind.help)) {
-            outcome = "Mention `@" + conf.login() + " review` on a pull request, or `@" + conf.login()
-                    + " solve <request>` on an issue or enabled Discussion.";
+            outcome = "Mention `@" + conf.login()
+                    + " review` on a pull request for code review, or on an issue or enabled Discussion for an advisory assessment. Use `@"
+                    + conf.login() + " solve <request>` on an issue or enabled Discussion.";
         } else if (!failure && (task.kind() == TaskKind.review)) {
-            // The native review is the response. Do not announce it in a second comment.
-            final var reviewUrl = reviews.publish(task, result);
-            finish(task, "reviewUrl", reviewUrl, false);
-            return;
+            if ("pull_request".equals(task.reviewTarget())) {
+                // The native review is the response. Do not announce it in a second comment.
+                final var reviewUrl = reviews.publish(task, result);
+                finish(task, "reviewUrl", reviewUrl, false);
+                return;
+            }
+            outcome = new AssessmentRenderer().render(result.assessment());
         } else if (!failure && task.kind() == TaskKind.fix) {
             outcome = "I updated the existing pull request: " + fixes.publish(task, result);
         } else if (!failure && (task.kind() == TaskKind.solve) && (task.strictSolveBaseSha() != null)) {
@@ -1144,11 +1200,14 @@ public class Worker {
                 state.task(id).publicationFailure(failed);
                 return null;
             });
-            final var url = discussions.publish(task, marker + "\n" + outcome);
+            final var url = discussions.publish(task, marker + "\n" + outcome, () -> authorized(task));
             finish(task, "commentUrl", url, failed);
             return;
         }
         store.transaction(state -> {
+            if (state.task(id).publicationIntent() != null) {
+                throw new IllegalStateException("Final comment already claimed; reconcile before another write");
+            }
             state.task(id).publicationIntent(marker);
             state.task(id).publicationFailure(failed);
             return null;
@@ -1157,7 +1216,22 @@ public class Worker {
                 "publication-starting",
                 store.transaction(state -> state.task(id).document()));
         final var posted = TaskStore.map(github.post(prefix, new GitHubClient.CommentRequest(marker + "\n" + outcome)));
-        finish(task, "commentUrl", String.valueOf(posted.get("html_url")), failed);
+        final var postedUrl = String.valueOf(posted.get("html_url"));
+        final var expectedUrl =
+                "https://github.com/" + task.repository() + "/issues/" + task.number() + "#issuecomment-";
+        final var expectedPullUrl =
+                "https://github.com/" + task.repository() + "/pull/" + task.number() + "#issuecomment-";
+        if (!(postedUrl.startsWith(expectedUrl)
+                        && PULL_NUMBER
+                                .matcher(postedUrl.substring(expectedUrl.length()))
+                                .matches())
+                && !(postedUrl.startsWith(expectedPullUrl)
+                        && PULL_NUMBER
+                                .matcher(postedUrl.substring(expectedPullUrl.length()))
+                                .matches())) {
+            throw new IllegalStateException("Unverified final comment URL; reconcile previous write before retrying");
+        }
+        finish(task, "commentUrl", postedUrl, failed);
     }
 
     private void finish(
@@ -1184,6 +1258,34 @@ public class Worker {
             });
         }
         audit.record("completed", store.transaction(state -> state.task(id).document()));
+    }
+
+    private String publicFailure(final TaskDocument task) {
+        final var detail = task.lastFailure();
+        return "I could not complete the requested task. "
+                + (detail == null ? "" : detail.message() + " ")
+                + "The operator can inspect the retained private task diagnostics.";
+    }
+
+    private String lookupFailure(final Throwable failure) {
+        for (var cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof GitHubClient.DiscussionGraphqlException) {
+                return "GitHub could not complete the Discussion operation. Check host-token permissions, repository access and GitHub service or rate-limit status; the target was not inferred to be deleted.";
+            }
+            if (cause instanceof DiscussionClient.MissingDiscussionNodeException) {
+                return "The Discussion or a related comment is missing or inaccessible to the host token. Check the target and repository access.";
+            }
+            if (cause instanceof GitHubClient.HttpException http) {
+                return switch (http.status()) {
+                    case 404 ->
+                        "The target or required repository context is missing or inaccessible to the host token. Check the target and repository access.";
+                    case 401, 403 ->
+                        "GitHub denied access to the target or required context. Check host-token permissions, repository access and rate limits.";
+                    default -> null;
+                };
+            }
+        }
+        return null;
     }
 
     private String executionFingerprint() {
@@ -1240,28 +1342,35 @@ public class Worker {
         } catch (final IOException | RuntimeException captureFailure) {
             // Do not mask the original error, retain credentials, or print a potentially secret-bearing message.
         }
+        final var lookup = Set.of("source-staging", "credentials-and-fork", "relay-and-context", "publication")
+                        .contains(stage)
+                ? lookupFailure(failure)
+                : null;
         final var detail = new TaskDocument.FailureDetail(
                 stage,
                 failure.getClass().getSimpleName(),
-                switch (stage) {
-                    case "preparation" -> "Unable to prepare the private attempt configuration.";
-                    case "runtime-preflight" ->
-                        "Strict reviews require a dispatcher runtime and filesystem with SecureDirectoryStream support.";
-                    case "source-staging" -> "Unable to stage repository context or source.";
-                    case "credentials-and-fork" -> "Unable to prepare execution credentials or fork.";
-                    case "launch-preparation" -> "Unable to prepare the execution launch.";
-                    case "relay-and-context" -> "Unable to initialize the attempt relay or context broker.";
-                    case "execution" ->
-                        exitCode == null
-                                ? "Executor launch or execution failed."
-                                : "Agent process returned a non-zero exit status.";
-                    case "runtime-stop" -> "Unable to confirm runtime termination; recovery remains blocked.";
-                    case "result-validation", "recovery-result" -> "Unable to load a valid bounded task result.";
-                    case "agent-result" -> "The agent reported a task failure.";
-                    case "publication" -> "Unable to publish or reconcile the task response.";
-                    case "cleanup" -> "Unable to remove private attempt data.";
-                    default -> "Unable to reconcile or stage the task result.";
-                },
+                lookup != null
+                        ? lookup
+                        : switch (stage) {
+                            case "preparation" -> "Unable to prepare the private attempt configuration.";
+                            case "runtime-preflight" ->
+                                "Strict reviews require a dispatcher runtime and filesystem with SecureDirectoryStream support.";
+                            case "source-staging" -> "Unable to stage repository context or source.";
+                            case "credentials-and-fork" -> "Unable to prepare execution credentials or fork.";
+                            case "launch-preparation" -> "Unable to prepare the execution launch.";
+                            case "relay-and-context" -> "Unable to initialize the attempt relay or context broker.";
+                            case "execution" ->
+                                exitCode == null
+                                        ? "Executor launch or execution failed."
+                                        : "Agent process returned a non-zero exit status.";
+                            case "runtime-stop" -> "Unable to confirm runtime termination; recovery remains blocked.";
+                            case "result-validation", "recovery-result" ->
+                                "Unable to load a valid bounded task result.";
+                            case "agent-result" -> "The agent reported a task failure.";
+                            case "publication" -> "Unable to publish or reconcile the task response.";
+                            case "cleanup" -> "Unable to remove private attempt data.";
+                            default -> "Unable to reconcile or stage the task result.";
+                        },
                 clock.instant().toString(),
                 task.attempts(),
                 exitCode,
