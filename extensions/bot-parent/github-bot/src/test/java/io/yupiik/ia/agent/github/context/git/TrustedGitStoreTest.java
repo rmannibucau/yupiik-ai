@@ -290,7 +290,8 @@ class TrustedGitStoreTest {
     @Test
     void timeoutAndCloseCancelActiveProcessAndCleanScratch() throws Exception {
         final var slow = temporary.resolve("slow-git");
-        Files.writeString(slow, "#!/bin/sh\nexec /bin/sleep 30\n");
+        final var started = temporary.resolve("slow-git-started");
+        Files.writeString(slow, "#!/bin/sh\nprintf started > " + shell(started.toString()) + "\nexec /bin/sleep 30\n");
         Files.setPosixFilePermissions(slow, PosixFilePermissions.fromString("rwx------"));
         final var root = temporary.resolve("private");
         try (final var store =
@@ -299,16 +300,20 @@ class TrustedGitStoreTest {
                     Duration.ofSeconds(3),
                     () -> assertThrows(IOException.class, () -> store.prepare(URL, "a".repeat(40), 1, false)));
         }
+        Files.deleteIfExists(started);
         final var store = new TrustedGitStore(root, slow.toString(), Duration.ofSeconds(30), BUDGET, 67108864L, null);
-        try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (final var executor = Executors.newVirtualThreadPerTaskExecutor();
+                store) {
             final var future = executor.submit(() ->
                     assertThrows(IOException.class, () -> store.prepare(URL, "a".repeat(40), 1, false)));
-            Thread.sleep(100);
+            assertTimeoutPreemptively(Duration.ofSeconds(3), () -> {
+                while (!Files.exists(started)) {
+                    Thread.sleep(1);
+                }
+            });
             assertTimeoutPreemptively(Duration.ofSeconds(3), store::close);
             future.get(3, TimeUnit.SECONDS);
             assertThrows(IOException.class, () -> store.prepare(URL, "a".repeat(40), 1, false));
-        } finally {
-            store.close();
         }
     }
 
@@ -501,8 +506,7 @@ class TrustedGitStoreTest {
     @Test
     void nativeWorkerShallowCloneUsesBothApprovedRootsOverActualCgiGetAndPost() throws Exception {
         final var fixture = fixture();
-        final var upstream = temporary.resolve("upstream");
-        git(temporary, "clone", "--no-local", fixture.directory().toString(), upstream.toString());
+        final var upstream = copyFixture(temporary.resolve("upstream")).directory();
         git(upstream, "checkout", "--detach", fixture.parent());
         Files.writeString(upstream.resolve("base-only"), "upstream change\n");
         git(upstream, "add", ".");
@@ -582,8 +586,9 @@ class TrustedGitStoreTest {
                 assertEquals(fixture.head(), git(worker, "rev-parse", "HEAD").strip());
                 assertEquals(base, git(worker, "rev-parse", "refs/heads/base").strip());
                 assertEquals(base, read(store, view, "rev-parse", "BASE").strip());
-                assertEquals(git(worker, "diff", "refs/heads/base...HEAD"), read(store, view, "diff", "BASE...HEAD"));
-                assertFalse(read(store, view, "diff", "BASE...HEAD").isEmpty());
+                final var diff = read(store, view, "diff", "BASE...HEAD");
+                assertEquals(git(worker, "diff", "refs/heads/base...HEAD"), diff);
+                assertFalse(diff.isEmpty());
                 assertEquals("content-2", git(worker, "show", "HEAD:file"));
                 assertEquals("content-1", git(worker, "show", "refs/heads/base:file"));
                 assertEquals("unchanged content\n", git(worker, "show", "HEAD:unchanged/deep/shared"));
@@ -625,8 +630,7 @@ class TrustedGitStoreTest {
     @Test
     void explicitForkBaseAuthorizesOldRootButNotIncidentalHistoryOrUpstreamTags() throws Exception {
         final var fixture = fixture();
-        final var upstream = temporary.resolve("upstream");
-        git(temporary, "clone", "--no-local", fixture.directory().toString(), upstream.toString());
+        final var upstream = copyFixture(temporary.resolve("upstream")).directory();
         git(upstream, "tag", "upstream-only", fixture.old());
         try (final var store = new TrustedGitStore(
                 temporary.resolve("private"),
@@ -891,8 +895,14 @@ class TrustedGitStoreTest {
     @Test
     void boundsTagRefCountBeforeWalkingTagChains() throws Exception {
         final var fixture = fixture();
-        for (int i = 0; i < 10001; i++) {
-            Files.writeString(fixture.directory().resolve(".git/refs/tags/many-" + i), fixture.head() + "\n");
+        // Retain existing refs without a sorted header: the generated tag names are not sorted.
+        final var existingRefs = git(fixture.directory(), "for-each-ref", "--format=%(objectname) %(refname)");
+        try (final var output =
+                Files.newBufferedWriter(fixture.directory().resolve(".git/packed-refs"), StandardCharsets.US_ASCII)) {
+            output.write(existingRefs);
+            for (int i = 0; i < 10001; i++) {
+                output.write(fixture.head() + " refs/tags/many-" + i + "\n");
+            }
         }
         try (final var store = new TrustedGitStore(
                 temporary.resolve("private"),

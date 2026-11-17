@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -304,12 +305,18 @@ class AgentBrokerSourceTest {
     void originRequiresLiteralAttemptPrefixAndBoundedGitGrantSuffix() throws Exception {
         final var workspace = temporary.resolve("origin-scope");
         final var head = fixture(workspace);
+        // Keep a real main invocation in addition to the batched validation cases.
+        final var smoke = cli(workspace, head, "expand", "src");
+        assertEquals(0, smoke.exit(), smoke.error());
+        matrix(workspace, head, "origin");
+    }
+
+    private static void originMatrix(final Path workspace, final String head) throws Exception {
         final var repo = workspace.resolve("repository");
         final var base = ENDPOINT.substring(0, ENDPOINT.lastIndexOf('/') + 1);
         for (final var origin : List.of(base, base + "git/a.git", base + "git/" + "A-9".repeat(26) + "ab.git")) {
             git(repo, "remote", "set-url", "origin", origin);
-            final var result = cli(workspace, head, "expand", "src");
-            assertEquals(0, result.exit(), result.error());
+            assertDoesNotThrow(() -> runSource(flags(head), List.of("expand", "src")), origin);
         }
         for (final var origin : List.of(
                 "https://brokerXexample:8443" + base.substring(base.indexOf("/context/")) + "git/grant-1.git",
@@ -322,8 +329,7 @@ class AgentBrokerSourceTest {
                 base + "git/nested/grant-1.git",
                 "git/grant-1.git")) {
             git(repo, "remote", "set-url", "origin", origin);
-            final var result = cli(workspace, head, "expand", "docs");
-            assertNotEquals(0, result.exit(), origin);
+            assertRejected(flags(head), List.of("expand", "docs"));
             assertFalse(Files.exists(repo.resolve("docs/guide.txt")), origin);
         }
     }
@@ -400,21 +406,71 @@ class AgentBrokerSourceTest {
     void rejectsUnsafeConfigInvalidPathsBoundsAndExistingInitWithoutNetwork() throws Exception {
         final var workspace = temporary.resolve("invalid");
         final var head = fixture(workspace);
+        // Exercise main's rejection path too; the child matrix keeps its own real cwd throughout.
+        assertNotEquals(0, cli(workspace, head, "expand", "../outside").exit());
+        matrix(workspace, head, "unsafe");
+    }
+
+    private static void unsafeMatrix(final Path workspace, final String head) throws Exception {
         final var repo = workspace.resolve("repository");
         for (final var path : List.of("../outside", "/tmp/outside", "src/../docs", "src//nested", ".git", "--stdin")) {
-            assertNotEquals(0, cli(workspace, head, "expand", path).exit());
+            assertRejected(flags(head), List.of("expand", path));
         }
-        assertNotEquals(0, cli(workspace, head, "deepen", "1000").exit());
-        assertNotEquals(0, cli(workspace, head, "init").exit());
+        assertRejected(flags(head), List.of("deepen", "1000"));
+        assertRejected(flags(head), List.of("init"));
         final var diskBound = new ArrayList<>(flags(head));
         diskBound.set(diskBound.indexOf("--max-bytes") + 1, "1");
-        assertNotEquals(
-                0, launch(workspace, diskBound, List.of("expand", "docs")).exit());
+        assertRejected(diskBound, List.of("expand", "docs"));
         assertFalse(Files.exists(repo.resolve("docs/guide.txt")));
-        git(repo, "config", "filter.evil.smudge", "touch " + temporary.resolve("must-not-exist"));
-        assertNotEquals(0, cli(workspace, head, "expand", "docs").exit());
-        assertFalse(Files.exists(temporary.resolve("must-not-exist")));
+        final var sentinel = workspace.getParent().resolve("must-not-exist");
+        git(repo, "config", "filter.evil.smudge", "touch " + sentinel);
+        assertRejected(flags(head), List.of("expand", "docs"));
+        assertFalse(Files.exists(sentinel));
         assertEquals(head, git(repo, "rev-parse", "HEAD").strip());
+    }
+
+    private static void matrix(final Path workspace, final String head, final String name) throws Exception {
+        final var result = process(
+                workspace,
+                TestJava.javaCommand("-cp", classpath(), MatrixLauncher.class.getName(), name, head),
+                "",
+                Map.of());
+        assertEquals(0, result.exit(), result.output() + result.error());
+    }
+
+    public static final class MatrixLauncher {
+        public static void main(final String... args) throws Exception {
+            final var workspace = Path.of("").toAbsolutePath();
+            switch (args[0]) {
+                case "origin" -> originMatrix(workspace, args[1]);
+                case "unsafe" -> unsafeMatrix(workspace, args[1]);
+                default -> throw new IllegalArgumentException(args[0]);
+            }
+        }
+    }
+
+    private static void assertRejected(final List<String> flags, final List<String> args) {
+        final var failure =
+                assertThrows(InvocationTargetException.class, () -> runSource(flags, args), args.toString());
+        // Match main's exception boundary without reproducing its failure classification or formatting.
+        assertInstanceOf(Exception.class, failure.getCause());
+    }
+
+    private static void runSource(final List<String> flags, final List<String> args) throws Exception {
+        final var type = Class.forName(AgentBrokerSource.class.getName() + "$Options");
+        final var parse = type.getDeclaredMethod("parse", String[].class);
+        parse.setAccessible(true);
+        final var arguments = new ArrayList<>(flags);
+        arguments.addAll(args);
+        final var options = parse.invoke(null, (Object) arguments.toArray(String[]::new));
+        final var constructor =
+                AgentBrokerSource.class.getDeclaredConstructor(type, JsonMapper.class, Configuration.class);
+        constructor.setAccessible(true);
+        final var run = AgentBrokerSource.class.getDeclaredMethod("run");
+        run.setAccessible(true);
+        try (final var json = new JsonMapperImpl(List.of(), ignored -> Optional.empty())) {
+            run.invoke(constructor.newInstance(options, json, Configuration.of(Map.of())));
+        }
     }
 
     @Test

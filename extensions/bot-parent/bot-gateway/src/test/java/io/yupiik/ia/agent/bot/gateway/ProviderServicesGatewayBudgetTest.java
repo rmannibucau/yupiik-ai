@@ -29,6 +29,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -65,7 +66,16 @@ class ProviderServicesGatewayBudgetTest {
                     422,
                     client.send(request(gateway, "p".repeat(43)), HttpResponse.BodyHandlers.ofString())
                             .statusCode());
-            try (final var available = fixture.budget.tryAcquire().orElseThrow()) {
+            // Closing the downstream body exposes EOF before the handler's durable completion.
+            // Wait for that asynchronous cleanup, retaining the successful acquisition for close.
+            final long deadline = System.nanoTime() + Duration.ofMillis(400).toNanos();
+            var acquired = fixture.budget.tryAcquire();
+            while (acquired.isEmpty() && System.nanoTime() < deadline) {
+                Thread.sleep(1);
+                acquired = fixture.budget.tryAcquire();
+            }
+            assertTrue(acquired.isPresent(), "Completed upstream response did not release its budget slot");
+            try (final var available = acquired.orElseThrow()) {
                 assertNotNull(available);
             }
         }

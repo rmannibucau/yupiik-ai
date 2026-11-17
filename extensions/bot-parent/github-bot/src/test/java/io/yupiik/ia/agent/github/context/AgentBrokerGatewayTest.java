@@ -171,7 +171,12 @@ class AgentBrokerGatewayTest {
                     try (final var input = Files.newInputStream(checkout.resolve(".git/yca-broker.properties"))) {
                         state.load(input);
                     }
-                    verifyGitTransport(store, gateway, context, state.getProperty("gitPath"));
+                    // The CLI processor/path matrix above exercises real native Git for every case.
+                    // Protocol forwarding, compression and authorization are gateway-server concerns:
+                    // exhaust their transport matrix once, not once per child JVM processor count.
+                    if (explicitPaths && processors == 1) {
+                        verifyGitTransport(store, gateway, context, state.getProperty("gitPath"));
+                    }
                     Files.writeString(checkout.resolve("file.txt"), "committed agent work\n");
                     git(checkout, "add", "file.txt");
                     git(
