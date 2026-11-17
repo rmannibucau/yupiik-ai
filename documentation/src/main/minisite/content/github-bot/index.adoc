@@ -66,6 +66,7 @@ Explicit `github.authorization.userIds` are unconditional overrides that bypass 
 By default, `github.authorization.allowRepositoryWriters=true` also allows nonlisted users with effective write or admin permission on the exact target repository, subject to optional configured teams.
 Effective permissions include direct, team, organization and enterprise grants, not mere organization membership; maintain maps to write, triage maps to read, and custom roles use their base permission.
 An empty ID list works with repository-writer authorization enabled; setting the flag to `false` restores list-only behavior.
+
 Aggregate decisions, including identity and team checks, are cached in a bounded, thread-safe, process-local cache with a fixed default TTL of `github.authorization.permissionsCacheTtlSeconds=7200` and no cross-process persistence.
 Permission grants or revocations can therefore take up to two hours to take effect, and the worker reuses unexpired decisions in the same process.
 Zero disables the cache and negative TTL values are rejected.

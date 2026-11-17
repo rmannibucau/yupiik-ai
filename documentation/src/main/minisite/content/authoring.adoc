@@ -34,8 +34,22 @@ The xref:cli.adoc[CLI directory] groups the core, TUI and web commands.
 The xref:github-bot/index.adoc[GitHub bot directory] links its maintenance and worker commands.
 Both link to xref:cli/index.adoc[the complete generated command index].
 
-Include each generated partial from its canonical reference page.
-Do not copy its contents into feature guides or duplicate an option reference by hand.
+Keep the complete generated references on the main configuration pages.
+Feature and bot guides include context-filtered generated partials where readers need the options, rather than maintaining their own key/default tables.
+Do not copy generated contents or duplicate an option reference by hand.
+
+Add one `DocumentationGenerator` pre-action per configuration subtree in `documentation/pom.xml`, with an explicit module metadata `urls` input, a `namePrefix` filter and a unique `output` under `src/main/minisite/content/_partials/generated/`.
+Use `includeEnvironmentNames=true` and `formatter=definitionlist` consistently with the complete references.
+For example, the compaction guide includes `content/_partials/generated/configuration-compaction.adoc`, generated from the core metadata with `namePrefix=yca.compaction.`.
+Use the existing `include::content/_partials/generated/NAME.adoc[]` convention in pages, including nested feature and bot pages.
+
+IMPORTANT: Prefix filters are literal and combined with AND, not OR; use separate pre-actions and includes for unrelated groups, and `!prefix` to exclude a nested group.
+Bind an explicit output to a single metadata input because multiple inputs overwrite that output rather than merge into it.
+Keep generated files untracked; the minisite pre-actions recreate them before rendering.
+
+Move option descriptions, constraints and fallback semantics into the corresponding `@Property(documentation)` annotations before replacing a handwritten reference.
+Keep workflows, examples, security warnings and deployment-required values in the guide; these explain how to use the configuration rather than duplicating its defaults.
+Keep page-relative navigation links in the surrounding guide, not in reusable option descriptions that render at different directory depths.
 
 == Navigation (prev / next footer)
 
@@ -113,7 +127,8 @@ Verify includes, tables, code blocks and old anchors before publishing.
 
 === Automated checks
 
-Run `mvn -pl documentation test` for source-level navigation and diagram regressions.
+Run `mvn -pl documentation test` after compiling the reactor metadata for source-level navigation, diagrams and scoped configuration generation regressions.
+The scoped-reference tests use the configured POM filters and actual metadata, check every matching option and environment name, reject output collisions, and verify that includes and producers agree.
 After building the minisite, run the opt-in browser check with Playwright:
 
 [source,bash]
@@ -127,4 +142,4 @@ PLAYWRIGHT_MODULE=/tmp/yca-doc-browser/node_modules/playwright/index.mjs \
 
 Pass the generated site directory as the script's first argument if the version or output location differs.
 Set `CHROME_BIN` to use an existing Chrome/Chromium executable instead of Playwright's downloaded browser.
-The check validates local links and anchors, generated command directories, diagram rendering and failure fallback, theme changes, mobile layout, keyboard access and configuration filtering.
+The check validates local links and anchors, scoped option/environment references, generated command directories, diagram rendering and failure fallback, theme changes, mobile layout, keyboard access and configuration filtering.

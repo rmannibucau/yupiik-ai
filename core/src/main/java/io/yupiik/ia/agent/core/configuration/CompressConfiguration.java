@@ -50,19 +50,19 @@ public record CompressConfiguration(
         @Property(
                 defaultValue = "5",
                 documentation =
-                        "Emit the hard-limit nudge at most every this many iterations, so a model that ignores it is not spammed on every round.")
+                        "Emit the hard-limit nudge at most every this many real LLM request rounds, so a model that ignores it is not spammed on every round. Also sets the post-compression cooldown; context previews do not advance this cadence.")
         int nudgeFrequency,
 
         @Property(
                 defaultValue = "true",
                 documentation =
-                        "Count the active compressed summaries toward the effective context size and let them extend the hard nudge limit, like opencode-dcp summaryBuffer.")
+                        "Count the active compressed summaries toward the effective context size and let them extend the hard nudge limit to baseMax + summaryTokens. This changes guidance only: summary tokens still count toward real capacity and the core compaction guard is unchanged.")
         boolean summaryBuffer,
 
         @Property(
                 defaultValue = "false",
                 documentation =
-                        "Append the verbatim text of user messages covered by a compressed range to its summary.")
+                        "Preserve user messages by appending their verbatim text to the summary when a compressed range covers them.")
         boolean protectUserMessages,
 
         @Property(

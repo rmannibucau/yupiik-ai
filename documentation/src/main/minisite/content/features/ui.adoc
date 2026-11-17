@@ -234,30 +234,7 @@ In the TUI, the answer opens a `btw` modal.
 Scroll with the wheel or `Up`/`Down`; `Esc` closes it and cancels a pending request without stopping the main turn.
 The CLI prints the answer inline as a delimited block when ready.
 
-[opts=headers]
-|===
-|Property |Default |Description
-
-|`yca.slashcommands.btw.model`
-|provider model
-|Model answering side questions when set, the session model otherwise.
-
-|`yca.slashcommands.btw.maxTokens`
-|0
-|Maximum output tokens of an answer, 0 follows the provider/model budget.
-
-|`yca.slashcommands.btw.maxHistoryMessages`
-|200
-|Most recent session messages inherited as context, 0 keeps everything.
-
-|`yca.slashcommands.btw.recall`
-|5
-|Previous side questions replayed for follow-ups, 0 disables the replay.
-
-|`yca.slashcommands.btw.tools`
-|false
-|When false (default) /btw is a one-shot that never executes; the session system prompt and tool schema are kept for the provider cache and stray tool attempts surface as a retryable note. When true, /btw may also run the plan-mode read-only tools.
-|===
+include::content/_partials/generated/configuration-btw.adoc[]
 
 == Sessions on exit
 

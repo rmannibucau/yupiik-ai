@@ -127,18 +127,9 @@ Use `/compact` for an immediate core compaction:
 WARNING: `urgent` can discard old context without an LLM summary.
 Without it, transient summarizer failure preserves raw context and reports the failure.
 
-[cols="2,1,3",options="header"]
-|===
-|Key |Default |Purpose
-|`yca.compaction.enabled` |`true` |Enable automatic core compaction.
-|`yca.compaction.buffer.percent` |`15` |Safety buffer as a percentage of the raw context window.
-|`yca.compaction.buffer.minTokens` |`16000` |Minimum buffer; wins on small windows.
-|`yca.compaction.buffer.safetyPercent` |`90` |Cap the trigger below the hard limit, as a percentage of usable space.
-|`yca.compaction.thresholdPercent` |`0` |Positive legacy percentage override; `0` selects buffer mode.
-|`yca.compaction.tail.budgetTokens` |`15000` |Verbatim tail budget; `0` selects the legacy automatic budget, `25%` of usable space clamped to `[2000, 15000]`.
-|`yca.compaction.mode` |`llm` |Summarizer or local-only mode; a provider block can override it.
-|`yca.compaction.retriesMaxAttempts` |`2` |Total transient attempts per chunk; provider overrides are supported.
-|===
+=== Core compaction configuration
+
+include::content/_partials/generated/configuration-compaction.adoc[]
 
 Conversation retries keep their independent `yca.llm.retriesMaxAttempts` policy.
 
@@ -255,15 +246,7 @@ Reminders ask the model to reduce a large working context; they do not force exe
 A low percentage of a large model window does not cancel an absolute working-context target.
 But a reminder never justifies compressing ongoing work, blocking progress, or running whole-session compaction merely to meet that target.
 
-[cols="2,1,3",options="header"]
-|===
-|Key |Default |Purpose
-|`yca.compression.contextLimit.min` |`50000` |Soft floor; below it, turn and iteration reminders are off.
-|`yca.compression.contextLimit.max` |`100000` |Strong working-context reminder floor.
-|`yca.compression.iterationNudgeThreshold` |`15` |Rounds since the latest user message before an iteration reminder.
-|`yca.compression.nudgeFrequency` |`5` |Strong-reminder cadence in real LLM request rounds, also used as post-compression cooldown.
-|`yca.compression.summaryBuffer` |`true` |Extend the guidance maximum by active summary tokens: `baseMax + summaryTokens`.
-|===
+See <<_compression_configuration,generated compression settings>> for reminder thresholds and cadence.
 
 Limits accept token counts or percentages of the context window.
 Per-provider overrides live at `yca.provider.providers[i].compaction.contextLimit.min` / `.max`.
@@ -278,16 +261,11 @@ A model that ignores reminders keeps its working context until automatic compact
 
 Compression must retain the information needed by later work.
 
-[cols="2,1,3",options="header"]
-|===
-|Key |Default |Effect
-|`yca.compression.protectedTools` |`spawn_subagent`, `skill`, `write_todo` |Append completed outputs of these tools inside the range to the summary.
-|`yca.compression.protectUserMessages` |`false` |Preserve user messages verbatim when enabled; protected user messages receive a `BLOCKED` reference and cannot be selected as range content.
-|`yca.compression.protectTags` |`false` |Extract and append `<protect>...</protect>` blocks when enabled.
-|`yca.compression.turnProtection.enabled` |`false` |Refuse ranges covering the newest `yca.compression.turnProtection.turns` turns (default `4`).
-|`yca.compression.strategies.deduplication.enabled` |`true` |Collapse identical tool calls in unpruned history to their latest occurrence.
-|`yca.compression.strategies.purgeErrors.enabled` |`true` |Mark failed-call input for pruning after `yca.compression.strategies.purgeErrors.turns` turns (default `4`), retaining the error.
-|===
+Tool-output preservation, user-message and tag protection, recent-turn protection and local strategies are configured independently in the generated settings below.
+
+=== Compression configuration
+
+include::content/_partials/generated/configuration-compression.adoc[]
 
 === Tool actions
 

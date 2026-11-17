@@ -25,16 +25,29 @@ import java.util.regex.Pattern;
 @RootConfiguration("slack.context")
 @JsonModel
 public record SlackContextConfiguration(
-        @Property(defaultValue = "false", documentation = "Enable attempt-scoped Slack context.")
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Host opt-in to the attempt-scoped Slack context tool; does not enable search by itself.")
         boolean enabled,
 
-        @Property(defaultValue = "true", documentation = "Allow minimal names for granted members.")
+        @Property(
+                defaultValue = "true",
+                documentation = "Allow minimal names for already granted raw member IDs when context is enabled.")
         boolean resolveMentions,
 
-        @Property(defaultValue = "false", documentation = "Enable public-channel message search.")
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Separate opt-in to approved public-message search; requires context enabled and an approved"
+                                + " originating source channel.")
         boolean searchEnabled,
 
-        @Property(documentation = "Exact source channel allowlist; absent or empty denies search.")
+        @Property(
+                documentation =
+                        "Exact independently verified public, unshared source channel IDs; absent or empty denies"
+                                + " search. Search is restricted to the admitted originating channel, which must be on"
+                                + " this list.")
         List<String> sourceChannels,
 
         @Property(defaultValue = "30", documentation = "Maximum search lookback in days.")
@@ -46,7 +59,11 @@ public record SlackContextConfiguration(
         @Property(defaultValue = "12", documentation = "Maximum upstream calls per attempt, including failures.")
         int maxRequests,
 
-        @Property(defaultValue = "20", documentation = "Maximum returned messages across an attempt.")
+        @Property(
+                defaultValue = "20",
+                documentation =
+                        "Cumulative search-result message budget per attempt, separate from the thread-message budget;"
+                                + " not a per-page allowance.")
         int maxResults,
 
         @Property(
@@ -54,24 +71,29 @@ public record SlackContextConfiguration(
                 documentation = "Maximum cumulative conservative JSON response bytes per attempt.")
         int maxResponseBytes,
 
-        @Property(defaultValue = "20", documentation = "Maximum wait seconds per upstream call.")
+        @Property(
+                defaultValue = "20",
+                documentation = "Maximum wait in seconds per upstream call; not a latency promise.")
         int timeoutSeconds,
 
         @Property(
                 defaultValue = "2",
-                documentation = "Maximum concurrent controller context calls across all attempts.")
+                documentation = "Maximum concurrent controller context calls across all attempts; does not replace"
+                        + " controller/provider admission.")
         int maxConcurrent,
 
         @Property(
                 defaultValue = "600",
                 documentation =
-                        "Maximum ephemeral action authority retention and attempt context lifetime in seconds; Slack may expire authority earlier.")
+                        "Absolute admission-to-expiry context lifetime in seconds; validated range 1-600. Queue wait"
+                                + " consumes it, and Slack may revoke search authority earlier.")
         int actionRetentionSeconds,
 
         @Property(
                 defaultValue = "false",
                 documentation =
-                        "Explicitly accept swap-backed tmpfs for Slack context when noswap is unavailable; context data may persist in host swap. All other transient-storage checks remain mandatory.")
+                        "Explicitly accept only missing tmpfs noswap for Slack context; context data may persist in"
+                                + " host swap. All other storage, privacy and logging controls remain mandatory.")
         boolean allowSwapBackedTmpfs,
 
         @Property(documentation = "Deny-by-default bounded public-channel thread context.")
@@ -80,7 +102,9 @@ public record SlackContextConfiguration(
         @Property(
                 defaultValue = "false",
                 documentation =
-                        "Explicitly accept persistent Docker agent logs containing Slack context. Does not enable logging by itself; set slack.executor.docker.disableContainerLogs=false as well.")
+                        "Explicitly accept Docker retaining agent stdout/stderr containing Slack context. Does not"
+                                + " enable logging by itself; set slack.executor.docker.disableContainerLogs=false as"
+                                + " well.")
         boolean allowContainerLogs) {
     private static final Pattern PUBLIC_CHANNEL = Pattern.compile("C[A-Z0-9]{1,63}");
 

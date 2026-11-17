@@ -23,7 +23,10 @@ import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 public record SlackProviderConfiguration(
         @Property(
                 defaultValue = "\"\"",
-                documentation = "Exact selected provider target: HTTPS for Nono, numeric private HTTP for Kubernetes.")
+                documentation = "Required selected provider upstream for Nono or Kubernetes, never supplied by a Slack"
+                        + " message: HTTPS for Nono, canonical numerical private IPv4 HTTP with an explicit port"
+                        + " for Kubernetes. Must match the selected trusted provider URL, appending"
+                        + " /chat/completions for COMPLETIONS or /responses for RESPONSES when absent.")
         String upstream,
 
         @Property(documentation = "Qualified native socket deployment.")
@@ -35,23 +38,28 @@ public record SlackProviderConfiguration(
             @Property(
                     defaultValue = "\"\"",
                     documentation =
-                            "Private short absolute socket root outside runtime, attempts, state and budget roots.")
+                            "Pre-provisioned private short absolute socket root, disjoint from runtime, attempts,"
+                                    + " state and provider-budget roots.")
             String socketRoot,
 
             @Property(
                     defaultValue = "false",
-                    documentation =
-                            "Operator confirms qualified Linux/Nono pathname mediation and credential-free runtime.")
+                    documentation = "Required operator assertion of qualified Linux/Nono pathname mediation and"
+                            + " credential-free runtime; not an automatic probe or certification.")
             boolean qualified,
 
             @Property(
                     defaultValue = "false",
-                    documentation =
-                            "Operator confirms stronger outer isolation hiding host IPC endpoints; required because pathname mediation has a sockaddr race.")
+                    documentation = "Required operator assertion of stronger outer isolation hiding unrelated host IPC"
+                            + " endpoints; pathname mediation has a sockaddr race and alone is not a race-free"
+                            + " hostile-workload boundary.")
             boolean outerIsolationQualified) {}
 
     public record Kubernetes(
-            @Property(defaultValue = "\"\"", documentation = "Trusted provider gateway image.")
+            @Property(
+                    defaultValue = "\"\"",
+                    documentation =
+                            "Trusted provider gateway image containing Java and the Jib application classpath file.")
             String image,
 
             @Property(defaultValue = "\"\"", documentation = "Private TLS Secret containing gateway.p12.")
@@ -59,7 +67,7 @@ public record SlackProviderConfiguration(
 
             @Property(
                     defaultValue = "\"attempt-services.yca.internal\"",
-                    documentation = "Pinned TLS identity trusted by the agent image.")
+                    documentation = "Pinned TLS identity whose public CA is already trusted by the agent image.")
             String serverName,
 
             @Property(
@@ -67,18 +75,23 @@ public record SlackProviderConfiguration(
                     documentation = "Qualified node containing the shared local budget filesystem.")
             String nodeName,
 
-            @Property(defaultValue = "\"\"", documentation = "Private local budget PVC, never the attempt PVC.")
+            @Property(
+                    defaultValue = "\"\"",
+                    documentation = "Private node-local provider-budget PVC, distinct from the attempt PVC in"
+                            + " slack.executor.kubernetes.claim.")
             String budgetClaim,
 
             @Property(defaultValue = "\"default\"", documentation = "Gateway service account; no token mounted.")
             String serviceAccount,
 
-            @Property(defaultValue = "8443", documentation = "Gateway TLS port.")
+            @Property(defaultValue = "8443", documentation = "Gateway TLS port; validated range 1024-65535.")
             int port,
 
             @Property(
                     defaultValue = "false",
                     documentation =
-                            "Operator confirms enforcing CNI, no additive policies, node/metadata isolation and qualified same-host local budget storage.")
+                            "Required operator assertion of enforcing CNI, no additive allow policies, node/metadata"
+                                    + " isolation and qualified same-host local budget storage; not an automatic probe or"
+                                    + " certification.")
             boolean qualified) {}
 }

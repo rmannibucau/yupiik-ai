@@ -162,21 +162,9 @@ See xref:private-context.adoc[context operations, worker Git command reference, 
 
 These host-only settings are independent of the persisted executor fingerprint; changing them must not be treated as permission to reinterpret a retained attempt or unresolved publication.
 
-[cols="1,1,2",options="header"]
-|===
-|Setting |Default |Contract
-|`github.context.bind` |`127.0.0.1` |JRE HTTP listener address, not an implicit sandbox route
-|`github.context.port` |`0` |Random listener port; use a dedicated port per concurrent worker behind a static terminator
-|`github.context.advertised` |Empty |Required explicit HTTPS origin, without credentials, query, fragment or non-root path, routed to this exact worker
-|`github.context.storageRoot` |Empty |Private owner-only host storage under `github.home/context` unless overridden; outside agent attempt mounts
-|`github.context.git` |`git` |Trusted host executable with HTTPS and `http-backend` helpers
-|`github.context.repositories` |Empty |Exact comma-separated additional code grants; primary and verified PR head remain available
-|`github.context.maxRequests` |`256` |Shared authenticated-request budget across filesystem, HTTP control and native Git adapters; range 1 through 4096
-|`github.context.maxResponseBytes` |`1073741824` |Shared response-byte budget; range 1 MiB through 16 GiB
-|`github.context.maxHttpBufferBytes` |`67108864` |Git compatibility HTTP buffer cap in bytes; range 1 through 2147483639 (Java array-safe bound), sized for the worker heap; bounds request input and buffered responses, not streamed responses
-|`github.fix.enabled` |`false` |Explicit opt-in to existing open PR head updates
-|`github.fix.repositories` |Empty |Exact canonical head-repository allowlist; empty denies all, independent of code grants
-|===
+include::content/_partials/generated/configuration-github-context.adoc[]
+
+include::content/_partials/generated/configuration-github-fix.adoc[]
 
 For example, after provisioning the worker-specific HTTPS route and trusted certificate chains:
 
@@ -205,25 +193,25 @@ GraphQL `updateRefs` compares `beforeOid` and uses `force:false`; it does not ma
 IMPORTANT: The private gateway settings are canonical; the services-specific `dependencyEgress` extension is implemented and deployed, with passing native AMD64 actual-image acceptance.
 See xref:egress.adoc#restricted-services-evidence[restricted-services validation evidence] for completed package/final-image checks and the separate live-acceptance boundary.
 
-[cols="1,2",options="header"]
-|===
-|Setting |Contract
-|`github.executor.docker.services.image` |Digest-pinned existing egress application image with the new JRE TLS service-gateway runtime; public CONNECT readiness alone is insufficient.
-|`github.executor.docker.services.controlNetwork` |Operator control bridge shared by worker and gateway, never joined by the agent.
-|`github.executor.docker.services.keyStore` |Absolute path to a private PKCS12 TLS leaf key/chain store, root-managed and readable by the dedicated non-root worker/gateway, mounted read-only outside agent-visible storage.
-|`github.executor.docker.services.keyStorePasswordEnv` |Name of the trusted environment variable supplying the key-store password, not a literal password or an agent environment grant.
-|`github.executor.docker.services.serverName` |Exact TLS identity and per-attempt bridge alias, defaulting to `attempt-services.yca.internal`.
-|`github.executor.docker.services.providerTarget` |Fixed canonical private numerical IPv4 HTTP origin with explicit port and optional path prefix, for example `http://172.30.0.1:8080/v1`; must match the configured selected COMPLETIONS provider endpoint, including its configured path, rather than authorizing another upstream.
-|`github.context.advertised` |Set to `https://attempt-services.yca.internal:8443` for this route; no public DNS or published host port is necessary.
-|`github.executor.docker.services.dependencyEgress` |Nested policy for a separate credential-free public CONNECT sidecar, not a change to the private TLS gateway.
-|`github.executor.docker.services.dependencyEgress.enabled` |Boolean, default `true`; set to `false` to disable dependency egress. An explicit empty `allowedHosts` list also disables it.
-|`github.executor.docker.services.dependencyEgress.image` |Operator-reviewed, digest-pinned CONNECT application image for the dependency sidecar.
-|`github.executor.docker.services.dependencyEgress.allowedHosts` |Worker-operator destination policy with the public known-host defaults listed below; an explicit empty list disables dependency egress.
-|`github.executor.docker.services.dependencyEgress.dns` |Agent DNS sink, default `127.0.0.1`; IPv6 loopback `::1` is also supported, not an external resolver.
-|===
+include::content/_partials/generated/configuration-github-docker-services.adoc[]
+
+Use a digest-pinned existing egress application image with the JRE TLS service-gateway runtime; public CONNECT readiness alone is insufficient.
+Provision an operator control bridge shared by the worker and gateway, never joined by the agent.
+The key store must be an absolute path to a private PKCS12 TLS leaf key/chain store, root-managed and readable by the dedicated non-root worker/gateway, mounted read-only outside agent-visible storage.
+`github.executor.docker.services.keyStorePasswordEnv` names the trusted environment variable supplying its password, not a literal password or an agent environment grant.
+The configured `serverName` is the exact TLS identity and per-attempt bridge alias.
+The provider target must be a fixed canonical private numerical IPv4 HTTP origin with an explicit port and optional path prefix, for example `http://172.30.0.1:8080/v1`, matching the configured selected COMPLETIONS provider endpoint, including its configured path, rather than authorizing another upstream.
+Set `github.context.advertised` to `https://attempt-services.yca.internal:8443` for this route with the default services host; no public DNS or published host port is necessary.
+
+[[docker-services-dependency-egress-reference]]
+.Dependency egress reference
+include::content/_partials/generated/configuration-github-docker-services-dependency-egress.adoc[]
+
+The nested `dependencyEgress` policy configures a separate credential-free public CONNECT sidecar, not a change to the private TLS gateway.
+Use an operator-reviewed, digest-pinned CONNECT application image for this sidecar.
 
 Configure restricted services all-or-nothing and independently opt in; do not combine them with standalone `github.executor.docker.egress`, a custom agent network or the legacy `github.executor.relay` mode.
-The services dependency policy defaults to `github.com`, `api.github.com`, `codeload.github.com`, `raw.githubusercontent.com`, `objects.githubusercontent.com`, `repo.maven.apache.org`, `repo1.maven.org`, `registry.npmjs.org`, `docker.io`, `*.docker.io`, `production.cloudflare.docker.com`, `cdn.azul.com`, `api.azul.com` and `*.apache.org`.
+See the <<docker-services-dependency-egress-reference,generated dependency-egress reference above>> for the default `allowedHosts` policy.
 Only the worker operator configures this list; exact hosts and `*.suffix` entries are supported, and a wildcard excludes the suffix apex.
 For example, `*.docker.io` does not authorize `docker.io`, which is listed separately.
 Likewise, `*.apache.org` authorizes subdomains, not the `apache.org` apex.

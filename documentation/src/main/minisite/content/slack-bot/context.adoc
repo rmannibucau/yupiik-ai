@@ -56,31 +56,7 @@ The separate root is `slack.context`, implemented by `SlackContextConfiguration`
 Slack message text, modal input, templates and agent arguments cannot enable it or change its limits.
 The defaults are conservative; setting `enabled=true` alone does not enable search.
 
-[cols="2,1,4",options="header"]
-|===
-|Property |Default |Meaning
-|`slack.context.enabled` |`false` |Host opt-in to the attempt-scoped context tool.
-|`slack.context.allowSwapBackedTmpfs` |`false` |Explicit operator acceptance of missing tmpfs `noswap` only; all other storage, privacy and logging controls remain mandatory.
-|`slack.context.allowContainerLogs` |`false` |Explicit acceptance of Docker retaining agent stdout/stderr containing Slack context; logging also requires `slack.executor.docker.disableContainerLogs=false`.
-|`slack.context.resolveMentions` |`true` |Allow minimal names for already granted raw member IDs when context is enabled.
-|`slack.context.searchEnabled` |`false` |Separate opt-in to approved public-message search.
-|`slack.context.thread.enabled` |`false` |Prefetch bounded current-thread context and enable explicit thread pagination.
-|`slack.context.thread.channels` |`[]` |Exact independently verified public, unshared originating channel IDs; empty denies thread reads.
-|`slack.context.thread.initialMessages` |`20` |Maximum initial snapshot messages, not the total attempt limit.
-|`slack.context.thread.maxMessages` |`100` |Cumulative delivered thread-message limit across prefetch and tool pages.
-|`slack.context.thread.maxBytes` |`65536` |Cumulative conservative JSON thread response-byte limit, also inside the overall context-byte budget.
-|`slack.context.thread.maxRequests` |`3` |Thread upstream-call sublimit, also inside the overall request budget.
-|`slack.context.thread.lookbackHours` |`24` |Recent-reply horizon; an older root may be included separately.
-|`slack.context.sourceChannels` |`[]` |Exact public, unshared source channel IDs; empty denies search.
-|`slack.context.lookbackDays` |`30` |Bounded recent-message search horizon.
-|`slack.context.maxMembers` |`32` |Bound granted member IDs and cached minimal names per attempt.
-|`slack.context.maxRequests` |`12` |Bound upstream calls, including failures, per attempt.
-|`slack.context.maxResults` |`20` |Cumulative search-result message budget, separate from the thread-message budget; not an unlimited per-page allowance.
-|`slack.context.maxResponseBytes` |`131072` |Cumulative conservative JSON response-byte budget.
-|`slack.context.timeoutSeconds` |`20` |Maximum upstream-call wait; not a latency promise.
-|`slack.context.maxConcurrent` |`2` |Bound concurrent context work; does not replace controller/provider admission.
-|`slack.context.actionRetentionSeconds` |`600` |Absolute admission-to-expiry context lifetime, capped at 600 seconds; queue wait consumes it and Slack may revoke search authority earlier.
-|===
+include::content/_partials/generated/configuration-slack-context.adoc[]
 
 For a first rollout, use one approved requester and one independently verified public destination channel, with that same channel in the source allowlist.
 Keep the lists fixed for the attempt; do not interpolate model queries into policy or accept user-supplied allowlist overrides.

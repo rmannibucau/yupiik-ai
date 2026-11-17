@@ -44,6 +44,27 @@ for (const [path, content] of html) {
 }
 if (errors.length) { console.error('Broken local links:', errors); }
 
+// Scoped references must render as option definitions, not stale handwritten tables.
+const scopedReferences = {
+  'features/compaction.html': ['yca.compaction.enabled', 'yca.compression.contextLimit.min'],
+  'features/memory.html': ['yca.memory.enabled', 'yca.memory.extractEveryTurns'],
+  'features/code-graph-index.html': ['yca.structuralCodeGraph.indexEnabled', 'yca.mavenRepositoryKnowledge.codegraphIndexCacheBytes'],
+  'features/ui.html': ['yca.slashcommands.btw.tools'],
+  'features/context.html': ['yca.compaction.gate.maxAttempts', 'yca.pruning.nudgeMinTokens'],
+  'github-bot/configuration.html': ['github.context.bind', 'github.fix.enabled', 'github.executor.docker.services.dependencyEgress.allowedHosts'],
+  'slack-bot/configuration.html': ['slack.botUser', 'slack.executor.attemptRoot', 'slack.providerServices.upstream', 'slack.prompts.main', 'bot.admission.root'],
+  'slack-bot/context.html': ['slack.context.enabled', 'slack.context.thread.maxMessages']
+};
+for (const [path, keys] of Object.entries(scopedReferences)) {
+  const content = html.get(resolve(root, path));
+  assert.ok(content, `Missing scoped reference page: ${path}`);
+  const terms = [...content.matchAll(/<dt\b[^>]*>([\s\S]*?)<\/dt>/g)].map(match => match[1]);
+  for (const key of keys) {
+    const env = key.replaceAll('.', '_').toUpperCase();
+    assert.ok(terms.some(term => term.includes(`<code>${key}</code>`) && term.includes(env)), `Missing generated option/environment: ${path}: ${key}`);
+  }
+}
+
 const cli = html.get(resolve(root, 'cli.html'));
 const bot = html.get(resolve(root, 'github-bot/index.html'));
 const index = html.get(resolve(root, 'cli/index.html'));
@@ -59,7 +80,11 @@ assert.ok(cli.includes('cli/index.html') && bot.includes('../cli/index.html'));
 
 const diagramMarkup = content => content.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
 const diagramPages = [...html].filter(([, content]) => diagramMarkup(content).includes('<pre class="mermaid">'));
-assert.equal(diagramPages.length, 6, 'Expected all six current diagram pages');
+assert.deepEqual(diagramPages.map(([path]) => relative(root, path).split(sep).join('/')).sort(), [
+  'configuration.html', 'features/compaction.html', 'features/context.html',
+  'features/permissions.html', 'features/sessions.html', 'github-bot/architecture.html',
+  'github-bot/egress.html', 'slack-bot/deployment.html'
+].sort(), 'Expected every current diagram page');
 for (const [path, content] of html) {
   const scripts = [...content.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map(match => match[1]).join('\n');
   const loaders = scripts.match(/await import\('https:\/\/cdn.jsdelivr.net\/npm\/mermaid@/g) || [];

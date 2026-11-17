@@ -167,7 +167,9 @@ class MinisiteContentTest {
                 "features/compaction.adoc",
                 "features/permissions.adoc",
                 "features/sessions.adoc",
-                "github-bot/architecture.adoc")) {
+                "github-bot/architecture.adoc",
+                "github-bot/egress.adoc",
+                "slack-bot/deployment.adoc")) {
             final var source = Files.readString(content.resolve(page));
             final var count = block.matcher(source).results().count();
             assertTrue(count > 0, page);

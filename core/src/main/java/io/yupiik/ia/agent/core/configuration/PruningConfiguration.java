@@ -109,7 +109,7 @@ public record PruningConfiguration(
         @Property(
                 defaultValue = "55",
                 documentation =
-                        "Soft context-usage threshold (percent of the usable window) above which, once the nudge iteration threshold is met, a short nudge is appended to the session state to invite the model to finish or to compact; 0 disables the nudge. See xref:features/context.adoc#soft-context-usage-nudge[Soft context-usage nudge].")
+                        "Soft context-usage threshold (percent of the usable window) above which, once the nudge iteration threshold is met, a short nudge is appended to the session state to invite the model to finish or to compact; 0 disables the nudge.")
         int nudgeThresholdPercent,
 
         @Property(
@@ -121,19 +121,19 @@ public record PruningConfiguration(
         @Property(
                 defaultValue = "64000",
                 documentation =
-                        "Absolute context-size floor (estimated tokens) below which the nudge is suppressed even when the usage percentage is above the threshold: a small context makes the percentage noisy and nudging every turn would be noise. The effective floor is the smaller of 90% of the usable window and this value, so small-window providers are only nudged close to the compaction wall while large ones get an absolute cap; 0 disables the floor. See xref:features/context.adoc#soft-context-usage-nudge[Soft context-usage nudge].")
+                        "Absolute context-size floor (estimated tokens) below which the nudge is suppressed even when the usage percentage is above the threshold: a small context makes the percentage noisy and nudging every turn would be noise. The effective floor is the smaller of 90% of the usable window and this value, so small-window providers are only nudged close to the compaction wall while large ones get an absolute cap; 0 disables the floor.")
         int nudgeMinTokens,
 
         @Property(
                 defaultValue =
                         "\"Context is at ~%USAGE%% of the usable window. Prefer wrapping this step up, or compact soon.\"",
                 documentation =
-                        "Template of the soft context-usage nudge (usage below the prune threshold); supported placeholders: %USAGE% (usage percent), %PRUNE% (prune threshold), %COMPACT% (compaction threshold) and %ACTIONS% (manage_context suggestion, or a wrapping-up hint when the tool is disabled). See xref:features/context.adoc#soft-context-usage-nudge[Soft context-usage nudge].")
+                        "Template of the soft context-usage nudge (usage below the prune threshold); supported placeholders: %USAGE% (usage percent), %PRUNE% (prune threshold), %COMPACT% (compaction threshold) and %ACTIONS% (manage_context suggestion, or a wrapping-up hint when the tool is disabled).")
         String nudgeTemplate,
 
         @Property(
                 defaultValue =
                         "\"Context is at ~%USAGE%% and above the prune threshold (%PRUNE%%). Do not start new work - %ACTIONS% now to avoid the hard compaction wall.\"",
                 documentation =
-                        "Template of the urgent context-usage nudge, used once usage reaches the prune threshold; same placeholders as nudgeTemplate. See xref:features/context.adoc#soft-context-usage-nudge[Soft context-usage nudge].")
+                        "Template of the urgent context-usage nudge, used once usage reaches the prune threshold; same placeholders as nudgeTemplate.")
         String nudgeUrgentTemplate) {}

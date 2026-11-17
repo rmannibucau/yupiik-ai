@@ -54,8 +54,8 @@ public record MemoryConfiguration(
         @Property(
                 defaultValue = "true",
                 documentation =
-                        "Periodically rewrite the project memory with an LLM call (compact model) when it grows past a "
-                                + "size threshold: near-duplicates are merged, superseded and one-off facts dropped. A "
+                        "Periodically rewrite the project memory with an LLM call (compact model) when it grows past "
+                                + "64 KiB: near-duplicates are merged, superseded and one-off facts dropped. A "
                                 + "backup (MEMORY.md.bak) is kept and rewrites reducing the file by less than 20% are "
                                 + "discarded.")
         boolean compactEnabled,

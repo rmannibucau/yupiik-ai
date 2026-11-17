@@ -27,7 +27,11 @@ public record SlackExecutorConfiguration(
                 documentation = "Sandbox backend.")
         ExecutorConfiguration.Backend backend,
 
-        @Property(defaultValue = "\"\"", documentation = "Private attempt root, disjoint from controller state.")
+        @Property(
+                defaultValue = "\"\"",
+                documentation =
+                        "Dedicated private absolute attempt root, disjoint from slack.home, /etc/yca-slack, GitHub"
+                                + " state and GitHub attempts.")
         String attemptRoot,
 
         @Property(defaultValue = "3600", documentation = "Maximum attempt duration seconds.")
@@ -36,7 +40,11 @@ public record SlackExecutorConfiguration(
         @Property(defaultValue = "30", documentation = "Control command timeout seconds.")
         int commandTimeoutSeconds,
 
-        @Property(defaultValue = "\"hidden\"", documentation = "Tool output visibility; logs never published to Slack.")
+        @Property(
+                defaultValue = "\"hidden\"",
+                documentation =
+                        "Tool output visibility; use hidden for private tool activity. Neither hidden nor collapsed"
+                                + " output guarantees secret redaction; logs must never be published to Slack.")
         String showToolOutput,
 
         @Property(documentation = "Docker settings.") ExecutorConfiguration.Docker docker,

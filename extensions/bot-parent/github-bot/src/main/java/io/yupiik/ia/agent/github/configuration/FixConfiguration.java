@@ -29,5 +29,5 @@ public record FixConfiguration(
         @Property(
                 defaultValue = "\"\"",
                 documentation =
-                        "Comma-separated exact canonical head repository names allowed for fixes; empty denies all. No wildcards.")
+                        "Comma-separated exact canonical head repository names allowed for fixes; empty denies all. No wildcards. Independent of context code grants.")
         String repositories) {}

@@ -26,62 +26,84 @@ import java.util.regex.Pattern;
 @RootConfiguration("slack")
 @JsonModel
 public record SlackConfiguration(
-        @Property(defaultValue = "\"\"", documentation = "Single allowed workspace ID.")
+        @Property(
+                defaultValue = "\"\"",
+                documentation = "One exact T... workspace ID; required for installation validation.")
         String workspace,
 
-        @Property(defaultValue = "\"\"", documentation = "Bot user ID, not app ID or display name.")
+        @Property(
+                defaultValue = "\"\"",
+                documentation = "Exact U... or W... bot user ID, not app ID or display name; required for installation"
+                        + " validation.")
         String botUser,
 
-        @Property(documentation = "Exact allowed channel IDs; empty denies all.")
+        @Property(documentation = "Exact allowed C.../G... channel IDs; absent or empty denies all.")
         List<String> channels,
 
         @Property(
-                documentation = "Exact allowed requester IDs; empty denies all unless allowChannelMembers is enabled.")
+                documentation = "Exact allowed U.../W... requester IDs; absent or empty denies all unless"
+                        + " slack.allowChannelMembers is enabled.")
         List<String> users,
 
         @Property(
                 defaultValue = "false",
-                documentation =
-                        "Allow valid user IDs in allowed channels without a requester allowlist; does not enable Slack Connect.")
+                documentation = "Opt in to requests from valid user IDs in exact allowed channels without a requester"
+                        + " allowlist; bot/self events remain denied. Does not bypass workspace/channel checks or"
+                        + " enable Slack Connect.")
         boolean allowChannelMembers,
 
-        @Property(defaultValue = "false", documentation = "Explicitly authorize external/shared channel audiences.")
+        @Property(
+                defaultValue = "false",
+                documentation = "Explicitly authorize external/shared channel audiences; verify the channel audience"
+                        + " independently.")
         boolean allowSlackConnect,
 
         @Property(
                 defaultValue = "\"SLACK_APP_TOKEN\"",
-                documentation = "Environment variable holding the xapp Socket Mode token.")
+                documentation = "Name of the controller environment variable holding the xapp- Socket Mode token.")
         String appTokenEnv,
 
         @Property(
                 defaultValue = "\"SLACK_BOT_TOKEN\"",
-                documentation = "Environment variable holding the xoxb API token.")
+                documentation = "Name of the controller environment variable holding the xoxb- API token.")
         String botTokenEnv,
 
         @Property(
                 defaultValue = "\".yca-slack\"",
-                documentation = "Private controller state root; never mount in agents.")
+                documentation = "Private durable controller state root; never mount in agents.")
         String home,
 
-        @Property(defaultValue = "\"\"", documentation = "Trusted agent JSON configuration path.")
+        @Property(defaultValue = "\"\"", documentation = "Trusted operator-owned agent JSON configuration path.")
         String agentConfiguration,
 
-        @Property(defaultValue = "100", documentation = "Maximum durable nonterminal tasks.")
+        @Property(defaultValue = "100", documentation = "Maximum durable nonterminal tasks; validated range 1-10000.")
         int maxPending,
 
-        @Property(defaultValue = "4", documentation = "Maximum nonterminal tasks per requester.")
+        @Property(
+                defaultValue = "4",
+                documentation =
+                        "Maximum nonterminal tasks per requester; at least 1 and no greater than slack.maxPending.")
         int maxPendingPerUser,
 
-        @Property(defaultValue = "16000", documentation = "Maximum mention input characters.")
+        @Property(defaultValue = "16000", documentation = "Maximum mention input characters; validated range 1-100000.")
         int maxInputChars,
 
-        @Property(defaultValue = "12000", documentation = "Maximum structured answer characters.")
+        @Property(
+                defaultValue = "12000",
+                documentation =
+                        "Maximum structured answer characters; validated range 1-30000, not an LLM token budget.")
         int maxAnswerChars,
 
-        @Property(defaultValue = "600", documentation = "Maximum ask_user wait seconds, retaining worker slot.")
+        @Property(
+                defaultValue = "600",
+                documentation =
+                        "Maximum ask_user wait in seconds; validated range 1-3600. Waiting retains the worker slot.")
         int questionTimeoutSeconds,
 
-        @Property(defaultValue = "2592000", documentation = "Terminal task retention seconds.")
+        @Property(
+                defaultValue = "2592000",
+                documentation =
+                        "Terminal task retention age in seconds; minimum 86400 (one day), not a filesystem quota.")
         int retentionSeconds) {
     private static final Pattern TOKEN_ENVIRONMENT_NAME = Pattern.compile("[A-Z_][A-Z_0-9]{0,127}");
     private static final Pattern CHANNEL_ID = Pattern.compile("[CG][A-Z0-9]{1,63}");

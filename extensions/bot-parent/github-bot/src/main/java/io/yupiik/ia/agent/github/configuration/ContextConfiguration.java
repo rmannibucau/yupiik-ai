@@ -27,18 +27,20 @@ public record ContextConfiguration(
 
         @Property(
                 defaultValue = "0",
-                documentation = "Listener port. Set a dedicated port behind the worker's HTTPS terminator.")
+                documentation =
+                        "Listener port; zero selects a random port. Set a dedicated port per concurrent worker behind a static HTTPS terminator.")
         int port,
 
         @Property(
                 defaultValue = "\"\"",
-                documentation = "Explicit HTTPS origin routed to this worker, not a random worker load balancer.")
+                documentation =
+                        "Required explicit HTTPS origin when using the context service, without credentials, query, fragment or non-root path. Route to this exact worker, not a random worker load balancer.")
         String advertised,
 
         @Property(
                 defaultValue = "\"\"",
                 documentation =
-                        "Private context storage root; empty uses a private context directory under github.home. Never mount in agents.")
+                        "Private owner-only host context storage root; empty uses github.home/context. Keep outside agent attempt mounts and never mount in agents.")
         String storageRoot,
 
         @Property(
@@ -55,7 +57,7 @@ public record ContextConfiguration(
         @Property(
                 defaultValue = "256",
                 documentation =
-                        "Maximum authenticated requests shared by all context adapters per attempt, from 1 to 4096.")
+                        "Maximum authenticated requests shared by filesystem, HTTP control and native Git context adapters per attempt, from 1 to 4096.")
         int maxRequests,
 
         @Property(
@@ -67,7 +69,7 @@ public record ContextConfiguration(
         @Property(
                 defaultValue = "67108864L",
                 documentation =
-                        "Maximum bytes for Git compatibility HTTP buffers, from 1 to 2147483639. Bounds request input and buffered responses, not streamed responses; size for the worker heap.")
+                        "Maximum bytes for Git compatibility HTTP buffers, from 1 to 2147483639 (Java array-safe bound). Bounds request input and buffered responses, not streamed responses; size for the worker heap.")
         long maxHttpBufferBytes) {
     public ContextConfiguration {
         if (bind == null

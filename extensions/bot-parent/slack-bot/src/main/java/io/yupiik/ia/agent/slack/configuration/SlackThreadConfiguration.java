@@ -23,27 +23,48 @@ import java.util.regex.Pattern;
 /** Independent initial and cumulative thread budgets; no channel scope is inferred. */
 @JsonModel
 public record SlackThreadConfiguration(
-        @Property(defaultValue = "false", documentation = "Enable bounded thread context; requires context enabled.")
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Prefetch bounded current-thread context and enable explicit thread pagination; requires"
+                                + " slack.context.enabled.")
         boolean enabled,
 
-        @Property(documentation = "Exact public channel allowlist; absent or empty denies thread reads.")
+        @Property(
+                documentation =
+                        "Exact independently verified public, unshared originating channel IDs; absent or empty denies"
+                                + " thread reads.")
         List<String> channels,
 
-        @Property(defaultValue = "20", documentation = "Maximum messages in initial thread context, at most 20.")
+        @Property(
+                defaultValue = "20",
+                documentation = "Maximum initial snapshot messages, not the total attempt limit; validated range 1-20.")
         int initialMessages,
 
-        @Property(defaultValue = "100", documentation = "Maximum cumulative thread messages per attempt.")
+        @Property(
+                defaultValue = "100",
+                documentation = "Cumulative delivered thread-message limit across prefetch and explicit tool pages per"
+                        + " attempt.")
         int maxMessages,
 
-        @Property(defaultValue = "65536", documentation = "Maximum cumulative thread response bytes per attempt.")
+        @Property(
+                defaultValue = "65536",
+                documentation =
+                        "Cumulative conservative JSON thread response-byte limit per attempt, also inside the overall"
+                                + " slack.context.maxResponseBytes budget.")
         int maxBytes,
 
         @Property(
                 defaultValue = "3",
-                documentation = "Maximum upstream thread requests per attempt, including failures.")
+                documentation =
+                        "Thread upstream-call sublimit per attempt, including failures, shared by prefetch and tool"
+                                + " pages and also inside the overall slack.context.maxRequests budget.")
         int maxRequests,
 
-        @Property(defaultValue = "24", documentation = "Maximum thread lookback in hours, bounded to one year.")
+        @Property(
+                defaultValue = "24",
+                documentation =
+                        "Recent-reply horizon in hours, bounded to one year; an older root may be included separately.")
         int lookbackHours) {
     private static final Pattern PUBLIC_CHANNEL = Pattern.compile("C[A-Z0-9]{1,63}");
 

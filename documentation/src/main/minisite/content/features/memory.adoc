@@ -270,17 +270,7 @@ If a fact matters now, include it in the current conversation instead of relying
 
 == Configuration reference
 
-[cols="2,1,1,3",options="header"]
-|===
-|Property |Default |Scope |Meaning
-|`memory.mode` |`AUTO` |Extraction |`FULL`, `LAZY`, or routing-based cadence.
-|`memory.enabled` |`true` |Both |Enable extraction and injection.
-|`memory.maxChars` |`2000` |Context |Maximum characters in the session-start snapshot.
-|`memory.maxRatio` |`0.2` |Context |Budget is `min(maxChars, systemPromptCap * maxRatio)`; `0` uses plain `maxChars`.
-|`memory.maxLines` |`200` |Store |Per-scope bullet cap; oldest entries are dropped on write.
-|`memory.extractMinChars` |`1000` |Extraction |Minimum new text before another extraction call.
-|`memory.compactEnabled` |`true` |Store |Model rewrite of a project file above 64 KB, retained only for at least `20%` reduction.
-|===
+include::content/_partials/generated/configuration-memory.adoc[]
 
 When the resolved memory budget is below `1000` characters, injection is automatically disabled and extraction is skipped.
 The relative budget uses the resolved provider/model-aware system-prompt cap.

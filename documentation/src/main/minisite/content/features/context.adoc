@@ -177,12 +177,7 @@ Each attempt first runs forced recovery with a halved tail budget, then spills p
 LLM-free mode uses local strategies instead of a summarizer.
 Backoff is bounded and interruptible.
 
-[options="header"]
-|===
-|Budget |Default |Purpose
-|`yca.compaction.gate.maxAttempts` |`12` |Maximum recovery passes.
-|`yca.compaction.gate.maxDurationMs` |`300000` |Total wall-clock budget in milliseconds.
-|===
+include::content/_partials/generated/configuration-compaction-gate.adoc[]
 
 Both settings can be overridden under `yca.provider.providers[i].compaction.gate`; null or absent inherits globally.
 The gate escalates with a pinned `Compaction gate:` error when a pass reclaims nothing, two consecutive passes each reclaim less than `5%`, or either budget is exhausted.
@@ -314,15 +309,7 @@ On larger windows, the floor caps at `64000` tokens.
 
 All legacy nudge options use the `yca.pruning.*` prefix:
 
-[cols="1,2,1",options="header"]
-|===
-|Key |Purpose |Default
-|`nudgeThresholdPercent` |Usable-window percentage that permits a nudge; `0` disables. |`55`
-|`nudgeIterationThreshold` |Minimum iterations since the latest user message. |`15`
-|`nudgeMinTokens` |Absolute floor, capped at `90%` of usable space; `0` disables the floor. |`64000`
-|`nudgeTemplate` |Soft wording with usage, pruning, compaction and action placeholders. |Built-in soft wording
-|`nudgeUrgentTemplate` |Wording used at the pruning threshold. |Built-in urgent wording
-|===
+include::content/_partials/generated/configuration-pruning-nudges.adoc[]
 
 [[the-manage_context-tool]]
 [[_the_manage_context_tool]]
