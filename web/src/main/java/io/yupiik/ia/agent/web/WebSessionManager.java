@@ -531,7 +531,12 @@ public class WebSessionManager implements AutoCloseable {
                 // session recorded any usage, so a genuinely fresh session shows nothing spurious.
                 final var usage = webSession.runtime.usage();
                 final var quota = webSession.runtime.quotaSnapshot();
-                if (usage.completionTokens() > 0 || usage.promptTokens() > 0 || quota.visible()) {
+                if (usage.completionTokens() > 0
+                        || usage.reasoningTokens() > 0
+                        || usage.promptTokens() > 0
+                        || usage.contextInputTokens() > 0
+                        || usage.cacheReadTokens() > 0
+                        || quota.visible()) {
                     final var effective = usage.effectiveContext(messages, 0);
                     final var usagePayload = WebEventDto.of(new AgentEvent.UsageUpdated(
                             new Usage(
@@ -553,6 +558,8 @@ public class WebSessionManager implements AutoCloseable {
                             quota,
                             usage.lastContextMeasurement()));
                     final var data = new LinkedHashMap<String, Object>(usagePayload.data());
+                    // Keep the explicit cumulative full-input total, without narrowing it to Usage's int.
+                    data.put("contextInputTokens", usage.contextInputTokens());
                     replay.add(new WebEventDto("usage-updated", sessionId, null, null, null, data));
                 }
             }

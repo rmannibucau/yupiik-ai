@@ -88,6 +88,7 @@ public class ConversationTranscript {
     private volatile boolean busy;
     private volatile String status = "";
     private volatile int promptTokens;
+    private volatile int contextInputTokens;
     private volatile int completionTokens;
     private volatile long cacheReadTokens;
     private volatile int estimatedContext;
@@ -560,6 +561,7 @@ public class ConversationTranscript {
                         AgentEvent.UsageUpdated.Quota quota,
                         ContextMeasurement.Snapshot measurement)) {
             promptTokens = usage == null ? 0 : usage.promptTokens();
+            contextInputTokens = usage == null ? 0 : usage.contextInputTokens();
             completionTokens = usage == null ? 0 : usage.completionTokens();
             cacheReadTokens = usage == null ? 0 : usage.cacheReadTokens();
             estimatedContext = estimatedContextTokens;
@@ -1287,6 +1289,7 @@ public class ConversationTranscript {
         status = "";
         appliances.clear();
         promptTokens = 0;
+        contextInputTokens = 0;
         completionTokens = 0;
         cacheReadTokens = 0;
         estimatedContext = 0;
@@ -1484,11 +1487,16 @@ public class ConversationTranscript {
         return promptTokens;
     }
 
+    /** Cumulative full input, including cache reads and writes without double counting. */
+    public int contextInputTokens() {
+        return contextInputTokens;
+    }
+
     public int completionTokens() {
         return completionTokens;
     }
 
-    /** Provider-served prompt tokens that were read from the cache (subset of {@link #promptTokens()}). */
+    /** Provider-served input tokens read from cache (subset of {@link #contextInputTokens()}). */
     public long cacheReadTokens() {
         return cacheReadTokens;
     }

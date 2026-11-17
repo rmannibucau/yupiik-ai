@@ -27,6 +27,45 @@ import org.junit.jupiter.api.Test;
 
 class SubagentUsageTrackerTest {
     @Test
+    void fullInputFromNormalAndAuxiliaryCallsSurvivesMergeAndReset() {
+        final var parent = new UsageTracker(null, null, null, Clock.systemUTC());
+        final var subagent = new SubagentUsageTracker(parent, "sub-input");
+        subagent.record(new Usage(10, 5, 15, 60, 30, 2, 0, 100));
+        subagent.recordAuxiliary(new Usage(100, 8, 108, 60, 0, 3, 0, 100));
+        subagent.record(null);
+        subagent.recordAuxiliary(null);
+        assertEquals(200, subagent.contextInputTokens());
+        assertEquals(110, subagent.promptTokens());
+        assertEquals(2, subagent.requests());
+        assertEquals(0, subagent.auxiliaryContextInputTokens());
+        assertEquals(0, subagent.auxiliaryFreshTokens());
+        assertEquals(0, parent.contextInputTokens());
+
+        subagent.mergeToParent();
+        assertEquals(200, parent.contextInputTokens());
+        assertEquals(200, parent.auxiliaryContextInputTokens());
+        assertEquals(110, parent.promptTokens());
+        assertEquals(110, parent.auxiliaryPromptTokens());
+        assertEquals(120, parent.auxiliaryCacheReadTokens());
+        assertEquals(80, parent.auxiliaryFreshTokens());
+        assertEquals(13, parent.completionTokens());
+        assertEquals(5, parent.reasoningTokens());
+
+        subagent.reset();
+        assertEquals(0, subagent.contextInputTokens());
+        assertEquals(0, subagent.promptTokens());
+        assertEquals(0, subagent.requests());
+        assertEquals(0, subagent.auxiliaryContextInputTokens());
+        subagent.record(new Usage(0, 0, 0, 50, 0, 0, 0, 50));
+        subagent.mergeToParent();
+        assertEquals(50, subagent.contextInputTokens());
+        assertEquals(250, parent.contextInputTokens());
+        assertEquals(250, parent.auxiliaryContextInputTokens());
+        assertEquals(110, parent.promptTokens());
+        assertEquals(80, parent.auxiliaryFreshTokens());
+    }
+
+    @Test
     void toksAreKeptOffTheParentUntilMerged() {
         final var parent = new UsageTracker(null, null, null, Clock.systemUTC());
         final var subagent = new SubagentUsageTracker(parent, "sub-1");

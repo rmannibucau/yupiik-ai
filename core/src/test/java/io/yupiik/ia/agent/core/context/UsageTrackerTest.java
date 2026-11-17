@@ -179,6 +179,52 @@ class UsageTrackerTest {
     }
 
     @Test
+    void fullInputAccumulatesWithoutChangingRawPromptBilling() {
+        final var tracker = new UsageTracker(providerManager, null, null, Clock.systemUTC());
+        assertEquals(0, tracker.contextInputTokens());
+        // Exclusive cache accounting: raw prompt excludes cache reads and writes.
+        tracker.record(new Usage(10, 5, 15, 60, 30, 0, 0, 100));
+        assertEquals(100, tracker.contextInputTokens());
+        assertEquals(10, tracker.promptTokens());
+        // Inclusive cache accounting: raw prompt already contains cached input.
+        tracker.record(new Usage(100, 5, 105, 60, 0, 0, 0, 100));
+        tracker.record(null);
+        assertEquals(200, tracker.contextInputTokens());
+        assertEquals(110, tracker.promptTokens());
+        assertEquals(10, tracker.completionTokens());
+        assertEquals(120, tracker.cacheReadTokens());
+        assertEquals(2, tracker.requests());
+        assertEquals(0, tracker.auxiliaryContextInputTokens());
+    }
+
+    @Test
+    void auxiliaryFullInputIncludesCacheWritesAndReadsWithoutChangingBilling() {
+        final var tracker = new UsageTracker(providerManager, null, null, Clock.systemUTC());
+        tracker.record(new Usage(100, 20, 120));
+        tracker.recordAuxiliary(new Usage(10, 8, 18, 60, 30, 0, 0, 100));
+        assertEquals(200, tracker.contextInputTokens());
+        assertEquals(100, tracker.auxiliaryContextInputTokens());
+        assertEquals(10, tracker.auxiliaryPromptTokens());
+        assertEquals(40, tracker.auxiliaryFreshTokens(), "cache writes are fresh input too");
+        tracker.recordAuxiliary(new Usage(100, 8, 108, 60, 0, 0, 0, 100));
+        tracker.recordAuxiliary(null);
+        assertEquals(300, tracker.contextInputTokens());
+        assertEquals(200, tracker.auxiliaryContextInputTokens());
+        assertEquals(210, tracker.promptTokens());
+        assertEquals(110, tracker.auxiliaryPromptTokens());
+        assertEquals(80, tracker.auxiliaryFreshTokens());
+        assertEquals(2, tracker.auxiliaryRequests());
+        assertEquals(3, tracker.requests());
+    }
+
+    @Test
+    void auxiliaryFreshInputCannotBeNegative() {
+        final var tracker = new UsageTracker(providerManager, null, null, Clock.systemUTC());
+        tracker.recordAuxiliary(new Usage(0, 0, 0, 100, 0, 0, 0, 90));
+        assertEquals(0, tracker.auxiliaryFreshTokens());
+    }
+
+    @Test
     void auxiliarySpendIsCountedGloballyAndSeparately() {
         final var tracker = new UsageTracker(providerManager, null, null, Clock.systemUTC());
         tracker.record(new Usage(100, 20, 120));

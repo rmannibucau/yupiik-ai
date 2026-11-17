@@ -36,6 +36,26 @@ import org.junit.jupiter.api.Test;
 
 class ConversationTranscriptTest {
 
+    @Test
+    void fullInputIsIndependentOfRawPromptAndResetsWithUsage() {
+        final var transcript = new ConversationTranscript();
+        transcript.onEvent(new AgentEvent.UsageUpdated(new Usage(5, 2, 7, 100, 20, 0, 0, 125), 68, 14, "s1"));
+        assertEquals(5, transcript.promptTokens());
+        assertEquals(125, transcript.contextInputTokens());
+        assertEquals(100, transcript.cacheReadTokens());
+        assertEquals(68, transcript.estimatedContext());
+
+        transcript.reset();
+        assertEquals(0, transcript.promptTokens());
+        assertEquals(0, transcript.contextInputTokens());
+        assertEquals(0, transcript.cacheReadTokens());
+
+        transcript.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 2, 2, 100, 0, 0, 0, 100), 68, 14, "s1"));
+        assertEquals(100, transcript.contextInputTokens());
+        transcript.onEvent(new AgentEvent.UsageUpdated(null, 68, 14, "s1"));
+        assertEquals(0, transcript.contextInputTokens());
+    }
+
     private static CompressConfiguration config() {
         return new CompressConfiguration(
                 true,

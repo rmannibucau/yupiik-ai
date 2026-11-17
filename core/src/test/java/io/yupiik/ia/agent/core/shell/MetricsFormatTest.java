@@ -135,6 +135,16 @@ class MetricsFormatTest {
     }
 
     @Test
+    void cacheShareUsesFullInputForCacheExclusiveProviders() {
+        final var transcript = transcriptWithReasoningTurn();
+        transcript.onEvent(new AgentEvent.UsageUpdated(new Usage(5, 2, 7, 100, 20, 0, 0, 125), 68, 14, "s1"));
+        final var metrics = new MetricsConfiguration(true, true, MetricsDisplayMode.FULL);
+        assertTrue(MetricsFormat.report(metrics, transcript, null).contains("cached 100 (80%)"));
+        transcript.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 2, 2, 100, 0, 0, 0, 100), 68, 14, "s1"));
+        assertTrue(MetricsFormat.report(metrics, transcript, null).contains("cached 100 (100%)"));
+    }
+
+    @Test
     void tokensHelperFormatsCompactHumanCounts() {
         assertEquals("0", MetricsFormat.tokens(0));
         assertEquals("999", MetricsFormat.tokens(999));

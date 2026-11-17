@@ -28,8 +28,10 @@ export type SessionStatus = {
     windows: Array<{ kind: string; label: string; usedPercent: number | null; windowSeconds: number | null; resetAtEpochSeconds: number | null }>;
   };
   promptTokens?: number;
+  // Full model input, including cached input; promptTokens keeps the raw reported value.
+  contextInputTokens?: number;
   completionTokens?: number;
-  // provider-served prompt tokens read from the cache (subset of promptTokens when the provider
+  // provider-served prompt tokens read from the cache (subset of contextInputTokens when the provider
   // publishes cache metrics; absent for providers that do not).
   cacheReadTokens?: number;
   // turn metrics (last completed turn)
@@ -491,6 +493,8 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
       s.contextPercent = num(d.contextPercent, s.contextPercent);
       s.estimatedContext = num(d.estimatedContextTokens, s.estimatedContext);
       s.promptTokens = num(d.promptTokens, s.promptTokens);
+      // Fall back only to this frame's raw prompt, never to a previous frame's full input.
+      s.contextInputTokens = num(d.contextInputTokens, num(d.promptTokens, undefined));
       s.completionTokens = num(d.completionTokens, s.completionTokens);
       s.cacheReadTokens = num(d.cacheReadTokens, s.cacheReadTokens);
       completionTotal = num(d.completionTokens, completionTotal) ?? completionTotal;

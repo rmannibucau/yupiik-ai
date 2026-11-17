@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.context.ContextMeasurement.Snapshot;
 import io.yupiik.ia.agent.core.llm.Usage;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -95,8 +96,7 @@ class WebEventDtoTest {
                 null,
                 null,
                 AgentEvent.UsageUpdated.Quota.NONE,
-                new io.yupiik.ia.agent.core.context.ContextMeasurement.Snapshot(
-                        50, 52, "provider-anchored", 40, 10, 1.0)));
+                new Snapshot(50, 52, "provider-anchored", 40, 10, 1.0)));
         assertEquals("usage-updated", dto.type());
         assertEquals("model-x", dto.message());
         assertEquals(120, dto.data().get("completionTokens"));
@@ -119,6 +119,37 @@ class WebEventDtoTest {
         assertEquals("dedup,prune|CLEARED", dto.message());
         assertNull(dto.data().get("tokensBefore"), "no tokens carried -> no before key");
         assertNull(dto.data().get("tokensAfter"), "no tokens carried -> no after key");
+    }
+
+    @Test
+    void usageFramesPreserveRawPromptAndExplicitFullInput() {
+        for (final var usage : List.of(
+                new Usage(100, 25, 125, 400, 0, 0, 0, 500),
+                new Usage(0, 0, 0, 500, 0, 0, 0, 500),
+                new Usage(0, 25, 25, 0, 0, 0, 0, 0),
+                new Usage(100, 25, 125))) {
+            final var updated = WebEventDto.of(new AgentEvent.UsageUpdated(usage, 0, 0, "s1"));
+            final var completed = WebEventDto.of(new AgentEvent.LlmRequestCompleted(usage, null, 1, "s1"));
+            for (final var dto : List.of(updated, completed)) {
+                assertEquals(usage.promptTokens(), dto.data().get("promptTokens"));
+                assertEquals(usage.contextInputTokens(), dto.data().get("contextInputTokens"));
+                assertEquals(usage.cacheReadTokens(), dto.data().get("cacheReadTokens"));
+            }
+        }
+    }
+
+    @Test
+    void absentUsageHasZeroFullInput() {
+        assertEquals(
+                0,
+                WebEventDto.of(new AgentEvent.UsageUpdated(null, 0, 0, "s1"))
+                        .data()
+                        .get("contextInputTokens"));
+        assertEquals(
+                0,
+                WebEventDto.of(new AgentEvent.LlmRequestCompleted(null, null, 1, "s1"))
+                        .data()
+                        .get("contextInputTokens"));
     }
 
     @Test

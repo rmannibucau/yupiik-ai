@@ -276,6 +276,36 @@ describe('foldStatus - live per-turn out/reasoning tokens', () => {
     expect(s.cacheReadTokens).toBeUndefined();
   });
 
+  it('preserves raw prompt tokens while folding explicit full input, including fully cached input', () => {
+    const s = foldStatus([usageEv({ promptTokens: 0, contextInputTokens: 5000, cacheReadTokens: 5000 })]);
+    expect(s.promptTokens).toBe(0);
+    expect(s.contextInputTokens).toBe(5000);
+    expect(s.cacheReadTokens).toBe(5000);
+  });
+
+  it.each([undefined, null, 'invalid'])('falls back to the current frame prompt for full input %s', (contextInputTokens) => {
+    const s = foldStatus([
+      usageEv({ promptTokens: 100, contextInputTokens: 5000 }),
+      usageEv({ promptTokens: 200, contextInputTokens }),
+    ]);
+    expect(s.promptTokens).toBe(200);
+    expect(s.contextInputTokens).toBe(200);
+  });
+
+  it('keeps explicit zero full input instead of falling back to the raw prompt', () => {
+    const s = foldStatus([usageEv({ promptTokens: 100, contextInputTokens: 0 })]);
+    expect(s.promptTokens).toBe(100);
+    expect(s.contextInputTokens).toBe(0);
+  });
+
+  it('does not reuse stale input when a usage frame carries no input metrics', () => {
+    const s = foldStatus([
+      usageEv({ promptTokens: 100, contextInputTokens: 5000 }),
+      usageEv({ completionTokens: 20 }),
+    ]);
+    expect(s.contextInputTokens).toBeUndefined();
+  });
+
   it('folds the account quota carried by a usage event', () => {
     const s = foldStatus([
       usageEv({

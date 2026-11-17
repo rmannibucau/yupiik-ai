@@ -182,7 +182,7 @@ public class SessionUsageReporter {
     }
 
     private Usage currentUsage() {
-        if (usageTracker == null || usageTracker.promptTokens() <= 0) {
+        if (usageTracker == null) {
             return Usage.EMPTY;
         }
         return new Usage(
@@ -192,7 +192,8 @@ public class SessionUsageReporter {
                 usageTracker.cacheReadTokens(),
                 0,
                 (int) usageTracker.reasoningTokens(),
-                0);
+                0,
+                (int) usageTracker.contextInputTokens());
     }
 
     /** Reads the per-session cached account quota without causing a refresh. */

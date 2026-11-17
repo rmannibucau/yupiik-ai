@@ -11,6 +11,22 @@ const status = {
 };
 
 describe('web slash command rendering', () => {
+  it.each([
+    { promptTokens: 100, contextInputTokens: 500, cacheReadTokens: 400, input: 500, percent: 80 },
+    { promptTokens: 0, contextInputTokens: 500, cacheReadTokens: 500, input: 500, percent: 100 },
+    { promptTokens: 500, cacheReadTokens: 400, input: 500, percent: 80 },
+  ])('renders full input and cache percentage for %j', ({ input, percent, ...tokens }) => {
+    const html = renderToStaticMarkup(<TurnMetrics status={tokens} />);
+    expect(html).toContain(`in ${input} (cached ${tokens.cacheReadTokens} (${percent}%))`);
+  });
+
+  it('does not divide by zero for output-only usage', () => {
+    const html = renderToStaticMarkup(<TurnMetrics status={{ promptTokens: 0, contextInputTokens: 0, completionTokens: 25, liveOutTokens: 25 }} />);
+    expect(html).toContain('in 0');
+    expect(html).toContain('25 out');
+    expect(html).not.toMatch(/NaN|Infinity|cached/);
+  });
+
   it('honors metrics hide, turn, session, and density settings', () => {
     const render = (perTurn: boolean, session: boolean, full = false) =>
       renderToStaticMarkup(<TurnMetrics status={status} settings={{ perTurn, session, full }} />);

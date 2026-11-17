@@ -28,6 +28,7 @@ import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -42,11 +43,13 @@ public class UsageTracker {
     private final ChatClient chatClient;
     private final ContextWindowCache contextWindowCache;
     private final AtomicLong promptTokens = new AtomicLong();
+    private final AtomicLong contextInputTokens = new AtomicLong();
     private final AtomicLong completionTokens = new AtomicLong();
     private final AtomicLong reasoningTokens = new AtomicLong();
     private final AtomicLong cacheReadTokens = new AtomicLong();
     private final AtomicLong requests = new AtomicLong();
     private final AtomicLong auxiliaryPromptTokens = new AtomicLong();
+    private final AtomicLong auxiliaryContextInputTokens = new AtomicLong();
     private final AtomicLong auxiliaryCompletionTokens = new AtomicLong();
     private final AtomicLong auxiliaryCacheReadTokens = new AtomicLong();
     private final AtomicLong auxiliaryRequests = new AtomicLong();
@@ -126,7 +129,7 @@ public class UsageTracker {
 
     /** Attach the owning session's model/provider selection so this tracker resolves the right window. */
     public void attach(final ChatSettings sessionSettings) {
-        if (!java.util.Objects.equals(settings, sessionSettings)) {
+        if (!Objects.equals(settings, sessionSettings)) {
             clearAnchor();
         }
         this.settings = sessionSettings;
@@ -155,6 +158,7 @@ public class UsageTracker {
             return;
         }
         promptTokens.addAndGet(usage.promptTokens());
+        contextInputTokens.addAndGet(usage.contextInputTokens());
         completionTokens.addAndGet(usage.completionTokens());
         reasoningTokens.addAndGet(usage.reasoningTokens());
         cacheReadTokens.addAndGet(usage.cacheReadTokens());
@@ -172,11 +176,13 @@ public class UsageTracker {
             return;
         }
         promptTokens.addAndGet(usage.promptTokens());
+        contextInputTokens.addAndGet(usage.contextInputTokens());
         completionTokens.addAndGet(usage.completionTokens());
         reasoningTokens.addAndGet(usage.reasoningTokens());
         cacheReadTokens.addAndGet(usage.cacheReadTokens());
         requests.incrementAndGet();
         auxiliaryPromptTokens.addAndGet(usage.promptTokens());
+        auxiliaryContextInputTokens.addAndGet(usage.contextInputTokens());
         auxiliaryCompletionTokens.addAndGet(usage.completionTokens());
         auxiliaryCacheReadTokens.addAndGet(usage.cacheReadTokens());
         auxiliaryRequests.incrementAndGet();
@@ -503,6 +509,10 @@ public class UsageTracker {
     public long promptTokens() {
         return promptTokens.get();
     }
+    /** Cumulative full input, including cached input, across normal and auxiliary calls. */
+    public long contextInputTokens() {
+        return contextInputTokens.get();
+    }
 
     public long completionTokens() {
         return completionTokens.get();
@@ -523,6 +533,10 @@ public class UsageTracker {
     public long auxiliaryPromptTokens() {
         return auxiliaryPromptTokens.get();
     }
+    /** Cumulative full input, including cached input, for auxiliary calls only. */
+    public long auxiliaryContextInputTokens() {
+        return auxiliaryContextInputTokens.get();
+    }
 
     public long auxiliaryCompletionTokens() {
         return auxiliaryCompletionTokens.get();
@@ -537,7 +551,7 @@ public class UsageTracker {
     }
 
     public long auxiliaryFreshTokens() {
-        return Math.max(0, auxiliaryPromptTokens.get() - auxiliaryCacheReadTokens.get());
+        return Math.max(0, auxiliaryContextInputTokens() - auxiliaryCacheReadTokens());
     }
 
     /**

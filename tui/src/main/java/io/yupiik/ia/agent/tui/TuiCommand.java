@@ -4342,14 +4342,14 @@ public class TuiCommand implements Runnable {
         }
         text.add(Line.empty());
         text.add(Line.from(
-                Span.styled("tokens in  ", label), Span.styled(formatTokens(state.model.promptTokens()), value)));
+                Span.styled("tokens in  ", label), Span.styled(formatTokens(state.model.contextInputTokens()), value)));
         final var cached = state.model.cacheReadTokens();
-        final var promptTokens = state.model.promptTokens();
-        if (cached > 0 && promptTokens > 0) {
+        final var fullInputTokens = state.model.contextInputTokens();
+        if (cached > 0 && fullInputTokens > 0) {
             text.add(Line.from(
                     Span.styled("cached     ", label),
                     Span.styled(
-                            formatTokens(cached) + " (" + Math.round(cached * 100.0 / promptTokens) + "%)", value)));
+                            formatTokens(cached) + " (" + Math.round(cached * 100.0 / fullInputTokens) + "%)", value)));
         }
         text.add(Line.from(
                 Span.styled("tokens out ", label), Span.styled(formatTokens(state.model.completionTokens()), value)));
@@ -6708,13 +6708,13 @@ public class TuiCommand implements Runnable {
         if (narrow) {
             parts.add(Span.styled("  ctx " + state.model.contextPercent() + "%", muted));
             final var cached = state.model.cacheReadTokens();
-            final var promptTokens = state.model.promptTokens();
-            final var cachedSuffix = cached > 0 && promptTokens > 0
-                    ? " cached " + formatTokens(cached) + " (" + Math.round(cached * 100.0 / promptTokens) + "%)"
+            final var fullInputTokens = state.model.contextInputTokens();
+            final var cachedSuffix = cached > 0 && fullInputTokens > 0
+                    ? " cached " + formatTokens(cached) + " (" + Math.round(cached * 100.0 / fullInputTokens) + "%)"
                     : "";
             parts.add(Span.styled(
-                    "  in " + formatTokens(state.model.promptTokens()) + " out "
-                            + formatTokens(state.model.completionTokens()) + cachedSuffix,
+                    "  in " + formatTokens(fullInputTokens) + " out " + formatTokens(state.model.completionTokens())
+                            + cachedSuffix,
                     muted));
         }
         if (conf.bindings() == KeyBindingPreset.VIM) {

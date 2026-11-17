@@ -186,6 +186,8 @@ class AnthropicDialectTest {
         assertEquals("x-api-key:sk-test|anthropic-version:2023-06-01", reqHeaders.get());
         assertEquals("hello", response.text());
         assertEquals(6, response.usage().totalTokens());
+        assertEquals(5L, response.usage().prompt());
+        assertEquals(10L, response.usage().contextInput());
         assertEquals(3L, response.usage().cacheRead());
         assertEquals(2L, response.usage().cacheWrite());
         assertNull(response.usage().generationTimeMs(), "a standard Anthropic payload carries no timing");

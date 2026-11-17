@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 import dev.tamboui.buffer.Buffer;
 import dev.tamboui.layout.Rect;
 import dev.tamboui.style.Color;
+import dev.tamboui.terminal.Frame;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Text;
 import dev.tamboui.tui.TuiConfig;
@@ -2082,6 +2083,74 @@ class TuiCommandRenderTest {
                 null,
                 AgentEvent.UsageUpdated.Quota.NONE));
         awaitText("last real  68k tok");
+
+        quit();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"5,100000,80", "0,125000,100"})
+    void wideSidebarShowsFullInputAndCachePercentage(
+            final int rawInput, final long cachedInput, final int cachedPercent) throws Exception {
+        backend = new HeadlessBackend(120, 40);
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-sidebar-full-input-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(new AgentEvent.UsageUpdated(
+                new Usage(rawInput, 10, rawInput + 10, cachedInput, 0, 0, 0, 125000), 125000, 50, sid(shellRegistry)));
+        awaitText("tokens in  125k");
+        awaitText("cached     " + (cachedInput == 100000 ? "100k" : "125k") + " (" + cachedPercent + "%)");
+        awaitText("tokens out 10");
+
+        quit();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"5,100000,80", "0,125000,100"})
+    void narrowStatusStripShowsFullInputAndCachePercentage(
+            final int rawInput, final long cachedInput, final int cachedPercent) throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-status-full-input-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        state.sessionId = sid(shellRegistry);
+        state.session = shellRegistry.active(state.sessionId).session();
+        final var onEvent = TuiCommand.class.getDeclaredMethod("onEvent", AgentEvent.class, UiState.class);
+        onEvent.setAccessible(true);
+        onEvent.invoke(
+                command,
+                new AgentEvent.UsageUpdated(
+                        new Usage(rawInput, 10, rawInput + 10, cachedInput, 0, 0, 0, 125000),
+                        125000,
+                        50,
+                        state.sessionId),
+                state);
+
+        // Exercise the narrow strip on a roomy buffer so trailing cache metrics are not clipped.
+        final var area = new Rect(0, 0, 200, 1);
+        final var buffer = Buffer.empty(area);
+        final var render = TuiCommand.class.getDeclaredMethod(
+                "renderStatus", Rect.class, Frame.class, UiState.class, boolean.class);
+        render.setAccessible(true);
+        render.invoke(command, area, Frame.forTesting(buffer), state, true);
+        final var text = new StringBuilder();
+        for (var x = 0; x < area.width(); x++) {
+            text.append(buffer.get(x, 0).symbol());
+        }
+        assertTrue(
+                text.toString()
+                        .contains("in 125k out 10 cached " + (cachedInput == 100000 ? "100k" : "125k") + " ("
+                                + cachedPercent + "%)"),
+                text.toString());
 
         quit();
     }

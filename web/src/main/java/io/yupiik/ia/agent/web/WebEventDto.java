@@ -113,6 +113,7 @@ public record WebEventDto(
             case AgentEvent.UsageUpdated t -> {
                 final var data = new LinkedHashMap<String, Object>();
                 data.put("promptTokens", t.usage() == null ? 0 : t.usage().promptTokens());
+                data.put("contextInputTokens", t.usage() == null ? 0 : t.usage().contextInputTokens());
                 data.put("completionTokens", t.usage() == null ? 0 : t.usage().completionTokens());
                 data.put("reasoningTokens", t.usage() == null ? 0 : t.usage().reasoningTokens());
                 data.put("cacheReadTokens", t.usage() == null ? 0 : t.usage().cacheReadTokens());
@@ -156,6 +157,7 @@ public record WebEventDto(
                 data.put("index", t.index());
                 data.put("model", t.model() == null ? null : t.model());
                 data.put("promptTokens", t.usage() == null ? 0 : t.usage().promptTokens());
+                data.put("contextInputTokens", t.usage() == null ? 0 : t.usage().contextInputTokens());
                 data.put("completionTokens", t.usage() == null ? 0 : t.usage().completionTokens());
                 data.put("reasoningTokens", t.usage() == null ? 0 : t.usage().reasoningTokens());
                 data.put("cacheReadTokens", t.usage() == null ? 0 : t.usage().cacheReadTokens());

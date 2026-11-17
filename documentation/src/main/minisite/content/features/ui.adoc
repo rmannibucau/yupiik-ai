@@ -63,6 +63,13 @@ For `cli`, verbosity further selects compact, verbose or raw presentation.
 For `run`, the same visibility policy applies to both streamed and final tool output.
 Presentation truncation is separate from the xref:output.adoc[output optimization] performed before results enter the model context.
 
+== Token metrics
+
+`tokens in`, `tokens out` and `cached` are cumulative usage totals across recorded calls, including background work.
+`tokens in` includes cache reads and cache writes without counting them twice for providers whose input total already includes cached tokens.
+The cached percentage is the share of this full input served from cache, not the ratio of cached to uncached input.
+`context ~` estimates the active request context, while `last real` shows the full input of the last matching measured request; neither is a cumulative session total.
+
 == Account usage quota
 
 The TUI and web sidebars show *Usage* below the context gauge when the provider advertises `capabilities.codex.enableUsage`.

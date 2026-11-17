@@ -1206,6 +1206,7 @@ export function TurnMetrics({ status, settings = { perTurn: true, session: true,
   status: SessionStatus;
   settings?: { perTurn: boolean; session: boolean; full: boolean };
 }) {
+  const inputTokens = status.contextInputTokens ?? status.promptTokens;
   const parts: string[] = [];
   if (settings.perTurn) {
     if (status.turnLlmCalls != null && status.turnLlmCalls > 0) {
@@ -1221,7 +1222,7 @@ export function TurnMetrics({ status, settings = { perTurn: true, session: true,
       parts.push(`${status.turnLlmCalls} LLM${think}${tok} · ${tools}${toolDur}${dur}`);
     }
     if (
-      status.promptTokens != null ||
+      inputTokens != null ||
       status.completionTokens != null ||
       status.outputTokens != null ||
       status.reasoningTokens != null ||
@@ -1233,9 +1234,9 @@ export function TurnMetrics({ status, settings = { perTurn: true, session: true,
       const out = currentOutTokens(status);
       const reas = currentReasoningTokens(status);
       const outTxt = reas > 0 ? `${formatTokens(out)} out + ${formatTokens(reas)} reasoning` : `${formatTokens(out)} out`;
-      let inTxt = status.promptTokens != null ? `in ${formatTokens(status.promptTokens)}` : '';
-      if (status.cacheReadTokens != null && status.cacheReadTokens > 0 && status.promptTokens != null && status.promptTokens > 0) {
-        inTxt += ` (cached ${formatTokens(status.cacheReadTokens)} (${Math.round((status.cacheReadTokens * 100) / status.promptTokens)}%))`;
+      let inTxt = inputTokens != null ? `in ${formatTokens(inputTokens)}` : '';
+      if (status.cacheReadTokens != null && status.cacheReadTokens > 0 && inputTokens != null && inputTokens > 0) {
+        inTxt += ` (cached ${formatTokens(status.cacheReadTokens)} (${Math.round((status.cacheReadTokens * 100) / inputTokens)}%))`;
       }
       parts.push(`${inTxt && inTxt + ' · '}${outTxt}`.trim());
     }
@@ -1398,6 +1399,7 @@ function Sidebar({
   onSetPermissions: (mode: string) => void;
 }) {
   const [expandedServerId, setExpandedServerId] = useState<string>();
+  const inputTokens = status.contextInputTokens ?? status.promptTokens;
   const currentTodo = sidebar.todos.find(todo => todo.status === 'in_progress') ?? sidebar.todos.find(todo => todo.status === 'pending');
   const doneTodos = sidebar.todos.filter(todo => todo.status === 'completed').length;
   const collapsedTodoText = currentTodo ? currentTodo.content : todoSummary ?? (doneTodos > 0 ? 'All done' : 'No active tasks');
@@ -1424,14 +1426,14 @@ function Sidebar({
         <div className="space-y-0.5 text-sm" style={{ color: 'var(--yca-text)' }}>
           <div className="flex justify-between">
             <span style={{ color: 'var(--yca-muted)' }}>tokens in</span>
-            <span className="font-mono">{formatTokens(status.promptTokens)}</span>
+            <span className="font-mono">{formatTokens(inputTokens)}</span>
           </div>
-          {status.cacheReadTokens != null && status.cacheReadTokens > 0 && status.promptTokens != null && status.promptTokens > 0 && (
+          {status.cacheReadTokens != null && status.cacheReadTokens > 0 && inputTokens != null && inputTokens > 0 && (
             <div className="flex justify-between">
               <span style={{ color: 'var(--yca-muted)' }}>cached</span>
               <span className="font-mono">
                 {formatTokens(status.cacheReadTokens)} (
-                {Math.round((status.cacheReadTokens * 100) / status.promptTokens)}%)
+                {Math.round((status.cacheReadTokens * 100) / inputTokens)}%)
               </span>
             </div>
           )}

@@ -85,12 +85,12 @@ public final class CliUsagePrinter {
                     session.runtime().usage().usableWindow()));
             if (usage.usage() != null && usage.usage().cacheReadTokens() > 0) {
                 final var cached = MetricsFormat.cachedTokens(
-                        usage.usage().cacheReadTokens(), usage.usage().promptTokens());
+                        usage.usage().cacheReadTokens(), usage.usage().contextInputTokens());
                 if (!cached.isEmpty()) {
                     sb.append(" · ").append(cached);
                 }
             }
-            final var backgroundTokens = session.runtime().usage().auxiliaryPromptTokens()
+            final var backgroundTokens = session.runtime().usage().auxiliaryContextInputTokens()
                     + session.runtime().usage().auxiliaryCompletionTokens();
             if (backgroundTokens > 0) {
                 sb.append(String.format(Locale.ROOT, " · %,d background tokens (compaction/memory)", backgroundTokens));

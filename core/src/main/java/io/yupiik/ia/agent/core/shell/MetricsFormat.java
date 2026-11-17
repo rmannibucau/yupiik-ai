@@ -59,19 +59,19 @@ public final class MetricsFormat {
 
     /**
      * Formats the provider-cache read segment for a prompt/token pair: {@code cached N (P%)}
-     * where {@code P} is the share of {@code prompt} served from cache. Empty when there is
-     * nothing meaningful to show ({@code cacheRead <= 0} or {@code prompt <= 0}, so no divide
+     * where {@code P} is the share of full input served from cache. Empty when there is
+     * nothing meaningful to show ({@code cacheRead <= 0} or {@code fullInput <= 0}, so no divide
      * by zero and nothing to report for a provider that never publishes cache metrics).
      *
      * @param cacheRead the cache-read prompt tokens.
-     * @param prompt    the provider-billed prompt tokens.
+     * @param fullInput the full input tokens, including cache reads and writes.
      * @return e.g. {@code "cached 1.2k (30%)"} or {@code ""}.
      */
-    public static String cachedTokens(final long cacheRead, final long prompt) {
-        if (cacheRead <= 0 || prompt <= 0) {
+    public static String cachedTokens(final long cacheRead, final long fullInput) {
+        if (cacheRead <= 0 || fullInput <= 0) {
             return "";
         }
-        final var percent = (int) Math.round(cacheRead * 100.0 / prompt);
+        final var percent = (int) Math.round(cacheRead * 100.0 / fullInput);
         return "cached " + tokens(cacheRead) + " (" + percent + "%)";
     }
 
@@ -166,7 +166,7 @@ public final class MetricsFormat {
                 sb.append(" · reasoning ")
                         .append(String.format(Locale.ROOT, "%.1f tok/s", throughput.reasoningTokensPerSecond()));
             }
-            final var cachedSegment = cachedTokens(transcript.cacheReadTokens(), transcript.promptTokens());
+            final var cachedSegment = cachedTokens(transcript.cacheReadTokens(), transcript.contextInputTokens());
             if (!cachedSegment.isEmpty()) {
                 sb.append(" · ").append(cachedSegment);
             }

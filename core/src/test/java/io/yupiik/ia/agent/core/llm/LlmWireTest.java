@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.wiring.SessionAwareLogRecord;
 import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
+import io.yupiik.llm.client.model.Usage;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
@@ -44,6 +45,16 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 class LlmWireTest {
+    @Test
+    void usageConversionPreservesFullInputWithoutChangingRawCounters() {
+        final var usage = LlmWire.toUsage(new Usage(5L, 2L, 7L, 100L, 20L, null, null, 125L));
+        assertEquals(5, usage.promptTokens());
+        assertEquals(125, usage.contextInputTokens());
+        assertEquals(100, usage.cacheReadTokens());
+        assertEquals(20, usage.cacheWriteTokens());
+        assertEquals(7, usage.totalTokens());
+    }
+
     @Test
     void reasoningReplayIsOptInAndKeepsToolPairingAndVisibleContent() {
         final var assistant = new Message(

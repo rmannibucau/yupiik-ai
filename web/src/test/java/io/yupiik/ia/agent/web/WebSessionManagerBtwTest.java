@@ -27,6 +27,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.context.BackoffSleeper;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
@@ -289,6 +290,56 @@ class WebSessionManagerBtwTest {
         assertNotNull(btwEvent, "snapshot must carry the btw event");
         assertEquals("reseed me", btwEvent.message());
         assertEquals("persisted answer", btwEvent.data().get("answer"));
+    }
+
+    @Test
+    void snapshotPreservesCumulativeExplicitFullInputWithoutNarrowing() {
+        manager.attach("s1");
+        final var usage = manager.runtime("s1").usage();
+        usage.record(new Usage(100, 25, 125, 400, 0, 0, 0, 500));
+        usage.record(new Usage(100, 25, 125, 400, 0, 0, 0, 500));
+        var data = manager.snapshotFor("s1").stream()
+                .filter(e -> "usage-updated".equals(e.type()))
+                .findFirst()
+                .orElseThrow()
+                .data();
+        assertEquals(200, data.get("promptTokens"));
+        assertEquals(1000L, data.get("contextInputTokens"));
+        assertEquals(800L, data.get("cacheReadTokens"));
+
+        usage.record(new Usage(0, 0, 0, 0, 0, 0, 0, 1_500_000_000));
+        usage.record(new Usage(0, 0, 0, 0, 0, 0, 0, 1_500_000_000));
+        data = manager.snapshotFor("s1").stream()
+                .filter(e -> "usage-updated".equals(e.type()))
+                .findFirst()
+                .orElseThrow()
+                .data();
+        assertEquals(3_000_001_000L, data.get("contextInputTokens"));
+    }
+
+    @Test
+    void snapshotReseedsFullyCachedAndOutputOnlyUsageButNotFreshUsage() {
+        manager.attach("s1");
+        assertTrue(manager.snapshotFor("s1").stream().noneMatch(e -> "usage-updated".equals(e.type())));
+        manager.runtime("s1").usage().record(new Usage(0, 0, 0, 500, 0, 0, 0, 500));
+        final var cached = manager.snapshotFor("s1").stream()
+                .filter(e -> "usage-updated".equals(e.type()))
+                .findFirst()
+                .orElseThrow()
+                .data();
+        assertEquals(0, cached.get("promptTokens"));
+        assertEquals(500L, cached.get("contextInputTokens"));
+        assertEquals(500L, cached.get("cacheReadTokens"));
+
+        manager.attach("s2");
+        manager.runtime("s2").usage().record(new Usage(0, 25, 25));
+        final var output = manager.snapshotFor("s2").stream()
+                .filter(e -> "usage-updated".equals(e.type()))
+                .findFirst()
+                .orElseThrow()
+                .data();
+        assertEquals(0L, output.get("contextInputTokens"));
+        assertEquals(25, output.get("completionTokens"));
     }
 
     private static final class NoopShellRegistry extends ShellRegistry {

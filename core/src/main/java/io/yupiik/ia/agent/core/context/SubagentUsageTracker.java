@@ -29,6 +29,7 @@ public class SubagentUsageTracker extends UsageTracker {
     private final UsageTracker parent;
     private final String subagentId;
     private final AtomicLong promptTokens = new AtomicLong();
+    private final AtomicLong contextInputTokens = new AtomicLong();
     private final AtomicLong completionTokens = new AtomicLong();
     private final AtomicLong reasoningTokens = new AtomicLong();
     private final AtomicLong cacheReadTokens = new AtomicLong();
@@ -49,6 +50,7 @@ public class SubagentUsageTracker extends UsageTracker {
             return;
         }
         promptTokens.addAndGet(usage.promptTokens());
+        contextInputTokens.addAndGet(usage.contextInputTokens());
         completionTokens.addAndGet(usage.completionTokens());
         reasoningTokens.addAndGet(usage.reasoningTokens());
         cacheReadTokens.addAndGet(usage.cacheReadTokens());
@@ -61,6 +63,7 @@ public class SubagentUsageTracker extends UsageTracker {
             return;
         }
         promptTokens.addAndGet(usage.promptTokens());
+        contextInputTokens.addAndGet(usage.contextInputTokens());
         completionTokens.addAndGet(usage.completionTokens());
         reasoningTokens.addAndGet(usage.reasoningTokens());
         cacheReadTokens.addAndGet(usage.cacheReadTokens());
@@ -82,6 +85,11 @@ public class SubagentUsageTracker extends UsageTracker {
     @Override
     public long promptTokens() {
         return promptTokens.get();
+    }
+
+    @Override
+    public long contextInputTokens() {
+        return contextInputTokens.get();
     }
 
     @Override
@@ -107,6 +115,11 @@ public class SubagentUsageTracker extends UsageTracker {
     @Override
     public long auxiliaryPromptTokens() {
         return 0; // Subagent doesn't track auxiliary separately
+    }
+
+    @Override
+    public long auxiliaryContextInputTokens() {
+        return 0;
     }
 
     @Override
@@ -146,6 +159,7 @@ public class SubagentUsageTracker extends UsageTracker {
 
     public void reset() {
         promptTokens.set(0);
+        contextInputTokens.set(0);
         completionTokens.set(0);
         reasoningTokens.set(0);
         cacheReadTokens.set(0);
@@ -203,7 +217,8 @@ public class SubagentUsageTracker extends UsageTracker {
                     (int) cacheReadTokens.get(),
                     0,
                     (int) reasoningTokens.get(),
-                    0));
+                    0,
+                    (int) contextInputTokens.get()));
             if (optimizedOutputs.get() > 0) {
                 parent.mergeOptimizationCounters(
                         optimizedOutputs.get(), optimizedCharsBefore.get(), optimizedCharsAfter.get());

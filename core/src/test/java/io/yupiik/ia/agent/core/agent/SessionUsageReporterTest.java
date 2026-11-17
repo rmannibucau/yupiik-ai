@@ -22,13 +22,77 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.usage.CodexUsageSnapshot;
 import io.yupiik.ia.agent.core.usage.QuotaSnapshotStore;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 class SessionUsageReporterTest {
+    @Test
+    void usageEventsPreserveFullInputAndRawBillingForCachedAndOutputOnlyCalls() {
+        for (final var usage : List.of(
+                new Usage(10, 5, 15, 60, 30, 2, 0, 100),
+                new Usage(100, 5, 105, 60, 0, 2, 0, 100),
+                new Usage(0, 0, 0, 100, 0, 0, 0, 100),
+                new Usage(0, 5, 5, 0, 0, 2, 0, 0))) {
+            final var tracker = new UsageTracker(null, null, null, Clock.systemUTC());
+            tracker.record(usage);
+            final var events = new ArrayList<AgentEvent.UsageUpdated>();
+            final var reporter = new SessionUsageReporter(
+                    tracker,
+                    null,
+                    new Emitter() {
+                        @Override
+                        public <T> void emit(final T event) {
+                            if (event instanceof AgentEvent.UsageUpdated updated) {
+                                events.add(updated);
+                            }
+                        }
+                    },
+                    () -> null,
+                    "s-input",
+                    () -> ChatSettings.EMPTY,
+                    null,
+                    null);
+            reporter.emitUsage(List.of(), 0, "model-x");
+            reporter.pushUsageContext(123, "model-x");
+            reporter.pushUsageQuota("model-x");
+            assertEquals(3, events.size());
+            for (final var event : events) {
+                assertEquals(
+                        new Usage(
+                                usage.promptTokens(),
+                                usage.completionTokens(),
+                                usage.totalTokens(),
+                                usage.cacheReadTokens(),
+                                0,
+                                usage.reasoningTokens(),
+                                0,
+                                usage.contextInputTokens()),
+                        event.usage());
+                assertEquals("s-input", event.sessionId());
+            }
+
+            tracker.recordAuxiliary(usage);
+            reporter.pushUsageQuota("model-x");
+            final var aggregated = events.getLast().usage();
+            assertEquals(2 * usage.contextInputTokens(), aggregated.contextInputTokens());
+            assertEquals(2 * usage.promptTokens(), aggregated.promptTokens());
+            assertEquals(2 * usage.completionTokens(), aggregated.completionTokens());
+            assertEquals(2 * usage.totalTokens(), aggregated.totalTokens());
+            assertEquals(2 * usage.cacheReadTokens(), aggregated.cacheReadTokens());
+            reporter.close();
+        }
+    }
 
     @Test
     void completionPushesCachedQuotaWithoutRefreshingOrResettingContext() {
@@ -105,9 +169,9 @@ class SessionUsageReporterTest {
 
     @Test
     void attachSuppressesOnlyInlineCompletionAndRestoresScopeAfterFailure() throws Exception {
-        final var events = new java.util.concurrent.CopyOnWriteArrayList<AgentEvent.UsageUpdated>();
-        final var listener = new java.util.concurrent.atomic.AtomicReference<Runnable>();
-        final var fail = new java.util.concurrent.atomic.AtomicBoolean();
+        final var events = new CopyOnWriteArrayList<AgentEvent.UsageUpdated>();
+        final var listener = new AtomicReference<Runnable>();
+        final var fail = new AtomicBoolean();
         final var store = new CompletionStore() {
             @Override
             public void listen(final String id, final Runnable callback) {
@@ -121,8 +185,8 @@ class SessionUsageReporterTest {
                 if (fail.get()) {
                     throw new IllegalStateException("attach failed");
                 }
-                try (final var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
-                    executor.submit(listener.get()).get(5, java.util.concurrent.TimeUnit.SECONDS);
+                try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                    executor.submit(listener.get()).get(5, TimeUnit.SECONDS);
                 } catch (final Exception e) {
                     throw new IllegalStateException(e);
                 }
@@ -148,8 +212,7 @@ class SessionUsageReporterTest {
         assertEquals(1, events.size(), "background completion during attach must still publish");
         events.clear();
         fail.set(true);
-        org.junit.jupiter.api.Assertions.assertThrows(
-                IllegalStateException.class, () -> reporter.attachQuota(ChatSettings.EMPTY));
+        Assertions.assertThrows(IllegalStateException.class, () -> reporter.attachQuota(ChatSettings.EMPTY));
         assertTrue(events.isEmpty());
         listener.get().run();
         assertEquals(1, events.size(), "exceptional attach must restore the unbound scope");

@@ -15,8 +15,11 @@ const rpc = vi.hoisted(() => vi.fn(async (method: string, params: Record<string,
   return { mode: 'plan' };
 }));
 vi.mock('../api/rpc', () => ({ call: rpc, onServerRequest: () => () => {} }));
-vi.mock('../api/useSessionStream', async (importOriginal) => ({ ...await importOriginal<typeof import('../api/useSessionStream')>(), useSessionStream: () => ({ events: state.events, connected: true,
-  bootstrapped: state.bootstrapped, reconnecting: false, status: { busy: state.busy }, moreReplayExists: false, loadEarlier: () => {} }) }));
+vi.mock('../api/useSessionStream', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../api/useSessionStream')>();
+  return { ...original, useSessionStream: () => ({ events: state.events, connected: true,
+    bootstrapped: state.bootstrapped, reconnecting: false, status: { ...original.foldStatus(state.events), busy: state.busy }, moreReplayExists: false, loadEarlier: () => {} }) };
+});
 import { ChatPage } from './ChatPage';
 
 let host: HTMLDivElement;
@@ -49,6 +52,21 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
 describe('mounted external-store chat integration', () => {
+  it.each([
+    { promptTokens: 100, contextInputTokens: 500, cacheReadTokens: 400, percent: 80 },
+    { promptTokens: 0, contextInputTokens: 500, cacheReadTokens: 500, percent: 100 },
+    { promptTokens: 500, cacheReadTokens: 400, percent: 80 },
+  ])('renders full input consistently in the sidebar and status for %j', async ({ percent, ...data }) => {
+    state.events = [event('usage-updated', '', data)];
+    render(); await settle();
+    const inputLabel = [...host.querySelectorAll('span')].find(entry => entry.textContent === 'tokens in')!;
+    expect(inputLabel.parentElement?.textContent).toBe('tokens in500');
+    const cacheLabel = [...host.querySelectorAll('span')].find(entry => entry.textContent === 'cached')!;
+    expect(cacheLabel.parentElement?.textContent).toBe(`cached${data.cacheReadTokens} (${percent}%)`);
+    expect(host.textContent).toContain(`in 500 (cached ${data.cacheReadTokens} (${percent}%))`);
+    expect(state.events[0].data?.promptTokens).toBe(data.promptTokens);
+  });
+
   it('expands sidebar MCP connection details and applies enabled-state colors', async () => {
     render(); await settle();
     act(() => host.querySelector<HTMLButtonElement>('[title="Expand servers"]')!.click());
