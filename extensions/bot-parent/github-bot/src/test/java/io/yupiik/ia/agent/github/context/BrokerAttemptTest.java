@@ -21,7 +21,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
@@ -94,7 +94,9 @@ class BrokerAttemptTest {
                 new AttemptPreparation(
                                 fixture.json,
                                 new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                                new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                                new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                                        .get()
+                                        .shared())
                         .stageBroker(
                                 fixture.attempt,
                                 broker.endpoint(),
@@ -352,7 +354,9 @@ class BrokerAttemptTest {
             attempt = new AttemptPreparation(
                             json,
                             new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                            new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                            new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                                    .get()
+                                    .shared())
                     .prepare(Files.writeString(home.resolve("trusted.json"), "{}"), home.resolve("attempts"));
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/", exchange -> {

@@ -23,6 +23,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.core.llm.ProviderRequestBudget;
 import io.yupiik.ia.agent.github.support.TestJava;
 import java.io.File;
@@ -126,7 +127,9 @@ class RestrictedServicesGatewayTest {
     void rpcGitAndInferenceUseSeparateCredentialsAndFixedTargets() throws Exception {
         try (final var fixture = new Fixture();
                 final var gateway = new RestrictedServicesGateway(
-                        settings(fixture, 20, 5, 1024, 1024), Configuration.of(secrets()));
+                        settings(fixture, 20, 5, 1024, 1024),
+                        Configuration.of(secrets()),
+                        new ProviderBudgetConfiguration(null, null, null));
                 final var client = client()) {
             assertTrue(gateway.port() > 0);
             assertEquals(
@@ -167,7 +170,9 @@ class RestrictedServicesGatewayTest {
     void rejectsWrongRolesEscapesQueriesAndBrowserBeforeUpstream() throws Exception {
         try (final var fixture = new Fixture();
                 final var gateway = new RestrictedServicesGateway(
-                        settings(fixture, 20, 5, 1024, 1024), Configuration.of(secrets()));
+                        settings(fixture, 20, 5, 1024, 1024),
+                        Configuration.of(secrets()),
+                        new ProviderBudgetConfiguration(null, null, null));
                 final var client = client()) {
             assertEquals(
                     401,
@@ -223,7 +228,9 @@ class RestrictedServicesGatewayTest {
     void tlsHostSniFramingAndHeaderLimits() throws Exception {
         try (final var fixture = new Fixture();
                 final var gateway = new RestrictedServicesGateway(
-                        settings(fixture, 20, 5, 1024, 1024), Configuration.of(secrets()));
+                        settings(fixture, 20, 5, 1024, 1024),
+                        Configuration.of(secrets()),
+                        new ProviderBudgetConfiguration(null, null, null));
                 final var untrusted = HttpClient.newHttpClient()) {
             assertThrows(
                     IOException.class,
@@ -267,8 +274,10 @@ class RestrictedServicesGatewayTest {
         try (final var fixture = new Fixture()) {
             final var secrets = new HashMap<>(secrets());
             secrets.remove(YCA_SERVICES_UPSTREAM_TOKEN);
-            try (final var gateway =
-                            new RestrictedServicesGateway(settings(fixture, 20, 5, 4, 8), Configuration.of(secrets));
+            try (final var gateway = new RestrictedServicesGateway(
+                            settings(fixture, 20, 5, 4, 8),
+                            Configuration.of(secrets),
+                            new ProviderBudgetConfiguration(null, null, null));
                     final var client = client()) {
                 assertEquals(
                         413,
@@ -315,7 +324,9 @@ class RestrictedServicesGatewayTest {
         try (final var fixture = new Fixture()) {
             fixture.stall.set(true);
             try (final var gateway = new RestrictedServicesGateway(
-                            settings(fixture, 2, 5, 1024, 1024), Configuration.of(secrets()));
+                            settings(fixture, 2, 5, 1024, 1024),
+                            Configuration.of(secrets()),
+                            new ProviderBudgetConfiguration(null, null, null));
                     final var client = client();
                     // Release the stalled upstream before client.close(), including on assertion failure.
                     final AutoCloseable releaseUpstream = () -> fixture.release.countDown()) {
@@ -350,7 +361,9 @@ class RestrictedServicesGatewayTest {
         try (final var fixture = new Fixture()) {
             fixture.noHeaders.set(true);
             try (final var gateway = new RestrictedServicesGateway(
-                            settings(fixture, 20, 1, 1024, 1024), Configuration.of(secrets()));
+                            settings(fixture, 20, 1, 1024, 1024),
+                            Configuration.of(secrets()),
+                            new ProviderBudgetConfiguration(null, null, null));
                     final var client = client();
                     final AutoCloseable releaseUpstream = () -> fixture.release.countDown()) {
                 assertTimeoutPreemptively(Duration.ofSeconds(4), () -> {
@@ -373,7 +386,9 @@ class RestrictedServicesGatewayTest {
     void onlyFourConcurrentExchangesAndNeverFollowsRedirects() throws Exception {
         try (final var fixture = new Fixture();
                 final var gateway = new RestrictedServicesGateway(
-                        settings(fixture, 20, 5, 1024, 1024), Configuration.of(secrets()));
+                        settings(fixture, 20, 5, 1024, 1024),
+                        Configuration.of(secrets()),
+                        new ProviderBudgetConfiguration(null, null, null));
                 final var client = client()) {
             fixture.noHeaders.set(true);
             final var pending = new ArrayList<CompletableFuture<HttpResponse<String>>>();
@@ -401,7 +416,9 @@ class RestrictedServicesGatewayTest {
         }
         try (final var fixture = new Fixture();
                 final var gateway = new RestrictedServicesGateway(
-                        settings(fixture, 20, 5, 1024, 1024), Configuration.of(secrets()));
+                        settings(fixture, 20, 5, 1024, 1024),
+                        Configuration.of(secrets()),
+                        new ProviderBudgetConfiguration(null, null, null));
                 final var client = client()) {
             fixture.redirect.set(true);
             assertEquals(
@@ -449,7 +466,9 @@ class RestrictedServicesGatewayTest {
         }
         try (final var fixture = new Fixture();
                 final var gateway = new RestrictedServicesGateway(
-                        settings(fixture, 20, 5, 1024, 1024), Configuration.of(secrets()))) {
+                        settings(fixture, 20, 5, 1024, 1024),
+                        Configuration.of(secrets()),
+                        new ProviderBudgetConfiguration(null, null, null))) {
             final var base = settings(fixture, 20, 5, 1024, 1024);
             final var good = new Settings(
                     "localhost",
@@ -627,7 +646,8 @@ class RestrictedServicesGatewayTest {
             }
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> new RestrictedServicesGateway(good, Configuration.of(Map.of())));
+                    () -> new RestrictedServicesGateway(
+                            good, Configuration.of(Map.of()), new ProviderBudgetConfiguration(null, null, null)));
             final var wrong = new Settings(
                     "other.invalid",
                     0,
@@ -641,7 +661,10 @@ class RestrictedServicesGatewayTest {
                     1,
                     1,
                     1);
-            assertThrows(IOException.class, () -> new RestrictedServicesGateway(wrong, Configuration.of(secrets())));
+            assertThrows(
+                    IOException.class,
+                    () -> new RestrictedServicesGateway(
+                            wrong, Configuration.of(secrets()), new ProviderBudgetConfiguration(null, null, null)));
         }
     }
 

@@ -18,6 +18,8 @@ package io.yupiik.ia.agent.slack.store;
 import static io.yupiik.ia.agent.slack.support.SlackDomainFixture.task;
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.ia.agent.slack.model.SlackTask;
+import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,15 +28,57 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 class SlackStoreTest {
     @TempDir
     Path root;
 
+    @ParameterizedTest
+    @CsvSource({
+        "queued,false",
+        "preparing,false",
+        "running,false",
+        "waiting_for_user,false",
+        "cancel_requested,false",
+        "publishing,false",
+        "recovery_blocked,false",
+        "done,true",
+        "cancelled,true",
+        "failed,true"
+    })
+    void preservesLowercaseStatusAndTerminalClassification(final String wireValue, final boolean terminal)
+            throws Exception {
+        try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
+            final var status = TaskStatus.valueOf(wireValue);
+            final var expected = task("task", "U1", status, 1);
+            fixture.add(expected);
+            final var document =
+                    Files.readString(fixture.configuration.stateRoot().resolve("state.json"));
+            assertTrue(document.contains("\"status\":\"" + wireValue + "\""), document);
+            assertEquals(List.of(expected), new SlackStore(fixture.configuration, fixture.json).list());
+            assertEquals(terminal, expected.terminal());
+            assertEquals(terminal, status.terminal());
+        }
+    }
+
+    @Test
+    void rejectsUnknownAndMissingTaskStatuses() throws Exception {
+        try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
+            final var document = fixture.json.toString(task("task", "U1", TaskStatus.queued, 1));
+            assertThrows(
+                    RuntimeException.class,
+                    () -> fixture.json.fromString(SlackTask.class, document.replace("\"queued\"", "\"unknown\"")));
+            assertThrows(IllegalStateException.class, () -> fixture.add(task("task", "U1", null, 1)));
+            assertTrue(fixture.store.list().isEmpty());
+        }
+    }
+
     @Test
     void persistsGeneratedCodecStatePrivatelyAndLeavesNoTemporaryFiles() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
-            final var expected = task("task", "U1", "queued", 1);
+            final var expected = task("task", "U1", TaskStatus.queued, 1);
             fixture.add(expected);
             final var state = fixture.configuration.stateRoot();
             assertEquals(PosixFilePermissions.fromString("rwx------"), Files.getPosixFilePermissions(state));
@@ -60,7 +104,7 @@ class SlackStoreTest {
     @Test
     void callbackAndValidationFailuresLeavePriorStateByteForByteIntact() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
-            final var expected = task("task", "U1", "queued", 1);
+            final var expected = task("task", "U1", TaskStatus.queued, 1);
             fixture.add(expected);
             final var file = fixture.configuration.stateRoot().resolve("state.json");
             final var before = Files.readAllBytes(file);
@@ -133,7 +177,7 @@ class SlackStoreTest {
             assertTrue(fixture.store.list().isEmpty());
             final var state = fixture.configuration.stateRoot().resolve("state.json");
             assertFalse(Files.exists(state));
-            fixture.add(task("task", "U1", "queued", 1));
+            fixture.add(task("task", "U1", TaskStatus.queued, 1));
             final var before = Files.readAttributes(state, BasicFileAttributes.class);
             fixture.store.list();
             final var after = Files.readAttributes(state, BasicFileAttributes.class);
@@ -164,7 +208,7 @@ class SlackStoreTest {
             assertThrows(RuntimeException.class, () -> fixture.store.list());
             assertEquals("{\"version\":2,\"tasks\":[]}", Files.readString(state));
             assertThrows(IllegalArgumentException.class, () -> new SlackState(1, null));
-            final var duplicate = task("duplicate", "U1", "queued", 1);
+            final var duplicate = task("duplicate", "U1", TaskStatus.queued, 1);
             Files.writeString(state, fixture.json.toString(new SlackState(1, List.of(duplicate, duplicate))));
             assertThrows(IllegalStateException.class, () -> fixture.store.list());
         }

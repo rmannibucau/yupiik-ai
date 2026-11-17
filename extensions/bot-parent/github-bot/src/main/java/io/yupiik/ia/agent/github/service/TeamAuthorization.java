@@ -17,8 +17,8 @@ package io.yupiik.ia.agent.github.service;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
-import io.yupiik.ia.agent.github.store.TaskStore;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -26,7 +26,6 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -110,25 +109,26 @@ public class TeamAuthorization {
 
     private Decision lookup(final CacheKey key, final List<String> teams) {
         // Resolve the current login from immutable identity: renamed/reused logins cannot authorize another user.
-        final var user = TaskStore.map(github.get("/user/" + key.actorId()));
-        if (!key.actorId().equals(String.valueOf(user.get("id")))) {
+        final var user = github.get("/user/" + key.actorId(), RestResponses.User.class);
+        if (!key.actorId().equals(String.valueOf(user.id()))) {
             return new Decision(null, false);
         }
-        if (!(user.get("login") instanceof String login)
-                || !LOGIN.matcher(login).matches()) {
+        final var login = user.login();
+        if (login == null || !LOGIN.matcher(login).matches()) {
             return new Decision(null, false);
         }
-        final var permission =
-                TaskStore.map(github.get("/repos/" + key.repository() + "/collaborators/" + login + "/permission"));
-        final var permissionUser = permission.get("user");
-        if (!(permissionUser instanceof Map<?, ?> identity)
-                || !key.actorId().equals(String.valueOf(identity.get("id")))
-                || !login.equalsIgnoreCase(String.valueOf(identity.get("login")))) {
+        final var permission = github.get(
+                "/repos/" + key.repository() + "/collaborators/" + login + "/permission",
+                RestResponses.Permission.class);
+        final var identity = permission.user();
+        if (identity == null
+                || !key.actorId().equals(String.valueOf(identity.id()))
+                || !login.equalsIgnoreCase(identity.login())) {
             return new Decision(login, false);
         }
         // GitHub's permission field is the effective base permission (maintain -> write, triage -> read).
         // role_name is display/custom-role information and is not an authorization signal.
-        final var role = permission.get("permission");
+        final var role = permission.permission();
         if (!"write".equals(role) && !"admin".equals(role)) {
             return new Decision(login, false);
         }
@@ -137,10 +137,11 @@ public class TeamAuthorization {
         }
         for (final var team : teams) {
             final var parts = team.split("/");
-            final Map<String, Object> membership;
+            final RestResponses.Membership membership;
             try {
-                membership =
-                        TaskStore.map(github.get("/orgs/" + parts[0] + "/teams/" + parts[1] + "/memberships/" + login));
+                membership = github.get(
+                        "/orgs/" + parts[0] + "/teams/" + parts[1] + "/memberships/" + login,
+                        RestResponses.Membership.class);
             } catch (final GitHubClient.DeferredRequestException error) {
                 throw error;
             } catch (final GitHubClient.HttpException error) {
@@ -149,7 +150,7 @@ public class TeamAuthorization {
                 }
                 throw error;
             }
-            if ("active".equals(membership.get("state"))) {
+            if ("active".equals(membership.state())) {
                 return new Decision(login, true);
             }
         }

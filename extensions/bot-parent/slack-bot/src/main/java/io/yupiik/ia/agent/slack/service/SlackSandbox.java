@@ -23,15 +23,17 @@ import io.yupiik.ia.agent.bot.runtime.AttemptPreparation;
 import io.yupiik.ia.agent.bot.runtime.NativeProviderServices;
 import io.yupiik.ia.agent.bot.runtime.ProviderBudgetEnvironment;
 import io.yupiik.ia.agent.bot.runtime.ResultReader;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.bot.runtime.execution.DockerExecutionBackend;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesProviderServices;
+import io.yupiik.ia.agent.bot.runtime.execution.NonoExecutionBackend;
+import io.yupiik.ia.agent.bot.runtime.model.KubeconfigDocument;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.core.llm.ProviderRequestBudget;
 import io.yupiik.ia.agent.core.llm.UnixProviderProtocol;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.github.execution.DockerExecutionBackend;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend;
-import io.yupiik.ia.agent.github.execution.KubernetesProviderServices;
-import io.yupiik.ia.agent.github.execution.NonoExecutionBackend;
-import io.yupiik.ia.agent.github.model.KubeconfigDocument;
 import io.yupiik.ia.agent.slack.configuration.SlackProviderConfiguration;
+import io.yupiik.ia.agent.slack.context.SlackContextStorage;
 import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
@@ -43,9 +45,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.regex.Pattern;
 
 /** Adapter for shared sandbox backends; credentials and controller state are never supplied to the agent. */
 public final class SlackSandbox implements Sandbox {
+    private static final Pattern SANDBOX_ID = Pattern.compile("yca-slack-[0-9a-f]{32}-[1-9][0-9]*");
+
     private final DockerExecutionBackend docker;
     private final NonoExecutionBackend nono;
     private final KubernetesExecutionBackend kubernetes;
@@ -55,6 +60,7 @@ public final class SlackSandbox implements Sandbox {
     private final Path stateRoot;
     private final SlackProviderConfiguration provider;
     private final Configuration sources;
+    private final ProviderBudgetConfiguration budgetConfiguration;
     private final KubernetesProviderServices kubeServices;
     private final HttpClient nativeHttp;
     private final ConcurrentMap<String, NativeProviderServices> nativeServices = new ConcurrentHashMap<>();
@@ -65,12 +71,14 @@ public final class SlackSandbox implements Sandbox {
             final SlackProviderConfiguration provider,
             final Configuration sources,
             final JsonMapper json,
-            final Path stateRoot) {
+            final Path stateRoot,
+            final ProviderBudgetConfiguration budgetConfiguration) {
         this.settings = settings;
         this.json = json;
         this.stateRoot = stateRoot;
         this.provider = provider;
         this.sources = sources;
+        this.budgetConfiguration = budgetConfiguration;
         if (settings.backend() == ExecutorConfiguration.Backend.DOCKER
                 && (settings.docker() == null || settings.docker().services() == null)) {
             throw new IllegalArgumentException(
@@ -105,8 +113,8 @@ public final class SlackSandbox implements Sandbox {
             throw new IllegalArgumentException("Slack attempts and controller state must be disjoint");
         }
         try {
-            ProviderBudgetEnvironment.select(sources, attempts, stateRoot);
-            ProviderRequestBudget.fromConfiguration(sources);
+            ProviderBudgetEnvironment.select(budgetConfiguration, attempts, stateRoot);
+            ProviderRequestBudget.fromConfiguration(budgetConfiguration);
         } catch (final IOException invalid) {
             throw new IllegalArgumentException("Cannot initialize the trusted provider request budget", invalid);
         }
@@ -120,13 +128,15 @@ public final class SlackSandbox implements Sandbox {
         switch (settings.backend()) {
             case DOCKER -> {
                 docker = new DockerExecutionBackend(
+                        SlackExecutionPolicy.POLICY,
                         settings.docker().executable(),
                         settings.docker().image(),
                         timeout,
                         settings.docker().network(),
                         settings.docker().egress(),
                         settings.docker().services(),
-                        settings.showToolOutput());
+                        settings.showToolOutput(),
+                        settings.docker().disableContainerLogs());
                 docker.requireLocalDaemon();
                 nono = null;
                 kubernetes = null;
@@ -172,7 +182,7 @@ public final class SlackSandbox implements Sandbox {
                                 "Native provider sockets must be disjoint from agent grants and controller state");
                     }
                 }
-                ProviderBudgetEnvironment.select(sources, socketRoot, attempts, stateRoot);
+                ProviderBudgetEnvironment.select(budgetConfiguration, socketRoot, attempts, stateRoot);
                 nativeHttp = HttpClient.newBuilder()
                         .followRedirects(HttpClient.Redirect.NEVER)
                         .connectTimeout(Duration.ofSeconds(settings.commandTimeoutSeconds()))
@@ -232,7 +242,7 @@ public final class SlackSandbox implements Sandbox {
                         kube.serviceAccount(),
                         settings.showToolOutput());
                 final var service = provider.kubernetes();
-                final var budget = ProviderBudgetEnvironment.select(sources, attempts, stateRoot);
+                final var budget = ProviderBudgetEnvironment.select(budgetConfiguration, attempts, stateRoot);
                 if (budget.isEmpty() || service.budgetClaim().equals(kube.claim())) {
                     throw new IllegalArgumentException(
                             "Kubernetes requires a separate qualified local provider budget PVC and explicit request budget");
@@ -262,8 +272,15 @@ public final class SlackSandbox implements Sandbox {
         }
     }
 
-    public int execute(final Path path, final String id, final String prompt) {
+    public int execute(final Path path, final String id, final String prompt, final Path temporaryDirectory) {
         validateIdentity(id);
+        if (temporaryDirectory != null) {
+            try {
+                new SlackContextStorage().validate(settings);
+            } catch (final IOException invalid) {
+                throw new IllegalArgumentException("Slack context transient storage is unavailable");
+            }
+        }
         if (docker != null) {
             if (settings.docker().services() != null) {
                 try {
@@ -283,9 +300,17 @@ public final class SlackSandbox implements Sandbox {
                                     "/services/tls.p12",
                                     settings.docker().services().keyStorePasswordEnv()),
                             sources,
+                            budgetConfiguration,
                             settings.timeoutSeconds());
                     return docker.execute(
-                            path, id, prompt, Map.of(), Map.of(), services.settings(), services.secrets());
+                            path,
+                            id,
+                            prompt,
+                            Map.of(),
+                            Map.of(),
+                            services.settings(),
+                            services.secrets(),
+                            temporaryDirectory);
                 } catch (final IOException invalid) {
                     throw new IllegalStateException("Cannot prepare private Slack provider services");
                 }
@@ -310,12 +335,14 @@ public final class SlackSandbox implements Sandbox {
                                 "/unused",
                                 ""),
                         sources,
+                        budgetConfiguration,
                         settings.timeoutSeconds());
-                final var budget = ProviderRequestBudget.fromConfiguration(Configuration.of(services.secrets()));
+                final var budget = ProviderRequestBudget.fromConfiguration(budgetConfiguration);
                 final var bridge = new NativeProviderServices(
                         privateRoot.resolve("provider.sock"),
                         nativeHttp,
                         services.upstream(),
+                        services.api(),
                         "Bearer " + services.secrets().get("YCA_SERVICES_UPSTREAM_TOKEN"),
                         services.secrets().get("YCA_SERVICES_PROVIDER_TOKEN"),
                         Duration.ofSeconds(services.timeoutSeconds()),
@@ -361,6 +388,7 @@ public final class SlackSandbox implements Sandbox {
                             "/tls/gateway.p12",
                             "YCA_SERVICES_KEYSTORE_PASSWORD"),
                     sources,
+                    budgetConfiguration,
                     settings.timeoutSeconds());
             final var connection = kubeServices.start(
                     id,
@@ -423,14 +451,14 @@ public final class SlackSandbox implements Sandbox {
     }
 
     private void validateIdentity(final String id) {
-        if (id == null || !id.matches("yca-slack-[0-9a-f]{32}-[1-9][0-9]*")) {
+        if (id == null || !SANDBOX_ID.matcher(id).matches()) {
             throw new IllegalArgumentException("Invalid Slack runtime identity");
         }
     }
 
     @Override
     public String recoveryIdentity() {
-        final var budget = ProviderBudgetEnvironment.select(sources);
+        final var budget = ProviderBudgetEnvironment.select(budgetConfiguration);
         return String.valueOf(provider)
                 + ':'
                 + budget.getOrDefault(ProviderBudgetEnvironment.ROOT, "")

@@ -79,7 +79,7 @@ class UsageTrackerTest {
         this.mapper = mapper;
         configuration = configuration(-1);
         providerManager = new ProviderManager(configuration, mapper);
-        httpClient = new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null));
+        httpClient = new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null, null));
         client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC(), httpClient);
     }
 

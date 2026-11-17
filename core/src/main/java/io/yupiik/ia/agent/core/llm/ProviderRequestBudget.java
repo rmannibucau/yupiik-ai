@@ -19,7 +19,7 @@ import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 import static java.nio.file.StandardOpenOption.READ;
 import static java.nio.file.StandardOpenOption.WRITE;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -33,6 +33,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Pattern;
 
 /**
  * Non-queuing provider admission on a trusted, POSIX shared filesystem with coherent FileChannel
@@ -50,6 +51,9 @@ import java.util.concurrent.locks.ReentrantLock;
  * for filesystems without coherent advisory locks, nor protection against a malicious same-UID process.
  */
 public final class ProviderRequestBudget {
+    private static final Pattern BUDGET_ID = Pattern.compile("[A-Za-z0-9_-]{1,128}");
+    private static final Pattern BUDGET_COUNT = Pattern.compile("[1-9][0-9]{0,4}");
+
     public static final String ROOT = "YCA_PROVIDER_BUDGET_ROOT";
     public static final String ID = "YCA_PROVIDER_BUDGET_ID";
     public static final String SLOTS = "YCA_PROVIDER_BUDGET_SLOTS";
@@ -81,17 +85,21 @@ public final class ProviderRequestBudget {
     }
 
     /** Absent/blank ROOT disables only when ID and SLOTS are absent. Partial settings are errors. */
-    public static ProviderRequestBudget fromConfiguration(final Configuration configuration) throws IOException {
-        final var value = configuration.get(ROOT).orElse(null);
+    public static ProviderRequestBudget fromConfiguration(final ProviderBudgetConfiguration configuration)
+            throws IOException {
+        final var value = configuration.root();
         if (value == null || value.isBlank()) {
-            if (configuration.get(ID).isPresent() || configuration.get(SLOTS).isPresent()) {
+            if (configuration.id() != null || configuration.slots() != null) {
                 throw new IllegalArgumentException("Incomplete provider budget settings");
             }
             return new ProviderRequestBudget(null, null, 0, null, null);
         }
-        final var id = configuration.get(ID).orElse(null);
-        final var count = configuration.get(SLOTS).orElse(null);
-        if (id == null || !id.matches("[A-Za-z0-9_-]{1,128}") || count == null || !count.matches("[1-9][0-9]{0,4}")) {
+        final var id = configuration.id();
+        final var count = configuration.slots();
+        if (id == null
+                || !BUDGET_ID.matcher(id).matches()
+                || count == null
+                || !BUDGET_COUNT.matcher(count).matches()) {
             throw new IllegalArgumentException("Invalid provider budget settings");
         }
         final int slots = Integer.parseInt(count);

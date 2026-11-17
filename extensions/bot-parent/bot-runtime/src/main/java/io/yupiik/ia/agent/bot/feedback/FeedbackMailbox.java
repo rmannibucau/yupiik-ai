@@ -37,9 +37,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /** A pinned, bounded per-attempt channel, not arbitrary filesystem or tool RPC. */
 public final class FeedbackMailbox implements AutoCloseable {
+    private static final Pattern NONCE =
+            Pattern.compile("[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}");
+
     private static final int LIMIT = 65536;
     private static final int VERSION = 1;
     private final SecureDirectoryStream<Path> directory;
@@ -141,7 +145,7 @@ public final class FeedbackMailbox implements AutoCloseable {
     }
 
     private static boolean validNonce(final String nonce) {
-        return nonce != null && nonce.matches("[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}");
+        return nonce != null && NONCE.matcher(nonce).matches();
     }
 
     private static void checkExpiry(final Request request) throws IOException {

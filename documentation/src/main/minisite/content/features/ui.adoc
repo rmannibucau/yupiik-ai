@@ -21,6 +21,8 @@ yca provides terminal and web interfaces, plus a headless command for automation
 `run` writes the answer to stdout and exits nonzero on failure.
 Tool activity uses the logging channel rather than interactive cards or cursor controls.
 
+For web frontend architecture, interactive-request wire contracts and source provenance, see xref:ui-advanced.adoc[Advanced web UI integration].
+
 == Tool requests and results
 
 Tool details separate the request from the execution result.

@@ -15,17 +15,19 @@
  */
 package io.yupiik.ia.agent.core.todo;
 
+import io.yupiik.fusion.framework.api.container.Types;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.logging.Logger;
 
 /**
@@ -156,19 +158,13 @@ public class PlanTodoSeeder {
                 false);
     }
 
+    @JsonModel
+    public record Steps(List<TodoItem> steps) {}
+
     private List<TodoItem> parseSteps(final String content) {
         try {
-            final var root = mapper.fromString(Object.class, content);
-            if (!(root instanceof Map<?, ?> map) || !(map.get("steps") instanceof List<?> raw)) {
-                return null;
-            }
-            final var out = new ArrayList<TodoItem>();
-            for (final var t : TodoStore.from(raw)) {
-                if (t.isValid()) {
-                    out.add(t);
-                }
-            }
-            return out;
+            final var root = mapper.fromString(Steps.class, content);
+            return root == null || root.steps() == null ? null : validItems(root.steps());
         } catch (final RuntimeException e) {
             LOGGER.warning("Plan todo structured parse failed: " + e.getMessage());
             return null;
@@ -186,21 +182,17 @@ public class PlanTodoSeeder {
             return List.of();
         }
         try {
-            final var array = mapper.fromString(Object.class, content.substring(start, end + 1));
-            if (!(array instanceof List<?> raw)) {
-                return null;
-            }
-            final var out = new ArrayList<TodoItem>();
-            for (final var t : TodoStore.from(raw)) {
-                if (t.isValid()) {
-                    out.add(t);
-                }
-            }
-            return out;
+            final List<TodoItem> items = mapper.fromString(
+                    new Types.ParameterizedTypeImpl(List.class, TodoItem.class), content.substring(start, end + 1));
+            return items == null ? null : validItems(items);
         } catch (final RuntimeException e) {
             LOGGER.warning("Plan todo parse failed: " + e.getMessage());
             return null;
         }
+    }
+
+    private static List<TodoItem> validItems(final List<TodoItem> items) {
+        return items.stream().filter(Objects::nonNull).filter(TodoItem::isValid).toList();
     }
 
     private String lastAssistantContent(final String sessionId) {

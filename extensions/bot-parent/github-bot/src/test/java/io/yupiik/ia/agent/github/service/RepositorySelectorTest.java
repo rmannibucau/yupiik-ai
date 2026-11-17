@@ -18,8 +18,8 @@ package io.yupiik.ia.agent.github.service;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -50,7 +50,7 @@ class RepositorySelectorTest {
             exchange.close();
         });
         server.start();
-        try (final var json = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty());
                 final var client = new GitHubClient(
                         URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
                         json,
@@ -133,7 +133,7 @@ class RepositorySelectorTest {
             exchange.close();
         });
         server.start();
-        try (final var json = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty());
                 final var client = new GitHubClient(base, json, () -> "token", BotTestConfiguration.CLOCK)) {
             final var selector = new RepositorySelector(
                     client,

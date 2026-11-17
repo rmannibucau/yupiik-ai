@@ -28,6 +28,12 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.llm.client.openai.model.ChatCompletionRequest$FusionJsonCodec;
 import io.yupiik.llm.client.openai.model.ChatCompletionResponse$Choice$FusionJsonCodec;
 import io.yupiik.llm.client.openai.model.ChatCompletionResponse$FusionJsonCodec;
+import io.yupiik.llm.client.openai.model.ResponsesInput$FusionJsonCodec;
+import io.yupiik.llm.client.openai.model.ResponsesRequest$FusionJsonCodec;
+import io.yupiik.llm.client.openai.model.ResponsesResponse$FusionJsonCodec;
+import io.yupiik.llm.client.openai.model.ResponsesResponse$OutputContent$FusionJsonCodec;
+import io.yupiik.llm.client.openai.model.ResponsesResponse$OutputItem$FusionJsonCodec;
+import io.yupiik.llm.client.openai.model.ResponsesTool$FusionJsonCodec;
 import io.yupiik.llm.client.openai.model.WireMessage$FusionJsonCodec;
 import java.io.IOException;
 import java.net.Authenticator;
@@ -57,6 +63,8 @@ import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 class UnixProviderHttpClientTest {
     @Test
@@ -64,6 +72,7 @@ class UnixProviderHttpClientTest {
         final var disabled =
                 new NativeProviderConfiguration$FusionConfigurationFactory(Configuration.of(Map.of())).get();
         assertNull(disabled.socket());
+        assertEquals(ApiFlavor.COMPLETIONS, disabled.api());
         try (final var delegate = new NoNetworkClient()) {
             assertSame(delegate, UnixProviderHttpClient.fromConfiguration(delegate, disabled));
             final var configured = new NativeProviderConfiguration$FusionConfigurationFactory(
@@ -76,8 +85,11 @@ class UnixProviderHttpClientTest {
         }
     }
 
-    @Test
-    void actualChatClientUsesPreparedNativeTransport() throws Exception {
+    @ParameterizedTest
+    @EnumSource(
+            value = ApiFlavor.class,
+            names = {"COMPLETIONS", "RESPONSES"})
+    void actualChatClientUsesPreparedNativeTransport(final ApiFlavor api) throws Exception {
         final var directory = Files.createTempDirectory("yca-chat-uds-");
         final var path = directory.resolve("p");
         final var served = new CompletableFuture<Void>();
@@ -87,13 +99,22 @@ class UnixProviderHttpClientTest {
                                 new ChatCompletionRequest$FusionJsonCodec(),
                                 new ChatCompletionResponse$FusionJsonCodec(),
                                 new ChatCompletionResponse$Choice$FusionJsonCodec(),
-                                new WireMessage$FusionJsonCodec()),
+                                new WireMessage$FusionJsonCodec(),
+                                new ResponsesRequest$FusionJsonCodec(),
+                                new ResponsesInput$FusionJsonCodec(),
+                                new ResponsesTool$FusionJsonCodec(),
+                                new ResponsesResponse$FusionJsonCodec(),
+                                new ResponsesResponse$OutputItem$FusionJsonCodec(),
+                                new ResponsesResponse$OutputContent$FusionJsonCodec()),
                         ignored -> Optional.empty());
                 final var http = new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
                         .setDelegate(UnixProviderHttpClient.fromConfiguration(
                                 new NoNetworkClient(),
-                                new NativeProviderConfiguration$FusionConfigurationFactory(
-                                                Configuration.of(Map.of("yca.native.provider.socket", path.toString())))
+                                new NativeProviderConfiguration$FusionConfigurationFactory(Configuration.of(Map.of(
+                                                "yca.native.provider.socket",
+                                                path.toString(),
+                                                "yca.native.provider.api",
+                                                api.name())))
                                         .get())))) {
             listener.bind(UnixDomainSocketAddress.of(path));
             Thread.ofVirtual().start(() -> {
@@ -101,14 +122,16 @@ class UnixProviderHttpClientTest {
                     final var in = UnixProviderProtocol.input(channel);
                     assertEquals(UnixProviderProtocol.MAGIC, in.readInt());
                     assertEquals("attempt-capability", in.readUTF());
+                    assertEquals(api.name(), in.readUTF());
                     final var request = new String(in.readNBytes(in.readInt()), StandardCharsets.UTF_8);
                     assertTrue(request.contains("hello over unix"));
                     final var out = UnixProviderProtocol.output(channel);
                     out.writeInt(200);
                     out.writeUTF("application/json");
-                    final var body =
-                            "{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"native answer\"},\"finish_reason\":\"stop\"}]}"
-                                    .getBytes(StandardCharsets.UTF_8);
+                    final var body = (api == ApiFlavor.RESPONSES
+                                    ? "{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"native answer\"}]}]}"
+                                    : "{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"native answer\"},\"finish_reason\":\"stop\"}]}")
+                            .getBytes(StandardCharsets.UTF_8);
                     out.writeInt(body.length);
                     out.write(body);
                     out.writeInt(0);
@@ -119,10 +142,10 @@ class UnixProviderHttpClientTest {
             });
             final var config = TestConfigs.codingAgent(Map.of(
                     "yca.storageHome", directory.toString(),
-                    "yca.provider.baseUrl", UnixProviderProtocol.ENDPOINT.toString(),
+                    "yca.provider.baseUrl", UnixProviderProtocol.endpoint(api).toString(),
                     "yca.provider.apiKey", "attempt-capability",
                     "yca.provider.model", "test-model",
-                    "yca.provider.api", "completions",
+                    "yca.provider.api", api.name(),
                     "yca.provider.contextWindow", "128000",
                     "yca.llm.retriesMaxAttempts", "1"));
             try (final var chat =
@@ -156,7 +179,7 @@ class UnixProviderHttpClientTest {
         final var directory = Files.createTempDirectory("yca-uds-");
         final var path = directory.resolve("p");
         try (final var listener = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
-                final var client = new UnixProviderHttpClient(new NoNetworkClient(), path)) {
+                final var client = new UnixProviderHttpClient(new NoNetworkClient(), path, ApiFlavor.COMPLETIONS)) {
             listener.bind(UnixDomainSocketAddress.of(path));
             for (final int mode : new int[] {0, 1, 2}) {
                 final var server = new CompletableFuture<Void>();
@@ -165,6 +188,7 @@ class UnixProviderHttpClientTest {
                         final var in = UnixProviderProtocol.input(connection);
                         assertEquals(UnixProviderProtocol.MAGIC, in.readInt());
                         assertEquals("attempt", in.readUTF());
+                        assertEquals("COMPLETIONS", in.readUTF());
                         assertEquals("{}", new String(in.readNBytes(in.readInt()), StandardCharsets.UTF_8));
                         final var out = UnixProviderProtocol.output(connection);
                         out.writeInt(200);
@@ -199,6 +223,7 @@ class UnixProviderHttpClientTest {
             }
             for (final var uri : new String[] {
                 "http://yca-native.invalid/v1/models",
+                "http://yca-native.invalid/v1/responses",
                 "http://yca-native.invalid:80/v1/chat/completions",
                 "http://yca-native.invalid/v1/chat/completions?target=https://other.invalid"
             }) {
@@ -217,8 +242,13 @@ class UnixProviderHttpClientTest {
                                     .GET()
                                     .build(),
                             HttpResponse.BodyHandlers.ofString()));
-            assertSame(client, UnixProviderHttpClient.fromConfiguration(client, new NativeProviderConfiguration(null)));
-            assertThrows(IllegalArgumentException.class, () -> new UnixProviderHttpClient(client, Path.of("relative")));
+            assertSame(
+                    client,
+                    UnixProviderHttpClient.fromConfiguration(
+                            client, new NativeProviderConfiguration(null, ApiFlavor.COMPLETIONS)));
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new UnixProviderHttpClient(client, Path.of("relative"), ApiFlavor.COMPLETIONS));
         } finally {
             Files.deleteIfExists(path);
             Files.delete(directory);
@@ -230,7 +260,7 @@ class UnixProviderHttpClientTest {
         final var directory = Files.createTempDirectory("yca-uds-");
         final var path = directory.resolve("p");
         try (final var listener = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
-                final var client = new UnixProviderHttpClient(new NoNetworkClient(), path)) {
+                final var client = new UnixProviderHttpClient(new NoNetworkClient(), path, ApiFlavor.COMPLETIONS)) {
             listener.bind(UnixDomainSocketAddress.of(path));
             for (final boolean cancel : new boolean[] {true, false}) {
                 final var accepted = new CompletableFuture<SocketChannel>();
@@ -239,6 +269,7 @@ class UnixProviderHttpClientTest {
                     try (final var connection = listener.accept()) {
                         final var in = UnixProviderProtocol.input(connection);
                         in.readInt();
+                        in.readUTF();
                         in.readUTF();
                         in.readNBytes(in.readInt());
                         accepted.complete(connection);

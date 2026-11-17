@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.github.support;
 
+import io.yupiik.ia.agent.github.execution.GithubExecutionPolicy;
 import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
@@ -25,6 +26,19 @@ import java.nio.file.attribute.PosixFilePermissions;
 /** Shell fixtures whose executable inode is never opened for writing during tests. */
 public final class TestScript {
     private TestScript() {}
+
+    /** State responses use the trusted inspect target, never labels inferred from its name. */
+    public static String githubAgentState() {
+        return """
+                agent_state() {
+                  if [ "$#" = 5 ] && [ "$1 $2 $3" = 'container inspect --format' ]; then
+                    printf '%s|false\\n' "$5"
+                  else
+                    printf 'false\\n'
+                  fi
+                }
+                """.formatted(GithubExecutionPolicy.POLICY.ownership("%s", "agent"));
+    }
 
     public static Path write(final Path executable, final String body) throws IOException {
         final Path launcher;

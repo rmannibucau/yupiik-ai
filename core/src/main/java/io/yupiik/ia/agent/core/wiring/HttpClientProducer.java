@@ -55,6 +55,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.function.Predicate;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import javax.net.ssl.SSLContext;
@@ -165,11 +166,12 @@ public class HttpClientProducer {
         if (noProxyHosts.isEmpty()) {
             return ProxySelector.of(proxy);
         }
+        final var noProxyMatchers = noProxyMatchers(noProxyHosts);
         return new ProxySelector() {
             @Override
             public List<Proxy> select(final URI uri) {
                 final var host = uri.getHost();
-                if (host == null || matchesNoProxy(host, noProxyHosts)) {
+                if (host == null || matchesNoProxyMatchers(host, noProxyMatchers)) {
                     return List.of(Proxy.NO_PROXY);
                 }
                 return List.of(new Proxy(Proxy.Type.HTTP, proxy));
@@ -189,34 +191,42 @@ public class HttpClientProducer {
      * anywhere in a pattern ({@code *corp*}); blank entries are ignored.
      */
     static boolean matchesNoProxy(final String host, final List<String> entries) {
+        return matchesNoProxyMatchers(host, noProxyMatchers(entries));
+    }
+
+    private static boolean matchesNoProxyMatchers(final String host, final List<Predicate<String>> matchers) {
         final var h = host.toLowerCase(Locale.ROOT);
+        return matchers.stream().anyMatch(matcher -> matcher.test(h));
+    }
+
+    private static List<Predicate<String>> noProxyMatchers(final List<String> entries) {
+        final var matchers = new ArrayList<Predicate<String>>();
         for (final var raw : entries) {
             final var entry = raw == null ? "" : raw.strip().toLowerCase(Locale.ROOT);
             if (entry.isEmpty()) {
                 continue;
             }
-            if ("*".equals(entry) || glob(entry, h)) {
-                return true;
+            if ("*".equals(entry)) {
+                matchers.add(host -> true);
+                continue;
             }
             final var dotSuffix = entry.startsWith(".");
             final var core = dotSuffix ? entry.substring(1) : entry;
-            if (h.equals(core) || (dotSuffix && h.endsWith("." + core))) {
-                return true;
-            }
+            final var glob = entry.indexOf('*') < 0 ? null : noProxyGlob(entry);
+            matchers.add(host -> host.equals(core)
+                    || (dotSuffix && host.endsWith("." + core))
+                    || (glob != null && glob.matcher(host).matches()));
         }
-        return false;
+        return List.copyOf(matchers);
     }
 
-    private static boolean glob(final String pattern, final String value) {
-        if (pattern.indexOf('*') < 0) {
-            return false;
-        }
+    private static Pattern noProxyGlob(final String pattern) {
         final var regex = new StringBuilder();
         for (int i = 0; i < pattern.length(); i++) {
             final var c = pattern.charAt(i);
             regex.append(c == '*' ? ".*" : Pattern.quote(String.valueOf(c)));
         }
-        return value.matches(regex.toString());
+        return Pattern.compile(regex.toString());
     }
 
     /** Builds an SSL context trusting the JVM global trust store (optional) plus the configured PEMs. */

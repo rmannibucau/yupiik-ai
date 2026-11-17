@@ -105,6 +105,34 @@ Linux Engine 28 or later is required, but the observed remote 29.3.1 version alo
 Kubernetes and Nono are supported execution backends, but this automatic Docker route is not ported to them.
 See xref:kubernetes.adoc[operator-owned cluster mediation] and xref:installation.adoc[Nono runtime and external deny-default mediation].
 
+[[web-search-egress]]
+== Web search and fetched pages
+
+The core `websearch` tool enables four MCP providers by default, independently of the Docker destination allowlist.
+For either Docker bot, preserve the existing services dependency allowlist and add the exact hosts of the providers you intend to use.
+The GitHub property is `github.executor.docker.services.dependencyEgress.allowedHosts`; the Slack equivalent is `slack.executor.docker.services.dependencyEgress.allowedHosts`.
+An explicit list replaces defaults rather than extending them automatically.
+
+[cols="1,3,2",options="header"]
+|===
+|Provider |Default MCP endpoint |Exact egress host
+|Exa |`https://mcp.exa.ai/mcp` |`mcp.exa.ai`
+|Parallel |`https://search.parallel.ai/mcp` |`search.parallel.ai`
+|Firecrawl |`https://mcp.firecrawl.dev/v2/mcp` |`mcp.firecrawl.dev`
+|TinyFish |`https://agent.tinyfish.ai/mcp` |`agent.tinyfish.ai`
+|===
+
+The default fallback order is Exa, Parallel, Firecrawl, then TinyFish.
+The client supports anonymous requests, including TinyFish's keyless header, but providers control authentication, free quotas, rate limits and availability.
+Destination permission does not provision an API key or establish successful `tools/call` behavior; an HTTP or MCP initialization check alone is not search acceptance.
+The trusted attempt-preparation filter does not currently retain the agent document's `tools` block, so custom provider lists, URLs or inline search keys in that block must not be assumed to reach an attempt.
+Do not place upstream search credentials in arbitrary backend environment maps to bypass that boundary.
+
+Allowlisting a search service permits opaque HTTPS traffic to that destination, not search-only methods or paths.
+Search queries and responses can contain sensitive information; select providers accordingly.
+Neither search nor Context7 grants arbitrary page access: `webfetch`, archive downloads, release assets and redirects still require their own reviewed destination hosts.
+Do not copy a broad development allowlist into Slack merely to follow search results.
+
 == Prerequisites and image
 
 Use a trusted Linux Docker Engine 28 or later with its bridge firewall enabled and normal network isolation intact.
@@ -130,7 +158,7 @@ No image goal is bound to ordinary test/package lifecycles unless the explicit a
 The base defaults to `eclipse-temurin:25-jre` and the target to `yca-egress:local`; override both properties as shown and pin the base and configured gateway image by digest for production.
 For a registry build, record `extensions/bot-parent/github-bot/target/jib-image.digest` and configure `REGISTRY/IMAGE@sha256:DIGEST`, not a mutable tag.
 
-Jib generates the runtime classpath and Java entrypoint for `io.yupiik.ia.agent.github.execution.EgressGateway` with `-Xmx128m` and UID/GID 65532.
+Jib generates the runtime classpath and Java entrypoint for `io.yupiik.ia.agent.bot.gateway.EgressGateway` with `-Xmx128m` and UID/GID 65532.
 This is not the worker launcher, so no dispatcher credentials or services are initialized.
 It layers module classes and dependencies directly; no fixed in-image fat JAR path or launcher script is required.
 
@@ -228,7 +256,7 @@ Credentials needed by the agent remain on the agent side and may traverse its en
 
 Gateway readiness must succeed before the agent starts.
 Its polling deadline is the shorter of 30 seconds and the configured executor timeout, including when public dependency egress shares the restricted-services network.
-Readiness explicitly executes `java -Xmx32m -cp @/app/jib-classpath-file io.yupiik.ia.agent.github.execution.EgressGateway --check` inside the gateway as UID/GID 65532.
+Readiness explicitly executes `java -Xmx32m -cp @/app/jib-classpath-file io.yupiik.ia.agent.bot.gateway.EgressGateway --check` inside the gateway as UID/GID 65532.
 It does not rely on `docker exec` reusing the image entrypoint; custom gateway images must preserve the Java executable and Jib runtime classpath layout required by that command.
 Control commands, readiness polling, connection counts, headers, connect/idle times and total tunnel lifetime are bounded.
 The gateway also exits after the execution budget plus a two-minute cleanup grace period if the dispatcher disappears.

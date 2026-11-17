@@ -43,12 +43,16 @@ class ConfigurationJsonSchemaGeneratorTest {
                                 "partialOutput", "copy.json",
                                 "excludedRoots",
                                         "io.yupiik.ia.agent.github.configuration.GithubBotConfiguration,"
-                                                + "io.yupiik.ia.agent.github.configuration.ExecutorConfiguration,"
+                                                + "io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration,"
                                                 + "io.yupiik.ia.agent.github.configuration.AgentContextConfiguration,"
                                                 + "io.yupiik.ia.agent.github.configuration.ContextConfiguration,"
                                                 + "io.yupiik.ia.agent.github.configuration.FixConfiguration,"
                                                 + "io.yupiik.ia.agent.github.configuration.PromptConfiguration,"
-                                                + "io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration"))
+                                                + "io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration,"
+                                                + "io.yupiik.ia.agent.slack.command.TaskOptions,"
+                                                + "io.yupiik.ia.agent.slack.configuration.SlackExecutorConfiguration,"
+                                                + "io.yupiik.ia.agent.slack.configuration.SlackProviderConfiguration,"
+                                                + "io.yupiik.ia.agent.slack.configuration.SlackPrompts"))
                 .run();
         try (final var container = ConfiguringContainer.of()
                         .register(new FusionModule() {
@@ -67,6 +71,10 @@ class ConfigurationJsonSchemaGeneratorTest {
                 final var mapper = container.lookup(JsonMapper.class)) {
             final var schema = mapper.instance().fromString(Map.class, Files.readString(temp.resolve("schema.json")));
             final var defs = map(schema.get("$defs"));
+            final var slack = resolve(defs, map(map(schema.get("properties")).get("slack")));
+            final var channelMembers = map(map(slack.get("properties")).get("allowChannelMembers"));
+            assertEquals("boolean", channelMembers.get("type"));
+            assertEquals(false, channelMembers.get("default"));
             assertFalse(map(schema.get("properties")).containsKey("github"));
             assertFalse(map(schema.get("properties")).containsKey("githubContext"));
             assertFalse(defs.keySet().stream().anyMatch(key -> key.toString().contains("GithubBot")));
@@ -76,7 +84,14 @@ class ConfigurationJsonSchemaGeneratorTest {
                             || key.toString().contains("github.configuration.PromptConfiguration")
                             || key.toString().contains("ReviewPresentationConfiguration")));
             final var yca = map(map(map(schema.get("properties")).get("yca")).get("properties"));
-            assertFalse(yca.containsKey("bot"), "Host admission is not a yca.* configuration root");
+            final var ycaBot = map(map(yca.get("bot")).get("properties"));
+            assertFalse(ycaBot.containsKey("admission"), "Host admission is not a yca.* configuration root");
+            final var feedback = resolve(defs, map(ycaBot.get("feedback")));
+            final var feedbackProperties = map(feedback.get("properties"));
+            assertEquals("boolean", map(feedbackProperties.get("enabled")).get("type"));
+            assertEquals(
+                    "integer", map(feedbackProperties.get("timeoutSeconds")).get("type"));
+            assertEquals("string", map(feedbackProperties.get("directory")).get("type"));
             final var bot = map(map(map(schema.get("properties")).get("bot")).get("properties"));
             final var admission = resolve(defs, map(bot.get("admission")));
             final var admissionProperties = map(admission.get("properties"));
@@ -89,6 +104,18 @@ class ConfigurationJsonSchemaGeneratorTest {
                     "string",
                     map(map(nativeProvider.get("properties")).get("socket")).get("type"));
             final var provider = resolve(defs, map(yca.get("provider")));
+            final var budget = resolve(defs, map(map(provider.get("properties")).get("budget")));
+            final var budgetProperties = map(budget.get("properties"));
+            for (final var name : new String[] {"root", "id", "slots"}) {
+                assertEquals("string", map(budgetProperties.get(name)).get("type"), name);
+            }
+            assertTrue(map(budgetProperties.get("slots"))
+                    .get("description")
+                    .toString()
+                    .contains("fail closed"));
+            assertTrue(
+                    map(provider.get("properties")).containsKey("contextWindow"),
+                    "Adding yca.provider.budget must preserve the existing provider schema properties");
             assertTrue(map(map(provider.get("properties")).get("contextWindow"))
                     .get("description")
                     .toString()
@@ -110,6 +137,11 @@ class ConfigurationJsonSchemaGeneratorTest {
 
     private Map<?, ?> resolve(final Map<?, ?> defs, final Map<?, ?> reference) {
         final var ref = (String) reference.get("$ref");
+        if (ref == null) {
+            assertTrue(
+                    reference.containsKey("properties"), "Expected an inline object schema or a definition reference");
+            return reference;
+        }
         assertTrue(ref.startsWith("#/$defs/"));
         return map(defs.get(ref.substring("#/$defs/".length())));
     }

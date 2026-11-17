@@ -17,9 +17,11 @@ package io.yupiik.ia.agent.github.service;
 
 import static java.util.stream.Collectors.toSet;
 
+import io.yupiik.fusion.framework.api.container.Types;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.model.AgentResult;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.store.MutableSolvePublication;
@@ -164,7 +166,10 @@ public class StrictSolvePublisher {
             return reconcile(id, upstream, fork, branch, baseBranch, marker, publication, forkOwner);
         }
         verifyTarget(upstream, fork, baseBranch, base);
-        final var author = text(TaskStore.map(github.get("/user")), "login");
+        final var author = github.get("/user", RestResponses.User.class).login();
+        if (author == null || author.isBlank()) {
+            throw new IllegalArgumentException("Missing login");
+        }
         update(id, saved -> {
             final var previous = saved.author();
             if (previous == null) {
@@ -175,11 +180,11 @@ public class StrictSolvePublisher {
             }
             return null;
         });
-        final var commit = TaskStore.map(github.get("/repos/" + upstream + "/git/commits/" + base));
-        if (!base.equals(sha(commit.get("sha")))) {
+        final var commit = github.get("/repos/" + upstream + "/git/commits/" + base, RestResponses.Commit.class);
+        if (!base.equals(sha(commit.sha()))) {
             throw new IllegalStateException("Unexpected base commit");
         }
-        final var baseTree = sha(TaskStore.map(commit.get("tree")).get("sha"));
+        final var baseTree = sha(commit.tree().sha());
         final var modes = new PinnedTreeChanges(github, "/repos/" + upstream)
                 .modes(
                         baseTree,
@@ -219,10 +224,12 @@ public class StrictSolvePublisher {
             // Recheck immediately before making the commit reachable; never update or force a ref.
             verifyTarget(upstream, fork, baseBranch, base);
             intent(id, "refIntent");
-            final var ref = TaskStore.map(github.post(
-                    "/repos/" + fork + "/git/refs", new GitHubClient.RefRequest("refs/heads/" + branch, commitSha)));
-            if (!("refs/heads/" + branch).equals(ref.get("ref"))
-                    || !commitSha.equals(sha(TaskStore.map(ref.get("object")).get("sha")))) {
+            final var ref = github.post(
+                    "/repos/" + fork + "/git/refs",
+                    new GitHubClient.RefRequest("refs/heads/" + branch, commitSha),
+                    RestResponses.Ref.class);
+            if (!("refs/heads/" + branch).equals(ref.ref())
+                    || !commitSha.equals(sha(ref.object().sha()))) {
                 throw new IllegalStateException("Unexpected created reference");
             }
             update(id, saved -> {
@@ -230,35 +237,37 @@ public class StrictSolvePublisher {
                 return null;
             });
         }
-        final var live = TaskStore.map(github.get("/repos/" + fork + "/git/ref/heads/" + branch));
-        if (!("refs/heads/" + branch).equals(live.get("ref"))
-                || !commitSha.equals(sha(TaskStore.map(live.get("object")).get("sha")))) {
+        final var live = github.get("/repos/" + fork + "/git/ref/heads/" + branch, RestResponses.Ref.class);
+        if (!("refs/heads/" + branch).equals(live.ref())
+                || !commitSha.equals(sha(live.object().sha()))) {
             throw new IllegalStateException("Published head changed");
         }
         verifyTarget(upstream, fork, baseBranch, base);
         intent(id, "prIntent");
-        final var pr = TaskStore.map(github.post(
+        final var pr = github.post(
                 "/repos/" + upstream + "/pulls",
                 new GitHubClient.PullRequestRequest(
-                        title, renderedBody, forkOwner + ":" + branch, parts[1], baseBranch, false)));
+                        title, renderedBody, forkOwner + ":" + branch, parts[1], baseBranch, false),
+                RestResponses.Pull.class);
         return complete(
                 id, pr, upstream, fork, branch, baseBranch, marker, update(id, MutableSolvePublication::document));
     }
 
     private void verifyTarget(final String upstream, final String fork, final String branch, final String base) {
-        final var target = TaskStore.map(github.get("/repos/" + fork));
-        if (!Boolean.TRUE.equals(target.get("fork"))
-                || !fork.equals(target.get("full_name"))
-                || !upstream.equals(TaskStore.map(target.get("parent")).get("full_name"))) {
+        final var target = github.get("/repos/" + fork, RestResponses.Repository.class);
+        if (!Boolean.TRUE.equals(target.fork())
+                || !fork.equals(target.full_name())
+                || target.parent() == null
+                || !upstream.equals(target.parent().full_name())) {
             throw new IllegalStateException("Fork parent does not match upstream");
         }
-        final var repo = TaskStore.map(github.get("/repos/" + upstream));
-        if (!upstream.equals(repo.get("full_name")) || !branch.equals(repo.get("default_branch"))) {
+        final var repo = github.get("/repos/" + upstream, RestResponses.Repository.class);
+        if (!upstream.equals(repo.full_name()) || !branch.equals(repo.default_branch())) {
             throw new IllegalStateException("Upstream default branch changed");
         }
-        final var ref = TaskStore.map(github.get("/repos/" + upstream + "/git/ref/heads/" + encode(branch)));
-        if (!("refs/heads/" + branch).equals(ref.get("ref"))
-                || !base.equals(sha(TaskStore.map(ref.get("object")).get("sha")))) {
+        final var ref = github.get("/repos/" + upstream + "/git/ref/heads/" + encode(branch), RestResponses.Ref.class);
+        if (!("refs/heads/" + branch).equals(ref.ref())
+                || !base.equals(sha(ref.object().sha()))) {
             throw new IllegalStateException("Stale strict solve base");
         }
     }
@@ -270,7 +279,8 @@ public class StrictSolvePublisher {
             return sha(previous);
         }
         intent(id, stage + "Intent");
-        final var value = sha(TaskStore.map(github.post(endpoint, request)).get("sha"));
+        final var value =
+                sha(github.post(endpoint, request, RestResponses.ObjectId.class).sha());
         update(id, saved -> {
             saved.objectSha(stage, value);
             return null;
@@ -307,17 +317,18 @@ public class StrictSolvePublisher {
         String next = "/repos/" + upstream + "/pulls?state=all&head=" + encode(forkOwner + ":" + branch) + "&base="
                 + encode(baseBranch) + "&per_page=100";
         final var visited = new HashSet<String>();
-        Map<String, Object> found = null;
+        RestResponses.Pull found = null;
         while (next != null) {
             if (!visited.add(next) || visited.size() > 100) {
                 throw new IllegalStateException("Unbounded pull request reconciliation");
             }
-            final var page = github.page(next);
-            if (!(page.body() instanceof List<?> pulls)) {
+            final var page = github.<List<RestResponses.Pull>>page(
+                    next, new Types.ParameterizedTypeImpl(List.class, RestResponses.Pull.class));
+            final var pulls = page.body();
+            if (pulls == null) {
                 throw new IllegalStateException("Expected pull request list");
             }
-            for (final var item : pulls) {
-                final var pr = TaskStore.map(item);
+            for (final var pr : pulls) {
                 if (matches(pr, upstream, fork, branch, baseBranch, marker, publication)) {
                     if (found != null) {
                         throw new IllegalStateException("Multiple matching pull requests; operator recovery required");
@@ -335,7 +346,7 @@ public class StrictSolvePublisher {
 
     private String complete(
             final String id,
-            final Map<String, Object> pr,
+            final RestResponses.Pull pr,
             final String upstream,
             final String fork,
             final String branch,
@@ -345,9 +356,10 @@ public class StrictSolvePublisher {
         if (!matches(pr, upstream, fork, branch, baseBranch, marker, publication)) {
             throw new IllegalStateException("Pull request does not match publication intent");
         }
-        final var url = text(pr, "html_url");
-        if (!url.startsWith("https://github.com/" + upstream + "/pull/")
-                || !(pr.get("number") instanceof Number number)
+        final var url = pr.html_url();
+        if (url == null
+                || !url.startsWith("https://github.com/" + upstream + "/pull/")
+                || !(pr.number() instanceof Number number)
                 || number.longValue() <= 0
                 || !url.equals("https://github.com/" + upstream + "/pull/" + number.longValue())) {
             throw new IllegalStateException("Unexpected pull request URL");
@@ -360,30 +372,27 @@ public class StrictSolvePublisher {
     }
 
     private boolean matches(
-            final Map<String, Object> pr,
+            final RestResponses.Pull pr,
             final String upstream,
             final String fork,
             final String branch,
             final String baseBranch,
             final String marker,
             final TaskDocument.SolvePublication publication) {
-        if (!(pr.get("head") instanceof Map<?, ?>)
-                || !(pr.get("base") instanceof Map<?, ?>)
-                || !(pr.get("user") instanceof Map<?, ?>)
-                || !(pr.get("body") instanceof String body)) {
+        if (pr == null || pr.head() == null || pr.base() == null || pr.user() == null || pr.body() == null) {
             return false;
         }
-        final var head = TaskStore.map(pr.get("head"));
-        final var base = TaskStore.map(pr.get("base"));
-        return branch.equals(head.get("ref"))
-                && publication.commitSha().equals(head.get("sha"))
-                && head.get("repo") instanceof Map<?, ?> headRepo
-                && fork.equals(headRepo.get("full_name"))
-                && baseBranch.equals(base.get("ref"))
-                && base.get("repo") instanceof Map<?, ?> baseRepo
-                && upstream.equals(baseRepo.get("full_name"))
-                && publication.author().equals(TaskStore.map(pr.get("user")).get("login"))
-                && body.lines().anyMatch(marker::equals);
+        final var head = pr.head();
+        final var base = pr.base();
+        return branch.equals(head.ref())
+                && publication.commitSha().equals(head.sha())
+                && head.repo() != null
+                && fork.equals(head.repo().full_name())
+                && baseBranch.equals(base.ref())
+                && base.repo() != null
+                && upstream.equals(base.repo().full_name())
+                && publication.author().equals(pr.user().login())
+                && pr.body().lines().anyMatch(marker::equals);
     }
 
     private List<Change> validateChanges(final List<AgentResult.Change> values) {
@@ -495,13 +504,6 @@ public class StrictSolvePublisher {
             throw new IllegalArgumentException("Expected full SHA-1");
         }
         return text;
-    }
-
-    private static String text(final Map<String, Object> object, final String key) {
-        if (!(object.get(key) instanceof String value)) {
-            throw new IllegalArgumentException("Expected string: " + key);
-        }
-        return value;
     }
 
     private static String encode(final String value) {

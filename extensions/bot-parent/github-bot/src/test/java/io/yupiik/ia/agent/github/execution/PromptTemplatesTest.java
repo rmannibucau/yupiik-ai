@@ -17,8 +17,8 @@ package io.yupiik.ia.agent.github.execution;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode;
@@ -240,7 +240,9 @@ class PromptTemplatesTest {
     }
 
     private ExecutorConfiguration executor(final Map<String, String> values) {
-        return new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+        return new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .shared();
     }
 
     private Map<String, String> services(final Map<String, String> overrides) {

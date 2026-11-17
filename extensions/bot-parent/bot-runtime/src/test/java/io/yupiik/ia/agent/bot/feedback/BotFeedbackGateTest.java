@@ -17,7 +17,6 @@ package io.yupiik.ia.agent.bot.feedback;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.json.JsonMapper;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -45,7 +44,7 @@ class BotFeedbackGateTest {
                     return null;
                 }
             };
-            assertNull(producer.gate(key -> Optional.empty(), json).ask(FeedbackMailboxTest.questions()));
+            assertNull(producer.gate(configuration(Map.of()), json).ask(FeedbackMailboxTest.questions()));
             assertNull(producer.gate(configuration(Map.of("yca.bot.feedback.enabled", "false")), json)
                     .ask(FeedbackMailboxTest.questions()));
         }
@@ -181,20 +180,38 @@ class BotFeedbackGateTest {
     }
 
     @Test
-    void invalidDeadlinesRejectedAndMissingMailboxFailsClosed() throws Exception {
+    void configuredDirectoryReturnsAnswerWithoutOpeningDefaultMailbox() throws Exception {
+        final var root = privateDirectory("configured");
+        try (final var json = FeedbackMailboxTest.json()) {
+            final var producer = new BotFeedbackGate() {
+                @Override
+                protected FeedbackMailbox openMailbox(final JsonMapper mapper) {
+                    fail("Configured directory must bypass the default mailbox");
+                    return null;
+                }
+
+                @Override
+                protected void awaitPoll() {
+                    try (final var mailbox = new FeedbackMailbox(root, json)) {
+                        mailbox.answer(mailbox.pending(), Map.of("q", "configured"), false);
+                    } catch (final IOException e) {
+                        throw new IllegalStateException(e);
+                    }
+                }
+            };
+            final var configuration = new BotFeedbackConfiguration(true, 600, root.toString());
+            assertEquals(
+                    Map.of("q", "configured"),
+                    producer.gate(configuration, json).ask(FeedbackMailboxTest.questions()));
+            assertFalse(Files.exists(root.resolve("request.json")));
+            assertFalse(Files.exists(root.resolve("response.json")));
+        }
+    }
+
+    @Test
+    void missingMailboxFailsClosed() throws Exception {
         try (final var json = FeedbackMailboxTest.json()) {
             final var producer = producer(home.resolve("missing"), () -> fail("No polling without mailbox"));
-            for (final var timeout : new String[] {"0", "3601", "-1", "garbage"}) {
-                assertThrows(
-                        IllegalArgumentException.class,
-                        () -> producer.gate(
-                                configuration(Map.of(
-                                        "yca.bot.feedback.enabled",
-                                        "true",
-                                        "yca.bot.feedback.timeoutSeconds",
-                                        timeout)),
-                                json));
-            }
             assertNull(producer.gate(enabled(), json).ask(FeedbackMailboxTest.questions()));
         }
     }
@@ -204,12 +221,13 @@ class BotFeedbackGateTest {
                 home.resolve(name), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
     }
 
-    private static Configuration enabled() {
-        return configuration(Map.of("yca.bot.feedback.enabled", "true"));
+    private static BotFeedbackConfiguration enabled() {
+        return new BotFeedbackConfiguration(true, 600, null);
     }
 
-    private static Configuration configuration(final Map<String, String> values) {
-        return key -> Optional.ofNullable(values.get(key));
+    private static BotFeedbackConfiguration configuration(final Map<String, String> values) {
+        return new BotFeedbackConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key)))
+                .get();
     }
 
     private static BotFeedbackGate producer(final Path root, final Runnable poll) {

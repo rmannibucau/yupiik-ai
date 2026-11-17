@@ -18,7 +18,7 @@ package io.yupiik.ia.agent.core.llm;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
-import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -71,7 +71,7 @@ class LlmRelayProviderBudgetTest {
             final var forwarded = new AtomicInteger();
             try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
                 upstream.setExecutor(executor);
-                upstream.createContext("/upstream", exchange -> {
+                upstream.createContext("/v1/chat/completions", exchange -> {
                     try (exchange) {
                         assertEquals("POST", exchange.getRequestMethod());
                         assertEquals(
@@ -98,11 +98,14 @@ class LlmRelayProviderBudgetTest {
                     }
                 });
                 upstream.start();
-                final var budget = ProviderRequestBudget.fromConfiguration(Configuration.of(settings));
+                final var budget = ProviderRequestBudget.fromConfiguration(new ProviderBudgetConfiguration(
+                        settings.get(ProviderRequestBudget.ROOT),
+                        settings.get(ProviderRequestBudget.ID),
+                        settings.get(ProviderRequestBudget.SLOTS)));
                 try (final var relay = new LlmRelay(
                                 new InetSocketAddress("127.0.0.1", 0),
                                 URI.create("http://127.0.0.1:"
-                                        + upstream.getAddress().getPort() + "/upstream"),
+                                        + upstream.getAddress().getPort() + "/v1/chat/completions"),
                                 "secret",
                                 2,
                                 budget);
@@ -151,7 +154,10 @@ class LlmRelayProviderBudgetTest {
                                     // Closing an active relay is not evidence of upstream EOF.
                                     relay.close();
                                     assertTrue(budget.tryAcquire().isEmpty());
-                                    assertTrue(ProviderRequestBudget.fromConfiguration(Configuration.of(settings))
+                                    assertTrue(ProviderRequestBudget.fromConfiguration(new ProviderBudgetConfiguration(
+                                                    settings.get(ProviderRequestBudget.ROOT),
+                                                    settings.get(ProviderRequestBudget.ID),
+                                                    settings.get(ProviderRequestBudget.SLOTS)))
                                             .tryAcquire()
                                             .isEmpty());
                                 }

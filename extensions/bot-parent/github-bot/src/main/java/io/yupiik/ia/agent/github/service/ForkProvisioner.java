@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.github.service;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import java.util.Map;
@@ -69,9 +70,9 @@ public class ForkProvisioner {
             return null;
         });
 
-        final Object existing;
+        final RestResponses.Repository existing;
         try {
-            existing = github.get("/repos/" + fork);
+            existing = github.get("/repos/" + fork, RestResponses.Repository.class);
         } catch (final GitHubClient.HttpException error) {
             if (error.status() != 404) {
                 throw error;
@@ -88,8 +89,11 @@ public class ForkProvisioner {
             if (!publish) {
                 throw error;
             }
-            github.post("/repos/" + upstream + "/forks", new GitHubClient.ForkRequest(forkOwner));
-            verify(github.get("/repos/" + fork), upstream, fork);
+            github.post(
+                    "/repos/" + upstream + "/forks",
+                    new GitHubClient.ForkRequest(forkOwner),
+                    RestResponses.Repository.class);
+            verify(github.get("/repos/" + fork, RestResponses.Repository.class), upstream, fork);
             return fork;
         }
         verify(existing, upstream, fork);
@@ -102,12 +106,11 @@ public class ForkProvisioner {
         }
     }
 
-    private void verify(final Object value, final String upstream, final String fork) {
-        if (!(value instanceof Map<?, ?> repository)
-                || !Boolean.TRUE.equals(repository.get("fork"))
-                || !(repository.get("parent") instanceof Map<?, ?> parent)
-                || !(parent.get("full_name") instanceof String name)
-                || !upstream.equalsIgnoreCase(name)) {
+    private void verify(final RestResponses.Repository repository, final String upstream, final String fork) {
+        if (repository == null
+                || !Boolean.TRUE.equals(repository.fork())
+                || repository.parent() == null
+                || !upstream.equalsIgnoreCase(repository.parent().full_name())) {
             throw new IllegalStateException("Expected " + fork + " to be a fork of " + upstream);
         }
     }

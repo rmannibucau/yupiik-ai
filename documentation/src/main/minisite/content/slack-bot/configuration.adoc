@@ -14,7 +14,8 @@ The deployment environment sample uses that mapping.
 |`slack.workspace` |empty |One exact `T...` workspace ID; required for installation validation.
 |`slack.botUser` |empty |Exact `U...` or `W...` bot user ID, not app ID or display name.
 |`slack.channels` |empty |Exact allowed `C...`/`G...` channel IDs; empty denies all.
-|`slack.users` |empty |Exact allowed `U...`/`W...` requester IDs; empty denies all.
+|`slack.users` |empty |Exact allowed `U...`/`W...` requester IDs; empty denies all unless `slack.allowChannelMembers=true`.
+|`slack.allowChannelMembers` |`false` |Opt in to requests from any valid user ID in the exact allowed channels, without a requester allowlist; bot/self events remain denied.
 |`slack.allowSlackConnect` |`false` |Explicitly accept externally shared audiences; verify channel audience independently.
 |`slack.appTokenEnv` |`SLACK_APP_TOKEN` |Name of the controller environment variable containing the `xapp-` token.
 |`slack.botTokenEnv` |`SLACK_BOT_TOKEN` |Name of the controller environment variable containing the `xoxb-` token.
@@ -24,9 +25,54 @@ The deployment environment sample uses that mapping.
 
 Prefer a single approved channel and requester for initial acceptance.
 Do not use wildcard IDs or substitute human-readable names.
-The sample leaves both lists empty deliberately; before admitting users, verify the assembled CLI's list binding rather than assuming a delimiter syntax.
+The sample leaves both lists empty deliberately.
+Use comma-separated exact channel IDs in `SLACK_CHANNELS`; the generated configuration binding strips surrounding whitespace from each entry.
+Changes to an environment file require a graceful controller restart; they do not modify a running container's environment.
+Invite the app to every approved channel separately and send an explicit bot mention there.
+An allowlist entry grants controller admission, not Slack channel membership, and `app_mention` subscriptions do not receive direct messages.
+To admit all members of an operator-verified private channel, set its exact ID in `slack.channels`, set `slack.allowChannelMembers=true` (`SLACK_ALLOWCHANNELMEMBERS=true`), and leave `slack.users` empty.
+This bypasses only the requester allowlist, not workspace/channel checks or Slack Connect policy; keep `slack.allowSlackConnect=false` for an unshared channel.
+Membership is trusted from Slack's delivered event, not independently queried; verify channel membership and sharing settings administratively.
+Questions, modal answers and cancellation remain bound to the original requester, even when other channel members may start their own requests.
+
+== Controller diagnostics
+
+`YCA_LOGGING_AUTO=false` disables automatic terminal-stream takeover and the automatic inline JUL handler, not JUL logging itself.
+Without a separate JUL configuration, ordinary INFO/WARNING records still go to the process console and are captured by Docker's configured log driver.
+The controller reports startup channel count and worker parallelism, Socket Mode connection/hello/reconnect/disabled state, and successful durable admission at INFO or WARNING.
+It does not log message text, interaction payloads, platform IDs, socket tickets, raw API errors or credentials.
+Admission rejection categories such as `channel_not_approved`, `requester_not_allowed` and `shared_channel_policy` are FINE-level records.
+To enable those categories, provision a protected JUL properties file and pass its path with `-Djava.util.logging.config.file=...` to the controller JVM only; configure both the admission logger and its console handler to allow FINE.
+Do not enable global HTTP, WebSocket or request-body tracing to troubleshoot admission.
+An empty log from a controller version without these lifecycle diagnostics is not evidence that Slack delivered no events.
+
+== Optional public GitHub URLs
+
+Docker restricted-services dependency egress can allow unauthenticated HTTPS to public GitHub resources without enabling GitHub context/Git RPC or passing GitHub credentials into Slack attempts.
+For example, an operator may add the exact hosts `github.com`, `api.github.com` and `raw.githubusercontent.com` to `slack.executor.docker.services.dependencyEgress.allowedHosts`, preserving any separately reviewed MCP hosts.
+This grants destination-based CONNECT access, not read-only HTTP methods or individual URL paths.
+Private repositories remain inaccessible without separately authorized credentials, and unauthenticated GitHub API rate limits apply.
+Redirects to other hosts, including archive or attachment hosts, remain blocked unless explicitly reviewed and allowed.
+
+== Optional web search
+
+The core `websearch` tool defaults to the Exa, Parallel, Firecrawl and TinyFish MCP providers, in that fallback order.
+An enabled tool is not proof of network reachability: restricted-services attempts also need their destinations in `slack.executor.docker.services.dependencyEgress.allowedHosts`.
+Preserve the existing list and add only the reviewed provider hosts: `mcp.exa.ai`, `search.parallel.ai`, `mcp.firecrawl.dev` and `agent.tinyfish.ai`.
+See xref:../github-bot/egress.adoc#web-search-egress[the provider endpoint and access checklist], which applies to both Docker adapters.
+No search API key is required by the local default configuration; anonymous availability, authentication requirements and quotas remain provider-controlled.
+Adding a destination does not provision credentials or guarantee successful search calls.
+
+Search results and page fetching are separate capabilities.
+The `webfetch` tool still cannot fetch a result on an unapproved host, and redirects to unapproved destinations remain blocked.
+Do not enable arbitrary internet access or wildcard provider domains just to follow search results.
+Trusted preparation currently does not copy the agent document's `tools` block into attempts, so do not assume custom `tools.websearch` provider lists, URLs or inline keys reach the sandbox.
+Qualify configuration handoff separately before relying on custom search settings or credentials.
 
 == Bounded work
+
+See xref:context.adoc[opt-in approved Slack context] for the separate `slack.context` root, default-disabled tool, source/member grants, opt-in manifest and privacy/retention acceptance requirements.
+Enabling it does not alter admission or agent network egress.
 
 [cols="2,1,4",options="header"]
 |===
@@ -57,10 +103,11 @@ Use `hidden` for private tool activity; neither hidden nor collapsed output is a
 
 Nested `docker`, `nono`, `kubernetes` and `relay` shapes are shared types; deployment qualification and live acceptance remain backend-specific.
 Slack integrates Docker restricted services, a qualified Linux Nono pathname Unix-socket bridge, and qualified Kubernetes separate-Pod provider services.
-All three stage only the selected COMPLETIONS provider with an attempt capability instead of handing a permanent provider key to the agent.
+All three stage only the selected provider, pinned to `COMPLETIONS` or `RESPONSES`, with an attempt capability instead of handing a permanent provider key to the agent.
 Missing backend prerequisites fail closed; `qualified=true` records an operator assertion, not a probe or certification.
 Direct-credential handoff and an enabled `relay.bind` remain unsupported.
-Override `slack.executor.docker.image`: its inherited default is a GitHub-named agent image, not the Slack image built by the Slack profile.
+Override `slack.executor.docker.image` with the operator-vetted Slack agent image; the neutral shared default is `yca-agent:latest`, not the Slack profile's image.
+The shared Kubernetes namespace default is `yca`; explicitly set `slack.executor.kubernetes.namespace` and the backend's adapter image to preserve the intended deployment during cutover.
 An empty Docker `network` with no enforced gateway means default Docker networking, not no networking.
 A named bridge is not an egress boundary either.
 Docker requires `slack.executor.docker.services`; `SlackProviderServices` prepares the neutral `ProviderServicesGateway` from `bot-gateway`.
@@ -69,7 +116,7 @@ See xref:deployment.adoc#_restricted_provider_services[the restricted-services d
 === Backend-specific provider configuration
 
 `SlackProviderConfiguration` binds the trusted `slack.providerServices` root for Nono and Kubernetes, independently of Docker's nested services settings.
-The selected trusted provider's URL must match the configured upstream, with `/chat/completions` appended when absent.
+The selected trusted provider's URL must match the configured upstream, with the selected API suffix appended when absent: `/chat/completions` for `COMPLETIONS`, or `/responses` for `RESPONSES`.
 Nono accepts a fixed HTTPS upstream with normal TLS validation; Docker and Kubernetes currently accept only canonical numerical private IPv4 HTTP with an explicit port.
 An external HTTPS provider usable through Nono is therefore not directly interchangeable with the Docker/Kubernetes target.
 Do not silently downgrade a public HTTPS API or use a hostname/private DNS workaround for those gateways.
@@ -116,6 +163,7 @@ Docker socket access is privileged controller authority and must never be passed
 `slack.prompts.policy`, `main` and `output` are operator-owned templates, each nonblank and at most 32000 characters.
 The main Handlebars template uses `{{{policy}}}`, `{{{output}}}`, `{{{request}}}` and `{{{context}}}`; request/context are JSON data, not template source.
 The default policy forbids implicit history, repository, file and URL retrieval.
+When trusted host configuration explicitly enables Slack context, the renderer also appends non-template-overridable xref:context.adoc#_agent_handoff_and_trusted_guidance[context guidance]; when disabled, rendering is unchanged and no context tool is advertised by the host.
 The renderer appends a mandatory `/attempt/output/result.json` contract with exactly `taskId` and `summary`; the worker validates the exact task identity and a nonblank summary bounded by `maxAnswerChars`.
 The default `output` instruction uses the same `taskId` and `summary` contract; custom instructions cannot replace the mandatory contract with an `answer` field.
 A prompt instruction alone does not establish result validity or successful publication.
@@ -139,10 +187,31 @@ Never put Slack tokens, GitHub tokens, operator home paths or permanent provider
 For restricted services, prefer supplying the upstream provider key through the controller's `OPENAI_API_KEY` environment rather than the trusted JSON document.
 The selected trusted provider's `apiKey`, if nonblank, takes precedence over that environment fallback; the staged configuration replaces it with a fresh attempt-scoped token.
 The gateway alone receives the upstream key; it is not passed into the agent environment or mounted into the agent.
-Only the selected provider survives staging, with an explicit model and `api=COMPLETIONS`; input `AUTO` is accepted only for this chat-completions route.
-The selected provider's `baseUrl` must match `docker.services.providerTarget` for Docker, or `slack.providerServices.upstream` for Nono/Kubernetes, after appending `/chat/completions` if needed.
+Only the selected provider survives staging, with an explicit model and a concrete `api=COMPLETIONS` or `api=RESPONSES` pin; input `AUTO` defaults to `COMPLETIONS`, so explicitly pin `RESPONSES` for a Responses deployment.
+The selected provider's `baseUrl` must match `docker.services.providerTarget` for Docker, or `slack.providerServices.upstream` for Nono/Kubernetes, after appending the selected API suffix if needed.
 See xref:../bots/cohosting.adoc#_shared_provider_request_budget[the separate provider request budget] for trusted environment forwarding, filesystem ownership and durable debt.
 Other provider APIs, dynamic provider selection and GitHub broker capabilities are not supplied by this route.
+
+== Context-bearing execution override
+
+The optional GitHub URL, MCP and web-search examples above apply only to context-disabled tasks.
+Context-enabled execution is Linux Docker only and must refuse Nono/Kubernetes until equivalent transient controls are implemented.
+See xref:context.adoc#_linux_docker_transient_execution_only[transient execution and separate deployment samples] before enabling even member-only context.
+
+[cols="2,3",options="header"]
+|===
+|Required setting |Context-bearing contract
+|`slack.executor.attemptRoot=/run/yca-slack-context-attempts` |Dedicated tmpfs with `noswap,nodev,nosuid,noexec,mode=0700,uid=10002,gid=10002,size=512m`, visible at the identical host/controller path; each agent sees only its own attempt.
+|`slack.executor.docker.disableContainerLogs=true` |Neutral shared Docker flag, default false elsewhere; environment binding is `SLACK_EXECUTOR_DOCKER_DISABLECONTAINERLOGS=true`, launching the agent with `--log-driver=none`.
+|`slack.executor.showToolOutput=hidden` |Forced hidden tool output, with request/body tracing prohibited and payload-free host diagnostics.
+|`slack.executor.docker.services.dependencyEgress.enabled=false` |No MCP/web search/dependency downloads or ancillary integration egress; only the fixed inference route and controller-only Slack calls remain.
+|===
+
+Active dependency-cache restore/publication is forbidden, and the entire attempt, including configuration/session/log/result artifacts, stays on tmpfs without failure copies or backups.
+Context preparation overrides memory, skills, subagents, MCP, notifications and hooks to disabled; the trusted-value preservation described for ordinary preparation below does not apply to context-bearing attempts.
+No context-derived local answer, prior-answer history or uncertain-publication replay body is retained; see xref:context.adoc#_answers_publication_and_recovery[publication and recovery].
+The separate `controller-context.env.example` leaves context/search disabled and does not change request-admission lists.
+The existing base launcher does not consume it or mount the new root: a reviewed separate launcher and matched UID/GID 10002 images/accounts are required, not just changing one environment variable.
 
 == Common host admission
 

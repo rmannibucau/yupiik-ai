@@ -45,6 +45,16 @@
             <compilerArg>-Afusion.moduleFqn=io.yupiik.ia.agent.slack.SlackBotModule</compilerArg>
           </compilerArgs>
         </configuration>
+        <executions>
+          <execution>
+            <id>default-testCompile</id>
+            <configuration>
+              <compilerArgs combine.self="override">
+                <compilerArg>-Afusion.moduleFqn=io.yupiik.ia.agent.slack.SlackBotTestModule</compilerArg>
+              </compilerArgs>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -239,7 +249,7 @@
                     <image>${slack-bot.egress.image}</image>
                   </to>
                   <container>
-                    <mainClass>io.yupiik.ia.agent.github.execution.EgressGateway</mainClass>
+                    <mainClass>io.yupiik.ia.agent.bot.gateway.EgressGateway</mainClass>
                     <user>65532:65532</user>
                     <jvmFlags>
                       <jvmFlag>-Xmx128m</jvmFlag>

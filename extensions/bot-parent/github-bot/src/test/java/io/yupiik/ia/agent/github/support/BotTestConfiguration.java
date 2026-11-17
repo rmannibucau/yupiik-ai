@@ -18,14 +18,16 @@ package io.yupiik.ia.agent.github.support;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.container.configuration.ConfigurationImpl;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.bot.runtime.DockerControlConfiguration;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.PollCommand;
 import io.yupiik.ia.agent.github.command.WorkerCommand;
 import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
@@ -142,7 +144,15 @@ public final class BotTestConfiguration {
             final GitHubClient github,
             final JsonMapper json,
             final ExecutorConfiguration execution) {
-        return worker(conf, store, github, json, execution, key -> Optional.empty());
+        return worker(
+                conf,
+                store,
+                github,
+                json,
+                execution,
+                key -> Optional.empty(),
+                new ProviderBudgetConfiguration(null, null, null),
+                new DockerControlConfiguration("", ""));
     }
 
     public static Worker worker(
@@ -151,7 +161,9 @@ public final class BotTestConfiguration {
             final GitHubClient github,
             final JsonMapper json,
             final ExecutorConfiguration execution,
-            final Configuration sources) {
+            final Configuration sources,
+            final ProviderBudgetConfiguration budgetConfiguration,
+            final DockerControlConfiguration dockerControl) {
         return new Worker(
                 conf,
                 store,
@@ -178,7 +190,9 @@ public final class BotTestConfiguration {
                 new FixPublisher(github, store, json, new FixConfiguration(false, "")),
                 new HostAdmissionConfiguration("", 1, ""),
                 CLOCK,
-                sources);
+                sources,
+                budgetConfiguration,
+                dockerControl);
     }
 
     public static ReviewSummaryPoller reviewSummaryPoller(

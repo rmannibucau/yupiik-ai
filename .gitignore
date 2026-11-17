@@ -35,7 +35,6 @@ scripts
 /scripts/*
 !/scripts/repro/
 /scripts/repro/*
-!/scripts/repro/tui-drag-perf.py
 
 TODO.*
 

@@ -45,7 +45,13 @@ class MavenServerPasswordTemplateHelperTest {
 
     private static final String MASTER = "YCA_HELPER_MASTER_SECRET";
     private static final String SERVER_PASSWORD = "YCA_HELPER_SERVER_PASSWORD";
-    // Independent OpenSSL known-answer vector; inputs and recipe: src/test/resources/maven4-known-answers.md.
+    // Synthetic public credentials; independent OpenSSL 4.0.3 libcrypto vector (2026-11-16), not a Java round trip.
+    // Precomputed to avoid test-time encryption; production decryption must retain all 310,000 iterations.
+    // Recipe: MASTER and SERVER_PASSWORD as UTF-8 without newlines; salt=202122232425262728292a2b2c2d2e2f,
+    // IV=303132333435363738393a3b (fixed for this vector only, never for production encryption).
+    // PKCS5_PBKDF2_HMAC with EVP_sha512(), 310000 iterations, 32-byte key; EVP_aes_256_gcm(),
+    // no padding, empty AAD, 16-byte tag. Wrap standard Base64(IV || salt || ciphertext || tag)
+    // in the Maven prefix/suffix below. Use libcrypto's EVP API: OpenSSL enc does not support GCM.
     private static final String SERVER_CIPHERTEXT =
             "{[name=master,cipher=AES/GCM/NoPadding,version=4.0]MDEyMzQ1Njc4OTo7ICEiIyQlJicoKSorLC0uL3wGicWimiArTLNFI2W3zICctKr13Oq7RQTgB8zlUzRZm/EehIWxTODOhg==}";
 

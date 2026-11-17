@@ -143,7 +143,7 @@ class StructuralCodeGraphTest {
     private final List<ExtendedHttpClient> httpClients = new ArrayList<>();
 
     private ChatClient chatClient(final CodingAgentConfiguration config, final JsonMapper mapper) {
-        final var httpClient = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null));
+        final var httpClient = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null));
         httpClients.add(httpClient);
         final var client =
                 new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC(), httpClient);

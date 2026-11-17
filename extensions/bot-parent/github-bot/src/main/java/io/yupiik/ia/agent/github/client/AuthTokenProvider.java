@@ -27,7 +27,6 @@ import java.security.Signature;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Base64;
-import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
@@ -144,8 +143,15 @@ public final class AuthTokenProvider implements Supplier<String>, AutoCloseable 
                 return cached;
             }
             if (installationId == 0) {
-                final var installation = app.get(installationPath);
-                if (!(installation instanceof Map<?, ?> response) || !(response.get("id") instanceof Number id)) {
+                final Installation installation;
+                try {
+                    installation = app.get(installationPath, Installation.class);
+                } catch (final GitHubClient.HttpException transport) {
+                    throw transport;
+                } catch (final RuntimeException malformed) {
+                    throw new IllegalStateException("GitHub installation lookup must return a positive integer id");
+                }
+                if (installation == null || !(installation.id() instanceof Number id)) {
                     throw new IllegalStateException("GitHub installation lookup must return a positive integer id");
                 }
                 final long resolved;
@@ -159,10 +165,17 @@ public final class AuthTokenProvider implements Supplier<String>, AutoCloseable 
                 }
                 installationId = resolved;
             }
-            final var response = (Map<?, ?>)
-                    app.post("/app/installations/" + installationId + "/access_tokens", new InstallationTokenRequest());
-            final var token = requireToken((String) response.get("token"));
-            final var expiry = Instant.parse((String) response.get("expires_at"));
+            final var response = app.post(
+                    "/app/installations/" + installationId + "/access_tokens",
+                    new InstallationTokenRequest(),
+                    InstallationToken.class);
+            if (response == null
+                    || !(response.token() instanceof String value)
+                    || !(response.expires_at() instanceof String expires)) {
+                throw new IllegalStateException("Invalid installation token response");
+            }
+            final var token = requireToken(value);
+            final var expiry = Instant.parse(expires);
             if (!expiry.isAfter(clock.instant())) {
                 throw new IllegalStateException("GitHub returned an expired installation token");
             }
@@ -245,4 +258,10 @@ public final class AuthTokenProvider implements Supplier<String>, AutoCloseable 
             app.close();
         }
     }
+
+    @JsonModel
+    public record Installation(Object id) {}
+
+    @JsonModel
+    public record InstallationToken(Object token, Object expires_at) {}
 }

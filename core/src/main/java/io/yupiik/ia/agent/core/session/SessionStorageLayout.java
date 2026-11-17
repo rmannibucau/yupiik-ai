@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.session;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.regex.Pattern;
 
 /**
  * Single source of truth for the on-disk storage layout:
@@ -36,6 +37,8 @@ import java.nio.file.Path;
  * ({@code s}<em>hex</em>) migrate there - anything else keeps the legacy file.</p>
  */
 public final class SessionStorageLayout {
+    private static final Pattern SESSION_ID = Pattern.compile("s[0-9a-f]+");
+
     private SessionStorageLayout() {
         // no-op
     }
@@ -46,7 +49,7 @@ public final class SessionStorageLayout {
      *         hex, e.g. {@code s1a0e47e830a}) and can use the folder layout.
      */
     public static boolean isGeneratedSessionId(final String id) {
-        return id != null && id.matches("s[0-9a-f]+");
+        return id != null && SESSION_ID.matcher(id).matches();
     }
 
     /** @return the folder owning all state of a session ({@code <storageHome>/sessions/<id>}). */

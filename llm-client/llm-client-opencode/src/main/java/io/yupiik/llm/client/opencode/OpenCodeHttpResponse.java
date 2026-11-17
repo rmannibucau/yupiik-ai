@@ -15,7 +15,9 @@
  */
 package io.yupiik.llm.client.opencode;
 
+import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.http.HttpClient;
@@ -25,12 +27,19 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.TreeMap;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.InflaterInputStream;
 
 /** Bounded HTTP/1.1 framing, kept separate from TLS and Flow demand. */
 final class OpenCodeHttpResponse {
+    private static final Pattern STATUS_LINE = Pattern.compile("HTTP/1\\.[01] [1-5][0-9]{2}( .*)?");
+    private static final Pattern CONTENT_LENGTH = Pattern.compile("[0-9]{1,18}");
+    private static final Pattern HEADER_NAME = Pattern.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]+");
+    private static final Pattern CHUNK_SIZE = Pattern.compile("[0-9A-Fa-f]{1,15}");
+
     private OpenCodeHttpResponse() {}
 
     record Parsed(HttpResponse.ResponseInfo info, InputStream body) {}
@@ -38,7 +47,7 @@ final class OpenCodeHttpResponse {
     static Parsed read(final InputStream input, final String method) throws IOException {
         for (int interim = 0; interim < 16; interim++) {
             final var status = line(input);
-            if (status == null || !status.matches("HTTP/1\\.[01] [1-5][0-9]{2}( .*)?")) {
+            if (status == null || !STATUS_LINE.matcher(status).matches()) {
                 throw new IOException("Malformed HTTP status line");
             }
             final int code = Integer.parseInt(status.substring(9, 12));
@@ -61,7 +70,8 @@ final class OpenCodeHttpResponse {
                 headers.remove("content-length");
             } else if (headers.containsKey("content-length")) {
                 final var lengths = headers.get("content-length");
-                if (lengths.size() != 1 || !lengths.getFirst().matches("[0-9]{1,18}")) {
+                if (lengths.size() != 1
+                        || !CONTENT_LENGTH.matcher(lengths.getFirst()).matches()) {
                     throw new IOException("Invalid Content-Length");
                 }
                 try {
@@ -82,7 +92,7 @@ final class OpenCodeHttpResponse {
                             case "deflate" -> new InflaterInputStream(body);
                             default -> throw new IOException("Unsupported response content coding: " + coding);
                         };
-                body = new java.io.FilterInputStream(decoded) {
+                body = new FilterInputStream(decoded) {
                     private boolean complete;
 
                     @Override
@@ -148,7 +158,7 @@ final class OpenCodeHttpResponse {
             }
             final int colon = line.indexOf(':');
             if (colon < 1
-                    || !line.substring(0, colon).matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+                    || !HEADER_NAME.matcher(line.substring(0, colon)).matches()
                     || line.substring(colon + 1).chars().anyMatch(c -> c < 32 && c != 9 || c == 127)) {
                 throw new IOException("Malformed HTTP header");
             }
@@ -159,7 +169,7 @@ final class OpenCodeHttpResponse {
     }
 
     private static String line(final InputStream input) throws IOException {
-        final var bytes = new java.io.ByteArrayOutputStream();
+        final var bytes = new ByteArrayOutputStream();
         while (bytes.size() < 8192) {
             final int next = input.read();
             if (next < 0) {
@@ -199,7 +209,7 @@ final class OpenCodeHttpResponse {
 
         @Override
         public int read(final byte[] bytes, final int offset, final int length) throws IOException {
-            java.util.Objects.checkFromIndexSize(offset, length, bytes.length);
+            Objects.checkFromIndexSize(offset, length, bytes.length);
             if (length == 0) {
                 return 0;
             }
@@ -233,7 +243,7 @@ final class OpenCodeHttpResponse {
 
         @Override
         public int read(final byte[] bytes, final int offset, final int length) throws IOException {
-            java.util.Objects.checkFromIndexSize(offset, length, bytes.length);
+            Objects.checkFromIndexSize(offset, length, bytes.length);
             if (length == 0) {
                 return 0;
             }
@@ -245,7 +255,7 @@ final class OpenCodeHttpResponse {
                     throw new IOException("Missing chunk-data CRLF");
                 }
                 final var line = line(input);
-                if (line == null || !line.split(";", 2)[0].matches("[0-9A-Fa-f]{1,15}")) {
+                if (line == null || !CHUNK_SIZE.matcher(line.split(";", 2)[0]).matches()) {
                     throw new IOException("Malformed chunk size");
                 }
                 remaining = Long.parseLong(line.split(";", 2)[0], 16);

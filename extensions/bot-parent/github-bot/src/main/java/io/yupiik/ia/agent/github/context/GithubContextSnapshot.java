@@ -15,14 +15,17 @@
  */
 package io.yupiik.ia.agent.github.context;
 
+import io.yupiik.fusion.framework.api.container.Types;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import java.io.IOException;
+import java.lang.reflect.Type;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -34,6 +37,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
@@ -76,27 +80,40 @@ public class GithubContextSnapshot {
                 throw new IllegalArgumentException("Expected an explicit review target");
             }
             final var prefix = "/repos/" + repo + "/pulls/" + number;
-            final var pull = object(budget.read(prefix).body());
-            final var selectedPull = fields(pull, "title", "body");
-            for (final var ref : List.of("head", "base")) {
-                selectedPull.put(ref, fields(object(pull.get(ref)), "sha"));
+            final var pull = budget.<ContextPull>read(prefix, ContextPull.class).body();
+            if (pull == null || pull.head() == null || pull.base() == null) {
+                throw new IllegalStateException("Expected GitHub context pull and refs");
             }
             snapshot = new Snapshot(
                     1,
                     repo,
                     number,
-                    Pull.from(selectedPull),
-                    pages(prefix + "/files", budget, "filename", "status", "patch").stream()
-                            .map(ChangedFile::from)
+                    new Pull(
+                            optionalText(pull.title()),
+                            optionalText(pull.body()),
+                            new Ref(optionalText(pull.head().sha())),
+                            new Ref(optionalText(pull.base().sha()))),
+                    pages(prefix + "/files", budget).stream()
+                            .map(entry -> new ChangedFile(
+                                    optionalText(entry.filename()),
+                                    optionalText(entry.status()),
+                                    optionalText(entry.patch())))
                             .toList(),
-                    pages(prefix + "/reviews", budget, "body", "state", "commit_id").stream()
-                            .map(Review::from)
+                    pages(prefix + "/reviews", budget).stream()
+                            .map(entry -> new Review(
+                                    optionalText(entry.body()),
+                                    optionalText(entry.state()),
+                                    optionalText(entry.commit_id())))
                             .toList(),
-                    pages(prefix + "/comments", budget, "path", "line", "side", "body").stream()
-                            .map(Comment::from)
+                    pages(prefix + "/comments", budget).stream()
+                            .map(entry -> new Comment(
+                                    optionalText(entry.path()),
+                                    line(entry.line()),
+                                    optionalText(entry.side()),
+                                    optionalText(entry.body())))
                             .toList(),
-                    pages("/repos/" + repo + "/issues/" + number + "/comments", budget, "body").stream()
-                            .map(Conversation::from)
+                    pages("/repos/" + repo + "/issues/" + number + "/comments", budget).stream()
+                            .map(entry -> new Conversation(optionalText(entry.body())))
                             .toList());
         }
         final var bytes = encoded(snapshot);
@@ -194,16 +211,16 @@ public class GithubContextSnapshot {
         return false;
     }
 
-    private List<Map<String, Object>> pages(final String endpoint, final Budget budget, final String... names) {
-        final var result = new ArrayList<Map<String, Object>>();
+    private List<RestResponses.ContextEntry> pages(final String endpoint, final Budget budget) {
+        final var result = new ArrayList<RestResponses.ContextEntry>();
         for (int page = 1; page <= MAX_PAGES; page++) {
-            final var response = budget.read(endpoint + "?per_page=100" + (page == 1 ? "" : "&page=" + page));
-            if (!(response.body() instanceof List<?> entries)) {
+            final var response = budget.<List<RestResponses.ContextEntry>>read(
+                    endpoint + "?per_page=100" + (page == 1 ? "" : "&page=" + page),
+                    new Types.ParameterizedTypeImpl(List.class, RestResponses.ContextEntry.class));
+            if (response.body() == null || response.body().stream().anyMatch(Objects::isNull)) {
                 throw new IllegalStateException("Expected GitHub context array");
             }
-            for (final var entry : entries) {
-                result.add(fields(object(entry), names));
-            }
+            result.addAll(response.body());
             if (response.next() == null) {
                 return result;
             }
@@ -214,6 +231,29 @@ public class GithubContextSnapshot {
         }
         throw new IllegalStateException("GitHub context exceeds pagination limit");
     }
+
+    private static String optionalText(final Object value) {
+        if (value != null && !(value instanceof String)) {
+            throw new IllegalStateException("Invalid GitHub context field");
+        }
+        return (String) value;
+    }
+
+    private static BigDecimal line(final Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof Number)) {
+            throw new IllegalStateException("Invalid GitHub context line");
+        }
+        return new BigDecimal(value.toString());
+    }
+
+    @JsonModel
+    public record ContextPull(Object title, Object body, ContextRef head, ContextRef base) {}
+
+    @JsonModel
+    public record ContextRef(Object sha) {}
 
     private void validateNext(final String next, final String endpoint, final int page) {
         final var uri = URI.create(next);
@@ -256,20 +296,6 @@ public class GithubContextSnapshot {
                 result.put(name, item);
             }
         });
-        return result;
-    }
-
-    private static Map<String, Object> fields(final Map<String, Object> source, final String... names) {
-        final var result = new LinkedHashMap<String, Object>();
-        for (final var name : names) {
-            final var value = source.get(name);
-            if (source.containsKey(name)) {
-                if (value != null && !(value instanceof String) && !("line".equals(name) && value instanceof Number)) {
-                    throw new IllegalStateException("Invalid GitHub context field");
-                }
-                result.put(name, value);
-            }
-        }
         return result;
     }
 
@@ -324,15 +350,7 @@ public class GithubContextSnapshot {
             @Property(documentation = "Pull request title.") String title,
             @Property(documentation = "Pull request body.") String body,
             @Property(documentation = "Pinned head.") Ref head,
-            @Property(documentation = "Pinned base.") Ref base) {
-        private static Pull from(final Map<String, Object> source) {
-            return new Pull(
-                    (String) source.get("title"),
-                    (String) source.get("body"),
-                    new Ref((String) object(source.get("head")).get("sha")),
-                    new Ref((String) object(source.get("base")).get("sha")));
-        }
-    }
+            @Property(documentation = "Pinned base.") Ref base) {}
 
     @JsonModel
     public record ChangedFile(
@@ -340,12 +358,7 @@ public class GithubContextSnapshot {
             @Property(documentation = "Change status.") String status,
 
             @Property(documentation = "Available diff patch.")
-            String patch) {
-        private static ChangedFile from(final Map<String, Object> source) {
-            return new ChangedFile(
-                    (String) source.get("filename"), (String) source.get("status"), (String) source.get("patch"));
-        }
-    }
+            String patch) {}
 
     @JsonModel
     public record Review(
@@ -355,50 +368,25 @@ public class GithubContextSnapshot {
             @Property(documentation = "Review state.") String state,
 
             @Property(documentation = "Reviewed commit SHA.")
-            String commit_id) {
-        private static Review from(final Map<String, Object> source) {
-            return new Review(
-                    (String) source.get("body"), (String) source.get("state"), (String) source.get("commit_id"));
-        }
-    }
+            String commit_id) {}
 
     @JsonModel
     public record Comment(
             @Property(documentation = "Changed path.") String path,
             @Property(documentation = "Diff line.") BigDecimal line,
             @Property(documentation = "Diff side.") String side,
-            @Property(documentation = "Comment body.") String body) {
-        private static Comment from(final Map<String, Object> source) {
-            return new Comment(
-                    (String) source.get("path"),
-                    source.get("line") == null
-                            ? null
-                            : new BigDecimal(source.get("line").toString()),
-                    (String) source.get("side"),
-                    (String) source.get("body"));
-        }
-    }
+            @Property(documentation = "Comment body.") String body) {}
 
     @JsonModel
     public record Conversation(
-            @Property(documentation = "Conversation body.") String body) {
-        private static Conversation from(final Map<String, Object> source) {
-            return new Conversation((String) source.get("body"));
-        }
-    }
-
-    @JsonModel
-    public record ContextResponse(
-            @Property(documentation = "Remote context payload measured against the staging byte budget.")
-            Object payload) {}
+            @Property(documentation = "Conversation body.") String body) {}
 
     private final class Budget {
         private long bytes;
 
-        private GitHubClient.Page read(final String path) {
-            final var page = github.page(path);
-            bytes += json.toString(new ContextResponse(page.body())).getBytes(StandardCharsets.UTF_8).length
-                    - "{\"payload\":}".getBytes(StandardCharsets.UTF_8).length;
+        private <T> GitHubClient.Page<T> read(final String path, final Type type) {
+            final var page = github.<T>page(path, type);
+            bytes += page.responseBytes();
             if (bytes > MAX_BYTES) {
                 throw new IllegalStateException("GitHub context exceeds encoded JSON limit");
             }

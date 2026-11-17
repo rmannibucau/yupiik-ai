@@ -15,21 +15,27 @@
  */
 package io.yupiik.ia.agent.slack.command;
 
+import static java.util.stream.Collectors.toSet;
+
 import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
-import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
-import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.bot.runtime.SlotLease;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackExecutorConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
 import io.yupiik.ia.agent.slack.configuration.SlackProviderConfiguration;
+import io.yupiik.ia.agent.slack.context.SlackActionRegistry;
+import io.yupiik.ia.agent.slack.context.SlackContextAttempt;
+import io.yupiik.ia.agent.slack.context.SlackContextStorage;
+import io.yupiik.ia.agent.slack.model.SlackTask;
 import io.yupiik.ia.agent.slack.service.SlackAdmission;
 import io.yupiik.ia.agent.slack.service.SlackFeedback;
 import io.yupiik.ia.agent.slack.service.SlackPromptRenderer;
@@ -43,7 +49,6 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -68,6 +73,9 @@ public class RunCommand implements Runnable {
     private final SlackAdmission admission;
     private final SlackPromptRenderer renderer;
     private final HostAdmissionConfiguration hostBudget;
+    private final ProviderBudgetConfiguration providerBudget;
+    private final SlackContextConfiguration contextConfiguration;
+    private final SlackActionRegistry actions;
 
     public RunCommand(
             final Options options,
@@ -80,7 +88,10 @@ public class RunCommand implements Runnable {
             final SlackStore store,
             final SlackAdmission admission,
             final SlackPromptRenderer renderer,
-            final HostAdmissionConfiguration hostBudget) {
+            final HostAdmissionConfiguration hostBudget,
+            final ProviderBudgetConfiguration providerBudget,
+            final SlackContextConfiguration contextConfiguration,
+            final SlackActionRegistry actions) {
         this.options = options;
         this.configuration = configuration;
         this.executor = executor;
@@ -91,7 +102,10 @@ public class RunCommand implements Runnable {
         this.store = store;
         this.admission = admission;
         this.hostBudget = hostBudget;
+        this.providerBudget = providerBudget;
         this.renderer = renderer;
+        this.contextConfiguration = contextConfiguration;
+        this.actions = actions;
     }
 
     @RootConfiguration("-")
@@ -141,7 +155,18 @@ public class RunCommand implements Runnable {
                 || configuration.agentConfiguration().isBlank()) {
             throw new IllegalArgumentException("Configure slack.agentConfiguration with trusted JSON");
         }
+        final var contextStorage = new SlackContextStorage();
+        if (contextConfiguration.enabled()) {
+            try {
+                contextStorage.validate(executor.shared());
+            } catch (final IOException invalid) {
+                throw new IllegalArgumentException("Slack context transient execution policy is unavailable", invalid);
+            }
+        }
         store.list(); // Validate/create private state before opening any remote connection.
+        Logger.getLogger(RunCommand.class.getName())
+                .info("Slack controller starting: approvedChannels="
+                        + configuration.channels().size() + ", parallelism=" + options.parallelism());
         final var stopped = new CountDownLatch(1);
         final var cleaned = new CountDownLatch(1);
         final var hook = Thread.ofPlatform().unstarted(() -> {
@@ -161,20 +186,20 @@ public class RunCommand implements Runnable {
         Runtime.getRuntime().addShutdownHook(hook);
         try (final var lease = SlotLease.tryAcquire(configuration.stateRoot().resolve("runner.lock"))
                         .orElseThrow(() -> new IllegalStateException("Another Slack controller owns this state root"));
+                final var contextDispatcher = new SlackContextAttempt.Dispatcher(contextConfiguration);
                 final var http = HttpClient.newBuilder()
                         .followRedirects(HttpClient.Redirect.NEVER)
                         .connectTimeout(Duration.ofSeconds(options.httpTimeoutSeconds()))
                         .build();
-                final var extended = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(http));
                 final var schedule = Executors.newSingleThreadScheduledExecutor(
                         Thread.ofVirtual().factory());
-                final var sandbox =
-                        new SlackSandbox(executor.shared(), provider, sources, json, configuration.stateRoot());
+                final var sandbox = new SlackSandbox(
+                        executor.shared(), provider, sources, json, configuration.stateRoot(), providerBudget);
                 final var workers = Executors.newFixedThreadPool(
                         options.parallelism(), Thread.ofVirtual().factory())) {
             final var api = new SlackWebApi(
                     json,
-                    extended,
+                    http,
                     new SlackWebApi.Settings(
                             URI.create(options.apiBase()),
                             Duration.ofSeconds(options.httpTimeoutSeconds()),
@@ -184,11 +209,33 @@ public class RunCommand implements Runnable {
                     () -> token(configuration.botTokenEnv(), "xoxb-"));
             token(configuration.appTokenEnv(), "xapp-");
             token(configuration.botTokenEnv(), "xoxb-");
+            schedule.scheduleAtFixedRate(
+                    () -> actions.expire(
+                            System.currentTimeMillis(),
+                            () -> store.list().stream()
+                                    .filter(task -> !task.terminal())
+                                    .map(SlackTask::id)
+                                    .collect(toSet())),
+                    1,
+                    1,
+                    TimeUnit.SECONDS);
             final var feedback = new SlackFeedback(configuration, prompts, store, api);
             final var hostAdmission = new HostAdmission(hostBudget);
             hostAdmission.validateDisjoint(configuration.stateRoot(), Path.of(executor.attemptRoot()));
             final var worker = new SlackWorker(
-                    configuration, executor.shared(), json, store, renderer, sandbox, feedback, api, hostAdmission);
+                    configuration,
+                    executor.shared(),
+                    json,
+                    store,
+                    renderer,
+                    sandbox,
+                    feedback,
+                    api,
+                    hostAdmission,
+                    contextConfiguration,
+                    actions,
+                    contextDispatcher,
+                    contextStorage);
             worker.recover();
             try (final var socket = new SlackSocketMode(
                     json,
@@ -201,13 +248,11 @@ public class RunCommand implements Runnable {
                             Duration.ofSeconds(options.reconnectMaxSeconds()),
                             options.maxTransportBytes()),
                     envelope -> {
-                        if (envelope.get("payload") instanceof Map<?, ?> raw) {
-                            @SuppressWarnings("unchecked")
-                            final var payload = (Map<String, Object>) raw;
-                            if ("events_api".equals(envelope.get("type"))) {
-                                admission.admit(payload);
-                            } else if ("interactive".equals(envelope.get("type"))) {
-                                return feedback.interaction(payload);
+                        if (envelope.payload() != null) {
+                            if ("events_api".equals(envelope.type())) {
+                                admission.admit(envelope.payload());
+                            } else if ("interactive".equals(envelope.type())) {
+                                return feedback.interaction(envelope.payload());
                             }
                         }
                         return Optional.empty();
@@ -224,8 +269,8 @@ public class RunCommand implements Runnable {
                             }
                         } catch (final RuntimeException failure) {
                             Logger.getLogger(RunCommand.class.getName())
-                                    .severe(
-                                            "Slack worker stopped; inspect private durable task state before restarting");
+                                    .severe("Slack worker stopped; inspect private durable task state before"
+                                            + " restarting");
                             stopped.countDown();
                         }
                     });
@@ -235,7 +280,8 @@ public class RunCommand implements Runnable {
                     stopped.await();
                 } finally {
                     workers.shutdownNow();
-                    // Do not release runtime ownership while any admitted worker may still be stopping a sandbox.
+                    // Do not release runtime ownership while any admitted worker may still be stopping a
+                    // sandbox.
                     while (!workers.awaitTermination(1, TimeUnit.SECONDS)) {
                         // Confirmation, not a guessed grace interval, controls ownership release.
                     }
@@ -246,6 +292,7 @@ public class RunCommand implements Runnable {
         } catch (final IOException failure) {
             throw new IllegalStateException("Cannot acquire private Slack controller ownership");
         } finally {
+            actions.close();
             cleaned.countDown();
             try {
                 Runtime.getRuntime().removeShutdownHook(hook);

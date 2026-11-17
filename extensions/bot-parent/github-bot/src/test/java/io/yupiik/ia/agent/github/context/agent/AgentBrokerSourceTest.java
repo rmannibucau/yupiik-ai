@@ -301,6 +301,34 @@ class AgentBrokerSourceTest {
     }
 
     @Test
+    void originRequiresLiteralAttemptPrefixAndBoundedGitGrantSuffix() throws Exception {
+        final var workspace = temporary.resolve("origin-scope");
+        final var head = fixture(workspace);
+        final var repo = workspace.resolve("repository");
+        final var base = ENDPOINT.substring(0, ENDPOINT.lastIndexOf('/') + 1);
+        for (final var origin : List.of(base, base + "git/a.git", base + "git/" + "A-9".repeat(26) + "ab.git")) {
+            git(repo, "remote", "set-url", "origin", origin);
+            final var result = cli(workspace, head, "expand", "src");
+            assertEquals(0, result.exit(), result.error());
+        }
+        for (final var origin : List.of(
+                "https://brokerXexample:8443" + base.substring(base.indexOf("/context/")) + "git/grant-1.git",
+                base + "git/.git",
+                base + "git/" + "a".repeat(81) + ".git",
+                base + "git/grant_1.git",
+                base + "git/grant-1Xgit",
+                base + "git/grant-1.git/extra",
+                base + "git/grant-1.git?query",
+                base + "git/nested/grant-1.git",
+                "git/grant-1.git")) {
+            git(repo, "remote", "set-url", "origin", origin);
+            final var result = cli(workspace, head, "expand", "docs");
+            assertNotEquals(0, result.exit(), origin);
+            assertFalse(Files.exists(repo.resolve("docs/guide.txt")), origin);
+        }
+    }
+
+    @Test
     void expandsMonotonicallyWithRealIndependentGitAndPreservesPinnedHead() throws Exception {
         final var workspace = temporary.resolve("expand");
         final var head = fixture(workspace);

@@ -19,7 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.bot.runtime.DockerControlConfiguration;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.service.Worker;
 import java.util.ArrayList;
@@ -53,7 +55,9 @@ class WorkerCommandTest {
                         null,
                         new HostAdmissionConfiguration("", 1, ""),
                         null,
-                        Configuration.of(Map.of())) {
+                        Configuration.of(Map.of()),
+                        new ProviderBudgetConfiguration(null, null, null),
+                        new DockerControlConfiguration("", "")) {
                     @Override
                     public void run(final String task, final WorkerOptions options) {
                         tasks.add(task);

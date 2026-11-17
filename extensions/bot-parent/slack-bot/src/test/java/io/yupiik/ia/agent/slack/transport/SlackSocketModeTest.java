@@ -17,34 +17,110 @@ package io.yupiik.ia.agent.slack.transport;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.ia.agent.slack.model.SlackJson;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
 
 class SlackSocketModeTest {
     @Test
+    void lifecycleDiagnosticsContainOnlyBoundedSafeStateText() throws Exception {
+        final var logger = Logger.getLogger(SlackSocketMode.class.getName());
+        final var previous = logger.getLevel();
+        final var records = new LinkedBlockingQueue<LogRecord>();
+        final var handler = new Handler() {
+            @Override
+            public void publish(final LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+        };
+        logger.addHandler(handler);
+        logger.setLevel(Level.INFO);
+        try (final var fixture = new SlackTransportFixture()) {
+            fixture.socketDiscovery(); // Discovery URL contains a secret socket ticket.
+            try (final var transport = fixture.socket(4096, ignored -> {
+                throw new IllegalStateException("xapp-secret xoxb-secret private-body");
+            })) {
+                var peer = start(fixture, transport);
+                assertDiagnostic(fixture.take(records), Level.INFO, "Slack Socket Mode connection open");
+                peer.text("{\"type\":\"hello\",\"reason\":\"private-body\"}", true, false);
+                assertDiagnostic(fixture.take(records), Level.INFO, "Slack Socket Mode hello received");
+                peer.text("{\"type\":\"hello\"}", true, false);
+                peer.text("{\"type\":\"events_api\",\"envelope_id\":\"private-body\"}", true, false);
+                fixture.take(fixture.scheduler.tasks).run();
+                assertDiagnostic(fixture.take(records), Level.INFO, "Slack Socket Mode reconnecting");
+                peer = fixture.take(fixture.sessions);
+                assertDiagnostic(fixture.take(records), Level.INFO, "Slack Socket Mode connection open");
+                peer.text(
+                        "{\"type\":\"disconnect\",\"reason\":\"disabled\",\"debug_info\":\"private-body\"}",
+                        true,
+                        false);
+                assertDiagnostic(
+                        fixture.take(records),
+                        Level.WARNING,
+                        "Slack Socket Mode disabled: remote_policy_or_credentials");
+                transport.close();
+                transport.close();
+                assertDiagnostic(fixture.take(records), Level.INFO, "Slack Socket Mode closed");
+                assertTrue(records.isEmpty(), "Duplicate hello/close must not produce repeated diagnostics");
+            }
+            fixture.scheduler.shutdownNow();
+            try (final var transport = fixture.socket(4096, ignored -> Optional.empty())) {
+                transport.start();
+                assertDiagnostic(
+                        fixture.take(records), Level.WARNING, "Slack Socket Mode disabled: scheduling_unavailable");
+                assertEquals(SlackSocketMode.State.DISABLED, transport.state());
+            }
+            assertDiagnostic(fixture.take(records), Level.INFO, "Slack Socket Mode closed");
+            assertTrue(records.isEmpty());
+        } finally {
+            logger.removeHandler(handler);
+            logger.setLevel(previous);
+        }
+    }
+
+    private void assertDiagnostic(final LogRecord record, final Level level, final String message) {
+        assertEquals(level, record.getLevel());
+        assertEquals(message, record.getMessage());
+        assertNull(record.getThrown());
+        assertNull(record.getParameters());
+    }
+
+    @Test
     void realJdkWebSocketReassemblesFragmentsAndAcksOnlyAfterDurableAdmission() throws Exception {
         try (final var fixture = new SlackTransportFixture()) {
             fixture.socketDiscovery();
-            final var admitted = new CompletableFuture<Map<String, Object>>();
+            final var admitted = new CompletableFuture<SlackJson.Envelope>();
             final var release = new CountDownLatch(1);
             try (final var transport = fixture.socket(4096, envelope -> {
                 admitted.complete(envelope);
                 if (!release.await(200, TimeUnit.MILLISECONDS)) {
                     throw new IllegalStateException("Admission was not released");
                 }
-                return Optional.of(Map.of("text", "accepted"));
+                return Optional.of(new SlackJson.Reply("accepted", null, null));
             })) {
                 final var peer = start(fixture, transport);
                 peer.text("{\"type\":\"events_api\",\"envelope_id\":\"E1\",", false, false);
-                peer.text("\"accepts_response_payload\":true,\"payload\":{\"event\":\"test\"}}", true, true);
-                assertEquals("E1", admitted.get(200, TimeUnit.MILLISECONDS).get("envelope_id"));
+                peer.text("\"accepts_response_payload\":true,\"payload\":{\"event\":{\"type\":\"test\"}}}", true, true);
+                assertEquals("E1", admitted.get(200, TimeUnit.MILLISECONDS).envelope_id());
                 assertTrue(peer.messages.isEmpty(), "ACK preceded durable admission");
                 release.countDown();
                 assertEquals(
@@ -58,6 +134,27 @@ class SlackSocketModeTest {
     }
 
     @Test
+    void missingEnvelopeIdentityWithholdsAckBeforeCallingAdmission() throws Exception {
+        for (final var body : List.of("{}", "{\"envelope_id\":null}", "{\"envelope_id\":\"\"}")) {
+            try (final var fixture = new SlackTransportFixture()) {
+                fixture.socketDiscovery();
+                final var calls = new AtomicInteger();
+                try (final var transport = fixture.socket(4096, ignored -> {
+                    calls.incrementAndGet();
+                    return Optional.empty();
+                })) {
+                    final var peer = start(fixture, transport);
+                    peer.text(body, true, false);
+                    fixture.take(fixture.scheduler.tasks);
+                    assertEquals(0, calls.get(), body);
+                    assertTrue(peer.messages.isEmpty(), body);
+                    assertEquals(SlackSocketMode.State.RECONNECTING, transport.state());
+                }
+            }
+        }
+    }
+
+    @Test
     void bareAckAndInteractionPayloadCapabilityAreRespected() throws Exception {
         try (final var fixture = new SlackTransportFixture()) {
             fixture.socketDiscovery();
@@ -66,7 +163,7 @@ class SlackSocketModeTest {
                     1024,
                     ignored -> calls.incrementAndGet() == 1
                             ? Optional.empty()
-                            : Optional.of(Map.of("text", "not-permitted")))) {
+                            : Optional.of(new SlackJson.Reply("not-permitted", null, null)))) {
                 final var peer = start(fixture, transport);
                 for (final var id : new String[] {"E1", "E2"}) {
                     peer.text(
@@ -204,7 +301,8 @@ class SlackSocketModeTest {
     void oversizedAckIsNotSentAndSocketCloseReleasesLiveConnection() throws Exception {
         try (final var fixture = new SlackTransportFixture()) {
             fixture.socketDiscovery();
-            try (final var transport = fixture.socket(128, ignored -> Optional.of(Map.of("text", "x".repeat(200))))) {
+            try (final var transport =
+                    fixture.socket(128, ignored -> Optional.of(new SlackJson.Reply("x".repeat(200), null, null)))) {
                 final var peer = start(fixture, transport);
                 peer.text("{\"envelope_id\":\"E1\",\"accepts_response_payload\":true}", true, false);
                 fixture.take(fixture.scheduler.tasks);
@@ -285,7 +383,8 @@ class SlackSocketModeTest {
         try (final var fixture = new SlackTransportFixture()) {
             final var entered = new CountDownLatch(1);
             final var release = new CountDownLatch(1);
-            fixture.respond(ignored -> {
+            fixture.respond(request -> {
+                fixture.expectedDisconnectedResponses.add(request);
                 entered.countDown();
                 try {
                     if (!release.await(200, TimeUnit.MILLISECONDS)) {

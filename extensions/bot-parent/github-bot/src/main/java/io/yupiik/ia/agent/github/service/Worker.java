@@ -16,19 +16,28 @@
 package io.yupiik.ia.agent.github.service;
 
 import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.fusion.framework.api.container.Types;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.kubernetes.client.KubernetesClient;
 import io.yupiik.fusion.kubernetes.client.KubernetesClientConfiguration;
+import io.yupiik.ia.agent.bot.runtime.DockerControlConfiguration;
 import io.yupiik.ia.agent.bot.runtime.ProviderBudgetEnvironment;
 import io.yupiik.ia.agent.bot.runtime.ResultReader;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.bot.runtime.execution.AttemptRelay;
+import io.yupiik.ia.agent.bot.runtime.execution.DockerExecutionBackend;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend;
+import io.yupiik.ia.agent.bot.runtime.execution.NonoExecutionBackend;
+import io.yupiik.ia.agent.bot.runtime.model.KubeconfigDocument;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.core.llm.ProviderRequestBudget;
 import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.context.AssessmentBase;
@@ -38,16 +47,12 @@ import io.yupiik.ia.agent.github.context.GithubContextSnapshot;
 import io.yupiik.ia.agent.github.context.GithubPrivateContext;
 import io.yupiik.ia.agent.github.execution.AgentGitSource;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
-import io.yupiik.ia.agent.github.execution.AttemptRelay;
 import io.yupiik.ia.agent.github.execution.AttemptServices;
-import io.yupiik.ia.agent.github.execution.DockerExecutionBackend;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend;
-import io.yupiik.ia.agent.github.execution.NonoExecutionBackend;
+import io.yupiik.ia.agent.github.execution.GithubExecutionPolicy;
 import io.yupiik.ia.agent.github.execution.RepositoryCache;
 import io.yupiik.ia.agent.github.execution.cache.DependencyCache;
 import io.yupiik.ia.agent.github.execution.cache.DependencyCacheProvisioning;
 import io.yupiik.ia.agent.github.model.AgentResult;
-import io.yupiik.ia.agent.github.model.KubeconfigDocument;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.model.TaskState;
@@ -90,6 +95,8 @@ import java.util.regex.Pattern;
  */
 @ApplicationScoped
 public class Worker {
+    private static final Pattern REPOSITORY_ID = Pattern.compile("[1-9][0-9]*");
+
     private static final Logger LOGGER = Logger.getLogger(Worker.class.getName());
     private static final Pattern PULL_NUMBER = Pattern.compile("[0-9]+");
     private static final Pattern TASK_ID = Pattern.compile("[a-zA-Z0-9-]+");
@@ -119,6 +126,8 @@ public class Worker {
     private final FixPublisher fixes;
     private final HostAdmissionConfiguration admissionConfiguration;
     private final Configuration sources;
+    private final ProviderBudgetConfiguration budgetConfiguration;
+    private final DockerControlConfiguration dockerControl;
 
     public Worker(
             final GithubBotConfiguration conf,
@@ -139,7 +148,9 @@ public class Worker {
             final FixPublisher fixes,
             final HostAdmissionConfiguration admission,
             final Clock clock,
-            final Configuration sources) {
+            final Configuration sources,
+            final ProviderBudgetConfiguration budgetConfiguration,
+            final DockerControlConfiguration dockerControl) {
         this.conf = conf;
         this.store = store;
         this.github = github;
@@ -159,6 +170,8 @@ public class Worker {
         this.fixes = fixes;
         this.admissionConfiguration = admission;
         this.sources = sources;
+        this.budgetConfiguration = budgetConfiguration;
+        this.dockerControl = dockerControl;
     }
 
     private void initializeBackend() {
@@ -174,9 +187,9 @@ public class Worker {
     }
 
     private void configureBackend() {
-        final var requestBudget = ProviderBudgetEnvironment.select(sources);
+        final var requestBudget = ProviderBudgetEnvironment.select(budgetConfiguration);
         try {
-            ProviderRequestBudget.fromConfiguration(sources);
+            ProviderRequestBudget.fromConfiguration(budgetConfiguration);
         } catch (final IOException invalid) {
             throw new IllegalArgumentException("Cannot initialize the trusted provider request budget", invalid);
         }
@@ -203,13 +216,15 @@ public class Worker {
                             "Docker enforced egress cannot reach the private credential relay; use a public HTTPS provider or disable one mode");
                 }
                 this.backend = new DockerExecutionBackend(
+                        GithubExecutionPolicy.POLICY,
                         execution.docker().executable(),
                         execution.docker().image(),
                         timeout,
                         execution.docker().network(),
                         execution.docker().egress(),
                         execution.docker().services(),
-                        execution.showToolOutput());
+                        execution.showToolOutput(),
+                        execution.docker().disableContainerLogs());
                 this.nono = null;
             }
             case NONO -> {
@@ -702,13 +717,7 @@ public class Worker {
                             "Brokered Git acquisition currently supports canonical github.com only");
                 }
                 if (execution.backend() == ExecutorConfiguration.Backend.DOCKER) {
-                    final var host = sources.get("DOCKER_HOST").orElse(null);
-                    final var context = sources.get("DOCKER_CONTEXT").orElse(null);
-                    if ((host != null && !host.isBlank() && !host.startsWith("unix://"))
-                            || (context != null && !context.isBlank() && !"default".equals(context))) {
-                        throw new IllegalArgumentException(
-                                "Broker mode requires a local Docker daemon with the same attempt paths; remote Docker contexts are unsupported");
-                    }
+                    dockerControl.requireLocal();
                     if (execution.docker().egress() != null) {
                         throw new IllegalArgumentException(
                                 "Broker mode cannot bypass enforced Docker egress; configure and accept a supported routed topology before enabling it");
@@ -794,9 +803,9 @@ public class Worker {
                 // Invalid provisioning is a configuration/safety failure, not a cache miss.
                 // Restore first: provisioning files must not be included in a restored entry.
                 try {
-                    final var repository = TaskStore.map(github.get("/repos/" + task.repository()));
-                    final var repositoryId = String.valueOf(repository.get("id"));
-                    if (!repositoryId.matches("[1-9][0-9]*")) {
+                    final var repository = github.get("/repos/" + task.repository(), RestResponses.Repository.class);
+                    final var repositoryId = String.valueOf(repository.id());
+                    if (!REPOSITORY_ID.matcher(repositoryId).matches()) {
                         throw new IOException("Dependency cache requires an immutable repository identity");
                     }
                     cacheIdentity = conf.api() + "#" + repositoryId;
@@ -825,6 +834,7 @@ public class Worker {
                         brokerContext.endpoint(),
                         credentials,
                         sources,
+                        budgetConfiguration,
                         Duration.ofSeconds(execution.timeoutSeconds()));
             }
             stage = "launch-preparation";
@@ -861,7 +871,7 @@ public class Worker {
                                     json,
                                     execution.relay().bind(),
                                     execution.relay().advertised(),
-                                    sources);
+                                    budgetConfiguration);
                     final var broker = !agentCommenting(task, options) && (task.kind() == TaskKind.review)
                             ? (context == null
                                     ? new GithubContextBroker(github, json, task, directory)
@@ -879,7 +889,8 @@ public class Worker {
                                         credentials,
                                         toolEnvironment,
                                         services.settings(),
-                                        services.credentials());
+                                        services.credentials(),
+                                        null);
                     case NONO -> nono.execute(directory, runtime, prompt, credentials, toolEnvironment);
                     case KUBERNETES -> {
                         try (final var client = kubernetesClient()) {
@@ -1071,12 +1082,12 @@ public class Worker {
         if (!FORK_OWNER.matcher(options.forkOwner()).matches()) {
             throw new IllegalArgumentException("Invalid fork owner");
         }
-        final var fork = TaskStore.map(
-                github.get("/repos/" + options.forkOwner() + "/" + repository.split("/")[1]));
-        if (!Boolean.TRUE.equals(fork.get("fork"))
-                || !(fork.get("parent") instanceof Map<?, ?>)
-                || !repository.equalsIgnoreCase(
-                        String.valueOf(TaskStore.map(fork.get("parent")).get("full_name")))) {
+        final var fork = github.get(
+                "/repos/" + options.forkOwner() + "/" + repository.split("/")[1], RestResponses.Repository.class);
+        if (fork == null
+                || !Boolean.TRUE.equals(fork.fork())
+                || fork.parent() == null
+                || !repository.equalsIgnoreCase(fork.parent().full_name())) {
             throw new IllegalArgumentException("Pre-provisioned fork does not belong to the expected upstream");
         }
     }
@@ -1092,11 +1103,11 @@ public class Worker {
         final var head = URLEncoder.encode(options.forkOwner() + ":github-bot/" + task.id(), StandardCharsets.UTF_8);
         String next = "/repos/" + task.repository() + "/pulls?state=open&head=" + head + "&per_page=100";
         while (next != null) {
-            final var page = github.page(next);
-            for (final var raw : (List<?>) page.body()) {
-                final var pr = TaskStore.map(raw);
+            final var page = github.<List<RestResponses.Pull>>page(
+                    next, new Types.ParameterizedTypeImpl(List.class, RestResponses.Pull.class));
+            for (final var pr : page.body()) {
                 if (validPullRequest(task, pr, options)) {
-                    return String.valueOf(pr.get("html_url"));
+                    return String.valueOf(pr.html_url());
                 }
             }
             next = page.next();
@@ -1105,24 +1116,20 @@ public class Worker {
     }
 
     private boolean validPullRequest(
-            final TaskDocument task, final Map<String, Object> pr, final WorkerOptions options) {
-        if (!"open".equals(pr.get("state"))
-                || !(pr.get("head") instanceof Map<?, ?>)
-                || !(pr.get("base") instanceof Map<?, ?>)) {
+            final TaskDocument task, final RestResponses.Pull pr, final WorkerOptions options) {
+        if (pr == null || !"open".equals(pr.state()) || pr.head() == null || pr.base() == null) {
             return false;
         }
-        final var head = TaskStore.map(pr.get("head"));
-        final var base = TaskStore.map(pr.get("base"));
-        if (!(head.get("repo") instanceof Map<?, ?>) || !(base.get("repo") instanceof Map<?, ?>)) {
+        final var head = pr.head();
+        final var base = pr.base();
+        if (head.repo() == null || base.repo() == null) {
             return false;
         }
         final var repo = String.valueOf(task.repository());
         final var fork = options.forkOwner() + "/" + repo.split("/")[1];
-        return ("github-bot/" + task.id()).equals(head.get("ref"))
-                && fork.equalsIgnoreCase(
-                        String.valueOf(TaskStore.map(head.get("repo")).get("full_name")))
-                && repo.equalsIgnoreCase(
-                        String.valueOf(TaskStore.map(base.get("repo")).get("full_name")));
+        return ("github-bot/" + task.id()).equals(head.ref())
+                && fork.equalsIgnoreCase(head.repo().full_name())
+                && repo.equalsIgnoreCase(base.repo().full_name());
     }
 
     private void stage(final String id, final AgentResult result) {
@@ -1191,18 +1198,18 @@ public class Worker {
         final boolean discussion = "discussion".equals(task.sourceType());
         String next = discussion ? null : prefix + "?per_page=100";
         while (next != null) {
-            final var page = github.page(next);
-            for (final var raw : (List<?>) page.body()) {
-                final var comment = TaskStore.map(raw);
-                if (String.valueOf(comment.get("body")).contains(marker)
-                        && comment.get("user") instanceof Map<?, ?>
+            final var page = github.<List<RestResponses.FeedItem>>page(
+                    next, new Types.ParameterizedTypeImpl(List.class, RestResponses.FeedItem.class));
+            for (final var comment : page.body()) {
+                if (comment != null
+                        && String.valueOf(comment.body()).contains(marker)
+                        && comment.user() != null
                         && conf.login()
-                                .equalsIgnoreCase(String.valueOf(
-                                        TaskStore.map(comment.get("user")).get("login")))) {
+                                .equalsIgnoreCase(String.valueOf(comment.user().login()))) {
                     finish(
                             task,
                             "commentUrl",
-                            String.valueOf(comment.get("html_url")),
+                            String.valueOf(comment.html_url()),
                             Boolean.TRUE.equals(task.publicationFailure()));
                     return;
                 }
@@ -1243,8 +1250,9 @@ public class Worker {
             final var expected = "https://github.com/" + task.repository() + "/pull/";
             if (url.startsWith(expected)
                     && PULL_NUMBER.matcher(url.substring(expected.length())).matches()) {
-                final var pr = TaskStore.map(
-                        github.get("/repos/" + task.repository() + "/pulls/" + url.substring(expected.length())));
+                final var pr = github.get(
+                        "/repos/" + task.repository() + "/pulls/" + url.substring(expected.length()),
+                        RestResponses.Pull.class);
                 if (validPullRequest(task, pr, options)) {
                     outcome = "I opened a pull request: " + url;
                 }
@@ -1275,8 +1283,9 @@ public class Worker {
         audit.record(
                 "publication-starting",
                 store.transaction(state -> state.task(id).document()));
-        final var posted = TaskStore.map(github.post(prefix, new GitHubClient.CommentRequest(marker + "\n" + outcome)));
-        final var postedUrl = String.valueOf(posted.get("html_url"));
+        final var posted = github.post(
+                prefix, new GitHubClient.CommentRequest(marker + "\n" + outcome), RestResponses.FeedItem.class);
+        final var postedUrl = posted == null ? "null" : String.valueOf(posted.html_url());
         final var expectedUrl =
                 "https://github.com/" + task.repository() + "/issues/" + task.number() + "#issuecomment-";
         final var expectedPullUrl =
@@ -1350,7 +1359,7 @@ public class Worker {
 
     private String executionFingerprint() {
         // Client settings can contain PEM credentials. Persist only a digest, never the configuration.
-        final var identity = execution.toString();
+        final var identity = "runtime-ownership-v2:" + GithubExecutionPolicy.POLICY + ':' + execution;
         try {
             return HexFormat.of()
                     .formatHex(MessageDigest.getInstance("SHA-256").digest(identity.getBytes(StandardCharsets.UTF_8)));

@@ -81,7 +81,7 @@ class ChatClientInBandToolCallsTest {
                 exchange -> respond(
                         exchange, 200, "{\"data\":[{\"id\":\"test-model\",\"owned_by\":\"x\"}]}", "application/json"));
         server.start();
-        http = new HttpClientProducer().httpClient(configuration(), new NativeProviderConfiguration(null));
+        http = new HttpClientProducer().httpClient(configuration(), new NativeProviderConfiguration(null, null));
         client = new ChatClient(
                 configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC(), http);
     }

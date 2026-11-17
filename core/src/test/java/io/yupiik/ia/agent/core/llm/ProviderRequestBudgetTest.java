@@ -17,7 +17,7 @@ package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
@@ -46,15 +46,16 @@ class ProviderRequestBudgetTest {
 
     @Test
     void disabledAndStrictTrustedSettings() throws Exception {
-        final var disabled = ProviderRequestBudget.fromConfiguration(Configuration.of(Map.of()));
+        final var disabled = ProviderRequestBudget.fromConfiguration(budgetConfiguration(Map.of()));
         assertFalse(disabled.enabled());
         try (final var lease = disabled.tryAcquire().orElseThrow()) {
             lease.dispatched();
             lease.completed();
             lease.completed();
         }
-        assertFalse(ProviderRequestBudget.fromConfiguration(Configuration.of(Map.of(ProviderRequestBudget.ROOT, " ")))
-                .enabled());
+        assertFalse(
+                ProviderRequestBudget.fromConfiguration(budgetConfiguration(Map.of(ProviderRequestBudget.ROOT, " ")))
+                        .enabled());
         for (final var settings : List.of(
                 Map.of(ProviderRequestBudget.ID, "account"),
                 Map.of(ProviderRequestBudget.SLOTS, "1"),
@@ -73,7 +74,7 @@ class ProviderRequestBudgetTest {
                         "1"))) {
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> ProviderRequestBudget.fromConfiguration(Configuration.of(settings)));
+                    () -> ProviderRequestBudget.fromConfiguration(budgetConfiguration(settings)));
         }
     }
 
@@ -161,7 +162,7 @@ class ProviderRequestBudgetTest {
         Files.createSymbolicLink(link, root);
         assertThrows(
                 IOException.class,
-                () -> ProviderRequestBudget.fromConfiguration(Configuration.of(Map.of(
+                () -> ProviderRequestBudget.fromConfiguration(budgetConfiguration(Map.of(
                         ProviderRequestBudget.ROOT,
                         link.toString(),
                         ProviderRequestBudget.ID,
@@ -170,7 +171,7 @@ class ProviderRequestBudgetTest {
                         "1"))));
         assertThrows(
                 IOException.class,
-                () -> ProviderRequestBudget.fromConfiguration(Configuration.of(Map.of(
+                () -> ProviderRequestBudget.fromConfiguration(budgetConfiguration(Map.of(
                         ProviderRequestBudget.ROOT,
                         link.resolve("nested").toString(),
                         ProviderRequestBudget.ID,
@@ -180,12 +181,12 @@ class ProviderRequestBudgetTest {
         Files.createSymbolicLink(root.resolve("symlink.budget"), ledger);
         assertThrows(
                 IOException.class,
-                () -> ProviderRequestBudget.fromConfiguration(Configuration.of(settings("symlink", "1"))));
+                () -> ProviderRequestBudget.fromConfiguration(budgetConfiguration(settings("symlink", "1"))));
         Files.write(root.resolve("partial.budget"), new byte[0]);
         Files.setPosixFilePermissions(root.resolve("partial.budget"), PosixFilePermissions.fromString("rw-------"));
         assertThrows(
                 IOException.class,
-                () -> ProviderRequestBudget.fromConfiguration(Configuration.of(settings("partial", "1"))));
+                () -> ProviderRequestBudget.fromConfiguration(budgetConfiguration(settings("partial", "1"))));
     }
 
     @Test
@@ -234,12 +235,6 @@ class ProviderRequestBudgetTest {
                         .getProtectionDomain()
                         .getCodeSource()
                         .getLocation()
-                        .toURI())
-                + separator
-                + Path.of(Configuration.class
-                        .getProtectionDomain()
-                        .getCodeSource()
-                        .getLocation()
                         .toURI());
         return new ProcessBuilder(
                         Path.of(System.getProperty("java.home"), "bin", "java").toString(),
@@ -260,7 +255,14 @@ class ProviderRequestBudgetTest {
     }
 
     private ProviderRequestBudget budget(final String slots) throws Exception {
-        return ProviderRequestBudget.fromConfiguration(Configuration.of(settings("account", slots)));
+        return ProviderRequestBudget.fromConfiguration(budgetConfiguration(settings("account", slots)));
+    }
+
+    private static ProviderBudgetConfiguration budgetConfiguration(final Map<String, String> settings) {
+        return new ProviderBudgetConfiguration(
+                settings.get(ProviderRequestBudget.ROOT),
+                settings.get(ProviderRequestBudget.ID),
+                settings.get(ProviderRequestBudget.SLOTS));
     }
 
     private Map<String, String> settings(final String id, final String slots) {
@@ -284,7 +286,7 @@ class ProviderRequestBudgetTest {
                     System.in.read();
                 }
             } else {
-                final var budget = ProviderRequestBudget.fromConfiguration(Configuration.of(Map.of(
+                final var budget = ProviderRequestBudget.fromConfiguration(budgetConfiguration(Map.of(
                         ProviderRequestBudget.ROOT,
                         args[0],
                         ProviderRequestBudget.ID,

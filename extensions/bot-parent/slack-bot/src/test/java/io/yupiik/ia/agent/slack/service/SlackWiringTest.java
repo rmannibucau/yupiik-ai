@@ -28,11 +28,14 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.framework.JsonModule;
 import io.yupiik.ia.agent.bot.feedback.BotFeedbackGate$FusionBean$gate;
 import io.yupiik.ia.agent.bot.runtime.BotRuntimeModule;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration$RootConfiguration$FusionBean;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.Question;
+import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.wiring.FeedbackGateProducer$FusionBean;
 import io.yupiik.ia.agent.core.wiring.FeedbackGateProducer$FusionBean$feedbackGate;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.slack.SlackBotModule;
 import io.yupiik.ia.agent.slack.command.CancelCommand;
 import io.yupiik.ia.agent.slack.command.CleanupCommand;
@@ -40,16 +43,25 @@ import io.yupiik.ia.agent.slack.command.ListCommand;
 import io.yupiik.ia.agent.slack.command.RetryCommand;
 import io.yupiik.ia.agent.slack.command.RunCommand;
 import io.yupiik.ia.agent.slack.command.ShowCommand;
+import io.yupiik.ia.agent.slack.configuration.AgentSlackContextConfiguration;
+import io.yupiik.ia.agent.slack.configuration.AgentSlackContextConfiguration$RootConfiguration$FusionBean;
 import io.yupiik.ia.agent.slack.configuration.SlackConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackExecutorConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
+import io.yupiik.ia.agent.slack.context.SlackContextMailbox;
+import io.yupiik.ia.agent.slack.model.SlackJson;
+import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackStore;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -57,6 +69,80 @@ import org.junit.jupiter.api.io.TempDir;
 class SlackWiringTest {
     @TempDir
     Path root;
+
+    @Test
+    void generatedSlackModuleDiscoversReadOnlyContextToolDisabledByDefault() {
+        try (final var container = configure(Map.of()).start();
+                final var configuration = container.lookup(AgentSlackContextConfiguration.class);
+                final var tool = container.lookup(EmbeddedTool.class)) {
+            assertEquals(
+                    AgentSlackContextConfiguration$RootConfiguration$FusionBean.class,
+                    configuration.bean().getClass());
+            assertFalse(configuration.instance().enabled());
+            assertEquals(
+                    "/attempt/storage/slack-context", configuration.instance().directory());
+            assertEquals("", configuration.instance().channel());
+            assertEquals(30, configuration.instance().timeoutSeconds());
+            assertEquals("slack_context", tool.instance().name());
+            assertEquals(ToolCategory.READ, tool.instance().category());
+            assertTrue(tool.instance().readonly());
+            assertFalse(tool.instance().usable());
+            assertTrue(tool.instance().execute(Map.of("operation", "summary")).error());
+        }
+        assertFalse(Files.exists(root.resolve("uncreated")));
+    }
+
+    @Test
+    void generatedContextConfigurationMakesDiscoveredToolUsableWithHostMailbox() throws Exception {
+        final var mailbox = Files.createDirectory(
+                root.resolve("renamed mailbox"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        try (final var container = configure(Map.of(
+                                "slackContext.enabled", "true",
+                                "slackContext.directory", mailbox.toString(),
+                                "slackContext.channel", "CBINDING",
+                                "slackContext.timeoutSeconds", "3"))
+                        .start();
+                final var configuration = container.lookup(AgentSlackContextConfiguration.class);
+                final var tool = container.lookup(EmbeddedTool.class);
+                final var mapper = container.lookup(JsonMapper.class);
+                final var controller = new SlackContextMailbox(mailbox, mapper.instance(), "CBINDING");
+                final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            assertTrue(configuration.instance().enabled());
+            assertEquals(mailbox.toString(), configuration.instance().directory());
+            assertEquals("CBINDING", configuration.instance().channel());
+            assertEquals(3, configuration.instance().timeoutSeconds());
+            assertTrue(tool.instance().usable());
+            final var result = executor.submit(() -> tool.instance().execute(Map.of("operation", "summary")));
+            final var request = assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
+                SlackContextMailbox.Request pending;
+                while ((pending = controller.pending()) == null) {
+                    Thread.sleep(10);
+                }
+                return pending;
+            });
+            assertEquals("CBINDING", request.channel());
+            assertEquals(Map.of("operation", "summary"), request.arguments());
+            final var response = Map.<String, Object>of("status", "ok", "summary", "host mailbox context");
+            controller.respond(request, response);
+            final var answer = result.get(2, TimeUnit.SECONDS);
+            assertFalse(answer.error());
+            assertEquals(response, mapper.instance().fromString(Object.class, answer.output()));
+        }
+        assertFalse(Files.exists(root.resolve("uncreated")));
+    }
+
+    @Test
+    void assembledMapperDiscoversGeneratedSlackModelCodecs() {
+        try (final var container = configure(Map.of()).start();
+                final var mapper = container.lookup(JsonMapper.class)) {
+            assertEquals(
+                    Boolean.TRUE,
+                    mapper.instance()
+                            .fromString(SlackJson.ApiResponse.class, "{\"ok\":true}")
+                            .ok());
+        }
+    }
 
     @Test
     void defaultConfigurationsBindWithoutInstallationOrCredentials() {
@@ -69,6 +155,7 @@ class SlackWiringTest {
             assertEquals("", defaults.botUser());
             assertEquals(List.of(), defaults.channels());
             assertEquals(List.of(), defaults.users());
+            assertFalse(defaults.allowChannelMembers());
             assertFalse(defaults.allowSlackConnect());
             assertEquals("SLACK_APP_TOKEN", defaults.appTokenEnv());
             assertEquals("SLACK_BOT_TOKEN", defaults.botTokenEnv());
@@ -148,9 +235,10 @@ class SlackWiringTest {
             assertEquals(List.of("U1", "W2", "U3"), configuration.instance().users());
             assertEquals(ApplicationScoped.class, renderer.bean().scope());
             assertNotEquals(SlackPromptRenderer.class, renderer.instance().getClass());
-            final var current = task("current", "U1", "queued", 100);
-            final var previous = task("previous", "U1", "done", 1).publication("{{untrusted}}", "2.1", "done", 2);
-            final var rendered = renderer.instance().render(current, List.of(previous));
+            final var current = task("current", "U1", TaskStatus.queued, 100);
+            final var previous =
+                    task("previous", "U1", TaskStatus.done, 1).publication("{{untrusted}}", "2.1", TaskStatus.done, 2);
+            final var rendered = renderer.instance().render(current, List.of(previous), false);
             final var lines = rendered.split("\n");
             assertEquals("trusted-policy", lines[0]);
             assertEquals("trusted-output", lines[1]);
@@ -171,7 +259,7 @@ class SlackWiringTest {
         try (final var container = configure(Map.of(
                                 "yca.bot.feedback.enabled", "false",
                                 "yca.bot.feedback.directory", mailbox.toString(),
-                                "yca.bot.feedback.timeoutSeconds", "not-parsed-when-disabled"))
+                                "yca.bot.feedback.timeoutSeconds", "600"))
                         .start();
                 final var gate = container.lookup(FeedbackGate.class)) {
             assertEquals(BotFeedbackGate$FusionBean$gate.class, gate.bean().getClass());
@@ -199,6 +287,7 @@ class SlackWiringTest {
                 .register(new SlackBotModule(), new BotRuntimeModule(), new JsonModule())
                 // Include the real competing core producer, not unrelated core Start listeners.
                 .register(new FeedbackGateProducer$FusionBean(), new FeedbackGateProducer$FusionBean$feedbackGate())
+                .register(new ProviderBudgetConfiguration$RootConfiguration$FusionBean())
                 .register(new FusionListener<ConfigurationRegistration>() {
                     @Override
                     public Type eventType() {

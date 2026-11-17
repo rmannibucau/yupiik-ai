@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.github.configuration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
 import io.yupiik.ia.agent.github.model.TaskDocument;
@@ -253,7 +254,9 @@ class PromptConfigurationTest {
     }
 
     private ExecutorConfiguration executor(final Map<String, String> values) {
-        return new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+        return new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .shared();
     }
 
     private LinkedHashMap<String, String> services() {

@@ -18,11 +18,11 @@ package io.yupiik.ia.agent.github.execution;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode;
-import io.yupiik.ia.agent.github.model.AgentConfigurationDocument;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -167,6 +167,8 @@ class CompletionPromptHandoffTest {
         return new AttemptPreparation(
                 json,
                 new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
+                new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                        .get()
+                        .shared());
     }
 }

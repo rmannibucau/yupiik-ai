@@ -18,13 +18,14 @@ package io.yupiik.ia.agent.github.client;
 import static io.yupiik.ia.agent.github.client.GraphqlResponses.cursor;
 import static io.yupiik.ia.agent.github.client.GraphqlResponses.invalid;
 import static io.yupiik.ia.agent.github.client.GraphqlResponses.number;
-import static io.yupiik.ia.agent.github.client.GraphqlResponses.object;
 import static io.yupiik.ia.agent.github.client.GraphqlResponses.positive;
 import static io.yupiik.ia.agent.github.client.GraphqlResponses.positiveDecimal;
 import static io.yupiik.ia.agent.github.client.GraphqlResponses.repository;
 import static io.yupiik.ia.agent.github.client.GraphqlResponses.repositoryName;
 import static io.yupiik.ia.agent.github.client.GraphqlResponses.text;
 
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import java.math.BigDecimal;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -113,10 +114,10 @@ public final class ReviewClient {
         final var result = new LinkedHashMap<String, Page<Pull>>();
         for (int i = 0; i < batch.size(); i++) {
             final var request = batch.get(i);
-            final var repo = checkedRepository(data.get("r" + i), request.repository());
+            final var repo = checkedRepository(data.repository(i), request.repository());
             result.put(
                     request.repository(),
-                    page(repo.get("pullRequests"), request.after(), PULL_PAGE_SIZE, node -> pull(node, null)));
+                    pullPage(repo.pullRequests(), request.after(), PULL_PAGE_SIZE, node -> pull(node, null)));
         }
         return Collections.unmodifiableMap(result);
     }
@@ -134,47 +135,58 @@ public final class ReviewClient {
         variables.put("name", parts[1]);
         variables.put("number", number);
         variables.put("after", after);
-        final var data = execute(
+        final var envelope = github.graphql(
                 "query ReviewContinuation($owner:String!,$name:String!,$number:Int!,$after:String) {"
                         + " repository(owner:$owner,name:$name) { nameWithOwner pullRequest(number:$number) {"
                         + " number state reviews(first:100,after:$after) { nodes { " + REVIEW + " } " + PAGE
                         + " } } } }",
-                variables);
-        final var repo = checkedRepository(data.get("repository"), repository);
-        final var node = object(repo.get("pullRequest"));
-        if (number(node.get("number")) != number) {
+                variables,
+                Envelope.class);
+        if (envelope == null || envelope.data() == null) {
+            throw invalid();
+        }
+        final var repo = checkedRepository(envelope.data().repository(), repository);
+        final var node = repo.pullRequest();
+        if (node == null || number(node.number()) != number) {
             throw invalid();
         }
         return pull(node, after);
     }
 
-    private Map<?, ?> execute(final String query, final Map<String, Object> variables) {
-        return object(object(github.graphql(query, variables)).get("data"));
+    private Data execute(final String query, final Map<String, Object> variables) {
+        final var envelope = github.graphql(query, variables, Envelope.class);
+        if (envelope == null || envelope.data() == null) {
+            throw invalid();
+        }
+        return envelope.data();
     }
 
-    private Map<?, ?> checkedRepository(final Object value, final String expected) {
-        final var repo = object(value);
-        if (!expected.equalsIgnoreCase(repositoryName(repo.get("nameWithOwner")))) {
+    private Repository checkedRepository(final Repository repo, final String expected) {
+        if (repo == null || !expected.equalsIgnoreCase(repositoryName(repo.nameWithOwner()))) {
             throw invalid();
         }
         return repo;
     }
 
-    private Pull pull(final Object value, final String after) {
-        final var node = object(value);
-        final var number = number(node.get("number"));
-        final var state = text(node.get("state"));
+    private Pull pull(final PullNode node, final String after) {
+        if (node == null) {
+            throw invalid();
+        }
+        final var number = number(node.number());
+        final var state = text(node.state());
         return new Pull(
                 number,
                 state,
                 "OPEN".equals(state)
-                        ? page(node.get("reviews"), after, REVIEW_PAGE_SIZE, this::review)
+                        ? reviewPage(node.reviews(), after, REVIEW_PAGE_SIZE, this::review)
                         : new Page<>(List.of(), null));
     }
 
-    private Review review(final Object value) {
-        final var node = object(value);
-        final var submittedAt = node.get("submittedAt");
+    private Review review(final ReviewNode node) {
+        if (node == null) {
+            throw invalid();
+        }
+        final var submittedAt = node.submittedAt();
         Instant instant = null;
         if (submittedAt != null) {
             try {
@@ -183,49 +195,116 @@ public final class ReviewClient {
                 throw invalid();
             }
         }
-        final var id = positiveDecimal(node.get("databaseId"));
-        return new Review(
-                id,
-                text(node.get("body")),
-                instant,
-                text(node.get("state")),
-                text(node.get("url")),
-                actor(node.get("author")));
+        final var id = positiveDecimal(node.databaseId());
+        return new Review(id, text(node.body()), instant, text(node.state()), text(node.url()), actor(node.author()));
     }
 
-    private Actor actor(final Object value) {
-        if (value == null) {
+    private Actor actor(final Author node) {
+        if (node == null) {
             return new Actor(null, "", "Deleted");
         }
-        final var node = object(value);
-        final var type = text(node.get("__typename"));
-        final var login = text(node.get("login"));
-        final var id = "User".equals(type) || ("Bot".equals(type) && node.get("databaseId") != null)
-                ? positive(node.get("databaseId"))
+        final var type = text(node.__typename());
+        final var login = text(node.login());
+        final var id = "User".equals(type) || ("Bot".equals(type) && node.databaseId() != null)
+                ? positive(node.databaseId())
                 : null;
         return new Actor(id, login, type);
     }
 
-    private <T> Page<T> page(
-            final Object value, final String after, final int limit, final Function<Object, T> mapper) {
-        final var connection = object(value);
-        if (!(connection.get("nodes") instanceof List<?> nodes) || nodes.size() > limit) {
+    private <T> Page<T> pullPage(
+            final PullConnection connection, final String after, final int limit, final Function<PullNode, T> mapper) {
+        if (connection == null) {
             throw invalid();
         }
-        final var info = object(connection.get("pageInfo"));
-        if (!(info.get("hasNextPage") instanceof Boolean more)) {
+        return page(connection.nodes(), connection.pageInfo(), after, limit, mapper);
+    }
+
+    private <T> Page<T> reviewPage(
+            final ReviewConnection connection,
+            final String after,
+            final int limit,
+            final Function<ReviewNode, T> mapper) {
+        if (connection == null) {
             throw invalid();
         }
-        final var end = info.get("endCursor");
-        if (end != null && !(end instanceof String)) {
+        return page(connection.nodes(), connection.pageInfo(), after, limit, mapper);
+    }
+
+    private <N, T> Page<T> page(
+            final List<N> nodes,
+            final PageInfo info,
+            final String after,
+            final int limit,
+            final Function<N, T> mapper) {
+        if (nodes == null || nodes.size() > limit || info == null || info.hasNextPage() == null) {
             throw invalid();
         }
+        final boolean more = info.hasNextPage();
+        final var end = info.endCursor();
         final var next = more ? text(end) : null;
         if (more && (nodes.isEmpty() || next.isBlank() || next.length() > 4096 || next.equals(after))) {
             throw invalid();
         }
         return new Page<>(nodes.stream().map(mapper).toList(), next);
     }
+
+    @JsonModel
+    public record Envelope(Data data) {}
+
+    // Discovery generates only r0..r9; continuation has one repository. Keep a stable typed
+    // envelope instead of a dynamic alias map.
+    @JsonModel
+    public record Data(
+            Repository r0,
+            Repository r1,
+            Repository r2,
+            Repository r3,
+            Repository r4,
+            Repository r5,
+            Repository r6,
+            Repository r7,
+            Repository r8,
+            Repository r9,
+            Repository repository) {
+        private Repository repository(final int index) {
+            return switch (index) {
+                case 0 -> r0;
+                case 1 -> r1;
+                case 2 -> r2;
+                case 3 -> r3;
+                case 4 -> r4;
+                case 5 -> r5;
+                case 6 -> r6;
+                case 7 -> r7;
+                case 8 -> r8;
+                case 9 -> r9;
+                default -> throw invalid();
+            };
+        }
+    }
+
+    @JsonModel
+    public record Repository(String nameWithOwner, PullConnection pullRequests, PullNode pullRequest) {}
+
+    @JsonModel
+    public record PullConnection(List<PullNode> nodes, PageInfo pageInfo) {}
+
+    @JsonModel
+    public record ReviewConnection(List<ReviewNode> nodes, PageInfo pageInfo) {}
+
+    @JsonModel
+    public record PullNode(BigDecimal number, String state, ReviewConnection reviews) {}
+
+    /** GitHub's BigInt identity can be represented as a JSON number or a decimal string. */
+    @JsonModel
+    public record ReviewNode(
+            Object databaseId, String body, String submittedAt, String state, String url, Author author) {}
+
+    @JsonModel
+    public record Author(String __typename, String login, BigDecimal databaseId) {}
+
+    @JsonModel
+    public record PageInfo(Boolean hasNextPage, String endCursor) {}
 
     public record Discovery(String repository, String after) {}
 

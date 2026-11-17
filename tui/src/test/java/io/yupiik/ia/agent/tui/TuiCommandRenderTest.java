@@ -3597,7 +3597,7 @@ class TuiCommandRenderTest {
                 0.22, 0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, true, "unicode",
                 "auto", "auto", List.of(), null, null, true, 3, 10, "", 0.8, "#ff5555", null, null);
         final var httpClient =
-                new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null));
+                new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null, null));
         httpClients.add(httpClient);
         final var chatClient =
                 new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), clock, httpClient);

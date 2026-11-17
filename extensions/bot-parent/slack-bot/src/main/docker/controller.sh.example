@@ -3,6 +3,32 @@
 # Requires a local daemon and identical host/container attempt paths.
 set -eu
 umask 077
+# Stop is credential-free and verifies ownership before touching the fixed name.
+if [ "$#" -eq 1 ] && [ "$1" = '--stop' ]; then
+  if identity=$(/usr/bin/docker container inspect \
+      --format '{{.Id}}|{{index .Config.Labels "app"}}|{{index .Config.Labels "io.yupiik.yca.bot.component"}}' \
+      yca-slack-controller 2>/dev/null); then
+    container=${identity%%|*}
+    if [ "${identity#*|}" != 'io.yupiik.yca.slack-bot|controller' ] || [ "${#container}" -ne 64 ]; then
+      echo 'Foreign controller identity; refusing stop' >&2
+      exit 1
+    fi
+    case "$container" in
+      *[!a-f0-9]*) echo 'Invalid controller ID; refusing stop' >&2; exit 1 ;;
+    esac
+    exec /usr/bin/docker stop --time -1 "$container"
+  fi
+  # An inspect error alone does not prove absence.
+  if ! names=$(/usr/bin/docker container ls --all --format '{{.Names}}'); then
+    echo 'Cannot establish controller absence; refusing stop' >&2
+    exit 1
+  fi
+  if printf '%s\n' "$names" | grep -Fxq yca-slack-controller; then
+    echo 'Cannot verify controller identity; refusing stop' >&2
+    exit 1
+  fi
+  exit 0
+fi
 : "${SLACK_CONTROLLER_IMAGE:?Set a vetted controller image pinned by digest}"
 : "${DOCKER_SOCKET_GID:?Set the numeric local Docker socket group}"
 : "${ADMISSION_GROUP_GID:?Set the numeric trusted-controller admission group}"
@@ -47,6 +73,8 @@ else
 fi
 # Never use set -x or pass secret values on the command line.
 exec /usr/bin/docker run --rm --name yca-slack-controller \
+  --label app=io.yupiik.yca.slack-bot --label io.yupiik.yca.bot.component=controller \
+  --stop-timeout=-1 \
   --init --user 10001:10001 --group-add "$DOCKER_SOCKET_GID" \
   --group-add "$ADMISSION_GROUP_GID" \
   --cap-drop=ALL --security-opt=no-new-privileges \

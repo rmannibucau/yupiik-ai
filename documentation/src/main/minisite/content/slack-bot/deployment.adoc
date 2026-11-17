@@ -4,6 +4,8 @@
 WARNING: These are operator-reviewed templates, not an installation script or a certified production deployment.
 Do not enable startup until CLI wiring, credential isolation, network confinement and recovery have been verified on the assembled implementation.
 No remote commands or live Slack acceptance are implied by this page.
+For the private-input checklist, standard sample paths and conservative removal template, see the xref:installation.adoc[installation sample].
+For an ordered procedure covering all four images, standalone admission, CA provisioning, credentials and lifecycle gates, use xref:docker.adoc[step-by-step Docker setup].
 
 == Minimal app manifest
 
@@ -39,6 +41,8 @@ No base image is selected implicitly by the Slack profiles.
 There is no Maven-managed Docker CLI download, Docker binary unpacking, or Maven-triggered Dockerfile build.
 The controller base must supply Docker itself; Jib only layers application classes and dependencies on the supplied base.
 Controller and agent images use the Fusion CLI launcher and UID/GID `10001:10001`; this is not itself a sandbox boundary.
+Before generating the vetted base digests and building images, provision the host admission group and bake its exact `yca-bots` name/GID into the controller base, with real execution passwd/group entries in controller and agent bases.
+The agent must not be an admission-group member; numeric `--user`/`--group-add` options do not create the required image account database entries.
 The agent image sets `HOME=/attempt/storage`, `MAVEN_CONFIG=/attempt/storage/.m2` and `MAVEN_OPTS=-Duser.home=/attempt/storage`.
 The services image runs the neutral `ProviderServicesGateway` as `10001:10001`, not the GitHub broker.
 The egress image runs the shared `EgressGateway` as `65532:65532`; its historical Java package name does not make it GitHub-specific.
@@ -81,14 +85,17 @@ The owned sample files are:
 
 * `src/main/deployment/controller.env.example` - exact configuration names with default-deny lists and deliberately invalid installation placeholders.
 * `src/main/deployment/agent-restricted-services.json.example` - selected COMPLETIONS provider, no permanent key, optional features disabled.
-* `src/main/docker/controller.sh.example` - bounded non-root controller container using a local Docker socket and explicit secret environment forwarding.
+* `src/main/docker/controller.sh.example` - bounded non-root controller container using a local Docker socket, explicit secret environment forwarding and credential-free ownership-checked `--stop`.
 * `src/main/docker/Dockerfile.agent-ca.example` - operator base-image recipe importing only an already-provisioned public CA certificate; not a Maven build step.
-* `src/main/deployment/yca-slack-controller.service.example` - systemd credential loading and hardened client lifecycle template.
+* `src/main/deployment/yca-slack-controller.service.example` - systemd credential loading, client hardening and infinite-grace wrapper stop; qualify the supplied lifecycle before activation.
+* `src/main/deployment/uninstall.sh.example` - conservative server-local removal template; its fixed unit-policy checks may reject the updated unit, so review compatibility, paths, identity and inventory checks separately before installation.
 
 All paths above are relative to `extensions/bot-parent/slack-bot`.
 Copy them into an operator-owned private deployment workspace, replace placeholders and review them; do not run them directly from a writable checkout.
 Provision a dedicated `yca-slack` account (container UID/GID 10001), `/var/lib/yca-slack/state` and `/var/lib/yca-slack/attempts` owned by that account with mode 0700.
 Keep `/etc/yca-slack` operator-owned; configuration files and token source files must be private and not writable by agents.
+Use root:`yca-slack` 0440 for the non-secret `/etc/yca-slack/controller.env`, trusted `agent.json` and private TLS leaf store, with root-controlled directory traversal for the dedicated service group only.
+The non-root host Docker client must read `--env-file` itself; this setup needs no wrapper environment-path adaptation and grants no service write access to configuration.
 The sample uses root-owned 0600 `/etc/yca-slack/secrets/slack-app-token`, `slack-bot-token`, `provider-api-key` and `services-keystore-password` through `LoadCredential`.
 Install the Docker wrapper as the root-owned executable `/opt/yca-slack/bin/docker-controller`; it reads the systemd credential directory without placing token values in command arguments.
 The long-running controller is headless, so the sample sets `YCA_LOGGING_AUTO=false` to keep JUL on ordinary process streams instead of interactive-terminal takeover.
@@ -102,6 +109,13 @@ For a reviewed, already assembled local JAR, use `java -jar "$SLACK_BOT_JAR" --h
 A successful Java launch or a working core `run` command is not evidence that Slack transport/controller commands are wired.
 Do not add an automatic startup timer or run a second controller against the same state before checking its ownership/recovery model.
 
+The wrapper's credential-free `--stop` checks app/component labels and a validated immutable container ID, then runs `docker stop --time -1` against that ID.
+After failed inspection, only a successful all-container inventory without the fixed name establishes absence; uncertainty causes refusal.
+The run path labels the controller and sets `--stop-timeout=-1`.
+The unit already uses wrapper `ExecStop`, `SuccessExitStatus=143`, `Restart=no`, `TimeoutStopSec=infinity`, `SendSIGKILL=no` and `KillMode=process`; there is no forced-kill fallback.
+Require xref:docker.adoc#lifecycle-review[operator qualification of that supplied lifecycle] before activation, including task state, positively confirmed owned agent/gateway termination and retained runtime/admission/provider debt checks.
+A successful stop return or accepted client exit 143 does not establish sandbox safety; crashes still require operator reconciliation and boot enablement follows acceptance, not template installation.
+
 The wrapper exposes no host listener and forwards only the named Slack, upstream-provider and gateway-password credentials into the controller.
 The controller container receives private state, attempts, the admission root, trusted agent JSON and a read-only TLS leaf store, plus the Docker socket; agents must receive only their own prepared handoff mounts.
 The attempt root is bind-mounted at the same absolute path on host and controller so daemon-created agent mounts resolve correctly.
@@ -109,6 +123,7 @@ Do not mount the whole `/var/lib/yca-slack` or `/etc/yca-slack` tree into an age
 
 WARNING: Docker socket access is effectively host-administrative authority, even from a non-root, read-only, capability-dropped controller.
 The systemd limits constrain the Docker client, not containers created by the daemon.
+The unit's actual `ReadWritePaths` is only `/var/lib/yca-slack`; daemon-created controller writes to the bind-mounted admission ledger do not require a host-client writable-path exception.
 The wrapper separately bounds the controller container; per-agent backend limits and whole-host admission still need review.
 Docker environment credentials remain visible to Docker administrators; this is not isolation from a hostile daemon owner.
 
@@ -140,20 +155,30 @@ The HTTP control-network hop carries provider traffic without TLS; isolate and t
 Do not substitute host networking, broad private-network access or request-time private DNS resolution.
 Container loopback is the gateway's own namespace, not the host; use the actual approved control-network address.
 
-The selected trusted provider must explicitly name a model and match `providerTarget`, with `api=COMPLETIONS` (or input `AUTO`, rewritten to COMPLETIONS).
-Only that selected provider is staged; alternate providers are removed and its `baseUrl` becomes `https://attempt-services.yca.internal:8443/inference/<attempt-uuid>/chat/completions`.
+The selected trusted provider must explicitly name a model and match `providerTarget`, pinned to `api=COMPLETIONS` or `api=RESPONSES`; input `AUTO` defaults to `COMPLETIONS`, so explicitly select `RESPONSES` for a Responses deployment.
+Only that selected provider is staged; alternate providers are removed and its `baseUrl` becomes `https://attempt-services.yca.internal:8443/inference/<attempt-uuid>` plus the selected API suffix (`/chat/completions` or `/responses`, respectively).
+The fixed upstream must use the same selected API suffix; mismatched APIs are rejected, and an attempt does not admit both routes.
 Its `apiKey` becomes a fresh attempt-scoped capability, not the permanent upstream key.
 The gateway admits only the exact TLS server name/Host, attempt path, bearer token and JSON POST contract; it does not provide arbitrary proxying, GitHub context/Git operations or Slack API access.
+It rejects query strings and does not forward caller headers other than `Content-Type`, follow redirects or use ambient proxies.
 The upstream key is supplied only to the gateway through its private environment, with controller `OPENAI_API_KEY` as the preferred source; do not put it in the sample JSON.
 The controller and Docker administrators remain trusted; environment forwarding is not protection from a daemon administrator.
 
 The provider-only manifest lives under private controller state, outside handoff mounts.
 The PKCS12 leaf key/chain store must be an operator-managed regular non-symlink file outside attempts, readable by the dedicated controller/gateway UID and mounted read-only only into those trusted containers.
 Its configured absolute path must exist on both host and controller because the local daemon resolves bind sources on the host.
+The PKCS12 store must contain exactly one non-CA private-key certificate with the exact server-name SAN.
 Keep its password in `YCA_SERVICES_KEYSTORE_PASSWORD`, never in a command argument, agent image, agent environment or prompt.
 Gateway capability lifetime follows the attempt execution timeout; selected provider `timeoutSeconds` is bounded to 1-900 seconds (default 300).
 Request and response limits are 4 MiB and 16 MiB; selected provider `maxConcurrent` is a per-gateway semaphore (default 1, capped at 64), not aggregate cross-attempt admission.
 Use xref:../bots/cohosting.adoc#_llm_limits_and_spend[external provider/account limits] if an aggregate tighter than host slots times per-attempt concurrency is required.
+The separate xref:../bots/cohosting.adoc#_shared_provider_request_budget[shared provider request budget] can constrain participating trusted forwarders across gateway processes; it does not cover unmanaged traffic or replace account-side controls.
+
+The standalone gateway entrypoint is `io.yupiik.ia.agent.bot.gateway.ProviderServicesGateway --config /services/config.json`; `--check` performs a bounded TLS readiness probe.
+Attempt preparation writes its private `Settings` JSON outside handoff mounts, with TLS name/port/store, the pinned inference route/target, lifetime, timeout, body bounds and per-instance concurrency.
+Secrets are separate trusted process configuration: `YCA_SERVICES_PROVIDER_TOKEN` is a fresh 43-character URL-safe attempt token, `YCA_SERVICES_UPSTREAM_TOKEN` is the optional permanent upstream credential, and the password uses the configured `keyStorePasswordEnv` name.
+Never pass these values in command arguments or diagnostic dumps.
+The adapter's execution policy selects the gateway entrypoint, not runtime-name prefixes; the reviewed services image must contain that entrypoint and its dependencies.
 
 The sample explicitly sets `services.dependencyEgress.enabled=false` so it grants no public dependency downloads.
 Omitting that nested configuration would enable the shared dependency-host defaults; do not omit it when intending inference-only access.
@@ -164,6 +189,7 @@ Do not combine services with standalone `docker.egress` or a named agent `docker
 === Operator-baked public CA trust
 
 Provision the signing CA and a leaf certificate for the exact `services.serverName` through the operator's existing certificate process; this task generates neither certificates nor keys.
+The xref:../github-bot/installation.adoc#restricted-services-tls[reusable TLS provisioning process] can be adapted to Slack paths and credentials; it is not a direction to reuse GitHub secrets or deployment history.
 Keep the signing key offline and the TLS leaf private key only in the controller/gateway PKCS12 store, never in an agent build context.
 Only the CA's public certificate is an agent image input; "public certificate" does not mean a publicly issued CA or permission to include a private key.
 The default internal server name normally needs an operator CA.
@@ -179,6 +205,7 @@ CA rotation requires reviewing/rebuilding the operator base and agent image and 
 === Admission provisioning
 
 The environment and wrapper samples enable a one-slot common budget at `/var/lib/yca-bots/admission` with `bot.admission.trustedGroup=yca-bots`.
+This provisioning is required even standalone because the wrapper always mounts that root; see xref:docker.adoc#_provision_host_admission_including_standalone_installs[the single-bot preparation] and xref:../bots/docker-shared-slots.adoc[additional-controller setup].
 Provision that separate root with a trusted-controller group, setgid permissions and no world access, plus matching group name/GID in both controller images; set `ADMISSION_GROUP_GID` in the unit.
 Configure participating GitHub workers with the same root, slot count and group, and mount the root at the same path only in controllers.
 Keep their state/attempt roots separate and disjoint from admission.
@@ -211,6 +238,7 @@ Close/remove the bridge only after launcher quiescence and positively confirmed 
 === Kubernetes separate-Pod gateway
 
 Set `slack.executor.backend=KUBERNETES` and the shared `slack.executor.kubernetes` agent image, namespace, attempt `claim`, service account and private static client credentials.
+The neutral shared defaults are agent image `yca-agent:latest` and namespace `yca`; explicitly set the adapter's image and namespace to preserve the intended deployment during cutover.
 Set `slack.providerServices.upstream` to the fixed numerical private IPv4 HTTP target and configure every required `slack.providerServices.kubernetes` field: `image`, `tlsSecret`, `serverName`, `nodeName`, `budgetClaim`, `serviceAccount`, `port` and `qualified=true`.
 The environment prefix is `SLACK_PROVIDERSERVICES_KUBERNETES_`; for example `BUDGETCLAIM` and `NODENAME` are not split with extra underscores.
 The adapter creates a separate trusted provider gateway Pod, ClusterIP Service, immutable private settings/credential Secret and agent/gateway NetworkPolicies, not a sidecar sharing the agent network namespace.
@@ -244,6 +272,25 @@ That file must be present in the actual image and enumerate application classes 
 Verify image contents and both startup and check paths against the reviewed artifact, not merely the Maven main-class setting.
 If a concurrent parent image/runtime change has not yet provided the matching classpath layout, treat it as a parent integration blocker, not a documentation workaround or a successful image smoke test.
 
+== Opt-in context deployment overlay
+
+The base samples above describe context-disabled operation and retain their existing environment/launcher invariants.
+Context-bearing execution requires a separately reviewed Linux Docker transient mode; Nono/Kubernetes context startup must be refused until equivalent controls exist.
+See xref:context.adoc#_separate_deployment_overlay[the exact tmpfs unit, context environment overlay and launcher mount fragments] before installing any overlay.
+Additional samples, relative to `extensions/bot-parent/slack-bot/src/main/deployment`, are:
+
+* `controller-context.env.example` - second Docker environment file with context/search initially off, `/run/yca-slack-context-attempts`, hidden tool output, disabled dependency egress and `SLACK_EXECUTOR_DOCKER_DISABLECONTAINERLOGS=true`.
+* `run-yca\x2dslack\x2dcontext\x2dattempts.mount.example` - dedicated Linux tmpfs, `noswap,nodev,nosuid,noexec,mode=0700,uid=10002,gid=10002,size=512m`.
+* `yca-slack-controller-context.conf.example` - systemd dependency/lifetime and writable-path drop-in, not a replacement Docker launcher.
+* `check-context-docker.sh` - offline-default fixture validator and explicitly gated disposable Docker infrastructure canary; see xref:context.adoc#_offline_and_opt_in_docker_canary[coverage, limits and operator-only invocation].
+
+Do not activate the drop-in with the unchanged base launcher: it lacks the overlay environment file, same-absolute-path tmpfs bind and context identity changes.
+Review host/image account ownership and use matching UID/GID 10002 for this mode; preserve trusted admission-group membership, CA trust, owned graceful stop and durable admission/provider-budget roots.
+The actual agent uses `--log-driver=none`, mounts only its own transient attempt at `/attempt`, and must have no MCP/search/dependency-download egress or active dependency cache.
+All attempt files, sessions, logs and results remain transient; context-derived answers and uncertain-publication replay bodies must not enter durable state/history.
+Inspect controller and inference/gateway logging independently; the agent log flag does not suppress every service's logs.
+Source acceptance is separate from xref:context.adoc#_separately_authorized_rollout[operator-authorized rollout], with disabled-mode smoke checks first and no automatic server activation.
+
 == Offline source validation
 
 From the repository root, `java documentation/src/test/ValidateBotSamples.java` checks these pages' local cross-references, section anchors, breadcrumbs, sample presence and restricted-services credential/configuration wiring without network access or a site/image build.
@@ -252,6 +299,7 @@ The root landing page is generated by the minisite; this source check does not v
 == Acceptance before startup
 
 Run these checks in a disposable approved workspace/channel after implementation integration; this page does not record them as completed:
+See xref:../bots/qualification.adoc[advanced backend qualification] for artifact evidence, backend-specific failure exercises and shared-ledger qualification.
 
 * Confirm exact assembled CLI names, options and environment/list binding; verify the unit launches that command.
 * Verify no inbound public HTTP port is needed and the outbound connection authenticates to the intended workspace.
@@ -264,12 +312,12 @@ Run these checks in a disposable approved workspace/channel after implementation
 * Exercise ACK loss/redelivery, restart during execution and uncertain publication; do not blindly rerun a model or repost an answer after an ambiguous write.
 * Test queue saturation, question timeout, provider 429/Retry-After handling, attempt cleanup and retained-state/disk limits.
 * Negatively test public/private network escapes and provider credential exposure; a prompt refusal is not a network test.
-* Reject wrong TLS names, Host headers, capability paths/tokens, unsupported APIs, redirects and expired attempts; verify only the selected COMPLETIONS provider reaches the fixed upstream.
+* Reject wrong TLS names, Host headers, capability paths/tokens, unsupported or mismatched APIs, redirects and expired attempts; verify only the selected provider's pinned COMPLETIONS or RESPONSES route reaches the fixed upstream.
 * Saturate common host admission across both bots, then simulate unknown termination; verify durable debt blocks new claims until manual reconciliation.
 * Test each selected backend and CPU architecture independently and record the artifact digests and remaining limitations.
 
 The final integrated status belongs to implementation acceptance, not this template set.
-The updater now has moved GitHub Maven paths and offline Slack/common-image role inventory; see `generated/c3p0-bots-update-plan.md`.
-Slack/all remote execution remains deliberately refused pending verified server facts and the operator's later explicit go; no transfer or activation was performed.
+Keep deployment-specific update scripts, server inventories, private runbooks and acceptance records outside the shared project sources.
+Qualify updates against the actual installation and require explicit operator approval before transfer, promotion or activation.
 
 include::content/_partials/mermaid.js.adoc[]

@@ -1,0 +1,268 @@
+= Opt-in approved Slack context
+:minisite-breadcrumb: Home[../index.html] > Slack bot[index.html] > Approved context
+
+Slack context is disabled by default and is separate from request admission, prior requester answers, web search and provider networking.
+This page describes the approved context contract and its acceptance gates, not evidence of a completed live deployment.
+Do not enable it until the integrated controller and chosen backend pass the checks below.
+
+== Privacy and scope first
+
+A public workplace channel is not public internet content.
+Its messages, author names and Slack permalinks can disclose internal information even when every workspace member can read them.
+The controller retrieves approved context on the requester's behalf and returns a minimized subset to the sandbox; tool results can then enter the model transcript, provider requests and the published answer.
+Review controller state, attempt/transcript retention, backups, provider retention and training policies, and the audience of the destination thread before enabling this feature.
+Ephemeral grant cleanup does not erase a transcript or a provider's retained request.
+Hidden tool output is not a retention or redaction policy.
+Slack's https://docs.slack.dev/apis/web-api/real-time-search-api/#privacy[Real-time Search API privacy requirements] prohibit storing/copying retrieved data or using it for training; qualify transcript and provider handling against those requirements before rollout, rather than treating a local retention setting as permission to retain search data.
+Do not enable global HTTP/body tracing or log event payloads to diagnose context.
+
+There is no expansion to DMs, group DMs, private-channel history, Slack Connect sources, files or attachments.
+Existing admission settings are not source grants, and this feature does not change them.
+In particular, `slack.allowSlackConnect` does not authorize context from shared sources.
+Operators must verify that each configured source is an unshared public channel in the approved workspace; an ID beginning with `C` alone does not prove its privacy or sharing state.
+Search is restricted to the admitted originating channel, which must also be in the fixed exact-ID source allowlist, not channels named by model text or search results.
+Member resolution is limited to the requester, explicit raw mentions in the admitted request, and authors observed in approved returned context, within the member budget.
+It is not a directory browser or a name-to-user discovery service.
+Names, message text and links remain untrusted data and grant no new authority.
+
+== Opt-in Slack manifest
+
+Keep `extensions/bot-parent/slack-bot/src/main/resources/slack-app-manifest.json` for the minimal installation.
+The separate opt-in sample is `extensions/bot-parent/slack-bot/src/main/deployment/slack-app-search-manifest.yaml`.
+Review and merge it into the operator-owned app configuration without discarding existing settings.
+Reinstall only if an actual scope change requires it; do not rotate tokens or reinstall an already correctly scoped app merely to apply this execution-mode change.
+An existing bot token with `users:read` and `search:read.public` does not need replacement for this plan.
+
+* Keep the app-level `xapp-` token's `connections:write` unchanged for Socket Mode.
+* Preserve the `xoxb-` bot scopes `app_mentions:read` and `chat:write`; add `users:read` for minimal member resolution and `search:read.public` for public-message search.
+* Keep only the `app_mention` event subscription and existing interactivity; no DM or channel-history subscriptions are needed.
+* Enable Slack's AI agent capability; the sample uses the current manifest `features.agent_view` shape.
+For existing apps using `assistant_view`, review Slack's migration requirements before changing it: migration to `agent_view` is irreversible.
+* Do not add user OAuth scopes or an `xoxp-` user token, legacy `search:read`, private/DM/file search scopes, `users:read.email`, or history scopes.
+
+Search uses https://docs.slack.dev/reference/methods/assistant.search.context/[`assistant.search.context`], not legacy `search.messages`.
+Bot-token search requires the `action_token` from the triggering mention event as well as the bot token.
+Check app eligibility and workspace search capabilities; semantic search depends on the workspace's Slack AI Search entitlement and is not guaranteed by a successful installation.
+The https://docs.slack.dev/apis/web-api/real-time-search-api/[Slack API guide] and https://docs.slack.dev/reference/app-manifest/[manifest reference] are authoritative for platform requirements.
+
+== Trusted controller configuration
+
+The separate root is `slack.context`, implemented by `SlackContextConfiguration` alongside the other trusted Slack configuration records.
+Slack message text, modal input, templates and agent arguments cannot enable it or change its limits.
+The defaults are conservative; setting `enabled=true` alone does not enable search.
+
+[cols="2,1,4",options="header"]
+|===
+|Property |Default |Meaning
+|`slack.context.enabled` |`false` |Host opt-in to the attempt-scoped context tool.
+|`slack.context.resolveMentions` |`true` |Allow minimal names for already granted raw member IDs when context is enabled.
+|`slack.context.searchEnabled` |`false` |Separate opt-in to approved public-message search.
+|`slack.context.sourceChannels` |`[]` |Exact public, unshared source channel IDs; empty denies search.
+|`slack.context.lookbackDays` |`30` |Bounded recent-message search horizon.
+|`slack.context.maxMembers` |`32` |Bound granted member IDs and cached minimal names per attempt.
+|`slack.context.maxRequests` |`12` |Bound upstream calls, including failures, per attempt.
+|`slack.context.maxResults` |`20` |Cumulative returned-message budget, not an unlimited per-page allowance.
+|`slack.context.maxResponseBytes` |`131072` |Cumulative conservative JSON response-byte budget.
+|`slack.context.timeoutSeconds` |`20` |Maximum upstream-call wait; not a latency promise.
+|`slack.context.maxConcurrent` |`2` |Bound concurrent context work; does not replace controller/provider admission.
+|`slack.context.actionRetentionSeconds` |`600` |Absolute admission-to-expiry context lifetime, capped at 600 seconds; queue wait consumes it and Slack may revoke search authority earlier.
+|===
+
+For a first rollout, use one approved requester and one independently verified public destination channel, with that same channel in the source allowlist.
+Keep the lists fixed for the attempt; do not interpolate model queries into policy or accept user-supplied allowlist overrides.
+The action registry must be bounded, controller-memory-only, bound to one task and its first attempt, and cleared on terminal completion, cancellation, expiry and shutdown.
+Restart, recovery and retries must not resurrect grants or replay a durable event token.
+Never write action tokens to state, attempt files, configuration JSON, prompts, logs or diagnostics.
+
+IMPORTANT: The 600-second local cap is not a promise that Slack accepts an action token for ten minutes.
+The current Slack documentation confirms event action tokens and rejects invalid/expired tokens, but does not publish a fixed lifetime in the cited method/guide; do not assume a three-minute lifetime or confuse it with an interactive `trigger_id` lifetime.
+No grant means no injected context tool or context guidance; a missing action token denies search but does not deny an otherwise valid member-only grant.
+
+== Agent handoff and trusted guidance
+
+Only trusted host preparation may inject the enabled `slack_context` tool configuration into the sanitized agent JSON.
+That configuration describes the attempt-local mailbox and its binding, never Slack/broker credentials, an arbitrary API origin, or a caller-selected filesystem path.
+The host must agree on tool injection and `SlackPromptRenderer.render(task, history, slackContextEnabled)`; the explicit boolean is host authority, not a value inferred from the request or template.
+When false, rendering is unchanged and the host advertises no context tool.
+When true, the renderer appends guidance outside Handlebars rendering, so omitting template placeholders cannot remove it.
+
+The guidance tells the agent that `slack_context` exists, to use its summary to understand current grants, to resolve relevant `<@USER_ID>` mentions by raw ID, and to search approved sources before declining for missing Slack context when search is available.
+It requires treating names and retrieved text as data, citing returned Slack links, distinguishing `denied`, `unavailable`, `expired` and `no_results`, and clarifying ambiguity rather than guessing.
+There is no mandatory tool call, automatic prelookup, or authority to bypass a denial.
+Prompts are defense in depth: the broker must enforce all grants and budgets independently of model compliance.
+
+== Admission-bound grant lifecycle
+
+The registry creates one in-memory grant only after a fresh admission transaction commits.
+It binds the task, workspace, originating channel and requester, admitted timestamp, absolute deadline and optional action token; durable task fields cannot reconstruct this authority.
+Duplicate delivery does not create another grant or renew the deadline.
+The worker atomically claims the grant for the first execution attempt only, moving it from pending to active registry ownership.
+Summary and member operations require that grant too; member-only context works with search disabled or without an action token.
+Search additionally requires a valid action token and the exact approved originating source channel.
+
+[cols="1,3",options="header"]
+|===
+|State |Outcome
+|Pending |Admission committed; queue time consumes the original deadline.
+|Active |Claimed once; tool configuration and host guidance may now be injected.
+|Expired/revoked |Deny all further context operations, clear the action-token reference and caches, cancel pending upstream/dispatcher work and cancel the attempt; late completion must not publish a response.
+|Closed |Completion, cancellation or controller shutdown clears authority; repeated close/revoke is harmless.
+|Absent |Duplicate, recovered, restarted, retried or already consumed work receives no renewed context authority.
+|===
+
+Authorization ends at the absolute deadline, not when the next maintenance sweep runs.
+The controller's existing sweep covers pending and active grants even when no tool is called; polling checks the same deadline before dispatch and before response publication.
+Physical cancellation and cleanup can lag until the next sweep or poll; neither queue delay, retries nor upstream errors extend validity.
+An upstream permanent invalid/expired action-token rejection is terminal for the grant, including member operations: clear authority immediately and do not issue another Slack call with it.
+A lost tmpfs directory is never proof of agent termination and never releases durable admission debt.
+
+== Linux Docker transient execution only
+
+Context-enabled startup is supported only on Linux Docker with a dedicated, non-swappable tmpfs attempt root.
+Refuse context on Nono or Kubernetes until equivalent storage, log, integration and lifecycle controls are implemented and qualified; the context-disabled backend documentation is not such qualification.
+Reject missing, disk-backed, symlinked or swap-capable roots before opening Socket Mode, using the controller's actual mount namespace rather than a host-only assertion.
+Keep attempt, controller state, admission and provider-budget roots disjoint.
+The whole attempt must be transient: sanitized configuration, mailbox, sessions, workspace, feedback, `execution.log`, result and any generated files, not just the context mailbox.
+The agent's writable `/tmp` and `/dev/shm` are separate binds of its private `attempt/tmp` directory on that same validated noswap filesystem, not Docker's ordinary swap-capable tmpfs mounts.
+Vetted agent images must not declare additional writable volumes; qualify the actual image mounts with the disposable canary checks before rollout.
+Do not copy failed attempts into persistent diagnostics, caches or backups.
+
+The mailbox uses `/attempt/storage/slack-context` in the agent with fixed request/response slots, bounded documents and attempt-bound requests.
+Directory handles and no-follow checks must reject symlink replacement, traversal and cross-attempt access.
+Both pollers use a nominal 25 ms interval; upstream calls, scheduling and filesystem overhead add latency, so this is not a wall-clock SLA.
+Only the controller calls Slack with controller-held credentials; the agent receives no Slack token or direct Slack route.
+
+Require the neutral `docker.disableContainerLogs=true` setting (`SLACK_EXECUTOR_DOCKER_DISABLECONTAINERLOGS=true`) so the actual agent launch uses `--log-driver=none`.
+Its shared default remains false for GitHub and context-disabled tasks.
+Force hidden tool output and prohibit HTTP/request/body tracing; host diagnostics may contain bounded categories and runtime identity, never payloads or exception messages containing context.
+Hidden output alone does not prevent retention.
+Context attempts disable memory, skills, subagents, MCP, notifications and hooks even when the trusted agent document enables them.
+They also disable the `ask_user` feedback transport because its ordinary question/options/answer lifecycle writes durable queue bodies; the final reply may still ask for clarification in the admitted Slack thread.
+No web search, ancillary integration or dependency-download egress is permitted: disable dependency egress and active dependency-cache restore/publication, retaining only the fixed provider-services route and controller-only Slack calls.
+The settings and mounts below are necessary deployment controls, not substitutes for assembled Java enforcement tests.
+
+=== Separate deployment overlay
+
+The samples under `extensions/bot-parent/slack-bot/src/main/deployment` deliberately leave `controller.env.example` and `src/main/docker/controller.sh.example` unchanged:
+
+* `controller-context.env.example` is a second Docker environment file, initially context/search disabled, with the transient root, hidden tool output, disabled dependency egress and neutral log-suppression setting.
+* `run-yca\x2dslack\x2dcontext\x2dattempts.mount.example` is the exact systemd mount unit for `/run/yca-slack-context-attempts`.
+* `yca-slack-controller-context.conf.example` adds mount ordering, mount lifetime binding and writable access, but does not change the launcher's arguments.
+
+The approved mount options are exactly `noswap,nodev,nosuid,noexec,mode=0700,uid=10002,gid=10002,size=512m`.
+Use a kernel with tmpfs `noswap` support; a rejected mount is a rollout blocker, not permission to omit the option or rely on `vm.swappiness`.
+Install the mount filename without `.example`; verify its escaped name with `systemd-escape --path --suffix=mount /run/yca-slack-context-attempts`.
+Provisioning, activation and removal remain operator actions; never unmount to force an uncertain runtime to disappear.
+
+Review a separate context-capable copy of the owned launcher and preserve its credential handling, identity labels, owned graceful stop and durable admission/provider-budget wiring.
+The base launcher does not read the overlay automatically and cannot be used unchanged for context.
+In the reviewed copy, replace the persistent attempt bind with the following identical host/controller absolute path and load the overlay after the base environment file:
+
+[source,bash]
+----
+# Docker run argument fragments, NOT a complete launcher or command to execute:
+--user 10002:10002 --log-driver=none \
+--env-file /etc/yca-slack/controller.env \
+--env-file /etc/yca-slack/controller-context.env \
+--mount type=bind,src=/run/yca-slack-context-attempts,dst=/run/yca-slack-context-attempts
+----
+
+Do not translate the controller root to an unrelated container path: the local Docker daemon resolves bind sources in its host namespace.
+The agent maps only its own child attempt to `/attempt`, not the entire root or sibling attempts.
+Inspect mount flags inside the actual controller and actual agent; a host `findmnt` result alone does not establish either view.
+Use matching controller/execution UID/GID 10002, image account database entries, host account ownership and group provisioning for this overlay, instead of the base sample's 10001 identity.
+Retain public CA trust and the installation's trusted admission group; do not make the mode-0700 tmpfs group/world-accessible to bridge an identity mismatch.
+The launcher must also suppress controller container logs or establish independently verified payload-free controller logging; the neutral flag controls agent logs, not every container automatically.
+Audit gateway/inference service logging and volumes separately.
+
+== Answers, publication and recovery
+
+For context-bearing execution/publication, persist only nonsecret markers, task status, runtime identity/fingerprint, admission debt and bounded publication metadata/identifier, not context-derived content.
+The original admitted request and ordinary admission records remain durable; this mode does not erase operator-supplied input.
+Hold the answer in controller memory through publication; do not persist its body, a replay payload, context-derived diagnostic text or prior-answer history.
+After success retain only terminal status and the Slack receipt, with the local answer absent.
+The published thread answer is an intentional disclosure to its admitted audience and may quote retrieved data; there is no promise that generated prose cannot do so.
+On controller loss or ambiguous publication, retain blocked metadata and reconcile against the existing Slack thread; do not automatically replay an answer, rerun context or restore an old queue snapshot.
+Do not release runtime/admission reservations until termination is positively confirmed, even if tmpfs contents have vanished.
+Context-disabled tasks keep their existing durable-answer/publication behavior.
+
+== Offline and opt-in Docker canary
+
+`src/main/deployment/check-context-docker.sh` defaults to offline option/mountinfo fixture checks and accepts an explicit `--execute` gate for disposable Docker checks.
+It never provisions mounts, pulls/builds images, connects to Slack or sends a model request.
+Run syntax and offline checks from the repository root without Docker:
+
+[source,bash]
+----
+bash -n extensions/bot-parent/slack-bot/src/main/deployment/check-context-docker.sh
+bash extensions/bot-parent/slack-bot/src/main/deployment/check-context-docker.sh --check
+java documentation/src/test/ValidateBotSamples.java
+----
+
+Only after separate approval, provision the tmpfs and a private persistent evidence directory, then use an already-loaded vetted digest-pinned image with the shell tools listed by `--help`:
+
+[source,bash]
+----
+# Operator-only opt-in example; replace the image digest and private scan paths.
+bash check-context-docker.sh --execute \
+  --image "$VETTED_LOCAL_FIXTURE_IMAGE_WITH_DIGEST" \
+  --evidence-root /var/lib/yca-context-canary-evidence \
+  --scan-root /var/lib/yca-slack/state
+----
+
+The fixture uses synthetic source text and a deterministic file-copy fake provider in a disposable container with no network, credentials or production model.
+It checks the dedicated host tmpfs, required flags and UID/GID/mode, the container's actual `/attempt` mountinfo, exclusive attempt bind, read-only root, configured user, `network=none` and `log-driver=none`.
+It positively checks that the canary reached the fake provider request and result, deliberately emits it on stdout, then checks Docker log suppression and scans its persistent evidence plus explicitly supplied scan roots without printing matches.
+Scans cover readable regular files recursively without following symlinks; read errors fail acceptance, but compressed/encrypted files, historical backups, external log collectors and unsupplied paths are not inspected.
+The script does not inspect production mounts, a real controller namespace, provider/gateway logging, daemon backing storage or prove complete host-wide erasure.
+The stricter `network=none` fixture does not validate the application's fixed inference route or its egress policy.
+It is not an assembled admission/grant/tool/model/publication test: no real `slack_context`, controller state serialization, grant expiry/revocation or answer replay path runs here.
+Those remain integration-test and separately approved live-acceptance gates.
+The script records nonsecret launch identity/status on persistent storage before Docker creation, confirms termination before removing the container/attempt, and retains evidence/attempt on uncertainty.
+It never force-removes a runtime or edits/clears an admission ledger; ambiguous creation or failed inspection requires manual reconciliation.
+
+== Acceptance before enabling
+
+Automated fake/broker acceptance is owned by the integrated controller work and must cover denial, budgets, malformed/oversized responses, replay, cancellation, expiry, first-attempt binding and filesystem attacks.
+Renderer tests alone do not establish broker or deployment correctness.
+Complete and record these additional live checks without recording credentials or raw search payloads:
+
+. Confirm disabled defaults: no injected tool, no host context advertisement, no Slack context API calls, and unchanged result validation.
+. Verify the installed bot scopes and AI capability administratively; apply the opt-in manifest/reinstall only if a required scope is actually missing.
+Keep `xapp-` connection scope unchanged, do not rotate correctly scoped tokens, and do not auto-migrate an existing `assistant_view` app merely for this change.
+. Admit a fresh mention from the approved requester and resolve a relevant raw mention to minimal names; reject an unrelated user ID and treat a hostile display name as data.
+. With search enabled, retrieve only recent messages in the fixed unshared public sources and cite real returned permalinks in the same admitted destination thread.
+Reject attempts to expand to other channels, private channels, DMs, Slack Connect, files or alternate workspaces.
+. Distinguish empty successful results from denied, unavailable and expired context, including missing scopes/entitlement, rate limiting, timeout and an expired event action token.
+Measure actual token expiry; queue delay must not restart its lifetime.
+. Exhaust each cumulative budget and concurrency bound; failures must consume the intended request budget and must not trigger unbounded retry or pagination.
+. Cancel, finish, expire, restart and retry tasks; confirm registry eviction, no token persistence, no cross-task grants and no recovered second-attempt context authority.
+. Confirm there are no Slack credentials in agent JSON/environment/files, logs or transcripts, and no new agent Slack egress or gateway routes.
+. Exercise the supported Linux Docker pinned-directory semantics, slot replay/overwrite rejection, tmpfs/log configuration and cleanup; measure pollers and end-to-end latency under load.
+Reject context-enabled Nono/Kubernetes startup rather than extrapolating from Docker acceptance.
+. Review minimized results, transcript/provider retention and answer disclosure against Slack policy and workplace approval before enabling additional requesters or sources.
+
+See xref:configuration.adoc[controller configuration] and xref:deployment.adoc#_acceptance_before_startup[general deployment acceptance] for the independent admission, sandbox and lifecycle requirements.
+
+== Separately authorized rollout
+
+Source implementation, offline checks and a disposable Docker canary do not authorize server changes or enablement.
+Obtain one approved public/unshared source/destination channel ID, one requester ID for the initial test, and explicit approval to send that channel's retrieved data to the exact inference service and publish the answer in that thread.
+Inspect the actual inference startup arguments, logging configuration and data volumes: disable request/prompt logging and remove prompt/history capture before enabling search, recording only the exact nonsecret settings.
+If provider-side retention cannot be inspected or controlled, leave `searchEnabled=false` and qualify member resolution separately, including handling of names sent to the provider.
+An operator approval Boolean is not a substitute for inspection.
+
+. Build matched controller/agent application layers with UID/GID 10002, public CA trust, the installation's admission group, digest pins and existing fixed provider routing.
+Reuse services/egress images unless their code changed; context attempts must not start dependency egress.
+. Drain Slack and stop through its owned launcher; refuse promotion while any runtime is active/uncertain or admission reservations remain.
+Do not stop or alter GitHub scheduling.
+. Provision the dedicated noswap tmpfs and reviewed launcher/overlay with context disabled first; preserve byte-exact durable queue state and protected operator rollback configuration/pins.
+. Start disabled-mode smoke checks and inspect actual mounts and log settings before enabling context.
+Preserve every existing request-admission channel; fix only the separately approved source allowlist to the chosen channel, with member/request/result/response/concurrency limits 8/4/5/32768/1 and admission lifetime at most 600 seconds.
+Use the separate context overlay; do not broaden admission to obtain source authority.
+. Verify a fresh mention delivers an action token before enabling search; otherwise keep search disabled and do not introduce a user token or broaden scopes.
+Check agent capability administratively rather than automatically migrating `assistant_view`.
+. With a fresh operator-sent mention, test minimal member names, unrelated-ID denial, channel-scoped search, returned links, cancellation, absolute expiry and canary exclusion from durable state, prior-answer prompts and logs.
+Record sanitized outcomes only, not context text or raw errors.
+. On failure turn context off, drain/stop, retain runtime evidence and restore prior pins/config only after positive termination confirmation.
+Never restore an older queue, delete admission debt, or automatically replay an answer.

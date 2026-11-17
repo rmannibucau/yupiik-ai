@@ -38,9 +38,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class WebFetchTool implements EmbeddedTool {
+    private static final Pattern CONTENT_TYPE_CHARSET = Pattern.compile("(?i).*charset\\s*=\\s*[\"']?([^\"';\\s]+).*");
+
     private static final int MAX_BYTES = 200_000;
     private static final int MAX_OUTPUT = 60_000;
 
@@ -210,10 +213,9 @@ public class WebFetchTool implements EmbeddedTool {
     }
 
     private static String decode(final HttpResponse<byte[]> response) {
-        final var charset = response.headers()
-                .firstValue("content-type")
-                .orElse("")
-                .replaceAll("(?i).*charset\\s*=\\s*[\"']?([^\"';\\s]+).*", "$1");
+        final var charset = CONTENT_TYPE_CHARSET
+                .matcher(response.headers().firstValue("content-type").orElse(""))
+                .replaceAll("$1");
         if (charset != null
                 && !charset.isEmpty()
                 && !charset.equals(response.headers().firstValue("content-type").orElse(""))) {

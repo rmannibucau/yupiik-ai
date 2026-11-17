@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
@@ -162,6 +163,51 @@ class PlanTodoSeederTest {
         assertEquals("ok", todos.all().get(0).content());
     }
 
+    @Test
+    void structuredStepsDecodeKnownFieldsAndFilterIncompleteItems() {
+        final var sessions = newSessionStore();
+        final var id = sessions.create();
+        sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
+        final var todos = newTodoStore();
+        final var client = new StubChatClient("""
+                {"extension":{"nested":[1,true]},"steps":[
+                  {"status":"pending","content":"check \\"quotes\\" and\\nnewlines","extra":{}},
+                  {"content":"missing status"},
+                  {"content":"","status":"pending"},
+                  {"content":"wrong status","status":"later"}]}
+                """, true);
+        final var seeder = new PlanTodoSeeder(client, sessions, mapper);
+
+        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id, todos));
+        assertEquals(List.of(new TodoItem("check \"quotes\" and\nnewlines", "pending")), todos.all());
+    }
+
+    @Test
+    void malformedStructuredEnvelopesDoNotSeedTodos() {
+        final var sessions = newSessionStore();
+        final var id = sessions.create();
+        sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
+        for (final var response :
+                List.of("{}", "null", "{\"steps\":null}", "{\"steps\":[]}", "{\"steps\":{}}", "{broken")) {
+            final var todos = newTodoStore();
+            final var seeder = new PlanTodoSeeder(new StubChatClient(response, true), sessions, mapper);
+            assertSame(
+                    PlanTodoSeeder.SeedResult.NO_ACTIONABLE_STEPS, seeder.seedFromLastAssistant(id, todos), response);
+            assertTrue(todos.all().isEmpty(), response);
+        }
+    }
+
+    @Test
+    void fallbackStillAcceptsAnArrayInsideMarkdown() {
+        final var sessions = newSessionStore();
+        final var id = sessions.create();
+        sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
+        final var todos = newTodoStore();
+        final var seeder = seeder(todos, sessions, "```json\n[{\"content\":\"step\",\"status\":\"pending\"}]\n```");
+        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id, todos));
+        assertEquals(List.of(new TodoItem("step", "pending")), todos.all());
+    }
+
     private PlanTodoSeeder seeder(final TodoStore todos, final SessionStore sessions, final String llmResponse) {
         return new PlanTodoSeeder(new StubChatClient(llmResponse), sessions, mapper);
     }
@@ -175,15 +221,21 @@ class PlanTodoSeederTest {
     }
 
     private CodingAgentConfiguration configuration() {
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of("yca.storageHome", dir.toString()));
+        return TestConfigs.codingAgent(Map.of("yca.storageHome", dir.toString()));
     }
 
     private static final class StubChatClient extends ChatClient {
         private final String response;
+        private final boolean structured;
 
         private StubChatClient(final String response) {
+            this(response, false);
+        }
+
+        private StubChatClient(final String response, final boolean structured) {
             super();
             this.response = response;
+            this.structured = structured;
         }
 
         @Override
@@ -194,7 +246,7 @@ class PlanTodoSeederTest {
         @Override
         public StructuredResult chatStructured(
                 final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema) {
-            return new StructuredResult(new ChatResult(Message.assistant(response, null), Usage.EMPTY), false);
+            return new StructuredResult(new ChatResult(Message.assistant(response, null), Usage.EMPTY), structured);
         }
     }
 

@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.bot.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.httpclient.core.DelegatingHttpClient;
+import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import io.yupiik.ia.agent.core.llm.UnixProviderHttpClient;
 import io.yupiik.ia.agent.core.llm.UnixProviderProtocol;
 import java.io.IOException;
@@ -48,14 +49,20 @@ import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSession;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class NativeProviderServicesTest {
     private static final String CAPABILITY = "attempt-capability-0123456789abcdef";
     private static final URI UPSTREAM = URI.create("https://provider.invalid/v1/chat/completions");
 
-    @Test
-    void fixedRouteStreamingAuthenticationSaturationAndBudgetLifetime() throws Exception {
+    @ParameterizedTest
+    @EnumSource(
+            value = ApiFlavor.class,
+            names = {"COMPLETIONS", "RESPONSES"})
+    void fixedRouteStreamingAuthenticationSaturationAndBudgetLifetime(final ApiFlavor api) throws Exception {
+        final var endpoint = URI.create(
+                "https://provider.invalid" + UnixProviderProtocol.endpoint(api).getPath());
         final var directory = privateDirectory();
         final var socket = directory.resolve("p");
         final var calls = new AtomicInteger();
@@ -64,14 +71,14 @@ class NativeProviderServicesTest {
         final var released = new CompletableFuture<Void>();
         final var stream = new GateStream();
         try (final var jdk = new NoNetworkClient(HttpClient.Redirect.NEVER);
-                final var transport = new UnixProviderHttpClient(jdk, socket)) {
+                final var transport = new UnixProviderHttpClient(jdk, socket, api)) {
             final var upstream = new DelegatingHttpClient(jdk) {
                 @Override
                 @SuppressWarnings("unchecked")
                 public <T> CompletableFuture<HttpResponse<T>> sendAsync(
                         final HttpRequest request, final HttpResponse.BodyHandler<T> handler) {
                     calls.incrementAndGet();
-                    assertEquals(UPSTREAM, request.uri());
+                    assertEquals(endpoint, request.uri());
                     assertEquals(
                             "Bearer upstream-only-secret",
                             request.headers().firstValue("Authorization").orElseThrow());
@@ -85,7 +92,8 @@ class NativeProviderServicesTest {
             try (final var bridge = new NativeProviderServices(
                     socket,
                     upstream,
-                    UPSTREAM,
+                    endpoint,
+                    api,
                     "Bearer upstream-only-secret",
                     CAPABILITY,
                     Duration.ofMillis(400),
@@ -108,11 +116,17 @@ class NativeProviderServicesTest {
                     })) {
                 assertEquals(socket, bridge.socketPath());
                 // Invalid auth and oversized request never reach the upstream or acquire a permit.
-                for (final int mode : new int[] {0, 1}) {
+                for (final int mode : new int[] {0, 1, 2}) {
                     try (final var channel = SocketChannel.open(UnixDomainSocketAddress.of(socket))) {
                         final var out = UnixProviderProtocol.output(channel);
                         out.writeInt(UnixProviderProtocol.MAGIC);
                         out.writeUTF(mode == 0 ? "invalid" : CAPABILITY);
+                        if (mode != 0) {
+                            out.writeUTF(
+                                    mode == 2
+                                            ? (api == ApiFlavor.RESPONSES ? "COMPLETIONS" : "RESPONSES")
+                                            : api.name());
+                        }
                         if (mode == 1) {
                             out.writeInt(UnixProviderProtocol.MAX_REQUEST + 1);
                         }
@@ -121,7 +135,12 @@ class NativeProviderServicesTest {
                 }
                 assertEquals(0, calls.get());
                 assertEquals(0, acquired.get());
-                final var response = transport.send(request(), HttpResponse.BodyHandlers.ofInputStream());
+                final var request = HttpRequest.newBuilder(UnixProviderProtocol.endpoint(api))
+                        .header("Authorization", "Bearer " + CAPABILITY)
+                        .header("X-Untrusted-Destination", "https://other.invalid")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build();
+                final var response = transport.send(request, HttpResponse.BodyHandlers.ofInputStream());
                 assertEquals(200, response.statusCode());
                 assertEquals(
                         "text/event-stream",
@@ -130,7 +149,7 @@ class NativeProviderServicesTest {
                 assertEquals(1, acquired.get());
                 assertEquals(0, completed.get());
                 assertFalse(released.isDone(), "permit must span streaming lifetime");
-                assertThrows(IOException.class, () -> transport.send(request(), HttpResponse.BodyHandlers.ofString()));
+                assertThrows(IOException.class, () -> transport.send(request, HttpResponse.BodyHandlers.ofString()));
                 assertEquals(1, acquired.get(), "local saturation must not acquire shared budget");
                 stream.finish.complete(null);
                 try (final var input = response.body()) {
@@ -153,7 +172,7 @@ class NativeProviderServicesTest {
         final var directory = privateDirectory();
         final var socket = directory.resolve("p");
         try (final var jdk = new NoNetworkClient(HttpClient.Redirect.NEVER);
-                final var transport = new UnixProviderHttpClient(jdk, socket)) {
+                final var transport = new UnixProviderHttpClient(jdk, socket, ApiFlavor.COMPLETIONS)) {
             final var stream = new GateStream();
             final var release = new CompletableFuture<Void>();
             final var complete = new AtomicInteger();
@@ -169,6 +188,7 @@ class NativeProviderServicesTest {
                     socket,
                     upstream,
                     UPSTREAM,
+                    ApiFlavor.COMPLETIONS,
                     "Bearer secret",
                     CAPABILITY,
                     Duration.ofMillis(disconnect ? 400 : 40),
@@ -216,13 +236,29 @@ class NativeProviderServicesTest {
             assertThrows(
                     IllegalArgumentException.class,
                     () -> new NativeProviderServices(
-                            socket, client, UPSTREAM, "Bearer secret", CAPABILITY, Duration.ofMillis(100), 1, budget));
+                            socket,
+                            client,
+                            UPSTREAM,
+                            ApiFlavor.COMPLETIONS,
+                            "Bearer secret",
+                            CAPABILITY,
+                            Duration.ofMillis(100),
+                            1,
+                            budget));
             Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
             Files.writeString(socket, "do-not-adopt");
             assertThrows(
                     IOException.class,
                     () -> new NativeProviderServices(
-                            socket, client, UPSTREAM, "Bearer secret", CAPABILITY, Duration.ofMillis(100), 1, budget));
+                            socket,
+                            client,
+                            UPSTREAM,
+                            ApiFlavor.COMPLETIONS,
+                            "Bearer secret",
+                            CAPABILITY,
+                            Duration.ofMillis(100),
+                            1,
+                            budget));
             assertEquals("do-not-adopt", Files.readString(socket));
             try (final var redirect = new NoNetworkClient(HttpClient.Redirect.ALWAYS)) {
                 assertThrows(
@@ -231,6 +267,7 @@ class NativeProviderServicesTest {
                                 socket,
                                 redirect,
                                 UPSTREAM,
+                                ApiFlavor.COMPLETIONS,
                                 "Bearer secret",
                                 CAPABILITY,
                                 Duration.ofMillis(100),
@@ -243,6 +280,7 @@ class NativeProviderServicesTest {
                             socket,
                             client,
                             URI.create("http://provider.invalid/v1/chat/completions"),
+                            ApiFlavor.COMPLETIONS,
                             "Bearer secret",
                             CAPABILITY,
                             Duration.ofMillis(100),
@@ -250,6 +288,59 @@ class NativeProviderServicesTest {
                             budget));
         } finally {
             Files.deleteIfExists(socket);
+            Files.delete(directory);
+        }
+    }
+
+    @Test
+    void rejectsMismatchedUnsupportedAndNoncanonicalPinnedUpstreams() throws Exception {
+        final var directory = privateDirectory();
+        try (final var http = new NoNetworkClient(HttpClient.Redirect.NEVER)) {
+            for (final var suffix : List.of(
+                    "/chat/completions",
+                    "/messages",
+                    "/codex/responses",
+                    "/responses/compact",
+                    "/responses/id",
+                    "/responses/",
+                    "/%72esponses",
+                    "/../v1/responses",
+                    "/responses?target=other",
+                    "/responses#fragment")) {
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> new NativeProviderServices(
+                                directory.resolve("p"),
+                                http,
+                                URI.create("https://provider.invalid/v1" + suffix),
+                                ApiFlavor.RESPONSES,
+                                "Bearer secret",
+                                CAPABILITY,
+                                Duration.ofMillis(100),
+                                1,
+                                () -> {
+                                    throw new AssertionError("Invalid pin must not acquire budget");
+                                }));
+                assertFalse(Files.exists(directory.resolve("p")));
+            }
+            for (final var api :
+                    List.of(ApiFlavor.AUTO, ApiFlavor.ANTHROPIC, ApiFlavor.CODEX, ApiFlavor.OPENCODE_FREE)) {
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> new NativeProviderServices(
+                                directory.resolve("p"),
+                                http,
+                                UPSTREAM,
+                                api,
+                                "Bearer secret",
+                                CAPABILITY,
+                                Duration.ofMillis(100),
+                                1,
+                                () -> {
+                                    throw new AssertionError("Unsupported pin must not acquire budget");
+                                }));
+            }
+        } finally {
             Files.delete(directory);
         }
     }

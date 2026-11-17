@@ -20,44 +20,46 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.bot.runtime.DockerControlConfiguration;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$Capabilities$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$Container$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$ContainerState$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$ContainerStatus$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$EmptyDirectory$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$Environment$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$EnvironmentSource$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$JobSpec$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$Metadata$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$PersistentVolumeClaim$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$Pod$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$PodList$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$PodSpec$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$PodStatus$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$PodTemplate$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$Resources$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$SeccompProfile$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$SecretKey$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$SecurityContext$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$Terminated$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$Volume$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.execution.KubernetesExecutionBackend$VolumeMount$FusionJsonCodec;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.WorkerCommand$Options$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.context.GithubContextSnapshot;
 import io.yupiik.ia.agent.github.context.GithubPrivateContext;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$Capabilities$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$Container$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$ContainerState$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$ContainerStatus$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$EmptyDirectory$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$Environment$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$EnvironmentSource$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$JobSpec$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$Metadata$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$PersistentVolumeClaim$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$Pod$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$PodList$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$PodSpec$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$PodStatus$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$PodTemplate$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$Resources$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$SeccompProfile$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$SecretKey$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$SecurityContext$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$Terminated$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$Volume$FusionJsonCodec;
-import io.yupiik.ia.agent.github.execution.KubernetesExecutionBackend$VolumeMount$FusionJsonCodec;
 import io.yupiik.ia.agent.github.model.TaskState;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
@@ -83,6 +85,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -124,9 +127,15 @@ class WorkerTest {
     @Test
     void rejectsIncompleteProviderBudgetFromInjectedConfigurationBeforeClaimingTask() {
         enqueue("review");
-        final Map<String, String> values = Map.of("YCA_PROVIDER_BUDGET_ID", "configured-budget");
         final var worker = BotTestConfiguration.worker(
-                conf, store, github, json, backend, key -> Optional.ofNullable(values.get(key)));
+                conf,
+                store,
+                github,
+                json,
+                backend,
+                key -> Optional.empty(),
+                new ProviderBudgetConfiguration(null, "configured-budget", null),
+                new DockerControlConfiguration("", ""));
 
         assertThrows(IllegalArgumentException.class, () -> worker.run(id, DEFAULT_OPTIONS));
         assertEquals(
@@ -421,7 +430,7 @@ class WorkerTest {
         final var executable = home.resolve("stoppable-docker");
         writeDockerFixture(
                 executable,
-                "#!/bin/sh\ncase \"$1\" in\nrun) exit 9;;\ncontainer) printf 'false\\n';;\n*) exit 0;;\nesac\n");
+                "#!/bin/sh\ncase \"$1\" in\nrun) exit 9;;\ncontainer) agent_state \"$@\";;\n*) exit 0;;\nesac\n");
         final var stoppable = execution(executable.toString(), "trusted-agent", Duration.ofSeconds(5));
         BotTestConfiguration.worker(conf, store, github, json, stoppable).run(id, DEFAULT_OPTIONS);
         assertEquals(
@@ -445,7 +454,7 @@ class WorkerTest {
         writeDockerFixture(
                 executable,
                 "#!/bin/sh\ncase \"$1\" in\nrun) printf '%s\\n' \"$@\" > '" + invocations
-                        + "'; exit 9;;\ncontainer) printf 'false\\n';;\n*) exit 0;;\nesac\n");
+                        + "'; exit 9;;\ncontainer) agent_state \"$@\";;\n*) exit 0;;\nesac\n");
         final var values = Map.of(
                 "github.executor.docker.executable",
                 executable.toString(),
@@ -455,8 +464,10 @@ class WorkerTest {
                 "5",
                 "github.executor.showToolOutput",
                 visibility);
-        final var executor =
-                new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+        final var executor = new GithubExecutorConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .shared();
         BotTestConfiguration.worker(conf, store, github, json, executor).run(id, DEFAULT_OPTIONS);
         final var arguments = Files.readAllLines(invocations);
         assertEquals(1, arguments.stream().filter("--show-tool-output"::equals).count());
@@ -623,7 +634,7 @@ class WorkerTest {
         writeDockerFixture(
                 executable,
                 "#!/bin/sh\ncase \"$1\" in\nrun) printf 'private-agent-secret\\n'; exit " + exitCode
-                        + ";;\ncontainer) printf 'false\\n';;\n*) exit 0;;\nesac\n");
+                        + ";;\ncontainer) agent_state \"$@\";;\n*) exit 0;;\nesac\n");
         return executable;
     }
 
@@ -740,7 +751,7 @@ class WorkerTest {
                         Map.of("schemaVersion", 1, "taskId", id, "summary", "Untrusted host file must not be loaded")));
         Files.createSymbolicLink(directory.resolve("output"), outside);
         final var executable = home.resolve("stoppable-docker");
-        writeDockerFixture(executable, "#!/bin/sh\nprintf 'false\\n'\n");
+        writeDockerFixture(executable, "#!/bin/sh\nagent_state \"$@\"\n");
         store.transaction(state -> {
             final var task = state.task(id);
             task.state(TaskState.running);
@@ -775,7 +786,7 @@ class WorkerTest {
                         ? json.toString(Map.of("schemaVersion", 1, "taskId", id, content.substring(6), " \t\n"))
                         : content);
         final var executable = home.resolve("stoppable-docker");
-        writeDockerFixture(executable, "#!/bin/sh\nprintf 'false\\n'\n");
+        writeDockerFixture(executable, "#!/bin/sh\nagent_state \"$@\"\n");
         store.transaction(state -> {
             final var task = state.task(id);
             task.state(TaskState.running);
@@ -865,7 +876,7 @@ class WorkerTest {
         writeDockerFixture(home.resolve("fake-docker"), """
             #!/bin/sh
             if [ "$1" != run ]; then
-              printf 'false\\n'
+              agent_state \"$@\"
               exit 0
             fi
             [ -z "${GH_TOKEN:-}" ] || exit 99
@@ -1010,7 +1021,9 @@ class WorkerTest {
                             new FixPublisher(github, store, json, new FixConfiguration(false, "")),
                             new HostAdmissionConfiguration("", 1, ""),
                             BotTestConfiguration.CLOCK,
-                            key -> Optional.ofNullable(values.get(key)))
+                            key -> Optional.ofNullable(values.get(key)),
+                            new ProviderBudgetConfiguration(null, null, null),
+                            new DockerControlConfiguration("", ""))
                     .run(id, commandOptions.worker());
             final var task = store.transaction(state -> state.task(id).document());
             assertEquals(TaskState.failed, task.state());
@@ -1081,7 +1094,7 @@ class WorkerTest {
         writeDockerFixture(home.resolve("fake-docker"), """
             #!/bin/sh
             if [ "$1" != run ]; then
-              printf 'false\\n'
+              agent_state \"$@\"
               exit 0
             fi
             for arg in "$@"; do
@@ -1196,13 +1209,15 @@ class WorkerTest {
         final var configured = new GithubBotConfiguration$FusionConfigurationFactory(
                         key -> Optional.ofNullable(values.get(key)))
                 .get();
-        final var execution = new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(Map.of(
-                                "github.executor.attemptRoot",
-                                attempts.toString(),
-                                "github.executor.docker.executable",
-                                home.resolve("fake-docker").toString())
-                        .get(key)))
-                .get();
+        final var execution = new GithubExecutorConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(Map.of(
+                                        "github.executor.attemptRoot",
+                                        attempts.toString(),
+                                        "github.executor.docker.executable",
+                                        home.resolve("fake-docker").toString())
+                                .get(key)))
+                .get()
+                .shared();
         try {
             BotTestConfiguration.worker(configured, store, github, json, execution)
                     .run(
@@ -1590,7 +1605,7 @@ class WorkerTest {
             Files.writeString(
                     directory.resolve("output/result.json"),
                     json.toString(Map.of("schemaVersion", 1, "taskId", id, "failure", "blocked")));
-            writeDockerFixture(home.resolve("fake-docker"), "#!/bin/sh\nprintf 'false\\n'\n");
+            writeDockerFixture(home.resolve("fake-docker"), "#!/bin/sh\nagent_state \"$@\"\n");
             store.transaction(state -> {
                 final var task = state.task(id);
                 task.state(TaskState.running);
@@ -1632,8 +1647,10 @@ class WorkerTest {
                 "github.executor.docker.egress.image", "trusted-gateway",
                 "github.executor.docker.egress.allowedHosts", "api.github.com",
                 "github.executor.relay.bind", "127.0.0.1");
-        final var executor =
-                new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+        final var executor = new GithubExecutorConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .shared();
         assertThrows(
                 IllegalArgumentException.class,
                 () -> BotTestConfiguration.worker(conf, store, github, json, executor)
@@ -1644,8 +1661,9 @@ class WorkerTest {
     @Test
     void privateServicesRemainOptInWithoutChangingWorkerDefaults() {
         assertNull(backend.docker().services());
-        assertNull(new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+        assertNull(new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
                 .get()
+                .shared()
                 .docker()
                 .services());
         assertEquals(WorkerOptions.SourceMode.export, DEFAULT_OPTIONS.source().mode());
@@ -1714,10 +1732,14 @@ class WorkerTest {
                 "github.executor.docker.services.keyStore",
                 home.resolve("private-tls.p12").toString(),
                 "github.executor.docker.services.providerTarget",
-                "http://192.168.52.32:8000/v1",
+                "http://10." + ThreadLocalRandom.current().nextInt(256) + "."
+                        + ThreadLocalRandom.current().nextInt(256) + "."
+                        + ThreadLocalRandom.current().nextInt(1, 255) + ":8000/v1",
                 "github.executor.relay.bind",
                 relayBind);
-        return new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+        return new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .shared();
     }
 
     private Worker worker() {
@@ -1766,7 +1788,7 @@ class WorkerTest {
                       exit 97
                     fi
                     printf 'inspect\\n' >> '%s'
-                    printf 'false\\n'
+                    agent_state \"$@\"
                     """.formatted(invocations, home.resolve("release"), invocations));
         backend = execution(home.resolve("fake-docker").toString(), "trusted-agent", Duration.ofSeconds(15));
     }
@@ -1777,7 +1799,7 @@ class WorkerTest {
         final var absentServices = """
                 if [ "$#" = 5 ] && [ "$2 $3" = 'inspect --format' ]; then
                   case "$4" in
-                    *io.yupiik.yca.github-bot.runtime*io.yupiik.yca.github-bot.component*)
+                    *io.yupiik.yca.bot.runtime*io.yupiik.yca.bot.component*)
                       case "$1:$5" in
                         container:yca-*-services|container:yca-*-egress) printf 'Error: No such container: %s\\n' "$5"; exit 1 ;;
                         network:yca-*-services-net|network:yca-*-external) printf 'Error: No such network: %s\\n' "$5"; exit 1 ;;
@@ -1786,7 +1808,9 @@ class WorkerTest {
                   esac
                 fi
                 """;
-        TestScript.write(executable, script.replace("#!/bin/sh\n", "#!/bin/sh\n" + absentServices));
+        TestScript.write(
+                executable,
+                script.replace("#!/bin/sh\n", "#!/bin/sh\n" + TestScript.githubAgentState() + absentServices));
     }
 
     private long launchCount() throws Exception {
@@ -1851,6 +1875,11 @@ class WorkerTest {
             values.put("github.executor.backend", "KUBERNETES");
             values.put("github.executor.attemptRoot", attempts.toString());
             values.put("github.executor.kubernetes.namespace", "worker-test");
+            values.put("github.executor.kubernetes.claim", "worker-attempts");
+            values.put("github.executor.kubernetes.image", "trusted-agent");
+            values.put("github.executor.kubernetes.serviceAccount", "worker-agent");
+            values.put("github.executor.kubernetes.uid", "10001");
+            values.put("github.executor.kubernetes.gid", "10001");
             if (kubeconfig) {
                 final var config = home.resolve("kubeconfig.json");
                 Files.writeString(
@@ -1870,9 +1899,10 @@ class WorkerTest {
                 values.put("github.executor.kubernetes.master", master);
                 values.put("github.executor.kubernetes.token", token.toString());
             }
-            final var execution = new ExecutorConfiguration$FusionConfigurationFactory(
+            final var execution = new GithubExecutorConfiguration$FusionConfigurationFactory(
                             key -> Optional.ofNullable(values.get(key)))
-                    .get();
+                    .get()
+                    .shared();
             if (kubeconfig) {
                 final var config = home.resolve("kubeconfig.json");
                 final var original = Files.readString(config);
@@ -1918,7 +1948,9 @@ class WorkerTest {
         if (attemptRoot != null) {
             values.put("github.executor.attemptRoot", attemptRoot.toString());
         }
-        return new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+        return new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .shared();
     }
 
     /**

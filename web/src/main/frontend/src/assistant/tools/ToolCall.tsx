@@ -1,5 +1,5 @@
 // Adapted from assistant-ui Elements tool-call.tsx (MIT).
-// See PROVENANCE.md and LICENSE.assistant-ui in this directory.
+// See LICENSE.assistant-ui here and documentation/src/main/minisite/content/features/ui-advanced.adoc.
 import { useId, useRef, useState, type ReactNode } from 'react';
 import { useScrollLock } from '@assistant-ui/react';
 

@@ -34,6 +34,10 @@ import java.util.regex.Pattern;
  * glm) are detected consistently.</p>
  */
 public final class DefaultModelTuner {
+    private static final Pattern KIMI_K2_DOT_MODEL = Pattern.compile(".*k2\\..*");
+    private static final Pattern KIMI_K2P_MODEL = Pattern.compile(".*k2p.*");
+    private static final Pattern KIMI_K2_5_MODEL = Pattern.compile(".*k2-5.*");
+
     private DefaultModelTuner() {
         // utility
     }
@@ -664,9 +668,9 @@ public final class DefaultModelTuner {
     /** True for kimi k2 reasoning families (thinking or k2. sub-versions). */
     private static boolean isKimiK2(final String model) {
         return model.contains("thinking")
-                || model.matches(".*k2\\..*")
-                || model.matches(".*k2p.*")
-                || model.matches(".*k2-5.*");
+                || KIMI_K2_DOT_MODEL.matcher(model).matches()
+                || KIMI_K2P_MODEL.matcher(model).matches()
+                || KIMI_K2_5_MODEL.matcher(model).matches();
     }
 
     /** Normalize a model name for matching: null/blank to null, else lower-case with trimmed. */

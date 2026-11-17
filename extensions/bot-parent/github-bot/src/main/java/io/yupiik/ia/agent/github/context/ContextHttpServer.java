@@ -19,6 +19,7 @@ import static io.yupiik.fusion.framework.build.api.http.HttpMatcher.PathMatching
 
 import com.sun.net.httpserver.HttpExchange;
 import io.yupiik.fusion.framework.build.api.http.HttpMatcher;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.http.server.api.Request;
 import io.yupiik.fusion.http.server.api.Response;
 import io.yupiik.fusion.httpserver.jre.JreHttpServer;
@@ -45,10 +46,16 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
 /** Explicitly owned, isolated JRE listener. TLS and per-worker routing belong to the deployment. */
 public final class ContextHttpServer implements AutoCloseable {
+    private static final Pattern GIT_SERVICE_PATH =
+            Pattern.compile("[A-Za-z0-9-]{1,80}\\.git/(info/refs|git-upload-pack)");
+    private static final Pattern CAPABILITY_TOKEN = Pattern.compile("[A-Za-z0-9_-]{43}");
+    private static final Pattern CONTENT_LENGTH = Pattern.compile("[0-9]{1,10}");
+
     public static final String CONTROL_TOKEN_ENV = "YCA_CONTEXT_TOKEN";
     public static final String GIT_TOKEN_ENV = "YCA_CONTEXT_GIT_TOKEN";
     private final ContextService service;
@@ -184,7 +191,7 @@ public final class ContextHttpServer implements AutoCloseable {
                         .status(200)
                         .header("content-type", "application/json;charset=utf-8")
                         .header("cache-control", "no-store")
-                        .body(json.toString(response))
+                        .body(json.toString(new RpcResponse(true, response.get("body"))))
                         .build();
             }
             return git(request, lease);
@@ -202,7 +209,7 @@ public final class ContextHttpServer implements AutoCloseable {
 
     private Response git(final Request request, final RequestLease lease) throws IOException {
         final var suffix = request.path().substring((path + "/git/").length());
-        if (!suffix.matches("[A-Za-z0-9-]{1,80}\\.git/(info/refs|git-upload-pack)")) {
+        if (!GIT_SERVICE_PATH.matcher(suffix).matches()) {
             return failure(404, "UNKNOWN_GIT_ROUTE");
         }
         final var generation = suffix.substring(0, suffix.indexOf(".git/"));
@@ -355,7 +362,7 @@ public final class ContextHttpServer implements AutoCloseable {
             }
             token = decoded.substring(8);
         }
-        return token.matches("[A-Za-z0-9_-]{43}")
+        return CAPABILITY_TOKEN.matcher(token).matches()
                 && MessageDigest.isEqual(hash(token), control ? controlHash : gitHash);
     }
 
@@ -380,7 +387,7 @@ public final class ContextHttpServer implements AutoCloseable {
 
     private static byte[] body(final Request request, final int max) throws IOException {
         final var length = request.header("content-length");
-        if (length != null && (!length.matches("[0-9]{1,10}") || Long.parseLong(length) > max)) {
+        if (length != null && (!CONTENT_LENGTH.matcher(length).matches() || Long.parseLong(length) > max)) {
             throw new IOException("Oversized context request");
         }
         final var input = request.unwrapOrNull(InputStream.class);
@@ -407,9 +414,16 @@ public final class ContextHttpServer implements AutoCloseable {
                 .status(status)
                 .header("content-type", "application/json;charset=utf-8")
                 .header("cache-control", "no-store")
-                .body(json.toString(Map.of("ok", false, "error", code)))
+                .body(json.toString(new RpcFailure(false, code)))
                 .build();
     }
+
+    /** Operation-specific context payloads deliberately remain dynamic within the stable envelope. */
+    @JsonModel
+    public record RpcResponse(boolean ok, Object body) {}
+
+    @JsonModel
+    public record RpcFailure(boolean ok, String error) {}
 
     private static String token() {
         final var bytes = new byte[32];

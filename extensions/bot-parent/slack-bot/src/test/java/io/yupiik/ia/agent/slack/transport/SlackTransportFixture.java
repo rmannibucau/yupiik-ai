@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.slack.support.SlackJsonMapper;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
@@ -29,6 +30,7 @@ import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
@@ -39,10 +41,11 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.ExecutorService;
@@ -57,11 +60,15 @@ import java.util.function.Function;
 
 /** Minimal real HTTP/1.1 + RFC6455 loopback peer; no timing sleeps or external server dependency. */
 final class SlackTransportFixture implements AutoCloseable {
-    final JsonMapperImpl json = new JsonMapperImpl(List.of(), ignored -> Optional.empty());
+    // Loopback I/O is not the timing behavior under test. Allow scheduler/JIT contention in parallel runs;
+    // reconnect delays are checked separately through ManualScheduler without waiting for wall-clock time.
+    private static final Duration IO_TIMEOUT = Duration.ofSeconds(5);
+
+    final JsonMapperImpl json = SlackJsonMapper.create();
     final HttpClient http = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
             .followRedirects(HttpClient.Redirect.NEVER)
-            .connectTimeout(Duration.ofMillis(200))
+            .connectTimeout(IO_TIMEOUT)
             .build();
     final ExtendedHttpClient extended = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(http));
     final ManualScheduler scheduler = new ManualScheduler();
@@ -69,6 +76,7 @@ final class SlackTransportFixture implements AutoCloseable {
     final BlockingQueue<Session> sessions = new LinkedBlockingQueue<>();
     final BlockingQueue<Throwable> failures = new LinkedBlockingQueue<>();
     final BlockingQueue<Request> responded = new LinkedBlockingQueue<>();
+    final Set<Request> expectedDisconnectedResponses = ConcurrentHashMap.newKeySet();
     private final ServerSocket listener = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final ConcurrentLinkedQueue<Socket> sockets = new ConcurrentLinkedQueue<>();
@@ -111,7 +119,7 @@ final class SlackTransportFixture implements AutoCloseable {
         return new SlackWebApi(
                 json,
                 extended,
-                new SlackWebApi.Settings(base(), Duration.ofMillis(200), requestLimit, responseLimit),
+                new SlackWebApi.Settings(base(), IO_TIMEOUT, requestLimit, responseLimit),
                 () -> "xapp-secret",
                 () -> "xoxb-secret");
     }
@@ -122,14 +130,13 @@ final class SlackTransportFixture implements AutoCloseable {
                 api(8192, 8192),
                 http,
                 scheduler,
-                new SlackSocketMode.Settings(
-                        Duration.ofMillis(200), Duration.ofMillis(10), Duration.ofMillis(80), limit),
+                new SlackSocketMode.Settings(IO_TIMEOUT, Duration.ofMillis(10), Duration.ofMillis(80), limit),
                 handler,
                 () -> 0.5);
     }
 
     <T> T take(final BlockingQueue<T> queue) throws InterruptedException {
-        final var value = queue.poll(200, TimeUnit.MILLISECONDS);
+        final var value = queue.poll(IO_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
         assertNotNull(value, () -> "Missing fixture event; failures=" + failures);
         return value;
     }
@@ -183,9 +190,18 @@ final class SlackTransportFixture implements AutoCloseable {
                 response.headers()
                         .forEach((key, value) ->
                                 head.append(key).append(": ").append(value).append("\r\n"));
-                socket.getOutputStream().write(head.append("\r\n").toString().getBytes(StandardCharsets.US_ASCII));
-                socket.getOutputStream().write(bytes);
-                socket.getOutputStream().flush();
+                try {
+                    socket.getOutputStream()
+                            .write(head.append("\r\n").toString().getBytes(StandardCharsets.US_ASCII));
+                    socket.getOutputStream().write(bytes);
+                    socket.getOutputStream().flush();
+                } catch (final SocketException disconnected) {
+                    if (!expectedDisconnectedResponses.remove(request)) {
+                        throw disconnected;
+                    }
+                    // Cancellation may close discovery before the intentionally delayed response.
+                    // The test needs the completed response attempt, not a successful peer write.
+                }
                 responded.add(request);
             }
         } catch (final Exception failure) {

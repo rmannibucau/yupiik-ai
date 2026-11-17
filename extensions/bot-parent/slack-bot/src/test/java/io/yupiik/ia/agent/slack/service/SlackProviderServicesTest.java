@@ -21,9 +21,11 @@ import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.bot.gateway.ProviderServicesGateway;
 import io.yupiik.ia.agent.bot.gateway.ProviderServicesGateway$Settings$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
+import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument$FusionJsonCodec;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
+import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import io.yupiik.ia.agent.core.llm.UnixProviderProtocol;
-import io.yupiik.ia.agent.github.model.AgentConfigurationDocument;
-import io.yupiik.ia.agent.github.model.AgentConfigurationDocument$FusionJsonCodec;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -31,6 +33,8 @@ import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 class SlackProviderServicesTest {
     private static final String TARGET = "http://172.20.0.1:8080/v1";
@@ -39,8 +43,13 @@ class SlackProviderServicesTest {
     @TempDir
     Path root;
 
-    @Test
-    void replacesSelectedInlineCredentialAndDropsAlternateRoutesForBothDocumentShapes() throws Exception {
+    @ParameterizedTest
+    @EnumSource(
+            value = ApiFlavor.class,
+            names = {"COMPLETIONS", "RESPONSES"})
+    void replacesSelectedInlineCredentialAndDropsAlternateRoutesForBothDocumentShapes(final ApiFlavor api)
+            throws Exception {
+        final var target = api == ApiFlavor.RESPONSES ? TARGET + "/responses" : TARGET;
         try (final var json = mapper()) {
             for (final var wrapped : List.of(false, true)) {
                 final var directory = Files.createDirectory(root.resolve(wrapped ? "wrapped" : "plain"));
@@ -48,11 +57,11 @@ class SlackProviderServicesTest {
                         "id",
                         "selected",
                         "api",
-                        "COMPLETIONS",
+                        api.name(),
                         "model",
                         "trusted-model",
                         "baseUrl",
-                        TARGET,
+                        target,
                         "apiKey",
                         "selected-inline-secret",
                         "headers",
@@ -83,9 +92,10 @@ class SlackProviderServicesTest {
                         configuration,
                         privateRoot,
                         json,
-                        services(TARGET),
+                        services(target),
                         Configuration.of(
                                 Map.of(PASSWORD_ENV, "private-tls-secret", "OPENAI_API_KEY", "fallback-secret")),
+                        new ProviderBudgetConfiguration(null, null, null),
                         60);
 
                 final var rewritten = Files.readString(configuration);
@@ -101,7 +111,7 @@ class SlackProviderServicesTest {
                 assertFalse(capability.isBlank());
                 assertEquals(capability, safe.get("apiKey"));
                 assertEquals("trusted-model", safe.get("model"));
-                assertEquals("COMPLETIONS", safe.get("api"));
+                assertEquals(api.name(), safe.get("api"));
                 assertFalse(safe.containsKey("headers"));
                 assertFalse(safe.containsKey("models"));
                 assertFalse(document.configuration().containsKey("model"));
@@ -119,10 +129,43 @@ class SlackProviderServicesTest {
                 }
                 assertFalse(manifestText.contains(capability));
                 final var manifest = json.fromString(ProviderServicesGateway.Settings.class, manifestText);
-                assertEquals(TARGET + "/chat/completions", manifest.inferenceTarget());
+                assertEquals(
+                        TARGET + (api == ApiFlavor.RESPONSES ? "/responses" : "/chat/completions"),
+                        manifest.inferenceTarget());
                 assertEquals(
                         "https://attempt-services.yca.internal:8443" + manifest.inferencePath(), safe.get("baseUrl"));
             }
+        }
+    }
+
+    @Test
+    void forwardsTypedBudgetOnlyToPrivateServices() throws Exception {
+        final var budgetRoot = Files.createTempDirectory(root.getParent(), "slack-services-budget-");
+        try (final var json = mapper()) {
+            final var configuration = Files.writeString(
+                    root.resolve("configuration.json"),
+                    json.toString(Map.of(
+                            "provider", Map.of("baseUrl", TARGET, "model", "test", "apiKey", "upstream-secret"))));
+            final var services = new SlackProviderServices(
+                    configuration,
+                    Files.createDirectory(root.resolve("private")),
+                    json,
+                    services(TARGET),
+                    Configuration.of(Map.of(PASSWORD_ENV, "tls-secret", "UNRELATED_HOST_SECRET", "never-forward")),
+                    new ProviderBudgetConfiguration(budgetRoot.toString(), "configured-budget", "2"),
+                    60);
+            assertEquals(budgetRoot.toString(), services.secrets().get("YCA_PROVIDER_BUDGET_ROOT"));
+            assertEquals("configured-budget", services.secrets().get("YCA_PROVIDER_BUDGET_ID"));
+            assertEquals("2", services.secrets().get("YCA_PROVIDER_BUDGET_SLOTS"));
+            assertFalse(services.secrets().containsKey("UNRELATED_HOST_SECRET"));
+            for (final var file : List.of(configuration, services.settings())) {
+                final var text = Files.readString(file);
+                assertFalse(text.contains(budgetRoot.toString()));
+                assertFalse(text.contains("configured-budget"));
+                assertFalse(text.contains("upstream-secret"));
+            }
+        } finally {
+            Files.delete(budgetRoot);
         }
     }
 
@@ -150,14 +193,20 @@ class SlackProviderServicesTest {
                             json,
                             services(TARGET),
                             Configuration.of(Map.of(PASSWORD_ENV, "tls-secret")),
+                            new ProviderBudgetConfiguration(null, null, null),
                             60));
             assertEquals(original, Files.readString(configuration));
             assertFalse(Files.exists(privateRoot.resolve("services.json")));
         }
     }
 
-    @Test
-    void nativeHandoffUsesOnlyPinnedUnixTransportCapability() throws Exception {
+    @ParameterizedTest
+    @EnumSource(
+            value = ApiFlavor.class,
+            names = {"COMPLETIONS", "RESPONSES"})
+    void nativeHandoffUsesOnlyPinnedUnixTransportCapability(final ApiFlavor api) throws Exception {
+        final var target =
+                "https://provider.example/v1" + (api == ApiFlavor.RESPONSES ? "/responses" : "/chat/completions");
         try (final var json = mapper()) {
             final var configuration = Files.writeString(
                     root.resolve("configuration.json"),
@@ -165,11 +214,11 @@ class SlackProviderServicesTest {
                             "provider",
                             Map.of(
                                     "api",
-                                    "COMPLETIONS",
+                                    "AUTO",
                                     "model",
                                     "trusted-model",
                                     "baseUrl",
-                                    "https://provider.example/v1",
+                                    target,
                                     "apiKey",
                                     "upstream-private-secret"))));
             final var services = new SlackProviderServices(
@@ -177,24 +226,53 @@ class SlackProviderServicesTest {
                     Files.createDirectory(root.resolve("private")),
                     json,
                     new SlackProviderServices.Routing(
-                            "https://provider.example/v1",
-                            UnixProviderProtocol.ENDPOINT.toString(),
-                            "native.invalid",
-                            0,
-                            "/unused",
-                            ""),
+                            target, UnixProviderProtocol.ENDPOINT.toString(), "native.invalid", 0, "/unused", ""),
                     Configuration.of(Map.of()),
+                    new ProviderBudgetConfiguration(null, null, null),
                     60);
             final var rewritten = Files.readString(configuration);
-            assertTrue(rewritten.contains(UnixProviderProtocol.ENDPOINT.toString()));
+            assertTrue(rewritten.contains(UnixProviderProtocol.endpoint(api).toString()));
+            assertEquals(api, services.api());
             assertFalse(rewritten.contains("upstream-private-secret"));
             assertFalse(rewritten.contains("https://provider.example"));
-            assertEquals(
-                    "https://provider.example/v1/chat/completions",
-                    services.upstream().toString());
+            assertEquals(target, services.upstream().toString());
             assertEquals("upstream-private-secret", services.secrets().get("YCA_SERVICES_UPSTREAM_TOKEN"));
             assertNull(services.manifest());
             assertFalse(Files.readString(services.settings()).contains("upstream-private-secret"));
+        }
+    }
+
+    @Test
+    void rejectsUnsupportedAndConflictingApisBeforeRewritingCredentials() throws Exception {
+        try (final var json = mapper()) {
+            final var configuration = root.resolve("configuration.json");
+            final var privateRoot = Files.createDirectory(root.resolve("private"));
+            for (final var api : List.of("COMPLETIONS", "ANTHROPIC", "CODEX", "OPENCODE_FREE", "invalid-api")) {
+                final var original = json.toString(Map.of(
+                        "provider",
+                        Map.of(
+                                "api",
+                                api,
+                                "model",
+                                "test",
+                                "baseUrl",
+                                TARGET + "/responses",
+                                "apiKey",
+                                "private-key")));
+                Files.writeString(configuration, original);
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> new SlackProviderServices(
+                                configuration,
+                                privateRoot,
+                                json,
+                                services(TARGET + "/responses"),
+                                Configuration.of(Map.of(PASSWORD_ENV, "tls-secret")),
+                                new ProviderBudgetConfiguration(null, null, null),
+                                60));
+                assertEquals(original, Files.readString(configuration));
+                assertFalse(Files.exists(privateRoot.resolve("services.json")));
+            }
         }
     }
 

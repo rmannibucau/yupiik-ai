@@ -20,9 +20,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.github.client.GitHubClient;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.model.TaskState;
 import io.yupiik.ia.agent.github.service.BotAudit;
@@ -688,7 +688,9 @@ class BotCommandTest {
                     sent.incrementAndGet();
                 }
             };
-            final var executor = new ExecutorConfiguration$FusionConfigurationFactory(unused -> Optional.empty()).get();
+            final var executor = new GithubExecutorConfiguration$FusionConfigurationFactory(unused -> Optional.empty())
+                    .get()
+                    .shared();
             final var worker = BotTestConfiguration.workerCommand(
                     new WorkerCommand.Options(
                             "",

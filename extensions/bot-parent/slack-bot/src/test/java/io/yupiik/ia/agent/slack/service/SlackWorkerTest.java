@@ -20,8 +20,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.slack.context.SlackContextStorage;
 import io.yupiik.ia.agent.slack.model.SlackTask;
+import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackStore;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import java.io.IOException;
@@ -41,12 +43,13 @@ class SlackWorkerTest {
     void confirmsStopBeforePublishingThenCleansAttempt() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
                 final var sandbox = new FakeSandbox(fixture, 0, false)) {
-            fixture.add(task("task", "U1", "queued", 1));
+            fixture.add(task("task", "U1", TaskStatus.queued, 1));
             fixture.response = exchange -> {
                 sandbox.events.add("publish");
                 assertEquals(List.of("execute", "stop", "publish"), sandbox.events);
                 assertTrue(Files.isDirectory(sandbox.path));
-                assertEquals("publishing", fixture.store.list().getFirst().status());
+                assertEquals(
+                        TaskStatus.publishing, fixture.store.list().getFirst().status());
                 final var body = (Map<?, ?>) fixture.json.fromString(Object.class, exchange.body());
                 assertEquals("C1", body.get("channel"));
                 assertEquals("1.1", body.get("thread_ts"));
@@ -60,7 +63,7 @@ class SlackWorkerTest {
             };
             assertTrue(worker(fixture, sandbox).runOne());
             final var saved = fixture.store.list().getFirst();
-            assertEquals("done", saved.status());
+            assertEquals(TaskStatus.done, saved.status());
             assertEquals("Safe answer", saved.answer());
             assertEquals("2.1", saved.messageTs());
             assertFalse(Files.exists(sandbox.path));
@@ -71,13 +74,14 @@ class SlackWorkerTest {
     void ambiguousPublicationPreservesEvidenceAndDoesNotReplay() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
                 final var sandbox = new FakeSandbox(fixture, 0, false)) {
-            fixture.add(task("task", "U1", "queued", 1));
+            fixture.add(task("task", "U1", TaskStatus.queued, 1));
             fixture.response = exchange -> {
                 throw new IllegalStateException("Unknown remote outcome");
             };
             final var worker = worker(fixture, sandbox);
             assertTrue(worker.runOne());
-            assertEquals("recovery_blocked", fixture.store.list().getFirst().status());
+            assertEquals(
+                    TaskStatus.recovery_blocked, fixture.store.list().getFirst().status());
             assertTrue(Files.isRegularFile(sandbox.path.resolve("output/result.json")));
             assertFalse(worker.runOne());
             assertEquals(1, fixture.exchanges.size());
@@ -88,7 +92,7 @@ class SlackWorkerTest {
     void simultaneousWorkerCannotClaimNextTaskInSameConversation() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
                 final var sandbox = new FakeSandbox(fixture, 0, false)) {
-            fixture.add(task("first", "U1", "queued", 1), task("next", "U1", "queued", 2));
+            fixture.add(task("first", "U1", TaskStatus.queued, 1), task("next", "U1", TaskStatus.queued, 2));
             final var worker = worker(fixture, sandbox);
             sandbox.duringExecution =
                     () -> assertFalse(worker.runOne(), "Concurrent worker must leave next task queued");
@@ -96,7 +100,7 @@ class SlackWorkerTest {
             sandbox.duringExecution = () -> {};
             assertTrue(worker.runOne());
             assertEquals(
-                    List.of("done", "done"),
+                    List.of(TaskStatus.done, TaskStatus.done),
                     fixture.store.list().stream().map(SlackTask::status).toList());
             assertEquals(2, sandbox.events.stream().filter("execute"::equals).count());
         }
@@ -106,9 +110,10 @@ class SlackWorkerTest {
     void unknownStopBlocksPublicationAndCleanup() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
                 final var sandbox = new FakeSandbox(fixture, 0, true)) {
-            fixture.add(task("task", "U1", "queued", 1));
+            fixture.add(task("task", "U1", TaskStatus.queued, 1));
             assertTrue(worker(fixture, sandbox).runOne());
-            assertEquals("recovery_blocked", fixture.store.list().getFirst().status());
+            assertEquals(
+                    TaskStatus.recovery_blocked, fixture.store.list().getFirst().status());
             assertTrue(fixture.exchanges.isEmpty());
             assertTrue(Files.isDirectory(sandbox.path));
             assertTrue(Files.isRegularFile(sandbox.path.resolve("output/result.json")));
@@ -120,11 +125,11 @@ class SlackWorkerTest {
     void nonzeroExitNeverPublishes() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
                 final var sandbox = new FakeSandbox(fixture, 7, false)) {
-            fixture.add(task("task", "U1", "queued", 1));
+            fixture.add(task("task", "U1", TaskStatus.queued, 1));
             assertTrue(worker(fixture, sandbox).runOne());
             assertTrue(sandbox.events.contains("stop"));
             assertTrue(fixture.exchanges.isEmpty(), "Failed sandbox output must not be published");
-            assertEquals("failed", fixture.store.list().getFirst().status());
+            assertEquals(TaskStatus.failed, fixture.store.list().getFirst().status());
         }
     }
 
@@ -132,17 +137,17 @@ class SlackWorkerTest {
     void queuedConversationWaitsUntilPriorTaskIsTerminal() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
                 final var sandbox = new FakeSandbox(fixture, 0, false)) {
-            fixture.add(task("active", "U1", "waiting_for_user", 1), task("next", "U1", "queued", 2));
+            fixture.add(task("active", "U1", TaskStatus.waiting_for_user, 1), task("next", "U1", TaskStatus.queued, 2));
             final var worker = worker(fixture, sandbox);
             assertFalse(worker.runOne());
             assertTrue(sandbox.events.isEmpty());
             fixture.store.transaction(tasks -> {
-                tasks.set(0, tasks.getFirst().publication("Previous answer", "2.1", "done", 3));
+                tasks.set(0, tasks.getFirst().publication("Previous answer", "2.1", TaskStatus.done, 3));
                 return null;
             });
             assertTrue(worker.runOne());
             assertEquals(1, sandbox.events.stream().filter("execute"::equals).count());
-            assertEquals("done", fixture.store.list().get(1).status());
+            assertEquals(TaskStatus.done, fixture.store.list().get(1).status());
         }
     }
 
@@ -154,12 +159,13 @@ class SlackWorkerTest {
             final var directory =
                     Files.createDirectories(Path.of(executor.attemptRoot()).resolve("yca-slack-evidence"));
             final var evidence = Files.writeString(directory.resolve("result"), "preserve");
-            final var original = task("task", "U1", "queued", 1);
-            fixture.add(original.running(directory.toString(), runtime(original), fingerprint(executor), 2)
-                    .publication("answer", null, "publishing", 3));
+            final var original = task("task", "U1", TaskStatus.queued, 1);
+            fixture.add(original.running(directory.toString(), runtime(original), fingerprint(executor), false, 2)
+                    .publication("answer", null, TaskStatus.publishing, 3));
             worker(fixture, sandbox).recover();
             assertEquals(List.of("stop"), sandbox.events);
-            assertEquals("recovery_blocked", fixture.store.list().getFirst().status());
+            assertEquals(
+                    TaskStatus.recovery_blocked, fixture.store.list().getFirst().status());
             assertEquals("preserve", Files.readString(evidence));
             assertTrue(fixture.exchanges.isEmpty());
         }
@@ -169,14 +175,15 @@ class SlackWorkerTest {
     void recoveryDoesNotStopUntrustedRuntimeAndDoesNotClaimQueuedTask() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
                 final var sandbox = new FakeSandbox(fixture, 0, false)) {
-            final var original = task("task", "U1", "queued", 1);
+            final var original = task("task", "U1", TaskStatus.queued, 1);
             fixture.add(
-                    original.running(root.resolve("outside").toString(), runtime(original), "wrong-fingerprint", 2),
-                    task("queued", "U2", "queued", 1));
+                    original.running(
+                            root.resolve("outside").toString(), runtime(original), "wrong-fingerprint", false, 2),
+                    task("queued", "U2", TaskStatus.queued, 1));
             worker(fixture, sandbox).recover();
             assertTrue(sandbox.events.isEmpty());
             assertEquals(
-                    List.of("recovery_blocked", "queued"),
+                    List.of(TaskStatus.recovery_blocked, TaskStatus.queued),
                     fixture.store.list().stream().map(SlackTask::status).toList());
         }
     }
@@ -185,10 +192,11 @@ class SlackWorkerTest {
     void malformedRecoveryPathIsQuarantined() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
                 final var sandbox = new FakeSandbox(fixture, 0, false)) {
-            final var original = task("task", "U1", "queued", 1);
-            fixture.add(original.running("/", runtime(original), fingerprint(fixture.executor(root)), 2));
+            final var original = task("task", "U1", TaskStatus.queued, 1);
+            fixture.add(original.running("/", runtime(original), fingerprint(fixture.executor(root)), false, 2));
             assertDoesNotThrow(() -> worker(fixture, sandbox).recover());
-            assertEquals("recovery_blocked", fixture.store.list().getFirst().status());
+            assertEquals(
+                    TaskStatus.recovery_blocked, fixture.store.list().getFirst().status());
             assertTrue(sandbox.events.isEmpty());
         }
     }
@@ -203,7 +211,11 @@ class SlackWorkerTest {
                 sandbox,
                 new SlackFeedback(fixture.configuration, SlackDomainFixture.prompts(), fixture.store, fixture.api),
                 fixture.api,
-                new HostAdmission(new HostAdmissionConfiguration("", 1, "")));
+                new HostAdmission(new HostAdmissionConfiguration("", 1, "")),
+                fixture.contextConfiguration,
+                fixture.actions,
+                fixture.contextDispatcher,
+                new SlackContextStorage());
     }
 
     private String runtime(final SlackTask task) {
@@ -211,7 +223,7 @@ class SlackWorkerTest {
     }
 
     private String fingerprint(final ExecutorConfiguration executor) {
-        return SlackStore.identity("slack-runtime-v1:" + executor);
+        return SlackStore.identity("runtime-ownership-v2:" + SlackExecutionPolicy.POLICY + ':' + executor);
     }
 
     private static final class FakeSandbox implements Sandbox {
@@ -229,14 +241,15 @@ class SlackWorkerTest {
         }
 
         @Override
-        public int execute(final Path directory, final String runtime, final String prompt) {
+        public int execute(
+                final Path directory, final String runtime, final String prompt, final Path temporaryDirectory) {
             path = directory;
             events.add("execute");
             final var durable = fixture.store.list().stream()
                     .filter(task -> runtime.equals(task.runtimeId()))
                     .findFirst()
                     .orElseThrow();
-            assertEquals("running", durable.status());
+            assertEquals(TaskStatus.running, durable.status());
             assertEquals(directory.toString(), durable.attemptPath());
             assertTrue(prompt.contains(durable.id()));
             assertFalse(Files.exists(directory.resolve(".prepared-only")));

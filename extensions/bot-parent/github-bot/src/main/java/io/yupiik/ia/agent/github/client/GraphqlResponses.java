@@ -16,7 +16,6 @@
 package io.yupiik.ia.agent.github.client;
 
 import java.math.BigDecimal;
-import java.util.Map;
 import java.util.regex.Pattern;
 
 /** Internal validation shared by GraphQL clients, not an externally supported API. */
@@ -26,29 +25,18 @@ final class GraphqlResponses {
 
     private GraphqlResponses() {}
 
-    static Map<?, ?> object(final Object value) {
-        if (!(value instanceof Map<?, ?> map)) {
+    static String text(final String value) {
+        if (value == null) {
             throw invalid();
         }
-        return map;
+        return value;
     }
 
-    static String text(final Object value) {
-        if (!(value instanceof String text)) {
-            throw invalid();
-        }
-        return text;
-    }
-
-    // GraphQL Int identities must be JSON numbers, never decimal strings.
-    static String positive(final Object value) {
-        if (!(value instanceof Number)) {
-            throw invalid();
-        }
+    static String positive(final BigDecimal value) {
         return positiveDecimal(value);
     }
 
-    // GitHub's BigInt review identity also permits a decimal string representation.
+    // GitHub's BigInt review identity permits a numeric or decimal string representation.
     static String positiveDecimal(final Object value) {
         if (!(value instanceof Number || value instanceof String)
                 || !POSITIVE_ID.matcher(value.toString()).matches()) {
@@ -57,7 +45,7 @@ final class GraphqlResponses {
         return value.toString();
     }
 
-    static int number(final Object value) {
+    static int number(final BigDecimal value) {
         try {
             return Integer.parseInt(positive(value));
         } catch (final NumberFormatException e) {
@@ -65,14 +53,13 @@ final class GraphqlResponses {
         }
     }
 
-    // Counts and search parent numbers accept exact numeric integers, not strings.
-    static int integer(final Object value) {
-        if (!(value instanceof Number)) {
+    static int integer(final BigDecimal value) {
+        if (value == null) {
             throw invalid();
         }
         try {
-            return new BigDecimal(value.toString()).intValueExact();
-        } catch (final NumberFormatException | ArithmeticException e) {
+            return value.intValueExact();
+        } catch (final ArithmeticException e) {
             throw invalid();
         }
     }
@@ -83,7 +70,7 @@ final class GraphqlResponses {
         }
     }
 
-    static String repositoryName(final Object value) {
+    static String repositoryName(final String value) {
         final var name = text(value);
         if (!REPOSITORY_NAME.matcher(name).matches()) {
             throw invalid();

@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.github.context;
 import static io.yupiik.ia.agent.github.context.ContextTestSupport.*;
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.ia.agent.github.context.agent.ContextClient;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -32,6 +33,7 @@ import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.locks.LockSupport;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -82,6 +84,34 @@ class ContextHttpServerTest {
             assertEquals("https://worker.example.invalid" + server.route() + "/rpc", server.endpoint());
             assertFalse(summary.body().contains(control));
             assertFalse(summary.body().contains(git));
+        }
+    }
+
+    @Test
+    void typedEnvelopesPreserveWireShapeAndInteroperateWithContextClient() throws Exception {
+        try (final var fixture = new ContextTestSupport(temporary);
+                final var server = new ContextHttpServer(fixture.configuration(""), fixture.service(), fixture.json);
+                final var http = HttpClient.newHttpClient()) {
+            final var token = server.credentials().get(ContextHttpServer.CONTROL_TOKEN_ENV);
+            final var rpc = local(server, server.route() + "/rpc");
+            final var client = new ContextClient(rpc, fixture.json, () -> token);
+            for (final var operation : List.of("summary", "repositories")) {
+                final var response = send(http, rpc, "Bearer " + token, "{\"operation\":\"" + operation + "\"}");
+                assertEquals(200, response.statusCode());
+                final var envelope = fixture.parse(response.body());
+                assertEquals(Set.of("ok", "body"), envelope.keySet());
+                assertEquals(true, envelope.get("ok"));
+                final var body = envelope.get("body");
+                assertEquals(
+                        body instanceof List<?> ? Map.of("data", body) : body,
+                        client.call(Map.of("operation", operation)));
+            }
+            final var rejected = send(http, rpc, "Bearer " + token, "{broken");
+            assertEquals(400, rejected.statusCode());
+            assertEquals(Map.of("ok", false, "error", "CONTEXT_JSON_INVALID"), fixture.parse(rejected.body()));
+            assertEquals(
+                    "no-store", rejected.headers().firstValue("cache-control").orElseThrow());
+            assertFalse(rejected.body().contains(token));
         }
     }
 
@@ -214,6 +244,10 @@ class ContextHttpServerTest {
                     "{\"operation\":\"issueComments\",\"page\":-1}",
                     "{\"operation\":\"issueComments\",\"page\":1.5}",
                     "{\"operation\":\"issueComments\",\"page\":\"1\"}",
+                    "{\"operation\":true}",
+                    "{\"operation\":\"summary\",\"unknown\":null}",
+                    "null",
+                    "true",
                     "[]")) {
                 assertEquals(400, send(client, rpc, auth, body).statusCode(), body);
             }

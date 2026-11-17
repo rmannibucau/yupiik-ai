@@ -33,6 +33,9 @@ import java.util.regex.Pattern;
  */
 @ApplicationScoped
 public class CommandOutputPostProcessor {
+    private static final Pattern UNSIGNED_INTEGER = Pattern.compile("\\d+");
+    private static final Pattern ENVIRONMENT_ASSIGNMENT = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*=.*");
+
     private static final Pattern ANSI = Pattern.compile("\u001B\\[[0-9;]*[A-Za-z]|\u001B\\][^\u0007]*\u0007");
     private static final Set<String> KNOWN_EXTENSIONS = Set.of("cmd", "exe", "sh");
 
@@ -271,7 +274,8 @@ public class CommandOutputPostProcessor {
                 final var j = skipFlags(tokens, i + 1);
                 // a bare numeric duration follows the (flag-less) wrapper; a non-numeric token
                 // is not a duration, so `timeout` here is an actual command being invoked
-                if (j >= tokens.size() || !tokens.get(j).matches("\\d+")) {
+                if (j >= tokens.size()
+                        || !UNSIGNED_INTEGER.matcher(tokens.get(j)).matches()) {
                     yield Optional.empty();
                 }
                 final var after = j + 1;
@@ -309,7 +313,7 @@ public class CommandOutputPostProcessor {
     }
 
     private boolean isEnvAssignment(final String token) {
-        return token.matches("[A-Za-z_][A-Za-z0-9_]*=.*");
+        return ENVIRONMENT_ASSIGNMENT.matcher(token).matches();
     }
 
     /**

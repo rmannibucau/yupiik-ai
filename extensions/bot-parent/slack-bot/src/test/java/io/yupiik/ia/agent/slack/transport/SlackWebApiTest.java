@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
+import io.yupiik.ia.agent.slack.model.SlackJson;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.time.Duration;
@@ -47,17 +48,18 @@ class SlackWebApiTest {
                     ignored -> new SlackTransportFixture.Response(200, Map.of(), "{\"ok\":true,\"ts\":\"1.2\"}"));
             assertEquals(
                     "1.2",
-                    api.postMessage(Map.of("channel", "C1", "text", "hello"))
+                    api.postMessage(new SlackJson.PostMessage("C1", null, "hello", null, null, null))
                             .toCompletableFuture()
                             .join()
-                            .get("ts"));
+                            .ts());
             request = fixture.take(fixture.requests);
             assertEquals("/api/chat.postMessage", request.path());
             assertEquals("Bearer xoxb-secret", request.headers().get("authorization"));
             assertEquals("POST", request.method());
             assertEquals(
                     Map.of("channel", "C1", "text", "hello"), fixture.json.fromString(Object.class, request.body()));
-            api.openView(Map.of("trigger_id", "trigger", "view", Map.of("type", "modal")))
+            api.openView(new SlackJson.OpenView(
+                            "trigger", new SlackJson.Modal("modal", null, null, null, null, null, null, null)))
                     .toCompletableFuture()
                     .join();
             request = fixture.take(fixture.requests);
@@ -68,11 +70,32 @@ class SlackWebApiTest {
     }
 
     @Test
+    void missingApiSuccessAndDiscoveryUrlAreSanitizedAndNeverReplayed() throws Exception {
+        try (final var fixture = new SlackTransportFixture()) {
+            final var api = fixture.api(4096, 4096);
+            for (final var body : List.of("{}", "{\"ok\":null}", "null")) {
+                fixture.respond(ignored -> new SlackTransportFixture.Response(200, Map.of(), body));
+                assertEquals(
+                        "invalid_response",
+                        failure(api.postMessage(new SlackJson.PostMessage(null, null, null, null, null, null)))
+                                .error(),
+                        body);
+                fixture.take(fixture.requests);
+                assertTrue(fixture.requests.isEmpty());
+            }
+            fixture.respond(ignored -> new SlackTransportFixture.Response(200, Map.of(), "{\"ok\":true}"));
+            assertEquals("invalid_response", failure(api.openConnection()).error());
+            assertEquals(4, fixture.extended.getRequestCount());
+        }
+    }
+
+    @Test
     void returnsRetryAfterWithoutReplayingPublication() throws Exception {
         try (final var fixture = new SlackTransportFixture()) {
             fixture.respond(
                     ignored -> new SlackTransportFixture.Response(429, Map.of("Retry-After", "37"), "xoxb-secret"));
-            final var error = failure(fixture.api(100, 100).postMessage(Map.of()));
+            final var error = failure(
+                    fixture.api(100, 100).postMessage(new SlackJson.PostMessage(null, null, null, null, null, null)));
             assertEquals(429, error.status());
             assertEquals("ratelimited", error.error());
             assertEquals(Duration.ofSeconds(37), error.retryAfter().orElseThrow());
@@ -90,7 +113,10 @@ class SlackWebApiTest {
             for (final var location : List.of(fixture.base().resolve("other"), target.base())) {
                 fixture.respond(ignored ->
                         new SlackTransportFixture.Response(302, Map.of("Location", location.toString()), ""));
-                assertEquals(302, failure(api.postMessage(Map.of())).status());
+                assertEquals(
+                        302,
+                        failure(api.postMessage(new SlackJson.PostMessage(null, null, null, null, null, null)))
+                                .status());
                 fixture.take(fixture.requests);
                 assertTrue(fixture.requests.isEmpty());
                 assertTrue(target.requests.isEmpty(), "Credentials were forwarded to redirect target");
@@ -105,11 +131,14 @@ class SlackWebApiTest {
             final var api = fixture.api(16, 16);
             assertEquals(
                     "request_too_large",
-                    failure(api.postMessage(Map.of("text", "x".repeat(32)))).error());
+                    failure(api.postMessage(new SlackJson.PostMessage(null, null, "x".repeat(32), null, null, null)))
+                            .error());
             assertTrue(fixture.requests.isEmpty());
             fixture.respond(ignored -> new SlackTransportFixture.Response(200, Map.of(), "x".repeat(1024)));
             assertEquals(
-                    "response_too_large", failure(api.postMessage(Map.of())).error());
+                    "response_too_large",
+                    failure(api.postMessage(new SlackJson.PostMessage(null, null, null, null, null, null)))
+                            .error());
             assertEquals(1, fixture.extended.getRequestCount());
         }
     }
@@ -119,7 +148,8 @@ class SlackWebApiTest {
         try (final var fixture = new SlackTransportFixture()) {
             fixture.respond(
                     ignored -> new SlackTransportFixture.Response(429, Map.of("Retry-After", "37"), "x".repeat(1024)));
-            final var error = failure(fixture.api(16, 16).postMessage(Map.of()));
+            final var error = failure(
+                    fixture.api(16, 16).postMessage(new SlackJson.PostMessage(null, null, null, null, null, null)));
             assertEquals(429, error.status());
             assertEquals(Duration.ofSeconds(37), error.retryAfter().orElseThrow());
             assertEquals(1, fixture.extended.getRequestCount());
@@ -132,7 +162,8 @@ class SlackWebApiTest {
             final var api = fixture.api(4096, 4096);
             for (final var body : List.of("{\"ok\":false,\"error\":\"xoxb-secret\"}", "xapp-secret", "[]", "{}")) {
                 fixture.respond(ignored -> new SlackTransportFixture.Response(200, Map.of(), body));
-                final var error = failure(api.postMessage(Map.of()));
+                final var error =
+                        failure(api.postMessage(new SlackJson.PostMessage(null, null, null, null, null, null)));
                 assertFalse(error.toString().contains("secret"));
                 assertNull(error.getCause());
                 assertEquals(0, error.getSuppressed().length);
@@ -146,7 +177,10 @@ class SlackWebApiTest {
                     },
                     () -> "xapp-wrong-kind");
             assertEquals("request_error", failure(bad.openConnection()).error());
-            assertEquals("invalid_token", failure(bad.postMessage(Map.of())).error());
+            assertEquals(
+                    "invalid_token",
+                    failure(bad.postMessage(new SlackJson.PostMessage(null, null, null, null, null, null)))
+                            .error());
         }
     }
 

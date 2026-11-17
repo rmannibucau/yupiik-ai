@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -32,6 +33,12 @@ import java.util.stream.Stream;
  */
 @ApplicationScoped
 public class GhOutputProcessor implements OutputProcessor {
+    private static final Pattern ISSUE_LIST_ROW = Pattern.compile("^#?\\d+\\s+.*");
+    private static final Pattern REPEATED_WHITESPACE = Pattern.compile("\\s{2,}");
+    private static final Pattern RUN_STATUS_SYMBOL = Pattern.compile("^(✓|✗|X|\\*|\\?)\\s+.*");
+    private static final Pattern RUN_STATUS_NAME =
+            Pattern.compile("^(completed|in_progress|queued|action_required|cancelled)\\s+.*");
+
     private final CommandOutputPostProcessor commandOutput;
 
     public GhOutputProcessor(final CommandOutputPostProcessor commandOutput) {
@@ -100,8 +107,8 @@ public class GhOutputProcessor implements OutputProcessor {
                     continue;
                 }
                 // drop the trailing state column noise: keep #number + title + branch
-                if (line.matches("^#?\\d+\\s+.*")) {
-                    seen.add(line.replaceAll("\\s{2,}", " "));
+                if (ISSUE_LIST_ROW.matcher(line).matches()) {
+                    seen.add(REPEATED_WHITESPACE.matcher(line).replaceAll(" "));
                 }
             }
             return seen.stream().limit(30);
@@ -148,9 +155,9 @@ public class GhOutputProcessor implements OutputProcessor {
             if (line.isBlank() || line.startsWith("Showing") || line.startsWith("No runs")) {
                 continue;
             }
-            if (line.matches("^(✓|✗|X|\\*|\\?)\\s+.*")) {
+            if (RUN_STATUS_SYMBOL.matcher(line).matches()) {
                 out.add(line);
-            } else if (line.matches("^(completed|in_progress|queued|action_required|cancelled)\\s+.*")) {
+            } else if (RUN_STATUS_NAME.matcher(line).matches()) {
                 out.add(line);
             }
         }

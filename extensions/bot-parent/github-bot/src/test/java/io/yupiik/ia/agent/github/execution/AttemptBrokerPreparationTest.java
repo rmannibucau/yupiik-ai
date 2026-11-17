@@ -17,10 +17,10 @@ package io.yupiik.ia.agent.github.execution;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
-import io.yupiik.ia.agent.github.model.AgentConfigurationDocument;
 import io.yupiik.ia.agent.github.model.AgentResult;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
@@ -49,7 +49,9 @@ class AttemptBrokerPreparationTest {
             final var preparation = new AttemptPreparation(
                     json,
                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                            .get()
+                            .shared());
             final var attempt = preparation.prepare(
                     Files.writeString(home.resolve("trusted.json"), "{}"), home.resolve("attempts"));
             try {
@@ -105,7 +107,9 @@ class AttemptBrokerPreparationTest {
             final var preparation = new AttemptPreparation(
                     json,
                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                            .get()
+                            .shared());
             final var attempt = preparation.prepare(
                     Files.writeString(home.resolve("trusted.json"), "{}"), home.resolve("attempts"));
             try {
@@ -172,7 +176,9 @@ class AttemptBrokerPreparationTest {
             final var preparation = new AttemptPreparation(
                     json,
                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                            .get()
+                            .shared());
             final var attempt = preparation.prepare(
                     Files.writeString(home.resolve("trusted.json"), "{}"), home.resolve("attempts"));
             try {
@@ -214,7 +220,9 @@ class AttemptBrokerPreparationTest {
             final var preparation = new AttemptPreparation(
                     json,
                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                            .get()
+                            .shared());
             for (final var kind : List.of("solve", "review", "fix")) {
                 final var task = TaskFixtures.task(Map.of(
                         "id",

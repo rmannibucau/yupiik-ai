@@ -18,9 +18,15 @@ package io.yupiik.ia.agent.bot.runtime;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /** Explicit tool variables only, never inherited host environment or executor credentials. */
 public final class ToolEnvironment {
+    private static final Pattern ENVIRONMENT_KEY = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+    private static final Pattern SENSITIVE_ENVIRONMENT_KEY =
+            Pattern.compile(".*(TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIAL|AUTH|CONTEXT|PROXY|KEY|COOKIE).*");
+    private static final Pattern URL_WITH_CREDENTIALS = Pattern.compile("(?s).*://[^/\\s]*@.*");
+
     private ToolEnvironment() {}
 
     public static void validate(final Map<String, String> environment) {
@@ -55,7 +61,7 @@ public final class ToolEnvironment {
                 throw new IllegalArgumentException("Null dependency cache environment name");
             }
             final var upper = key.toUpperCase(Locale.ROOT);
-            if (!key.matches("[A-Za-z_][A-Za-z0-9_]*")
+            if (!ENVIRONMENT_KEY.matcher(key).matches()
                     || reserved.contains(upper)
                     || upper.startsWith("DOCKER_")
                     || upper.startsWith("LD_")
@@ -67,7 +73,7 @@ public final class ToolEnvironment {
                     || upper.startsWith("JAVA_")
                     || upper.startsWith("SSH_")
                     || upper.startsWith("KUBERNETES_")
-                    || upper.matches(".*(TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIAL|AUTH|CONTEXT|PROXY|KEY|COOKIE).*")) {
+                    || SENSITIVE_ENVIRONMENT_KEY.matcher(upper).matches()) {
                 throw new IllegalArgumentException("Unsafe dependency cache environment variable: " + key);
             }
             if (value == null
@@ -75,7 +81,7 @@ public final class ToolEnvironment {
                     || value.indexOf('\0') >= 0
                     || value.indexOf('\n') >= 0
                     || value.indexOf('\r') >= 0
-                    || value.matches("(?s).*://[^/\\s]*@.*")) {
+                    || URL_WITH_CREDENTIALS.matcher(value).matches()) {
                 throw new IllegalArgumentException("Invalid dependency cache environment value");
             }
         });

@@ -42,10 +42,17 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 /** Short private durable transactions. All state access is relative to a pinned directory handle. */
 @ApplicationScoped
 public class SlackStore {
+    private static final Pattern TASK_ID = Pattern.compile("[a-f0-9]{64}");
+    private static final Pattern WORKSPACE_ID = Pattern.compile("T[A-Z0-9]{1,63}");
+    private static final Pattern CHANNEL_ID = Pattern.compile("[CG][A-Z0-9]{1,63}");
+    private static final Pattern USER_ID = Pattern.compile("[UW][A-Z0-9]{1,63}");
+    private static final Pattern THREAD_TIMESTAMP = Pattern.compile("[0-9]{1,20}\\.[0-9]{1,20}");
+
     private static final int MAX_BYTES = 32 * 1024 * 1024;
     private final SlackConfiguration configuration;
     private final JsonMapper json;
@@ -182,30 +189,19 @@ public class SlackStore {
         for (final var task : tasks) {
             if (task == null
                     || task.id() == null
-                    || !task.id().matches("[a-f0-9]{64}")
+                    || !TASK_ID.matcher(task.id()).matches()
                     || !ids.add(task.id())
                     || task.request() == null
                     || task.request().length() > configuration.maxInputChars()
                     || task.workspace() == null
-                    || !task.workspace().matches("T[A-Z0-9]{1,63}")
+                    || !WORKSPACE_ID.matcher(task.workspace()).matches()
                     || task.channel() == null
-                    || !task.channel().matches("[CG][A-Z0-9]{1,63}")
+                    || !CHANNEL_ID.matcher(task.channel()).matches()
                     || task.requester() == null
-                    || !task.requester().matches("[UW][A-Z0-9]{1,63}")
+                    || !USER_ID.matcher(task.requester()).matches()
                     || task.thread() == null
-                    || !task.thread().matches("[0-9]{1,20}\\.[0-9]{1,20}")
-                    || !Set.of(
-                                    "queued",
-                                    "preparing",
-                                    "running",
-                                    "waiting_for_user",
-                                    "publishing",
-                                    "done",
-                                    "cancel_requested",
-                                    "cancelled",
-                                    "failed",
-                                    "recovery_blocked")
-                            .contains(task.status())
+                    || !THREAD_TIMESTAMP.matcher(task.thread()).matches()
+                    || task.status() == null
                     || task.conversation() == null
                     || !task.conversation()
                             .equals(identity(task.workspace() + ":" + task.channel() + ":" + task.thread() + ":"

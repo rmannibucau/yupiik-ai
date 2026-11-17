@@ -17,11 +17,14 @@ package io.yupiik.ia.agent.slack.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /** Trusted controller configuration. Tokens never enter task documents or attempts. */
 @RootConfiguration("slack")
+@JsonModel
 public record SlackConfiguration(
         @Property(defaultValue = "\"\"", documentation = "Single allowed workspace ID.")
         String workspace,
@@ -32,8 +35,15 @@ public record SlackConfiguration(
         @Property(documentation = "Exact allowed channel IDs; empty denies all.")
         List<String> channels,
 
-        @Property(documentation = "Exact allowed requester IDs; empty denies all.")
+        @Property(
+                documentation = "Exact allowed requester IDs; empty denies all unless allowChannelMembers is enabled.")
         List<String> users,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Allow valid user IDs in allowed channels without a requester allowlist; does not enable Slack Connect.")
+        boolean allowChannelMembers,
 
         @Property(defaultValue = "false", documentation = "Explicitly authorize external/shared channel audiences.")
         boolean allowSlackConnect,
@@ -73,6 +83,11 @@ public record SlackConfiguration(
 
         @Property(defaultValue = "2592000", documentation = "Terminal task retention seconds.")
         int retentionSeconds) {
+    private static final Pattern TOKEN_ENVIRONMENT_NAME = Pattern.compile("[A-Z_][A-Z_0-9]{0,127}");
+    private static final Pattern CHANNEL_ID = Pattern.compile("[CG][A-Z0-9]{1,63}");
+    private static final Pattern USER_ID = Pattern.compile("[UW][A-Z0-9]{1,63}");
+    private static final Pattern WORKSPACE_ID = Pattern.compile("T[A-Z0-9]{1,63}");
+
     public SlackConfiguration {
         channels = channels == null ? List.of() : List.copyOf(channels);
         users = users == null ? List.of() : List.copyOf(users);
@@ -93,17 +108,17 @@ public record SlackConfiguration(
                 || home.isBlank()
                 || appTokenEnv == null
                 || botTokenEnv == null
-                || !appTokenEnv.matches("[A-Z_][A-Z_0-9]{0,127}")
-                || !botTokenEnv.matches("[A-Z_][A-Z_0-9]{0,127}")) {
+                || !TOKEN_ENVIRONMENT_NAME.matcher(appTokenEnv).matches()
+                || !TOKEN_ENVIRONMENT_NAME.matcher(botTokenEnv).matches()) {
             throw new IllegalArgumentException("Invalid Slack state or token environment configuration");
         }
         for (final var id : channels) {
-            if (!id.matches("[CG][A-Z0-9]{1,63}")) {
+            if (!CHANNEL_ID.matcher(id).matches()) {
                 throw new IllegalArgumentException("Invalid allowed channel ID");
             }
         }
         for (final var id : users) {
-            if (!id.matches("[UW][A-Z0-9]{1,63}")) {
+            if (!USER_ID.matcher(id).matches()) {
                 throw new IllegalArgumentException("Invalid allowed user ID");
             }
         }
@@ -112,12 +127,19 @@ public record SlackConfiguration(
     public Path stateRoot() {
         return Path.of(home).toAbsolutePath().normalize();
     }
+    /** Requester policy only; callers must also enforce workspace, channel and event/task binding. */
+    public boolean allowsRequester(final String user) {
+        return user != null
+                && USER_ID.matcher(user).matches()
+                && !user.equals(botUser)
+                && (allowChannelMembers || users.contains(user));
+    }
 
     public void validateInstallation() {
         if (workspace == null
-                || !workspace.matches("T[A-Z0-9]{1,63}")
+                || !WORKSPACE_ID.matcher(workspace).matches()
                 || botUser == null
-                || !botUser.matches("[UW][A-Z0-9]{1,63}")) {
+                || !USER_ID.matcher(botUser).matches()) {
             throw new IllegalArgumentException("Configure exact slack.workspace and slack.botUser IDs");
         }
     }

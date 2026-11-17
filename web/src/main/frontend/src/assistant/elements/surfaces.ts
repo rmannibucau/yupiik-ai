@@ -1,4 +1,5 @@
-// Adapted from assistant-ui Elements (MIT); see UPSTREAM.md and LICENSE.assistant-ui.
+// Adapted from assistant-ui Elements (MIT). See LICENSE.assistant-ui and
+// documentation/src/main/minisite/content/features/ui-advanced.adoc for provenance.
 // Only recipes used by the selected Elements are retained. No global theme changes.
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';

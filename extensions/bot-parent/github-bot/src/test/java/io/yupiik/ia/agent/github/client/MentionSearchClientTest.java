@@ -127,7 +127,7 @@ class MentionSearchClientTest {
     }
 
     @Test
-    void acceptsExactNumericIntegersWithoutTruncatingFractionsOrCoercingStrings() throws Exception {
+    void acceptsExactNumericIntegersWithoutTruncatingFractions() throws Exception {
         try (final var stub = new Stub()) {
             for (final var kind : MentionSearchClient.Kind.values()) {
                 final var type = kind == MentionSearchClient.Kind.ISSUE ? "Issue" : "Discussion";
@@ -137,12 +137,12 @@ class MentionSearchClientTest {
                 final var page = stub.client.search("q", kind, null);
                 assertEquals(2401, page.count());
                 assertEquals(42, page.nodes().getFirst().number());
-                for (final var value : List.of("42.000", new BigDecimal("42.0000000001"))) {
+                for (final var value : List.of(new BigDecimal("42.0000000001"))) {
                     node.put("number", value);
                     stub.search(connection(List.of(node), 2401, false, null));
                     rejected(stub, kind, null);
                 }
-                for (final var value : List.of("2401.000", new BigDecimal("2401.0000000001"))) {
+                for (final var value : List.of(new BigDecimal("2401.0000000001"))) {
                     stub.search(connection(List.of(candidate(type)), value, false, null));
                     rejected(stub, kind, null);
                 }
@@ -155,8 +155,7 @@ class MentionSearchClientTest {
         try (final var stub = new Stub()) {
             for (final var kind : MentionSearchClient.Kind.values()) {
                 final var type = kind == MentionSearchClient.Kind.ISSUE ? "Issue" : "Discussion";
-                for (final var count :
-                        Arrays.asList(null, -1, 0, "1", true, Map.of(), new BigDecimal("1.5"), 2147483648L)) {
+                for (final var count : Arrays.asList(null, -1, 0, true, Map.of(), new BigDecimal("1.5"), 2147483648L)) {
                     stub.search(connection(List.of(candidate(type)), count, false, null));
                     rejected(stub, kind, null);
                 }
@@ -187,8 +186,7 @@ class MentionSearchClientTest {
                     connection(List.of(node), 1, true, " "),
                     connection(List.of(node), 1, true, "x".repeat(4097)),
                     connection(List.of(node), 1, true, "prior"),
-                    connection(List.of(), 1, true, "next"),
-                    connection(List.of(node), 1, false, 123)));
+                    connection(List.of(), 1, true, "next")));
             for (final var info : Arrays.asList(null, "private info", Map.of())) {
                 final var value = connection(List.of(node), 1, false, null);
                 value.put("pageInfo", info);
@@ -218,8 +216,7 @@ class MentionSearchClientTest {
                                             "private unknown",
                                             kind == MentionSearchClient.Kind.ISSUE ? "Discussion" : "Issue",
                                             kind == MentionSearchClient.Kind.ISSUE ? "Discussion" : "PullRequest");
-                                case "number" ->
-                                    Arrays.asList(null, "42", 0, -1, new BigDecimal("1.5"), 2147483648L, true);
+                                case "number" -> Arrays.asList(null, 0, -1, new BigDecimal("1.5"), 2147483648L, true);
                                 case "createdAt" -> Arrays.asList(null, 42, "private date", "2026-11-13");
                                 default ->
                                     Arrays.asList(

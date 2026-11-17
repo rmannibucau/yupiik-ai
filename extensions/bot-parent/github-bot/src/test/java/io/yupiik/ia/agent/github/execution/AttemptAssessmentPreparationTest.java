@@ -17,7 +17,7 @@ package io.yupiik.ia.agent.github.execution;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
@@ -34,7 +34,9 @@ class AttemptAssessmentPreparationTest {
             final var preparation = new AttemptPreparation(
                     json,
                     new PromptConfiguration$FusionConfigurationFactory(ignored -> Optional.empty()).get(),
-                    new ExecutorConfiguration$FusionConfigurationFactory(ignored -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(ignored -> Optional.empty())
+                            .get()
+                            .shared());
             for (final var target : List.of("issue", "discussion")) {
                 final var task = TaskFixtures.task(Map.of(
                         "id",
@@ -104,7 +106,9 @@ class AttemptAssessmentPreparationTest {
             final var preparation = new AttemptPreparation(
                     json,
                     prompts,
-                    new ExecutorConfiguration$FusionConfigurationFactory(ignored -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(ignored -> Optional.empty())
+                            .get()
+                            .shared());
             for (final var target : List.of("issue", "discussion", "pull_request")) {
                 final var namespace =
                         switch (target) {
@@ -140,7 +144,9 @@ class AttemptAssessmentPreparationTest {
             final var preparation = new AttemptPreparation(
                     json,
                     new PromptConfiguration$FusionConfigurationFactory(ignored -> Optional.empty()).get(),
-                    new ExecutorConfiguration$FusionConfigurationFactory(ignored -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(ignored -> Optional.empty())
+                            .get()
+                            .shared());
             final var prompt = preparation.prompt(
                     TaskFixtures.task(Map.of(
                             "id",

@@ -21,15 +21,16 @@ import static io.yupiik.ia.agent.github.service.FixPublisher.repository;
 import static io.yupiik.ia.agent.github.service.FixPublisher.sha;
 import static io.yupiik.ia.agent.github.service.FixPublisher.target;
 import static io.yupiik.ia.agent.github.service.FixPublisher.targetMap;
-import static io.yupiik.ia.agent.github.service.FixPublisher.text;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.service.FixPublisher.Target;
 import io.yupiik.ia.agent.github.store.TaskStore;
+import java.math.BigDecimal;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -56,19 +57,19 @@ public class FixRequestAuthority {
             return targetMap(pinned);
         }
         final var pr = pull(draft);
-        final var head = TaskStore.map(pr.get("head"));
-        final var headRepo = TaskStore.map(head.get("repo"));
-        final var baseRepo = TaskStore.map(TaskStore.map(pr.get("base")).get("repo"));
+        final var head = pr.head();
+        final var headRepo = head.repo();
+        final var baseRepo = pr.base().repo();
         final var target = new Target(
-                text(headRepo, "node_id"),
-                repository(text(headRepo, "full_name")),
-                branch(text(head, "ref")),
-                sha(head.get("sha")),
-                text(baseRepo, "node_id"),
+                required(headRepo.node_id()),
+                repository(required(headRepo.full_name())),
+                branch(required(head.ref())),
+                sha(head.sha()),
+                required(baseRepo.node_id()),
                 draft.repository(),
                 draft.number(),
-                text(pr, "node_id"),
-                text(pr, "html_url"));
+                required(pr.node_id()),
+                required(pr.html_url()));
         verify(draft, target, true, pr);
         return targetMap(target);
     }
@@ -100,12 +101,12 @@ public class FixRequestAuthority {
         }
     }
 
-    private Map<String, Object> pull(final TaskDocument task) {
-        final var pr = TaskStore.map(github.get("/repos/" + task.repository() + "/pulls/" + task.number()));
-        if (!"open".equals(pr.get("state"))
-                || Boolean.TRUE.equals(pr.get("merged"))
-                || !(pr.get("number") instanceof Number number)
-                || number.longValue() != task.number()) {
+    private RestResponses.Pull pull(final TaskDocument task) {
+        final var pr = github.get("/repos/" + task.repository() + "/pulls/" + task.number(), RestResponses.Pull.class);
+        if (!"open".equals(pr.state())
+                || Boolean.TRUE.equals(pr.merged())
+                || !(pr.number() instanceof Number number)
+                || new BigDecimal(number.toString()).compareTo(BigDecimal.valueOf(task.number())) != 0) {
             throw new IllegalStateException("Fix requires the existing open pull request");
         }
         return pr;
@@ -117,44 +118,46 @@ public class FixRequestAuthority {
     }
 
     private String verify(
-            final TaskDocument task, final Target target, final boolean exactHead, final Map<String, Object> pr) {
+            final TaskDocument task, final Target target, final boolean exactHead, final RestResponses.Pull pr) {
         if (!target.upstream().equals(task.repository())
                 || target.number() != task.number()
                 || !target.url().equals("https://github.com/" + task.repository() + "/pull/" + task.number())) {
             throw new IllegalStateException("Pinned upstream identity changed");
         }
         policy(target.repository());
-        final var head = TaskStore.map(pr.get("head"));
-        final var headRepo = TaskStore.map(head.get("repo"));
-        final var baseRepo = TaskStore.map(TaskStore.map(pr.get("base")).get("repo"));
-        if (!target.pullRequestId().equals(pr.get("node_id"))
-                || !target.url().equals(pr.get("html_url"))
-                || !target.repositoryId().equals(headRepo.get("node_id"))
-                || !target.repository().equals(headRepo.get("full_name"))
-                || !target.upstreamId().equals(baseRepo.get("node_id"))
-                || !target.upstream().equals(baseRepo.get("full_name"))
-                || !target.branch().equals(head.get("ref"))) {
+        final var head = pr.head();
+        final var headRepo = head.repo();
+        final var baseRepo = pr.base().repo();
+        if (!target.pullRequestId().equals(pr.node_id())
+                || !target.url().equals(pr.html_url())
+                || !target.repositoryId().equals(headRepo.node_id())
+                || !target.repository().equals(headRepo.full_name())
+                || !target.upstreamId().equals(baseRepo.node_id())
+                || !target.upstream().equals(baseRepo.full_name())
+                || !target.branch().equals(head.ref())) {
             throw new IllegalStateException("PR no longer matches pinned fix binding");
         }
-        final var repo = TaskStore.map(github.get(prefix(target)));
-        if (!target.repositoryId().equals(repo.get("node_id"))
-                || !target.repository().equals(repo.get("full_name"))
-                || !Boolean.FALSE.equals(repo.get("archived"))
-                || !Boolean.FALSE.equals(repo.get("disabled"))
-                || !Boolean.TRUE.equals(TaskStore.map(repo.get("permissions")).get("push"))) {
+        final var repo = github.get(prefix(target), RestResponses.Repository.class);
+        if (!target.repositoryId().equals(repo.node_id())
+                || !target.repository().equals(repo.full_name())
+                || !Boolean.FALSE.equals(repo.archived())
+                || !Boolean.FALSE.equals(repo.disabled())
+                || repo.permissions() == null
+                || !Boolean.TRUE.equals(repo.permissions().push())) {
             throw new IllegalStateException("Fix head repository is unavailable or lacks push permission");
         }
-        final var upstream = TaskStore.map(github.get("/repos/" + target.upstream()));
-        if (!target.upstreamId().equals(upstream.get("node_id"))
-                || !target.upstream().equals(upstream.get("full_name"))
-                || !Boolean.FALSE.equals(upstream.get("archived"))
-                || !Boolean.FALSE.equals(upstream.get("disabled"))) {
+        final var upstream = github.get("/repos/" + target.upstream(), RestResponses.Repository.class);
+        if (!target.upstreamId().equals(upstream.node_id())
+                || !target.upstream().equals(upstream.full_name())
+                || !Boolean.FALSE.equals(upstream.archived())
+                || !Boolean.FALSE.equals(upstream.disabled())) {
             throw new IllegalStateException("Pinned upstream repository is unavailable");
         }
-        final var ref = TaskStore.map(github.get(prefix(target) + "/git/ref/heads/" + encode(target.branch())));
-        final var headSha = sha(TaskStore.map(ref.get("object")).get("sha"));
-        if (!Objects.equals(ref.get("ref"), "refs/heads/" + target.branch())
-                || !headSha.equals(sha(head.get("sha")))
+        final var ref =
+                github.get(prefix(target) + "/git/ref/heads/" + encode(target.branch()), RestResponses.Ref.class);
+        final var headSha = sha(ref.object().sha());
+        if (!Objects.equals(ref.ref(), "refs/heads/" + target.branch())
+                || !headSha.equals(sha(head.sha()))
                 || (exactHead && !target.headSha().equals(headSha))) {
             throw new IllegalStateException("PR head moved; fix will not rebase or overwrite it");
         }
@@ -163,5 +166,12 @@ public class FixRequestAuthority {
 
     private static String encode(final String value) {
         return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
+    }
+
+    private static String required(final String value) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("Missing fix binding field");
+        }
+        return value;
     }
 }

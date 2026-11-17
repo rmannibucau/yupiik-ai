@@ -45,6 +45,18 @@ import java.util.regex.Pattern;
  * immutable argv to an executor which performs its own final validation.
  */
 public final class GitReadPolicy {
+    private static final Pattern MERGE_PARENT_OPTION = Pattern.compile("-m[0-9]+");
+    private static final Pattern SHORT_COUNT_OPTION = Pattern.compile("-[0-9]+");
+    private static final Pattern MAX_COUNT_OPTION = Pattern.compile("-n[0-9]+");
+    private static final Pattern RENAME_THRESHOLD_OPTION = Pattern.compile("-M[0-9]{1,3}%?");
+    private static final Pattern RENAME_THRESHOLD = Pattern.compile("[0-9]{1,3}%?");
+    private static final Pattern RENAME_LIMIT_OPTION = Pattern.compile("-l[0-9]+");
+    private static final Pattern FOLLOW_COUNT = Pattern.compile("[0-9]{1,4}");
+    private static final Pattern LINE_RANGE = Pattern.compile("[0-9]{1,6},[0-9]{1,6}");
+    private static final Pattern DIFF_FILTER = Pattern.compile("[ACDMRTUXBacdmrtuxb]{1,18}");
+    private static final Pattern BASE_REVISION = Pattern.compile("(^|\\.\\.\\.?)BASE(?=$|[~^.])");
+    private static final Pattern CONTEXT_LINE_COUNT = Pattern.compile("[0-9]{1,6}");
+
     private static final Set<String> COMMANDS = Set.of(
             "log",
             "show",
@@ -252,7 +264,7 @@ public final class GitReadPolicy {
             }
             if ("grep".equals(command)
                     && ("-m".equals(arg)
-                            || arg.matches("-m[0-9]+")
+                            || MERGE_PARENT_OPTION.matcher(arg).matches()
                             || "--max-count".equals(arg)
                             || arg.startsWith("--max-count="))) {
                 if (hasGrepCount) {
@@ -272,8 +284,8 @@ public final class GitReadPolicy {
                 continue;
             }
             if (HISTORY.contains(command)
-                    && (arg.matches("-[0-9]+")
-                            || arg.matches("-n[0-9]+")
+                    && (SHORT_COUNT_OPTION.matcher(arg).matches()
+                            || MAX_COUNT_OPTION.matcher(arg).matches()
                             || "-n".equals(arg)
                             || "--max-count".equals(arg)
                             || arg.startsWith("--max-count="))) {
@@ -313,20 +325,22 @@ public final class GitReadPolicy {
             }
             if ("diff".equals(command)
                     && (arg.equals("-M")
-                            || arg.matches("-M[0-9]{1,3}%?")
+                            || RENAME_THRESHOLD_OPTION.matcher(arg).matches()
                             || arg.equals("--find-renames")
                             || arg.startsWith("--find-renames="))) {
                 final var value = arg.startsWith("-M")
                         ? arg.substring(2)
                         : arg.equals("--find-renames") ? "" : arg.substring("--find-renames=".length());
                 if (!value.isEmpty()
-                        && (!value.matches("[0-9]{1,3}%?") || Integer.parseInt(value.replace("%", "")) > 100)) {
+                        && (!RENAME_THRESHOLD.matcher(value).matches()
+                                || Integer.parseInt(value.replace("%", "")) > 100)) {
                     throw invalid("Rename similarity must be between 0 and 100 percent");
                 }
                 options.add("--find-renames=" + (value.isEmpty() ? "50%" : value));
                 continue;
             }
-            if ("diff".equals(command) && (arg.equals("-l") || arg.matches("-l[0-9]+"))) {
+            if ("diff".equals(command)
+                    && (arg.equals("-l") || RENAME_LIMIT_OPTION.matcher(arg).matches())) {
                 final String value;
                 if (arg.equals("-l")) {
                     if (++i == argv.size()) {
@@ -336,7 +350,9 @@ public final class GitReadPolicy {
                 } else {
                     value = arg.substring(2);
                 }
-                if (!value.matches("[0-9]{1,4}") || Integer.parseInt(value) < 1 || Integer.parseInt(value) > 1000) {
+                if (!FOLLOW_COUNT.matcher(value).matches()
+                        || Integer.parseInt(value) < 1
+                        || Integer.parseInt(value) > 1000) {
                     throw invalid("Rename limit must be between 1 and 1000");
                 }
                 options.add("-l" + value);
@@ -405,7 +421,9 @@ public final class GitReadPolicy {
         result.add(command);
         if (DIFF_OUTPUT.contains(command)) {
             result.addAll(List.of("--no-ext-diff", "--no-textconv", "--color=never"));
-            if ("diff".equals(command) && options.stream().noneMatch(it -> it.matches("-l[0-9]+"))) {
+            if ("diff".equals(command)
+                    && options.stream()
+                            .noneMatch(it -> RENAME_LIMIT_OPTION.matcher(it).matches())) {
                 result.add("-l200");
             }
         } else if ("grep".equals(command)) {
@@ -591,7 +609,7 @@ public final class GitReadPolicy {
             case "--unified", "-U", "-A", "-B", "-C", "--after-context", "--before-context", "--context" ->
                 number(value, 0, 1000);
             case "-L" -> {
-                if (!value.matches("[0-9]{1,6},[0-9]{1,6}")) {
+                if (!LINE_RANGE.matcher(value).matches()) {
                     throw invalid("Only numeric blame line ranges are supported");
                 }
                 final var parts = value.split(",");
@@ -602,7 +620,7 @@ public final class GitReadPolicy {
                 }
             }
             case "--diff-filter" -> {
-                if (!value.matches("[ACDMRTUXBacdmrtuxb]{1,18}")) {
+                if (!DIFF_FILTER.matcher(value).matches()) {
                     throw invalid("Unsupported diff filter");
                 }
             }
@@ -649,7 +667,7 @@ public final class GitReadPolicy {
         // Only called for validated revisions, never patterns, formats or tree paths.
         final var colon = value.indexOf(':');
         final var revision = colon < 0 ? value : value.substring(0, colon);
-        return revision.replaceAll("(^|\\.\\.\\.?)BASE(?=$|[~^.])", "$1refs/heads/base")
+        return BASE_REVISION.matcher(revision).replaceAll("$1refs/heads/base")
                 + (colon < 0 ? "" : value.substring(colon));
     }
 
@@ -835,7 +853,7 @@ public final class GitReadPolicy {
     }
 
     private int number(final String value, final int min, final int max) {
-        if (!value.matches("[0-9]{1,6}")) {
+        if (!CONTEXT_LINE_COUNT.matcher(value).matches()) {
             throw invalid("Expected a bounded decimal integer");
         }
         final var number = Integer.parseInt(value);

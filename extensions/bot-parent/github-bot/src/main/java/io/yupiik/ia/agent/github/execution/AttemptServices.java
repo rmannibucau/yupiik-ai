@@ -18,8 +18,9 @@ package io.yupiik.ia.agent.github.execution;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.bot.runtime.ProviderBudgetEnvironment;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.github.model.AgentConfigurationDocument;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import java.io.IOException;
 import java.net.URI;
@@ -37,9 +38,15 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /** Creates a secret-free gateway manifest and replaces all provider credentials in the sandbox handoff. */
 public final class AttemptServices implements AutoCloseable {
+    private static final Pattern NUMERIC_HOST = Pattern.compile("[0-9.]+");
+    private static final Pattern CONTEXT_PATH = Pattern.compile("/context/[0-9a-f-]{36}/rpc");
+    private static final Pattern PROVIDER_ID = Pattern.compile("[A-Za-z0-9_-]{1,64}");
+    private static final Pattern SERVICE_PATH = Pattern.compile("(/[A-Za-z0-9_-]+)*");
+
     private static final BotTemplates TEMPLATES = new BotTemplates(Map.of("mavenProxy", """
             <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0">
               <localRepository>/attempt/storage/.m2/repository</localRepository>
@@ -68,6 +75,7 @@ public final class AttemptServices implements AutoCloseable {
             final String advertisedEndpoint,
             final Map<String, String> contextCredentials,
             final Configuration sources,
+            final ProviderBudgetConfiguration budgetConfiguration,
             final Duration lifetime)
             throws IOException {
         if (!Files.isRegularFile(configuration, LinkOption.NOFOLLOW_LINKS)
@@ -80,14 +88,14 @@ public final class AttemptServices implements AutoCloseable {
         final var advertised = URI.create(advertisedEndpoint);
         if (!"http".equals(upstream.getScheme())
                 || upstream.getHost() == null
-                || !upstream.getHost().matches("[0-9.]+")
+                || !NUMERIC_HOST.matcher(upstream.getHost()).matches()
                 || "0.0.0.0".equals(upstream.getHost())
                 || upstream.getHost().startsWith("127.")
                 || upstream.getPort() < 1
                 || upstream.getRawQuery() != null
                 || upstream.getRawFragment() != null
                 || upstream.getRawUserInfo() != null
-                || !upstream.getPath().matches("/context/[0-9a-f-]{36}/rpc")
+                || !CONTEXT_PATH.matcher(upstream.getPath()).matches()
                 || !upstream.getPath().equals(advertised.getPath())
                 || !"https".equals(advertised.getScheme())
                 || !services.serverName().equals(advertised.getHost())
@@ -126,8 +134,10 @@ public final class AttemptServices implements AutoCloseable {
         new SecureRandom().nextBytes(random);
         final var capability = Base64.getUrlEncoder().withoutPadding().encodeToString(random);
         final var inferencePath = "/inference/" + UUID.randomUUID() + "/chat/completions";
-        final var id =
-                selected.get("id") instanceof String value && value.matches("[A-Za-z0-9_-]{1,64}") ? value : "default";
+        final var id = selected.get("id") instanceof String value
+                        && PROVIDER_ID.matcher(value).matches()
+                ? value
+                : "default";
         final var safe = new LinkedHashMap<String, Object>();
         safe.put("id", id);
         safe.put("api", "COMPLETIONS");
@@ -167,7 +177,8 @@ public final class AttemptServices implements AutoCloseable {
         credentials.put("YCA_SERVICES_PROVIDER_TOKEN", capability);
         credentials.put("YCA_SERVICES_UPSTREAM_TOKEN", key);
         credentials.put(services.keyStorePasswordEnv(), keyStorePassword);
-        credentials.putAll(ProviderBudgetEnvironment.select(sources, configuration.getParent(), privateDirectory));
+        credentials.putAll(
+                ProviderBudgetEnvironment.select(budgetConfiguration, configuration.getParent(), privateDirectory));
         settings = privateDirectory.resolve("services.json");
         Files.writeString(settings, json.toString(gateway), StandardOpenOption.CREATE_NEW, LinkOption.NOFOLLOW_LINKS);
         Files.setPosixFilePermissions(settings, PosixFilePermissions.fromString("rw-------"));
@@ -241,12 +252,12 @@ public final class AttemptServices implements AutoCloseable {
         final var uri = URI.create(base);
         if (!"http".equals(uri.getScheme())
                 || uri.getHost() == null
-                || !uri.getHost().matches("[0-9.]+")
+                || !NUMERIC_HOST.matcher(uri.getHost()).matches()
                 || uri.getPort() < 1
                 || uri.getRawUserInfo() != null
                 || uri.getRawQuery() != null
                 || uri.getRawFragment() != null
-                || !uri.getRawPath().matches("(/[A-Za-z0-9_-]+)*")) {
+                || !SERVICE_PATH.matcher(uri.getRawPath()).matches()) {
             throw new IllegalArgumentException(
                     "Private provider must be an explicit numeric HTTP target on the trusted control network");
         }

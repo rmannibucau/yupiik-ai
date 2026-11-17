@@ -128,7 +128,11 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
                     if (!primary.prefix().isEmpty()
                             && !root.prefix().equals(primary.prefix())
                             && !root.prefix().startsWith(primary.prefix() + '.')) {
-                        insert(peerProperties, List.of(root.prefix().split("\\.")), Map.of("$ref", "#/$defs/" + name));
+                        insert(
+                                peerProperties,
+                                List.of(root.prefix().split("\\.")),
+                                Map.of("$ref", "#/$defs/" + name),
+                                defs);
                         continue;
                     }
                     final var segments = relativeSegments(primary.prefix(), root.prefix());
@@ -136,7 +140,7 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
                     if (segments.isEmpty()) {
                         properties.putAll(rootProperties);
                     } else {
-                        insert(properties, segments, Map.of("$ref", "#/$defs/" + name));
+                        insert(properties, segments, Map.of("$ref", "#/$defs/" + name), defs);
                     }
                 }
 
@@ -163,7 +167,7 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
                     wrapper.put("type", "object");
                     wrapper.put("properties", properties);
                     wrapper.put("additionalProperties", false);
-                    insert(rootProperties, List.of(primary.prefix().split("\\.")), wrapper);
+                    insert(rootProperties, List.of(primary.prefix().split("\\.")), wrapper, defs);
                 }
                 rootProperties.putAll(peerProperties);
                 rootProperties.put("$schema", Map.of("type", "string")); // editor hint key, tolerate it
@@ -405,10 +409,20 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
     }
 
     private void insert(
-            final Map<String, Object> properties, final List<String> segments, final Map<String, Object> leaf) {
+            final Map<String, Object> properties,
+            final List<String> segments,
+            final Map<String, Object> leaf,
+            final Map<String, Object> defs) {
         var current = properties;
         for (final var segment : segments.subList(0, segments.size() - 1)) {
-            final var holder = current.containsKey(segment) ? map(current.get(segment)) : null;
+            var holder = current.containsKey(segment) ? map(current.get(segment)) : null;
+            if (holder != null && holder.get("$ref") instanceof String ref && ref.startsWith("#/$defs/")) {
+                // A separately bound root may extend a type already referenced by the primary root.
+                // Expand this occurrence only, preserving its properties without changing the shared definition.
+                holder = new LinkedHashMap<>(map(defs.get(ref.substring("#/$defs/".length()))));
+                holder.put("properties", new LinkedHashMap<>(map(holder.get("properties"))));
+                current.put(segment, holder);
+            }
             if (holder == null || !(holder.get("properties") instanceof Map<?, ?>)) {
                 final var intermediate = new LinkedHashMap<String, Object>();
                 intermediate.put("type", "object");

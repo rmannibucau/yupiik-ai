@@ -23,7 +23,7 @@ Use `jib:build` instead to publish directly to a registry without a Docker daemo
 No image goal is bound to ordinary test/package lifecycles.
 The base defaults to `eclipse-temurin:25-jre` and the target to `yca-egress:local`; override both properties as shown and pin the base and configured gateway image by digest for production.
 For a registry build, record `extensions/bot-parent/github-bot/target/jib-image.digest` and configure `REGISTRY/IMAGE@sha256:DIGEST`, not a mutable tag.
-Jib generates the runtime classpath and Java entrypoint for `io.yupiik.ia.agent.github.execution.EgressGateway` with `-Xmx128m` and UID/GID 65532, not the worker launcher, so no dispatcher credentials or services are initialized.
+Jib generates the runtime classpath and Java entrypoint for `io.yupiik.ia.agent.bot.gateway.EgressGateway` with `-Xmx128m` and UID/GID 65532, not the worker launcher, so no dispatcher credentials or services are initialized.
 It layers module classes and dependencies directly; no fixed in-image fat JAR path or launcher script is required.
 Configure the trusted gateway image and an explicit list such as `api.github.com`, `github.com`, and the exact public hostname of the model provider.
 There is deliberately no built-in list or wildcard support.

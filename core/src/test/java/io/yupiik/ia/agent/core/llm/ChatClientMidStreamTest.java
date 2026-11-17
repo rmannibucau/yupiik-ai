@@ -88,7 +88,8 @@ class ChatClientMidStreamTest {
         server.start();
         try {
             final var cfg = configuration(server.getAddress().getPort());
-            try (final var http = new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null));
+            try (final var http =
+                            new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null, null));
                     final var client =
                             new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http)) {
                 final var result = CompletableFuture.supplyAsync(() ->
@@ -138,7 +139,8 @@ class ChatClientMidStreamTest {
 
             final var port = server.getLocalPort();
             final var cfg = configuration(port);
-            try (final var http = new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null));
+            try (final var http =
+                            new HttpClientProducer().httpClient(cfg, new NativeProviderConfiguration(null, null));
                     final var client =
                             new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC(), http)) {
                 final var deltas = new CopyOnWriteArrayList<LlmStreamEvent>();

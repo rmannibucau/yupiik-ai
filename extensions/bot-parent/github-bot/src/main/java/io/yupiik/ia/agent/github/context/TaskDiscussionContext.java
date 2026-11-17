@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.github.context;
 
 import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import java.net.URI;
@@ -127,17 +128,20 @@ public final class TaskDiscussionContext {
     }
 
     private Object issue() {
-        if (!(github.get("/repos/" + repository + "/issues/" + number) instanceof Map<?, ?> raw)) {
-            throw new IllegalStateException("Expected issue object");
-        }
+        final var raw = github.get("/repos/" + repository + "/issues/" + number, RestResponses.Issue.class);
         final var result = new LinkedHashMap<String, Object>();
-        for (final var field : List.of("title", "body", "state", "id", "node_id")) {
-            final var value = raw.get(field);
+        result.put("title", raw.title());
+        result.put("body", raw.body());
+        result.put("state", raw.state());
+        result.put("id", raw.id());
+        result.put("node_id", raw.node_id());
+        for (final var entry : result.entrySet()) {
+            final var field = entry.getKey();
+            final var value = entry.getValue();
             if ((value == null && !"body".equals(field))
                     || (value != null && !(value instanceof String) && !(value instanceof Number))) {
                 throw new IllegalStateException("Malformed issue field");
             }
-            result.put(field, value);
         }
         return result;
     }

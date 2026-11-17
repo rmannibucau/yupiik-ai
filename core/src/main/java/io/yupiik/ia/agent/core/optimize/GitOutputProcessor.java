@@ -25,6 +25,9 @@ import java.util.stream.Stream;
 
 @ApplicationScoped
 public class GitOutputProcessor implements OutputProcessor {
+    private static final Pattern GIT_STASH_PREFIX = Pattern.compile("^git\\s+stash\\s*");
+    private static final Pattern GIT_PREFIX = Pattern.compile("^git\\s+");
+
     private static final int MAX_HUNK_LINES = 8;
     private static final int MAX_LOG_BODY = 3;
     private static final int DEFAULT_MAX_BLOB_BYTES = 8192;
@@ -304,7 +307,8 @@ public class GitOutputProcessor implements OutputProcessor {
     }
 
     private Stream<String> processStash(final String command, final Stream<String> lines) {
-        final var action = commandOutput.secondToken(command.replaceFirst("^git\\s+stash\\s*", ""));
+        final var action =
+                commandOutput.secondToken(GIT_STASH_PREFIX.matcher(command).replaceFirst(""));
         if (!"list".equals(action) && !"".equals(action)) {
             return lines; // push/pop/apply/... carry real output, keep it
         }
@@ -321,7 +325,7 @@ public class GitOutputProcessor implements OutputProcessor {
 
     private Stream<String> processMutation(final String command, final Stream<String> lines) {
         final var out = new ArrayList<String>();
-        final var sub = commandOutput.firstToken(command.replaceFirst("^git\\s+", ""));
+        final var sub = commandOutput.firstToken(GIT_PREFIX.matcher(command).replaceFirst(""));
         for (final var raw : lines.toList()) {
             final var line = commandOutput.stripAnsi(raw).strip();
             if (line.isEmpty()) {

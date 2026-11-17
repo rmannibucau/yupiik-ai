@@ -99,7 +99,8 @@ class OptionalContextModelAcceptanceTest {
                     new GithubContextTool(disabled, json, Configuration.of(Map.of())));
             final var provider = source.get("yca.provider.providers.0.id");
             final var model = source.get("yca.provider.providers.0.model");
-            try (final var http = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null));
+            try (final var http =
+                            new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null));
                     final var client =
                             new ChatClient(config, json, new ProviderManager(config, json), Clock.systemUTC(), http)) {
                 final var response = client.chat(new ChatCompletionRequest(

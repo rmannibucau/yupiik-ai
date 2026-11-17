@@ -15,8 +15,10 @@
  */
 package io.yupiik.ia.agent.github.service;
 
+import io.yupiik.fusion.framework.api.container.Types;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration;
 import io.yupiik.ia.agent.github.model.AgentResult;
@@ -26,7 +28,6 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -65,24 +66,21 @@ public class ReviewPublisher {
         final var id = String.valueOf(task.id());
         final var prefix = "/repos/" + task.repository() + "/pulls/" + task.number();
         final var marker = "<!-- yca-task:" + id + ":review -->";
-        final var pr = TaskStore.map(github.get(prefix));
-        final var sha = String.valueOf(TaskStore.map(pr.get("head")).get("sha"));
+        final var pr = github.get(prefix, RestResponses.Pull.class);
+        final var sha = pr.head().sha();
         final var intendedSha = store.transaction(state -> state.task(id).reviewIntentSha());
         final var reconciliationSha = intendedSha instanceof String persisted ? persisted : sha;
         String next = prefix + "/reviews?per_page=100";
         while (next != null) {
-            final var page = github.page(next);
-            for (final var item : (List<?>) page.body()) {
-                final var review = TaskStore.map(item);
-                if (String.valueOf(review.get("body")).contains(marker)
-                        && reconciliationSha.equals(review.get("commit_id"))
-                        && "COMMENTED".equals(review.get("state"))
-                        && review.get("user") instanceof Map<?, ?>
-                        && configuration
-                                .login()
-                                .equalsIgnoreCase(String.valueOf(
-                                        TaskStore.map(review.get("user")).get("login")))) {
-                    return String.valueOf(review.get("html_url"));
+            final var page = github.<List<RestResponses.Review>>page(
+                    next, new Types.ParameterizedTypeImpl(List.class, RestResponses.Review.class));
+            for (final var review : page.body()) {
+                if (String.valueOf(review.body()).contains(marker)
+                        && reconciliationSha.equals(review.commit_id())
+                        && "COMMENTED".equals(review.state())
+                        && review.user() != null
+                        && configuration.login().equalsIgnoreCase(review.user().login())) {
+                    return String.valueOf(review.html_url());
                 }
             }
             next = page.next();
@@ -101,14 +99,14 @@ public class ReviewPublisher {
         next = prefix + "/files?per_page=100";
         int files = 0;
         while (next != null) {
-            final var page = github.page(next);
-            for (final var item : (List<?>) page.body()) {
+            final var page = github.<List<RestResponses.File>>page(
+                    next, new Types.ParameterizedTypeImpl(List.class, RestResponses.File.class));
+            for (final var file : page.body()) {
                 if (++files > 3000) {
                     throw new IllegalArgumentException("PR file listing exceeded supported limit");
                 }
-                final var file = TaskStore.map(item);
-                if (file.get("patch") instanceof String patch) {
-                    valid.addAll(locations(String.valueOf(file.get("filename")), patch));
+                if (file.patch() != null) {
+                    valid.addAll(locations(String.valueOf(file.filename()), file.patch()));
                 }
             }
             next = page.next();
@@ -147,8 +145,8 @@ public class ReviewPublisher {
         if (body.length() > 30000) {
             throw new IllegalArgumentException("Review summary too large");
         }
-        final var current = TaskStore.map(github.get(prefix));
-        if (!sha.equals(TaskStore.map(current.get("head")).get("sha"))) {
+        final var current = github.get(prefix, RestResponses.Pull.class);
+        if (!sha.equals(current.head().sha())) {
             throw new IllegalArgumentException("Review head changed during validation");
         }
         store.transaction(state -> {
@@ -156,9 +154,11 @@ public class ReviewPublisher {
             state.task(id).reviewIntentSha(sha);
             return null;
         });
-        final var posted = TaskStore.map(github.post(
-                prefix + "/reviews", new GitHubClient.ReviewRequest(sha, "COMMENT", marker + "\n" + body, comments)));
-        return String.valueOf(posted.get("html_url"));
+        final var posted = github.post(
+                prefix + "/reviews",
+                new GitHubClient.ReviewRequest(sha, "COMMENT", marker + "\n" + body, comments),
+                RestResponses.Review.class);
+        return String.valueOf(posted.html_url());
     }
 
     public static Set<String> locations(final String path, final String patch) {

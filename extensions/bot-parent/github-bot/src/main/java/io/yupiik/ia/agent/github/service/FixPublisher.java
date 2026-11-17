@@ -18,8 +18,10 @@ package io.yupiik.ia.agent.github.service;
 import static java.util.stream.Collectors.toSet;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.model.AgentResult;
 import io.yupiik.ia.agent.github.model.TaskDocument;
@@ -38,6 +40,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 /**
  * Host-only existing-PR publication. Recovery maps are durable, versioned host evidence.
@@ -48,6 +51,10 @@ import java.util.function.Function;
  */
 @ApplicationScoped
 public class FixPublisher {
+    private static final Pattern REPOSITORY_NAME =
+            Pattern.compile("[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}");
+    private static final Pattern COMMIT_SHA = Pattern.compile("[0-9a-f]{40}");
+
     private static final int FILE_LIMIT = 1024 * 1024;
     private static final String UPDATE_REFS =
             "mutation Fix($input:UpdateRefsInput!) {" + " updateRefs(input:$input) { clientMutationId } }";
@@ -127,11 +134,11 @@ public class FixPublisher {
             return reconcile(current, target, publication);
         }
         verify(current, target, true);
-        final var commit = TaskStore.map(github.get(prefix(target) + "/git/commits/" + target.headSha()));
-        if (!target.headSha().equals(sha(commit.get("sha")))) {
+        final var commit = github.get(prefix(target) + "/git/commits/" + target.headSha(), RestResponses.Commit.class);
+        if (!target.headSha().equals(sha(commit.sha()))) {
             throw new IllegalStateException("Unexpected pinned commit");
         }
-        final var baseTree = sha(TaskStore.map(commit.get("tree")).get("sha"));
+        final var baseTree = sha(commit.tree().sha());
         final var modes = new PinnedTreeChanges(github, prefix(target))
                 .modes(
                         baseTree,
@@ -198,7 +205,7 @@ public class FixPublisher {
         // All responses (including errors or transport failure) leave the intent claimed forever.
         // Acknowledgement alone is insufficient: always read back the authoritative ref.
         try {
-            github.graphql(UPDATE_REFS, Map.of("input", input));
+            github.graphql(UPDATE_REFS, Map.of("input", input), UpdateRefsEnvelope.class);
         } catch (final RuntimeException uncertain) {
             return reconcile(current, target, publication(current.id()));
         }
@@ -234,12 +241,11 @@ public class FixPublisher {
         final var newCommit = sha(TaskStore.map(publication.get("commit")).get("sha"));
         final var actual = verify(task, target, false);
         if (!newCommit.equals(actual)) {
-            final var comparison = TaskStore.map(github.get(prefix(target) + "/compare/" + newCommit + "..." + actual));
-            if (!"ahead".equals(comparison.get("status"))
-                    || !newCommit.equals(sha(
-                            TaskStore.map(comparison.get("merge_base_commit")).get("sha")))
-                    || !newCommit.equals(
-                            sha(TaskStore.map(comparison.get("base_commit")).get("sha")))) {
+            final var comparison = github.get(
+                    prefix(target) + "/compare/" + newCommit + "..." + actual, RestResponses.Comparison.class);
+            if (!"ahead".equals(comparison.status())
+                    || !newCommit.equals(sha(comparison.merge_base_commit().sha()))
+                    || !newCommit.equals(sha(comparison.base_commit().sha()))) {
                 throw new IllegalStateException(
                         "Uncertain fix CAS: no incorporation proof; manual recovery required, no replay");
             }
@@ -308,14 +314,35 @@ public class FixPublisher {
             final String stage,
             final String path,
             final GitHubClient.MutationRequest request) {
-        final var body = json.fromString(Object.class, json.toString(request));
         edit(task, target, fingerprint, publication -> {
             if (publication.containsKey(stage) || (!stage.equals("cas") && publication.containsKey("cas"))) {
                 throw new IllegalStateException("Fix write already claimed; no replay: " + stage);
             }
-            publication.put(stage, Map.of("intent", true, "path", path, "request", body));
+            publication.put(stage, Map.of("intent", true, "path", path, "request", journalRequest(request)));
             return null;
         });
+    }
+
+    private Object journalRequest(final GitHubClient.MutationRequest request) {
+        // The store mapper can omit null model fields. Deletion evidence must still contain sha:null,
+        // exactly like the null-serializing transport, without a serialize/parse roundtrip.
+        if (request instanceof GitHubClient.TreeRequest tree
+                && tree.tree().stream().anyMatch(entry -> entry.sha() == null)) {
+            return Map.of(
+                    "base_tree", tree.base_tree(),
+                    "tree",
+                            tree.tree().stream()
+                                    .map(entry -> {
+                                        final var value = new LinkedHashMap<String, Object>();
+                                        value.put("path", entry.path());
+                                        value.put("mode", entry.mode());
+                                        value.put("type", entry.type());
+                                        value.put("sha", entry.sha());
+                                        return value;
+                                    })
+                                    .toList());
+        }
+        return request;
     }
 
     private String object(
@@ -336,7 +363,7 @@ public class FixPublisher {
         claim(task, target, fingerprint, stage, path, request);
         final String value;
         try {
-            value = sha(TaskStore.map(github.post(path, request)).get("sha"));
+            value = sha(github.post(path, request, RestResponses.ObjectId.class).sha());
         } catch (final RuntimeException uncertain) {
             throw new IllegalStateException(
                     "Uncertain fix object requires manual recovery; no replay: " + stage, uncertain);
@@ -429,7 +456,7 @@ public class FixPublisher {
 
     static String repository(final String value) {
         if (value == null
-                || !value.matches("[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}")
+                || !REPOSITORY_NAME.matcher(value).matches()
                 || value.endsWith("/.")
                 || value.endsWith("/..")) {
             throw new IllegalArgumentException("Invalid fix repository");
@@ -512,7 +539,7 @@ public class FixPublisher {
     }
 
     static String sha(final Object value) {
-        if (!(value instanceof String text) || !text.matches("[0-9a-f]{40}")) {
+        if (!(value instanceof String text) || !COMMIT_SHA.matcher(text).matches()) {
             throw new IllegalArgumentException("Expected full lowercase SHA-1");
         }
         return text;
@@ -534,4 +561,14 @@ public class FixPublisher {
             String url) {}
 
     private record Change(String path, String content, boolean delete) {}
+
+    // The fixed updateRefs operation selects only clientMutationId, never repository data.
+    @JsonModel
+    public record UpdateRefsEnvelope(UpdateRefsData data) {}
+
+    @JsonModel
+    public record UpdateRefsData(UpdateRefsResult updateRefs) {}
+
+    @JsonModel
+    public record UpdateRefsResult(String clientMutationId) {}
 }

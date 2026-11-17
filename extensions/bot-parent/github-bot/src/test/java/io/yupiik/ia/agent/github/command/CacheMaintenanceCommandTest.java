@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.github.configuration.ContextConfiguration$FusionConfigurationFactory;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -94,7 +94,9 @@ class CacheMaintenanceCommandTest {
                         .get(),
                 BotTestConfiguration.CLOCK,
                 BotTestConfiguration.home(root.resolve("state")),
-                new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get(),
+                new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key)))
+                        .get()
+                        .shared(),
                 new ContextConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get());
     }
 }

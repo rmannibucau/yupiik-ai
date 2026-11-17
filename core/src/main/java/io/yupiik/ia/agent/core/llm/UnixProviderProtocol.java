@@ -29,15 +29,17 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Private provider protocol v1: one request per connection, no HTTP parser or destinations on the wire.
- * Request: magic(int), capability(UTF), body length(int), body. Response: status(int), media type(UTF),
+ * Private provider protocol v2: one request per connection, no HTTP parser or destinations on the wire.
+ * Request: magic(int), capability(UTF), pinned API(UTF), body length(int), body. Response: status(int), media type(UTF),
  * then length(int)/bytes frames terminated by zero. A truncated exchange is never success.
  */
 public final class UnixProviderProtocol {
-    public static final int MAGIC = 0x59434131;
+    public static final int MAGIC = 0x59434132;
     public static final URI ENDPOINT = URI.create("http://yca-native.invalid/v1/chat/completions");
+    public static final URI RESPONSES_ENDPOINT = URI.create("http://yca-native.invalid/v1/responses");
     // Launcher wire name; Fusion binds it to NativeProviderConfiguration's yca.native.provider.socket.
     public static final String SOCKET_ENV = "YCA_NATIVE_PROVIDER_SOCKET";
+    public static final String API_ENV = "YCA_NATIVE_PROVIDER_API";
     public static final int MAX_REQUEST = 8 * 1024 * 1024;
     public static final long MAX_RESPONSE = 32L * 1024 * 1024;
     public static final int FRAME_SIZE = 16 * 1024;
@@ -50,6 +52,17 @@ public final class UnixProviderProtocol {
     }
 
     private UnixProviderProtocol() {}
+
+    public static URI endpoint(final ApiFlavor api) {
+        if (api == null) {
+            throw new IllegalArgumentException("Pinned provider API required");
+        }
+        return switch (api) {
+            case COMPLETIONS -> ENDPOINT;
+            case RESPONSES -> RESPONSES_ENDPOINT;
+            default -> throw new IllegalArgumentException("Unsupported pinned provider API");
+        };
+    }
 
     public static ScheduledFuture<?> deadline(final Duration timeout, final Runnable action) {
         if (timeout.isNegative() || timeout.isZero() || timeout.compareTo(MAX_DURATION) > 0) {

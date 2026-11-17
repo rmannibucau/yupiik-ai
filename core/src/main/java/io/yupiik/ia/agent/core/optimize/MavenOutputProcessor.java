@@ -28,6 +28,10 @@ import java.util.stream.Stream;
 
 @ApplicationScoped
 public class MavenOutputProcessor implements OutputProcessor {
+    private static final Pattern FRAMEWORK_STACK_FRAME =
+            Pattern.compile("\\s+at (org\\.junit|java\\.base|org\\.apache\\.maven)[^\n]*");
+    private static final Pattern TEST_SUMMARY = Pattern.compile("Tests run: \\d+, Failures: \\d+, Errors: \\d+.*");
+
     private final LogNoiseOutputProcessor logNoise;
     private final CommandOutputPostProcessor commandOutput;
 
@@ -221,7 +225,7 @@ public class MavenOutputProcessor implements OutputProcessor {
                         && !line.contains("org.apache.maven")) {
             return line;
         }
-        return line.replaceAll("\\s+at (org\\.junit|java\\.base|org\\.apache\\.maven)[^\n]*", "");
+        return FRAMEWORK_STACK_FRAME.matcher(line).replaceAll("");
     }
 
     /**
@@ -239,7 +243,7 @@ public class MavenOutputProcessor implements OutputProcessor {
         if (!command.contains("-q")) {
             return lines;
         }
-        final var quiet = lines.stream().anyMatch(l -> l.matches("Tests run: \\d+, Failures: \\d+, Errors: \\d+.*"));
+        final var quiet = lines.stream().anyMatch(l -> TEST_SUMMARY.matcher(l).matches());
         if (quiet) {
             return lines; // already has the per-class lines
         }

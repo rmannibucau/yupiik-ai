@@ -109,7 +109,7 @@ class ChatClientFlavorTest {
                     "application/json");
         });
         server.start();
-        http = new HttpClientProducer().httpClient(configuration(), new NativeProviderConfiguration(null));
+        http = new HttpClientProducer().httpClient(configuration(), new NativeProviderConfiguration(null, null));
         client = new ChatClient(configuration(), mapper, providerManager(), Clock.systemUTC(), http);
     }
 

@@ -23,6 +23,7 @@ import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.container.configuration.ConfigurationImpl;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.core.llm.ProviderRequestBudget;
 import java.io.FilterInputStream;
 import java.io.IOException;
@@ -169,9 +170,13 @@ public final class RestrictedServicesGateway implements AutoCloseable {
         }
     }
 
-    public RestrictedServicesGateway(final Settings settings, final Configuration configuration) throws IOException {
+    public RestrictedServicesGateway(
+            final Settings settings,
+            final Configuration configuration,
+            final ProviderBudgetConfiguration budgetConfiguration)
+            throws IOException {
         this.settings = settings;
-        this.budget = ProviderRequestBudget.fromConfiguration(configuration);
+        this.budget = ProviderRequestBudget.fromConfiguration(budgetConfiguration);
         control = "Bearer " + secret(configuration, YCA_CONTEXT_TOKEN);
         git = "Basic "
                 + Base64.getEncoder()
@@ -649,7 +654,13 @@ public final class RestrictedServicesGateway implements AutoCloseable {
             System.setProperty("sun.net.httpserver.maxIdleConnections", "4");
             System.setProperty("sun.net.httpserver.maxReqTime", "" + settings.timeoutSeconds());
             System.setProperty("sun.net.httpserver.maxRspTime", "" + settings.timeoutSeconds());
-            try (final var gateway = new RestrictedServicesGateway(settings, configuration)) {
+            try (final var gateway = new RestrictedServicesGateway(
+                    settings,
+                    configuration,
+                    new ProviderBudgetConfiguration(
+                            configuration.get(ProviderRequestBudget.ROOT).orElse(null),
+                            configuration.get(ProviderRequestBudget.ID).orElse(null),
+                            configuration.get(ProviderRequestBudget.SLOTS).orElse(null)))) {
                 final var hook = new Thread(gateway::close, "services-shutdown");
                 Runtime.getRuntime().addShutdownHook(hook);
                 try {

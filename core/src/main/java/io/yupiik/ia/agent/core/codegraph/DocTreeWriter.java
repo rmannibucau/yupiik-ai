@@ -32,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Writes the agent-readable per-source-file markdown cards under the graph store, mirroring the project source
@@ -49,6 +50,8 @@ import java.util.Map;
  * whether called during the structural build or after an async deep pass completes.
  */
 public class DocTreeWriter {
+    private static final Pattern SOURCE_EXTENSION = Pattern.compile("\\.[^./]+$");
+
     private static final String FRONTMATTER_OPEN = "---";
 
     /** Source of tier-2 enrichment consulted when rendering cards and the wiring graph. */
@@ -193,7 +196,7 @@ public class DocTreeWriter {
         if (!enabled() || relSource == null || relSource.isBlank()) {
             return null;
         }
-        final var stem = relSource.replaceFirst("\\.[^./]+$", "");
+        final var stem = SOURCE_EXTENSION.matcher(relSource).replaceFirst("");
         return docsRoot.resolve(stem + ".md");
     }
 
@@ -380,7 +383,7 @@ public class DocTreeWriter {
         if (values == null) {
             return false;
         }
-        final var stem = relSource.replaceFirst("\\.[^./]+$", "");
+        final var stem = SOURCE_EXTENSION.matcher(relSource).replaceFirst("");
         for (final var v : values.split("\n")) {
             final var c = v.strip();
             if (c.equals(relSource) || c.equals(stem)) {

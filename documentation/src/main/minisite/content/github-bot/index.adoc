@@ -39,13 +39,14 @@ Use the generated pages for the exact options and defaults of each command, and 
 See the xref:../cli/index.adoc[generated CLI index] for the full command tree.
 There is no handwritten option reference; use the generated metadata for supported options and defaults.
 
-== Start with the simple, functional setup
+== Choose a setup
 
-TIP: xref:simple-setup.adoc[Follow the step-by-step Linux/Docker deployment guide] for a complete single-server setup: build, SSH transfer, service account, GitHub permissions, private configuration, manual acceptance and optional systemd scheduling.
+TIP: xref:docker.adoc[Full all-container Docker setup] covers matched dispatcher/agent/egress images, strict broker services, private TLS, credentials, boot scheduling, acceptance and safe maintenance.
+For optional cross-bot coordination, follow the separate xref:../bots/docker-shared-slots.adoc[Docker shared-slots add-on]; the stand-alone setup does not impose a shared host cap.
 
-This is a real deployment path using the strict Docker workflow tested live, not a mock or a collection of disconnected configuration examples.
-It deliberately uses one worker, a PAT, an existing provider configuration and a separately owned verified fork.
-It leaves unrestricted Docker egress explicit and does not require Nono or Kubernetes.
+The xref:simple-setup.adoc[simple Linux/Docker walkthrough] instead runs the JVM dispatcher on the host with one Docker worker, a PAT, an existing provider configuration and a separately owned verified fork.
+That baseline leaves unrestricted Docker egress explicit and does not require Nono or Kubernetes.
+Neither guide replaces qualification with your actual images, daemon, identity, provider and repositories.
 
 * xref:installation.adoc[Bare-metal Docker and Nono walkthrough]
 * xref:configuration.adoc[Configuration and CLI]

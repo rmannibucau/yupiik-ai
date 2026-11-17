@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.github.configuration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.github.command.PollCommand$Options$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.command.PurgeCommand$Options$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.command.WorkerCommand$Options$FusionConfigurationFactory;
@@ -30,7 +31,9 @@ class GithubBotConfigurationTest {
     @Test
     void defaultsAreHierarchicalAndOperationSettingsAreSeparate() {
         final var shared = new GithubBotConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get();
-        final var executor = new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get();
+        final var executor = new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                .get()
+                .shared();
         final var options = new PollCommand$Options$FusionConfigurationFactory(key -> Optional.empty()).get();
         final var worker = new WorkerCommand$Options$FusionConfigurationFactory(key -> Optional.empty()).get();
         final var purge = new PurgeCommand$Options$FusionConfigurationFactory(key -> Optional.empty()).get();
@@ -97,8 +100,10 @@ class GithubBotConfigurationTest {
         final var shared = new GithubBotConfiguration$FusionConfigurationFactory(
                         key -> Optional.ofNullable(values.get(key)))
                 .get();
-        final var executor =
-                new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+        final var executor = new GithubExecutorConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .shared();
         final var options =
                 new PollCommand$Options$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
         final var worker =
@@ -197,8 +202,10 @@ class GithubBotConfigurationTest {
                 "bot.purge.retentionDays", "99");
         final var options =
                 new PollCommand$Options$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
-        final var executor =
-                new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+        final var executor = new GithubExecutorConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .shared();
         final var worker =
                 new WorkerCommand$Options$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
         final var purge =
@@ -206,6 +213,6 @@ class GithubBotConfigurationTest {
         assertEquals(1, worker.worker().parallelism());
         assertEquals(7, purge.retentionDays());
         assertFalse(options.poll().reviews().enabled());
-        assertEquals("yca-github", executor.kubernetes().namespace());
+        assertEquals("yca", executor.kubernetes().namespace());
     }
 }

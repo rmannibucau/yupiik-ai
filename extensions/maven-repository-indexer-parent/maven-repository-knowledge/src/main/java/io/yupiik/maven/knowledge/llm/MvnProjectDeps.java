@@ -46,6 +46,7 @@ import java.util.regex.Pattern;
  * important artifacts first.</p>
  */
 public final class MvnProjectDeps {
+    private static final Pattern LOG_PREFIXES = Pattern.compile("^(\\[[^]]+]\\s*)+");
 
     private static final Pattern COORDINATE = Pattern.compile("^([^:]+):([^:]+):([^:]+):([^:]+):([^:]+)");
 
@@ -372,6 +373,6 @@ public final class MvnProjectDeps {
 
     /** Strips the Maven log prefixes (eg {@code [INFO]    }) so the coordinate starts the line. */
     private static String stripLogPrefix(final String line) {
-        return line.replaceAll("^(\\[[^]]+]\\s*)+", "").trim();
+        return LOG_PREFIXES.matcher(line).replaceAll("").trim();
     }
 }

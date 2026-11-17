@@ -37,6 +37,10 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 public class SystemPromptBuilder {
+    private static final Pattern RELATIVE_ROOT_PREFIX = Pattern.compile("^\\.?/");
+    private static final Pattern QUESTION_PHRASE =
+            Pattern.compile(".*(how (do|can|to|would)|what (about|if)|why (not|do)|where (do|can)).*");
+
     /**
      * Files that used to be inlined eagerly into the system prompt as {@code <project-file>} blocks. Removed:
      * README.md/CLAUDE.md are project *content*, not agent instructions - eager inlining of a large README (this
@@ -435,7 +439,10 @@ public class SystemPromptBuilder {
         while (matcher.find()) {
             final var hit = matcher.group().strip();
             if (hit.length() >= 4 && !hit.contains("://") && !hit.contains(" ") && !hit.endsWith(".")) {
-                out.add(hit.startsWith("/") || hit.startsWith("./") ? hit.replaceFirst("^\\.?/", "") : hit);
+                out.add(
+                        hit.startsWith("/") || hit.startsWith("./")
+                                ? RELATIVE_ROOT_PREFIX.matcher(hit).replaceFirst("")
+                                : hit);
             }
         }
         return out.stream().distinct().limit(8).toList();
@@ -662,7 +669,7 @@ public class SystemPromptBuilder {
             // questions about *how to* change (how do I add X?) are still informational; bare
             // imperatives ("fix X", "add Y") imply work
             final var before = lower.substring(Math.max(0, matcher.start() - 18), matcher.start());
-            if (!before.matches(".*(how (do|can|to|would)|what (about|if)|why (not|do)|where (do|can)).*")) {
+            if (!QUESTION_PHRASE.matcher(before).matches()) {
                 return true;
             }
         }

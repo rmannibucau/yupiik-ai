@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.github.context.agent;
 
 import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
@@ -39,9 +40,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /** No redirects, ambient proxies, remote diagnostics or unbounded body buffering. */
 public final class ContextClient {
+    private static final Pattern CONTEXT_RPC_PATH =
+            Pattern.compile("/context/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/rpc");
+
     private static final int MAX_RESPONSE = 512 * 1024;
     private final URI endpoint;
     private final JsonMapper json;
@@ -78,9 +83,7 @@ public final class ContextClient {
                 || uri.getRawQuery() != null
                 || uri.getRawFragment() != null
                 || uri.getRawPath() == null
-                || !uri.getRawPath()
-                        .matches(
-                                "/context/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/rpc")
+                || !CONTEXT_RPC_PATH.matcher(uri.getRawPath()).matches()
                 || uri.getPort() == 0
                 || uri.getPort() > 65535) {
             throw new IllegalArgumentException("Invalid context endpoint.");
@@ -146,15 +149,15 @@ public final class ContextClient {
                             if (response.statusCode() != 200) {
                                 throw new IOException("Context request rejected.");
                             }
-                            final var value =
-                                    json.fromString(Object.class, new String(response.body(), StandardCharsets.UTF_8));
-                            if (!(value instanceof Map<?, ?> map) || !Boolean.TRUE.equals(map.get("ok"))) {
+                            final var value = json.fromString(
+                                    RpcResponse.class, new String(response.body(), StandardCharsets.UTF_8));
+                            if (value == null || !Boolean.TRUE.equals(value.ok())) {
                                 throw new IOException("Context response unavailable.");
                             }
-                            if (map.get("body") instanceof List<?> list) {
+                            if (value.body() instanceof List<?> list) {
                                 return Map.of("data", list);
                             }
-                            if (!(map.get("body") instanceof Map<?, ?> body)
+                            if (!(value.body() instanceof Map<?, ?> body)
                                     || body.keySet().stream().anyMatch(it -> !(it instanceof String))) {
                                 throw new IOException("Context response unavailable.");
                             }
@@ -224,6 +227,10 @@ public final class ContextClient {
             return false;
         }
     }
+
+    /** Only the transport envelope is fixed; each context operation defines its own object or list body. */
+    @JsonModel
+    public record RpcResponse(Boolean ok, Object body) {}
 
     private static final class LimitedBody implements HttpResponse.BodySubscriber<byte[]> {
         private final HttpResponse.BodySubscriber<byte[]> delegate = HttpResponse.BodySubscribers.ofByteArray();

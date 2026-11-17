@@ -18,7 +18,7 @@ package io.yupiik.ia.agent.github.service;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.ia.agent.github.command.CleanupCommand;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
@@ -50,9 +50,10 @@ class OrphanCleanupTest {
         final var attempts = Files.createDirectory(root.resolve("attempts"));
         final var orphan = prepared(attempts, "yca-github-clock");
         final var configuration = BotTestConfiguration.home(home);
-        final var execution = new ExecutorConfiguration$FusionConfigurationFactory(key ->
+        final var execution = new GithubExecutorConfiguration$FusionConfigurationFactory(key ->
                         "github.executor.attemptRoot".equals(key) ? Optional.of(attempts.toString()) : Optional.empty())
-                .get();
+                .get()
+                .shared();
         try (final var json =
                 BotJsonMapper.create(List.of(new OrphanCleanup$Report$FusionJsonCodec()), key -> Optional.empty())) {
             final var store = new TaskStore(configuration, json);

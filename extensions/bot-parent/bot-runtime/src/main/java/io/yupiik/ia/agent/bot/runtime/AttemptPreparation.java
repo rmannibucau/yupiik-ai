@@ -16,7 +16,7 @@
 package io.yupiik.ia.agent.bot.runtime;
 
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.github.model.AgentConfigurationDocument;
+import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -27,9 +27,12 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /** Private, provider-neutral attempt handoff; no task, prompt, repository or broker policy. */
 public final class AttemptPreparation {
+    private static final Pattern DIRECTORY_PREFIX = Pattern.compile("[A-Za-z0-9_-]{3,80}");
+
     private final JsonMapper json;
 
     public AttemptPreparation(final JsonMapper json) {
@@ -41,7 +44,8 @@ public final class AttemptPreparation {
         if (!Files.isRegularFile(configuration, LinkOption.NOFOLLOW_LINKS)) {
             throw new IllegalArgumentException("Trusted agent configuration must be a regular non-symbolic file");
         }
-        if (directoryPrefix == null || !directoryPrefix.matches("[A-Za-z0-9_-]{3,80}")) {
+        if (directoryPrefix == null
+                || !DIRECTORY_PREFIX.matcher(directoryPrefix).matches()) {
             throw new IllegalArgumentException("A plain attempt directory prefix is required");
         }
         final var permissions = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"));

@@ -21,6 +21,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import io.yupiik.ia.agent.github.service.BotAudit;
@@ -101,9 +102,9 @@ public class CreateCommand implements Runnable {
         task.createdAt(clock.instant().toString());
         task.reference("https://github.com/" + options.repository() + "/issues/" + options.number());
         if (options.kind() == TaskKind.review) {
-            final var parent =
-                    TaskStore.map(github.get("/repos/" + options.repository() + "/issues/" + options.number()));
-            task.reviewTarget(parent.get("pull_request") instanceof Map<?, ?> ? "pull_request" : "issue");
+            final var parent = github.get(
+                    "/repos/" + options.repository() + "/issues/" + options.number(), RestResponses.Issue.class);
+            task.reviewTarget(parent.pull_request() != null ? "pull_request" : "issue");
         }
         if (options.kind() == TaskKind.fix) {
             task.reference("https://github.com/" + options.repository() + "/pull/" + options.number());

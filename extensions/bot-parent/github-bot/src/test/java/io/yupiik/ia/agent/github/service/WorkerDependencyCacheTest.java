@@ -20,12 +20,12 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.WorkerCommand$Options$FusionConfigurationFactory;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.execution.cache.DependencyCache;
 import io.yupiik.ia.agent.github.model.TaskState;
@@ -33,6 +33,7 @@ import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
+import io.yupiik.ia.agent.github.support.TestScript;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -141,8 +142,10 @@ class WorkerDependencyCacheTest {
                 attempts.toString(),
                 "github.executor.timeoutSeconds",
                 "5");
-        execution = new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(backend.get(key)))
-                .get();
+        execution = new GithubExecutorConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(backend.get(key)))
+                .get()
+                .shared();
     }
 
     @AfterEach
@@ -403,7 +406,7 @@ class WorkerDependencyCacheTest {
                 #!/bin/sh
                 if [ "$#" = 5 ] && [ "$2 $3" = 'inspect --format' ]; then
                   case "$4" in
-                    *io.yupiik.yca.github-bot.runtime*io.yupiik.yca.github-bot.component*)
+                    *io.yupiik.yca.bot.runtime*io.yupiik.yca.bot.component*)
                       case "$1:$5" in
                         container:yca-*-services|container:yca-*-egress) printf 'Error: No such container: %%s\\n' "$5"; exit 1 ;;
                         network:yca-*-services-net|network:yca-*-external) printf 'Error: No such network: %%s\\n' "$5"; exit 1 ;;
@@ -412,7 +415,7 @@ class WorkerDependencyCacheTest {
                 fi
                 if [ "$1" != run ]; then
                   %s
-                  printf 'false\\n'
+                  agent_state "$@"
                   exit 0
                 fi
                 set -eu
@@ -455,7 +458,7 @@ class WorkerDependencyCacheTest {
                         ARTIFACT,
                         result,
                         "exit-failure".equals(outcome) ? 9 : 0);
-        Files.writeString(executable, script);
+        Files.writeString(executable, script.replace("#!/bin/sh\n", "#!/bin/sh\n" + TestScript.githubAgentState()));
         Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
     }
 }

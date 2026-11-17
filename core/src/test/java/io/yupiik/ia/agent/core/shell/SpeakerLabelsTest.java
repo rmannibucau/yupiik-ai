@@ -100,7 +100,7 @@ class SpeakerLabelsTest {
 
     private ChatClient chatClient(final CodingAgentConfiguration configuration) {
         final var httpClient =
-                new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null));
+                new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null, null));
         httpClients.add(httpClient);
         final var client =
                 new ChatClient(configuration, mapper, providerManager(configuration), Clock.systemUTC(), httpClient);

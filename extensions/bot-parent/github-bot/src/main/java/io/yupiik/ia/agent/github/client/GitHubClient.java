@@ -17,8 +17,10 @@ package io.yupiik.ia.agent.github.client;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.fusion.framework.build.api.json.JsonOthers;
 import io.yupiik.fusion.json.JsonMapper;
 import java.io.IOException;
+import java.lang.reflect.Type;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -119,8 +121,12 @@ public final class GitHubClient implements AutoCloseable {
                 .build();
     }
 
-    public Object get(final String path) {
-        return page(path).body();
+    public <T> T get(final String path, final Class<T> responseType) {
+        return get(path, (Type) responseType);
+    }
+
+    public <T> T get(final String path, final Type responseType) {
+        return this.<T>page(path, responseType).body();
     }
 
     private void pace() {
@@ -142,42 +148,27 @@ public final class GitHubClient implements AutoCloseable {
         }
     }
 
-    public Object post(final String path, final MutationRequest body) {
-        return request("POST", path, body, Object.class).body();
+    public <T> T post(final String path, final MutationRequest body, final Class<T> responseType) {
+        return post(path, body, (Type) responseType);
     }
 
-    /** GraphQL reads and mutations are never automatically replayed, including partial-error responses. */
-    public Object graphql(final String query, final Map<String, Object> variables) {
-        // Native review polling uses GraphQL to fetch open PRs and their review bodies together across
-        // repositories, instead of one REST PR-list request per repository plus one per PR's reviews.
-        // A read-only comparison on 47 repositories (31 open PRs, 21 reviews) needed 78 REST requests
-        // versus 5 GraphQL requests with identical coverage. Ten-repository batches with ten PRs and
-        // 100 reviews per page cost 5 GraphQL points; requesting 100 PRs raised that to 47 points.
-        // These are review-phase measurements, not an end-to-end poll guarantee. Both nested
-        // connections must still paginate independently, and partial data must never advance cursors.
-        // Search further reduces quiet polls by selecting candidate repositories before those reads.
-        // Its independently paginated, persistent shards split below GitHub's 1,000-result cap.
-        // Search is not an event log or an authorization boundary: consumers read the actual feeds,
-        // and periodic direct reconciliation covers index lag and unverified mention coverage.
-        // Keep incremental issue/comment feeds on REST: their repository-wide since endpoints
-        // avoid per-issue GraphQL walks and preserve detection of edited comments.
-        final var path = toGraphQlPath();
-        final var response = post(path, new GraphqlRequest(query, variables));
-        if (!(response instanceof Map<?, ?> envelope)
-                || envelope.containsKey("errors")
-                || !(envelope.get("data") instanceof Map<?, ?>)) {
-            // GraphQL can acknowledge a mutation with HTTP 200 and errors. Do not expose response diagnostics
-            // or replay a write whose remote outcome may be uncertain.
-            throw new IllegalStateException("GitHub GraphQL request failed or returned partial data");
-        }
-        return envelope;
+    public <T> T post(final String path, final MutationRequest body, final Type responseType) {
+        return this.<T>request("POST", path, body, responseType).body();
+    }
+
+    /** Decodes a complete envelope only after checking HTTP-200 partial errors, including errors:null. */
+    public <T> T graphql(final String query, final Object variables, final Class<T> responseType) {
+        return graphql(query, variables, (Type) responseType);
+    }
+
+    public <T> T graphql(final String query, final Object variables, final Type responseType) {
+        return this.<T>request("POST", toGraphQlPath(), new GraphqlRequest(query, variables), responseType, true)
+                .body();
     }
 
     public DiscussionClient.Envelope discussionGraphql(final String query, final DiscussionClient.Variables variables) {
         final var path = toGraphQlPath();
-        final var envelope = (DiscussionClient.Envelope)
-                request("POST", path, new GraphqlRequest(query, variables), DiscussionClient.Envelope.class)
-                        .body();
+        final var envelope = post(path, new GraphqlRequest(query, variables), DiscussionClient.Envelope.class);
         if (envelope == null
                 || (envelope.extensions() != null && envelope.extensions().containsKey("errors"))
                 || envelope.data() == null) {
@@ -186,8 +177,12 @@ public final class GitHubClient implements AutoCloseable {
         return envelope;
     }
 
-    public Page page(final String path) {
-        return request("GET", path, null, Object.class);
+    public <T> Page<T> page(final String path, final Class<T> responseType) {
+        return page(path, (Type) responseType);
+    }
+
+    public <T> Page<T> page(final String path, final Type responseType) {
+        return request("GET", path, null, responseType);
     }
 
     private String toGraphQlPath() {
@@ -216,8 +211,18 @@ public final class GitHubClient implements AutoCloseable {
         return uri.getPort() >= 0 ? uri.getPort() : ("https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80);
     }
 
-    private Page request(
-            final String method, final String path, final MutationRequest body, final Class<?> responseType) {
+    private <T> Page<T> request(
+            final String method, final String path, final MutationRequest body, final Type responseType) {
+        return request(method, path, body, responseType, false);
+    }
+
+    private <T> Page<T> request(
+            final String method,
+            final String path,
+            final MutationRequest body,
+            final Type responseType,
+            final boolean graphql) {
+        Objects.requireNonNull(responseType, "responseType");
         final var uri = uri(path);
         final var cacheKey = uri.toString();
         final boolean get = "GET".equals(method);
@@ -274,7 +279,7 @@ public final class GitHubClient implements AutoCloseable {
                     continue;
                 }
                 if (status == 304 && cached != null && cached.credential().equals(credential)) {
-                    return cached.page();
+                    return decode(cached.page(), responseType);
                 }
                 if (status < 200 || status >= 300) {
                     final boolean limited = status == 429
@@ -334,11 +339,26 @@ public final class GitHubClient implements AutoCloseable {
                         next = uri(uri.resolve(matcher.group(1)).toString()).toString();
                     }
                 }
-                final var page = new Page(
-                        response.body().isBlank()
-                                ? (responseType == Object.class ? Map.of() : null)
-                                : json.fromString(responseType, response.body()),
-                        next);
+                final var raw =
+                        new Page<>(response.body(), next, response.body().getBytes(StandardCharsets.UTF_8).length);
+                if (graphql) {
+                    try {
+                        final var statusEnvelope = json.fromString(GraphqlStatus.class, response.body());
+                        synchronized (cache) {
+                            cache.clear();
+                        }
+                        if (statusEnvelope == null
+                                || !(statusEnvelope.data() instanceof Map<?, ?>)
+                                || (statusEnvelope.extensions() != null
+                                        && statusEnvelope.extensions().containsKey("errors"))) {
+                            throw new IllegalStateException("Invalid envelope");
+                        }
+                        return decode(raw, responseType);
+                    } catch (final RuntimeException invalid) {
+                        throw new IllegalStateException("GitHub GraphQL request failed or returned partial data");
+                    }
+                }
+                final Page<T> page = decode(raw, responseType);
                 if (get) {
                     synchronized (cache) {
                         cache.remove(cacheKey);
@@ -349,7 +369,7 @@ public final class GitHubClient implements AutoCloseable {
                                         new Cached(
                                                 etag,
                                                 credential,
-                                                page,
+                                                raw,
                                                 response.body().getBytes(StandardCharsets.UTF_8).length)));
                         while (cache.size() > 256
                                 || cache.values().stream()
@@ -458,6 +478,11 @@ public final class GitHubClient implements AutoCloseable {
                     RefRequest,
                     PullRequestRequest,
                     GraphqlRequest {}
+
+    // Transport-only preflight: errors must be rejected even when present as null, before
+    // decoding an operation-specific typed envelope. The raw data is never returned to callers.
+    @JsonModel
+    public record GraphqlStatus(Object data, @JsonOthers Map<String, Object> extensions) {}
 
     @JsonModel
     public record GraphqlRequest(
@@ -578,9 +603,14 @@ public final class GitHubClient implements AutoCloseable {
             @Property(documentation = "Finding Markdown body.")
             String body) {}
 
-    public record Page(Object body, String next) {}
+    private <T> Page<T> decode(final Page<String> raw, final Type responseType) {
+        final T body = raw.body().isBlank() ? null : json.fromString(responseType, raw.body());
+        return new Page<>(body, raw.next(), raw.responseBytes());
+    }
 
-    private record Cached(String etag, String credential, Page page, int bytes) {}
+    public record Page<T>(T body, String next, int responseBytes) {}
+
+    private record Cached(String etag, String credential, Page<String> page, int bytes) {}
 
     private static final class ResponseLimitException extends IOException {
         private ResponseLimitException() {

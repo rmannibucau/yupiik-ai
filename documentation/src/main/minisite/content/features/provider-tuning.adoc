@@ -195,7 +195,9 @@ It is not an independent guarantee of provider retention policy.
 - `max_completion_tokens` vs `max_tokens` is a naming difference on the same
   wire family; both are "headroom", not forced output.
 
-=== Measured parity (2026-10-09, N=3 median, deepseek-v4-flash)
+=== Measured parity (N=3 median, deepseek-v4-flash)
+
+The measurements below were collected on 2026-10-09.
 
 yca was run with reasoning absent + `store:false` + a 7-tool allow-list
 (`bash, read_file, write_file, edit_file, glob, grep, list_dir`) + the log-noise

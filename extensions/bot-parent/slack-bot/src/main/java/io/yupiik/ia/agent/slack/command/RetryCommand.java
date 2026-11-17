@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.slack.command;
 
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.cli.Command;
+import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackStore;
 
 @DefaultScoped
@@ -38,10 +39,10 @@ public class RetryCommand implements Runnable {
             for (int i = 0; i < tasks.size(); i++) {
                 final var task = tasks.get(i);
                 if (task.id().equals(options.id())) {
-                    if (!"failed".equals(task.status()) && !"cancelled".equals(task.status())) {
+                    if (task.status() != TaskStatus.failed && task.status() != TaskStatus.cancelled) {
                         throw new IllegalStateException("Only confirmed failed/cancelled tasks can be retried");
                     }
-                    tasks.set(i, task.feedback(null, "queued", System.currentTimeMillis()));
+                    tasks.set(i, task.feedback(null, TaskStatus.queued, System.currentTimeMillis()));
                     return null;
                 }
             }

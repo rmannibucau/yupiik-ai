@@ -17,7 +17,8 @@ package io.yupiik.ia.agent.github.execution;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.bot.runtime.execution.DockerExecutionBackend;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -82,6 +83,7 @@ class DockerLiveTest {
                 Files.createDirectory(attempt.resolve(name));
             }
             final var backend = new DockerExecutionBackend(
+                    GithubExecutionPolicy.POLICY,
                     "docker",
                     image,
                     Duration.ofSeconds(40),
@@ -90,7 +92,9 @@ class DockerLiveTest {
                             System.getProperty("github.bot.docker.egress.image"),
                             List.of("api.github.com"),
                             "127.0.0.1"),
-                    "shown");
+                    null,
+                    "shown",
+                    false);
             assertEquals(
                     0,
                     backend.execute(
@@ -143,7 +147,16 @@ class DockerLiveTest {
                 Files.createDirectory(attempt.resolve(name));
             }
             final var runtime = "yca-live-" + ProcessHandle.current().pid();
-            final var backend = new DockerExecutionBackend("docker", image, Duration.ofSeconds(20), "", null, "shown");
+            final var backend = new DockerExecutionBackend(
+                    GithubExecutionPolicy.POLICY,
+                    "docker",
+                    image,
+                    Duration.ofSeconds(20),
+                    "",
+                    null,
+                    null,
+                    "shown",
+                    false);
             assertEquals(
                     0,
                     backend.execute(
@@ -162,7 +175,16 @@ class DockerLiveTest {
             assertEquals(0, rebuild.exitValue());
             // A real timeout must stop the container before the caller can discard its attempt.
             Files.delete(attempt.resolve("execution.log"));
-            final var timed = new DockerExecutionBackend("docker", image, Duration.ofMillis(300), "", null, "shown");
+            final var timed = new DockerExecutionBackend(
+                    GithubExecutionPolicy.POLICY,
+                    "docker",
+                    image,
+                    Duration.ofMillis(300),
+                    "",
+                    null,
+                    null,
+                    "shown",
+                    false);
             assertThrows(
                     IllegalStateException.class,
                     () -> timed.execute(attempt, runtime + "-timeout", "timeout", Map.of(), Map.of()));

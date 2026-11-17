@@ -8,6 +8,9 @@
 TIP: For a first single-server deployment, use the xref:simple-setup.adoc[simple, functional Linux/Docker setup] instead: it provides the complete phased path from artifact transfer through manual acceptance and scheduling.
 This page covers broader Docker/Nono choices and image details.
 
+For an all-container dispatcher, agent and gateway deployment, follow xref:docker.adoc[the full Docker setup].
+The optional xref:../bots/docker-shared-slots.adoc[Docker shared-slots add-on] supplies a separate cross-bot deployment layer; a stand-alone setup does not imply a shared host cap.
+
 WARNING: Strict Docker review/help/solve has live acceptance evidence, but Nono and additional isolation modes still need deployment-specific validation.
 Start with a disposable test repository, not unattended production solving.
 
@@ -21,10 +24,9 @@ It is disabled by default and does not replace dependency-egress configuration.
 == Execution backend and private-routing choices
 
 Docker, Kubernetes and Nono are supported execution backends, not equally implemented or live-accepted private-routing deployments.
-Restricted Docker and its services dependency CONNECT route are implemented and deployed, with passing native AMD64 actual-image acceptance; see xref:egress.adoc#restricted-services-evidence[the current reactor, image and server-smoke evidence].
-Private TLS, the fixed control bridge and immutable dependency-egress images have been promoted on the operator host, with read-only list/startup passing and the queue unchanged.
-Timers remain paused awaiting operator authorization, not necessarily pending live acceptance.
-Prior accepted review/solve evidence is unchanged; this release evidence adds no new live GitHub task, model task or publication acceptance.
+Restricted Docker and its services dependency CONNECT route require qualification on the actual host with its matched immutable images, private TLS, fixed worker listener and firewall policy.
+See xref:egress.adoc[egress acceptance gates] and keep scheduling disabled until deployment-specific GitHub/model and recovery checks pass.
+Image startup or a synthetic network check alone does not establish live publication acceptance.
 
 [cols="1,2,2",options="header"]
 |===
@@ -66,8 +68,8 @@ Configure the xref:configuration.adoc[canonical services settings] after provisi
 On an offline signing machine, use a private directory on protected storage, not an image build context.
 The following creates an encrypted private CA and a 30-day leaf with the exact default gateway SAN, then packages the leaf key and certificate chain as PKCS12.
 Use your organization's issuance and lifetime policy instead where required.
-These illustrative lifetimes are not the current operator certificate state: the authorized leaf rotation under the same CA expires at `2035-12-31T23:59:59Z`, and the CA expires on `2036-11-12`.
-The rotated leaf is installed under the unchanged CA; dependency-route acceptance comes from the separate image and server-smoke checks, not certificate rotation alone.
+These lifetimes are illustrative, not a statement about any installed certificate.
+Track the actual leaf and CA expiry and arrange operator-managed renewal; certificate issuance alone does not qualify dependency routing or live workflows.
 The password files are private inputs to OpenSSL, never literal secrets in command arguments; do not enable shell tracing.
 
 [source,bash]

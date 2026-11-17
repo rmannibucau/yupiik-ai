@@ -26,8 +26,11 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 public final class ApprovalEndpoint {
+    private static final Pattern JSON_CONTENT_TYPE = Pattern.compile("(?i)application/json(?:;\\s*charset=utf-8)?");
+
     private final PrivateState state;
     private final ApprovalCoordinator coordinator;
     private final ScheduledExecutorService timer;
@@ -62,7 +65,7 @@ public final class ApprovalEndpoint {
         }
         try {
             final var contentType = request.header("content-type");
-            if (contentType == null || !contentType.matches("(?i)application/json(?:;\\s*charset=utf-8)?")) {
+            if (contentType == null || !JSON_CONTENT_TYPE.matcher(contentType).matches()) {
                 return response(415, "denied");
             }
             final var length = Integer.parseInt(request.header("content-length"));

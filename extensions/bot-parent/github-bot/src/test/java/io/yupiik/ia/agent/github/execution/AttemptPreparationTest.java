@@ -17,7 +17,7 @@ package io.yupiik.ia.agent.github.execution;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode;
 import io.yupiik.ia.agent.github.store.TaskStore;
@@ -61,7 +61,9 @@ class AttemptPreparationTest {
                     final var attempt = new AttemptPreparation(
                                     json,
                                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                                            .get()
+                                            .shared())
                             .prepare(config);
                     try {
                         final var sanitized = TaskStore.map(TaskStore.map(json.fromString(
@@ -124,7 +126,9 @@ class AttemptPreparationTest {
                     final var attempt = new AttemptPreparation(
                                     json,
                                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                                            .get()
+                                            .shared())
                             .prepare(config);
                     try {
                         final var expected = new LinkedHashMap<String, Object>(optional);
@@ -166,7 +170,9 @@ class AttemptPreparationTest {
                     final var attempt = new AttemptPreparation(
                                     json,
                                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                                            .get()
+                                            .shared())
                             .prepare(config);
                     try {
                         final var sanitized = TaskStore.map(TaskStore.map(json.fromString(
@@ -190,7 +196,9 @@ class AttemptPreparationTest {
             final var prompt = new AttemptPreparation(
                             json,
                             new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                            new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                            new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                                    .get()
+                                    .shared())
                     .prompt(
                             TaskFixtures.task(
                                     Map.of("id", "solve-1", "repository", "owner/repo", "number", 4, "kind", "solve")),
@@ -211,7 +219,9 @@ class AttemptPreparationTest {
             final var preparation = new AttemptPreparation(
                     json,
                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                            .get()
+                            .shared());
             final var task = TaskFixtures.task(
                     Map.of("id", "solve-1", "repository", "owner/repo", "number", 4, "kind", "solve"));
             final var prompt = preparation.prompt(task, "fork", false, SourceMode.git);
@@ -245,7 +255,9 @@ class AttemptPreparationTest {
             final var preparation = new AttemptPreparation(
                     json,
                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                            .get()
+                            .shared());
             final var attempt = preparation.prepare(config, root);
             assertEquals(root, attempt.getParent());
             AttemptPreparation.delete(attempt);
@@ -278,7 +290,9 @@ class AttemptPreparationTest {
             final var preparation = new AttemptPreparation(
                     json,
                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                            .get()
+                            .shared());
             final var first = preparation.prepare(configuration);
             Path second = null;
             try {
@@ -328,7 +342,9 @@ class AttemptPreparationTest {
             final var preparation = new AttemptPreparation(
                     json,
                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                            .get()
+                            .shared());
             final var directory = preparation.prepare(configuration);
             try {
                 final var sanitized = TaskStore.map(TaskStore.map(json.fromString(
@@ -364,7 +380,9 @@ class AttemptPreparationTest {
             final var prompt = new AttemptPreparation(
                             json,
                             new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                            new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                            new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                                    .get()
+                                    .shared())
                     .prompt(
                             TaskFixtures.task(
                                     Map.of("id", "task-1", "repository", "owner/repo", "number", 12, "kind", "review")),
@@ -386,7 +404,9 @@ class AttemptPreparationTest {
             final var prompt = new AttemptPreparation(
                             json,
                             new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                            new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                            new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                                    .get()
+                                    .shared())
                     .prompt(
                             TaskFixtures.task(Map.of(
                                     "id",

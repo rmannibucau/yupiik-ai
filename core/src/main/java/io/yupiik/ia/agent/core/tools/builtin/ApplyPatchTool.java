@@ -60,6 +60,8 @@ import java.util.regex.Pattern;
  */
 @ApplicationScoped
 public class ApplyPatchTool implements EmbeddedTool {
+    private static final Pattern HUNK_COORDINATES = Pattern.compile("^[0-9\\s,+\\-]+$");
+
     private static final String DEV_NULL = "/dev/null";
     /** How far an anchored hunk may drift from its declared position before being rejected. */
     private static final int ANCHOR_FUZZ = 5;
@@ -723,7 +725,7 @@ public class ApplyPatchTool implements EmbeddedTool {
         private static boolean numericNoise(final String s) {
             final var stripped =
                     s.replace("@", "").replace("(", "").replace(")", "").trim();
-            return stripped.isEmpty() || stripped.matches("^[0-9\\s,+\\-]+$");
+            return stripped.isEmpty() || HUNK_COORDINATES.matcher(stripped).matches();
         }
 
         /** Returns {1-based oldStart, oldCount, newCount} or null when the header carries no position. */

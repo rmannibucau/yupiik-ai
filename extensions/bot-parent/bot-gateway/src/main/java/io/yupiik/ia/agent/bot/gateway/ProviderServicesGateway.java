@@ -24,6 +24,9 @@ import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.container.configuration.ConfigurationImpl;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
+import io.yupiik.ia.agent.core.llm.ApiFlavor;
+import io.yupiik.ia.agent.core.llm.ChatRoutes;
 import io.yupiik.ia.agent.core.llm.ProviderRequestBudget;
 import java.io.FilterInputStream;
 import java.io.IOException;
@@ -70,7 +73,7 @@ import javax.net.ssl.TrustManagerFactory;
 
 /**
  * Fixed inference only. Numeric private HTTP targets require an operator-trusted control network.
- * The constructor's trusted Configuration also supplies optional ProviderRequestBudget
+ * The constructor's typed budget configuration supplies optional ProviderRequestBudget
  * settings; these must never originate from agent configuration or request headers.
  */
 public final class ProviderServicesGateway implements AutoCloseable {
@@ -78,7 +81,7 @@ public final class ProviderServicesGateway implements AutoCloseable {
     public static final String YCA_SERVICES_UPSTREAM_TOKEN = "YCA_SERVICES_UPSTREAM_TOKEN";
     public static final String YCA_SERVICES_KEYSTORE_PASSWORD = "YCA_SERVICES_KEYSTORE_PASSWORD";
     private static final String UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-    private static final Pattern INFERENCE = Pattern.compile("/inference/" + UUID + "/chat/completions");
+    private static final Pattern INFERENCE = Pattern.compile("/inference/" + UUID + "/(?:chat/completions|responses)");
     private static final Pattern TOKEN = Pattern.compile("[A-Za-z0-9_-]{43}");
     private static final Pattern ENV = Pattern.compile("[A-Za-z_][A-Za-z0-9_]{0,127}");
     private static final Set<String> RESERVED_ENV = Set.of(
@@ -115,6 +118,13 @@ public final class ProviderServicesGateway implements AutoCloseable {
     private volatile String provider;
     private volatile String upstream;
 
+    /**
+     * Trusted, controller-private listener policy, never supplied by an agent or request.
+     * The inference path is an attempt UUID capability pinned to one COMPLETIONS or RESPONSES
+     * suffix; the fixed numerical HTTP target must use the same API. TLS keys/settings must
+     * remain outside agent mounts. maxConcurrent bounds this instance through streaming EOF;
+     * the separately configured ProviderRequestBudget coordinates participating forwarders.
+     */
     @JsonModel
     public record Settings(
             String serverName,
@@ -157,6 +167,11 @@ public final class ProviderServicesGateway implements AutoCloseable {
                 throw new IllegalArgumentException("Invalid services settings");
             }
             target(inferenceTarget);
+            final var api = ChatRoutes.detectFlavor(inferencePath);
+            if ((api != ApiFlavor.COMPLETIONS && api != ApiFlavor.RESPONSES)
+                    || ChatRoutes.detectFlavor(inferenceTarget) != api) {
+                throw new IllegalArgumentException("Provider route and target must pin the same supported API");
+            }
         }
 
         /** Returns zero for an accepted request, otherwise its HTTP rejection status. Never chooses a destination. */
@@ -219,13 +234,17 @@ public final class ProviderServicesGateway implements AutoCloseable {
         }
     }
 
-    public ProviderServicesGateway(final Settings settings, final Configuration configuration) throws IOException {
+    public ProviderServicesGateway(
+            final Settings settings,
+            final Configuration configuration,
+            final ProviderBudgetConfiguration budgetConfiguration)
+            throws IOException {
         if (configuration.get("YCA_CONTEXT_TOKEN").isPresent()
                 || configuration.get("YCA_CONTEXT_GIT_TOKEN").isPresent()) {
             throw new IllegalArgumentException("GitHub capabilities are not supported");
         }
         this.settings = settings;
-        this.budget = ProviderRequestBudget.fromConfiguration(configuration);
+        this.budget = ProviderRequestBudget.fromConfiguration(budgetConfiguration);
         slots = new Semaphore(settings.maxConcurrent());
         provider = "Bearer " + secret(configuration, YCA_SERVICES_PROVIDER_TOKEN);
         final var credential = configuration.get(YCA_SERVICES_UPSTREAM_TOKEN).orElse(null);
@@ -599,7 +618,13 @@ public final class ProviderServicesGateway implements AutoCloseable {
             System.setProperty("sun.net.httpserver.maxIdleConnections", "4");
             System.setProperty("sun.net.httpserver.maxReqTime", "" + settings.timeoutSeconds());
             System.setProperty("sun.net.httpserver.maxRspTime", "" + settings.timeoutSeconds());
-            try (final var gateway = new ProviderServicesGateway(settings, configuration)) {
+            try (final var gateway = new ProviderServicesGateway(
+                    settings,
+                    configuration,
+                    new ProviderBudgetConfiguration(
+                            configuration.get(ProviderRequestBudget.ROOT).orElse(null),
+                            configuration.get(ProviderRequestBudget.ID).orElse(null),
+                            configuration.get(ProviderRequestBudget.SLOTS).orElse(null)))) {
                 final var hook = new Thread(gateway::close, "services-shutdown");
                 Runtime.getRuntime().addShutdownHook(hook);
                 try {

@@ -30,6 +30,8 @@ import java.util.regex.Pattern;
  * then returns its input unchanged).
  */
 public class MarkdownColorizer {
+    private static final Pattern ORDERED_LIST_ITEM = Pattern.compile("\\d+\\.\\s.*");
+
     private static final String RESET = "\u001b[0m";
 
     private static final String BOLD = "\u001b[1m";
@@ -102,7 +104,7 @@ public class MarkdownColorizer {
         if (trimmed.startsWith("- ")
                 || trimmed.startsWith("* ")
                 || trimmed.startsWith("+ ")
-                || trimmed.matches("\\d+\\.\\s.*")) {
+                || ORDERED_LIST_ITEM.matcher(trimmed).matches()) {
             return bullet(line);
         }
         return inline(line);

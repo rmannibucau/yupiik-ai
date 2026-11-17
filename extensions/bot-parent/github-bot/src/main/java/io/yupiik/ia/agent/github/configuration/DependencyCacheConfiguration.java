@@ -65,6 +65,11 @@ public record DependencyCacheConfiguration(
 
         @Property(documentation = "Bounded cache operation limits.")
         Limits limits) {
+    private static final Pattern ENVIRONMENT_KEY = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+    private static final Pattern SENSITIVE_ENVIRONMENT_KEY =
+            Pattern.compile(".*(TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIAL|AUTH|CONTEXT|PROXY|KEY|COOKIE).*");
+    private static final Pattern URL_WITH_CREDENTIALS = Pattern.compile("(?s).*://[^/\\s]*@.*");
+
     private static final Pattern ID = Pattern.compile("[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}");
     private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([^}]*)}");
 
@@ -376,7 +381,7 @@ public record DependencyCacheConfiguration(
                 throw new IllegalArgumentException("Null dependency cache environment name");
             }
             final var upper = key.toUpperCase(Locale.ROOT);
-            if (!key.matches("[A-Za-z_][A-Za-z0-9_]*")
+            if (!ENVIRONMENT_KEY.matcher(key).matches()
                     || reserved.contains(upper)
                     || upper.startsWith("DOCKER_")
                     || upper.startsWith("LD_")
@@ -388,7 +393,7 @@ public record DependencyCacheConfiguration(
                     || upper.startsWith("JAVA_")
                     || upper.startsWith("SSH_")
                     || upper.startsWith("KUBERNETES_")
-                    || upper.matches(".*(TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIAL|AUTH|CONTEXT|PROXY|KEY|COOKIE).*")) {
+                    || SENSITIVE_ENVIRONMENT_KEY.matcher(upper).matches()) {
                 throw new IllegalArgumentException("Unsafe dependency cache environment variable: " + key);
             }
             if (value == null
@@ -396,7 +401,7 @@ public record DependencyCacheConfiguration(
                     || value.indexOf('\0') >= 0
                     || value.indexOf('\n') >= 0
                     || value.indexOf('\r') >= 0
-                    || value.matches("(?s).*://[^/\\s]*@.*")) {
+                    || URL_WITH_CREDENTIALS.matcher(value).matches()) {
                 throw new IllegalArgumentException("Invalid dependency cache environment value");
             }
         });

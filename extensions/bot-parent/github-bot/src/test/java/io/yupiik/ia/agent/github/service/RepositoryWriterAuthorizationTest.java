@@ -22,8 +22,8 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.WorkerCommand$Options$FusionConfigurationFactory;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.model.TaskState;
@@ -329,9 +329,10 @@ class RepositoryWriterAuthorizationTest {
             final var settings = Map.of(
                     "github.executor.docker.executable",
                     home.resolve("must-not-run").toString());
-            final var execution = new ExecutorConfiguration$FusionConfigurationFactory(
+            final var execution = new GithubExecutorConfiguration$FusionConfigurationFactory(
                             key -> Optional.ofNullable(settings.get(key)))
-                    .get();
+                    .get()
+                    .shared();
             return BotTestConfiguration.worker(conf, store, github, json, execution);
         }
 

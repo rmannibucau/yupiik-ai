@@ -13,7 +13,11 @@ The assembled CLI, controller lifecycle, sandbox integration, recovery and netwo
 No GitHub live-test evidence establishes Slack behavior.
 
 * xref:configuration.adoc[Admission, configuration and prompt contracts]
+* xref:context.adoc[Opt-in approved Slack context, privacy and acceptance]
+* xref:docker.adoc[Step-by-step Docker setup, private credentials and lifecycle gates]
 * xref:deployment.adoc[Manifest, image profiles and hardened deployment templates]
+* xref:installation.adoc[Generic installation checklist and conservative removal sample]
+* xref:../bots/docker-shared-slots.adoc[Docker shared-slot setup for participating controllers]
 * xref:../bots/cohosting.adoc[Same-machine GitHub and Slack security, resource and LLM caps]
 
 == Mentioned natural-language requests
@@ -31,8 +35,9 @@ Conversation identity includes workspace, channel, root thread timestamp and req
 
 == Default-deny scope
 
-* Configure one exact workspace ID, the bot user ID, exact channel IDs and exact requester IDs in trusted controller configuration.
-* Empty channel or user lists deny all requests.
+* Configure one exact workspace ID, the bot user ID, exact channel IDs and, by default, exact requester IDs in trusted controller configuration.
+* Empty channel lists always deny all requests; empty user lists deny all unless `slack.allowChannelMembers=true` is explicitly enabled.
+* Channel-member access bypasses only the requester allowlist, never workspace/channel checks, bot/self rejection or requester-bound feedback.
 * Display names, email addresses, workspace membership and a successful Socket Mode connection grant no access.
 * Bot/self events, event subtypes and requests from other workspaces are rejected by admission.
 * Slack Connect/shared audiences are disabled by default; enabling them is an explicit audience disclosure decision, not merely a connectivity switch.
@@ -50,6 +55,7 @@ A user asking to read a URL does not override the operator's network policy.
 Do not mount a user's checkout, GitHub controller state, home directory or credentials into Slack agents.
 
 Only explicitly selected requester-scoped prior answers may become conversation context; this is not an implicit fetch of the Slack thread or channel history.
+Separately, xref:context.adoc[approved Slack context] requires explicit trusted host opt-in and bounded source/member grants; it does not change the minimal manifest or grant private/DM/Slack Connect retrieval.
 Prompts are defense in depth, not an access-control boundary: enforce filesystem, credential and network restrictions outside the model.
 
 == Shared implementation boundary
@@ -57,7 +63,7 @@ Prompts are defense in depth, not an access-control boundary: enforce filesystem
 `bot-runtime` contains the extracted sandbox backends, private attempt preparation, environment validation, structured result handling and feedback primitives.
 Shared classes can retain historical `io.yupiik.ia.agent.github.*` package names; that does not make Slack state or policy GitHub-owned.
 `bot-gateway` owns public CONNECT `EgressGateway` and the neutral provider-only `ProviderServicesGateway`.
-Slack's `SlackProviderServices` stages only the selected chat-completions provider with an attempt-scoped capability, without an upstream key in the agent.
+Slack's `SlackProviderServices` stages only the selected provider, pinned to `COMPLETIONS` or `RESPONSES`, with an attempt-scoped capability and no upstream key in the agent.
 Docker uses `docker.services` and the neutral TLS gateway; qualified Linux Nono uses a controller-owned pathname Unix bridge to a fixed HTTPS upstream; qualified Kubernetes uses a separate provider gateway Pod.
 Docker/Kubernetes upstreams currently remain numerical private IPv4 HTTP, not arbitrary public HTTPS APIs.
 Nono requires exactly 0.81.0 and has a documented sockaddr TOCTOU limitation; qualification is not a claim of race-free host IPC isolation.

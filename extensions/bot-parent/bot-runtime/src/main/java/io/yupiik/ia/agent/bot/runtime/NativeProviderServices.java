@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.bot.runtime;
 
+import io.yupiik.ia.agent.core.llm.ApiFlavor;
+import io.yupiik.ia.agent.core.llm.ChatRoutes;
 import io.yupiik.ia.agent.core.llm.UnixProviderProtocol;
 import java.io.IOException;
 import java.io.InputStream;
@@ -41,6 +43,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 
 /**
  * Single-attempt, controller-owned provider bridge. The caller persists the socket identity before
@@ -48,16 +51,18 @@ import java.util.concurrent.atomic.AtomicReference;
  * quiescence and confirmed agent termination. Existing socket names are never adopted or unlinked.
  *
  * The supplied HTTP client is borrowed and must enforce normal TLS validation, no redirects, no
- * cookies/authenticator and trusted proxy policy. Production upstream must be HTTPS chat completions.
+ * cookies/authenticator and trusted proxy policy. Production upstream must be HTTPS with a pinned API.
  * This service does not own agent/session recovery: after a controller crash, retain budget uncertainty
  * and reconcile the durable Nono identity before deleting the private directory.
  */
 public final class NativeProviderServices implements AutoCloseable {
+    private static final Pattern UPSTREAM_PATH = Pattern.compile("(/[A-Za-z0-9_-]+)+");
     private final Path socketPath;
     private final Object socketKey;
     private final ServerSocketChannel listener;
     private final HttpClient http;
     private final URI upstream;
+    private final ApiFlavor api;
     private final String authorization;
     private final byte[] capability;
     private final Duration deadline;
@@ -92,6 +97,7 @@ public final class NativeProviderServices implements AutoCloseable {
             final Path socketPath,
             final HttpClient http,
             final URI upstream,
+            final ApiFlavor api,
             final String upstreamAuthorization,
             final String attemptCapability,
             final Duration deadline,
@@ -120,7 +126,11 @@ public final class NativeProviderServices implements AutoCloseable {
                 || upstream.getRawUserInfo() != null
                 || upstream.getRawQuery() != null
                 || upstream.getRawFragment() != null
-                || !upstream.getPath().endsWith("/chat/completions")
+                || (api != ApiFlavor.COMPLETIONS && api != ApiFlavor.RESPONSES)
+                || ChatRoutes.detectFlavor(upstream.toString()) != api
+                || !UPSTREAM_PATH.matcher(upstream.getRawPath()).matches()
+                || upstream.getPort() == 0
+                || upstream.getPort() > 65535
                 || http.followRedirects() != HttpClient.Redirect.NEVER
                 || http.cookieHandler().isPresent()
                 || http.authenticator().isPresent()) {
@@ -131,6 +141,7 @@ public final class NativeProviderServices implements AutoCloseable {
         this.socketPath = socketPath;
         this.http = http;
         this.upstream = upstream;
+        this.api = api;
         this.authorization = upstreamAuthorization;
         this.capability = attemptCapability.getBytes(StandardCharsets.US_ASCII);
         this.deadline = deadline;
@@ -226,6 +237,9 @@ public final class NativeProviderServices implements AutoCloseable {
             }
             final var token = in.readUTF();
             if (token.length() > 256 || !MessageDigest.isEqual(capability, token.getBytes(StandardCharsets.US_ASCII))) {
+                return;
+            }
+            if (!api.name().equals(in.readUTF())) {
                 return;
             }
             final int length = in.readInt();

@@ -286,7 +286,7 @@ class GithubContextSnapshotTest {
     @Test
     void acceptsExactlyFourMiBAndRejectsOneByteMore() throws Exception {
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
-            final int fixed = json.toString(json.fromString(Object.class, PULL)).getBytes(StandardCharsets.UTF_8).length
+            final int fixed = PULL.getBytes(StandardCharsets.UTF_8).length
                     + "[{\"discarded\":\"\"}]".getBytes(StandardCharsets.UTF_8).length
                     + 3 * 2; // The other three collections are empty arrays.
             for (final int extra : List.of(0, 1)) {

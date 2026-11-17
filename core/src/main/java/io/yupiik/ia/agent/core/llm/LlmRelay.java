@@ -45,23 +45,28 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 
 /**
  * Optional, explicitly owned relay for one deployment attempt. Create a new instance for each attempt
  * and give clients only {@link #address()} and {@link #accessToken()}, never the upstream credential.
  * This is not an egress sandbox: callers must separately control network access and bind exposure.
- * Only POST /chat/completions is accepted; its body is sent to the exact configured upstream URI.
+ * Only POST to the pinned /chat/completions or /responses route is accepted; its body is sent to the exact configured upstream URI.
  * No caller headers are forwarded. Transport-generated headers are supplied by the JDK client.
  * Responses forward status, an allowlisted content type, and bounded bytes, including SSE.
  * A timeout, disconnect or oversized streaming response aborts the exchange; once response headers
  * have been sent its status cannot be replaced. Closing cancels all active attempts.
  */
 public final class LlmRelay implements AutoCloseable {
+    private static final Pattern BEARER_SECRET = Pattern.compile("[A-Za-z0-9._~+/-]+=*");
+    private static final Pattern LOOPBACK_IPV4 = Pattern.compile("127\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}");
+
     private static final int MAX_REQUEST_BYTES = 8 * 1024 * 1024;
     private static final long MAX_RESPONSE_BYTES = 128L * 1024 * 1024;
     private static final Duration TIMEOUT = Duration.ofSeconds(120);
 
     private final URI upstream;
+    private final String route;
     private final String bearerSecret;
     private final String accessToken;
     private final byte[] authorizationDigest;
@@ -93,7 +98,13 @@ public final class LlmRelay implements AutoCloseable {
             final ProviderRequestBudget budget)
             throws IOException {
         validateUpstream(upstream);
-        if (bearerSecret == null || !bearerSecret.matches("[A-Za-z0-9._~+/-]+=*")) {
+        final var api = ChatRoutes.detectFlavor(upstream.toString());
+        if ((api != ApiFlavor.COMPLETIONS && api != ApiFlavor.RESPONSES)
+                || !upstream.getRawPath().endsWith(api == ApiFlavor.RESPONSES ? "/responses" : "/chat/completions")) {
+            throw new IllegalArgumentException("Explicit completions or responses upstream required");
+        }
+        this.route = api == ApiFlavor.RESPONSES ? "/responses" : "/chat/completions";
+        if (bearerSecret == null || !BEARER_SECRET.matcher(bearerSecret).matches()) {
             throw new IllegalArgumentException("Invalid upstream bearer credential");
         }
         if (bindAddress == null || maxConcurrency < 1) {
@@ -159,7 +170,7 @@ public final class LlmRelay implements AutoCloseable {
             if (host.equals("[::1]") || host.equals("::1")) {
                 return;
             }
-            if (host.matches("127\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}")) {
+            if (LOOPBACK_IPV4.matcher(host).matches()) {
                 try {
                     if (InetAddress.getByName(host).isLoopbackAddress()) {
                         return;
@@ -182,7 +193,11 @@ public final class LlmRelay implements AutoCloseable {
 
     private void handle(final HttpExchange exchange) throws IOException {
         final var uri = exchange.getRequestURI();
-        if (uri.isAbsolute() || !"/chat/completions".equals(uri.getRawPath()) || uri.getRawQuery() != null) {
+        if (uri.isAbsolute()
+                || uri.getRawAuthority() != null
+                || !route.equals(uri.getRawPath())
+                || uri.getRawQuery() != null
+                || uri.getRawFragment() != null) {
             reject(exchange, 404);
             return;
         }

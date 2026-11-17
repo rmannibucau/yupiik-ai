@@ -53,6 +53,14 @@ import java.util.stream.Collectors;
 
 /** Packaged, secret-free entry point. All network Git uses native smart HTTPS against the broker only. */
 public final class AgentBrokerSource {
+    private static final Pattern OPERATION_ID = Pattern.compile("[A-Za-z0-9-]{1,80}");
+    private static final Pattern COMMIT_SHA = Pattern.compile("[0-9a-fA-F]{40}");
+    private static final Pattern GIT_PATH = Pattern.compile("[A-Za-z0-9_.-][A-Za-z0-9_./ -]*");
+    private static final Pattern REPOSITORY_NAME =
+            Pattern.compile("[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}/[A-Za-z0-9_.-]{1,100}");
+    private static final Pattern HEAD_SHA = Pattern.compile("[a-fA-F0-9]{40}");
+    private static final Pattern GIT_GRANT_SUFFIX = Pattern.compile("[A-Za-z0-9-]{1,80}\\.git");
+
     private static final String CONTROL_TOKEN = "YCA_CONTEXT_TOKEN";
     private static final String GIT_TOKEN = "YCA_CONTEXT_GIT_TOKEN";
     private static final String STATE = "yca-broker.properties";
@@ -74,7 +82,8 @@ public final class AgentBrokerSource {
 
     public static void main(final String... args) {
         AgentBrokerSource source = null;
-        try (final var json = new JsonMapperImpl(List.of(), ignored -> Optional.empty())) {
+        try (final var json = new JsonMapperImpl(
+                List.of(new ContextClient$RpcResponse$FusionJsonCodec()), ignored -> Optional.empty())) {
             final var sources = new ConfigurationImpl(List.of());
             final var options = Options.parse(args);
             if (options.command().equals("credential")) {
@@ -194,7 +203,8 @@ public final class AgentBrokerSource {
                         "waitMillis",
                         1000),
                 this::expired);
-        if (!(status.get("operationId") instanceof String id) || !id.matches("[A-Za-z0-9-]{1,80}")) {
+        if (!(status.get("operationId") instanceof String id)
+                || !OPERATION_ID.matcher(id).matches()) {
             throw new IOException("Invalid preparation.");
         }
         // Long-polling returns fast completions immediately. Slow/legacy servers still get at most
@@ -223,10 +233,10 @@ public final class AgentBrokerSource {
                     || !options.repository().equals(source.get("repository"))
                     || !revision.equals(source.get("revision"))
                     || !(source.get("headSha") instanceof String sha)
-                    || !sha.matches("[0-9a-fA-F]{40}")
+                    || !COMMIT_SHA.matcher(sha).matches()
                     || (revision.equals("HEAD") && !options.head().equalsIgnoreCase(sha))
                     || !(source.get("generation") instanceof String generation)
-                    || !generation.matches("[A-Za-z0-9-]{1,80}")
+                    || !OPERATION_ID.matcher(generation).matches()
                     || !("git/" + generation + ".git").equals(source.get("gitPath"))
                     || !(source.get("depth") instanceof Number actualDepth)
                     || new BigDecimal(actualDepth.toString()).intValueExact() != depth) {
@@ -366,7 +376,12 @@ public final class AgentBrokerSource {
         final var origin =
                 git(List.of("config", "--get", "remote.origin.url"), null).strip();
         final var base = options.endpoint().resolve(".").toASCIIString();
-        if (!origin.equals(base) && !origin.matches(Pattern.quote(base) + "git/[A-Za-z0-9-]{1,80}\\.git")) {
+        final var prefix = base + "git/";
+        if (!origin.equals(base)
+                && (!origin.startsWith(prefix)
+                        || !GIT_GRANT_SUFFIX
+                                .matcher(origin.substring(prefix.length()))
+                                .matches())) {
             throw new IOException("Unsafe origin.");
         }
         try (final var objects = Files.walk(repository.resolve(".git/objects"))) {
@@ -674,7 +689,8 @@ public final class AgentBrokerSource {
         if (!"https".equals(fields.get("protocol"))
                 || !options.endpoint().getRawAuthority().equals(fields.get("host"))
                 || !gitPath.equals(fields.get("path"))
-                || !gitPath.matches(Pattern.quote(prefix) + "[A-Za-z0-9-]{1,80}\\.git")) {
+                || !gitPath.startsWith(prefix)
+                || !GIT_GRANT_SUFFIX.matcher(gitPath.substring(prefix.length())).matches()) {
             throw new IOException("Credential scope denied.");
         }
         final var secret = sources.get(GIT_TOKEN).orElse(null);
@@ -697,7 +713,7 @@ public final class AgentBrokerSource {
             }
             if (value.length() > 1024
                     || value.startsWith("-")
-                    || !value.matches("[A-Za-z0-9_.-][A-Za-z0-9_./ -]*")
+                    || !GIT_PATH.matcher(value).matches()
                     || Arrays.stream(value.split("/", -1))
                             .anyMatch(it ->
                                     it.isEmpty() || it.equals(".") || it.equals("..") || it.equalsIgnoreCase(".git"))) {
@@ -815,10 +831,10 @@ public final class AgentBrokerSource {
                     null,
                     Configuration.of(Map.of()));
             final var repo = values.get("--repository");
-            if (!repo.matches("[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}/[A-Za-z0-9_.-]{1,100}")
+            if (!REPOSITORY_NAME.matcher(repo).matches()
                     || repo.endsWith("/.")
                     || repo.endsWith("/..")
-                    || !values.get("--head").matches("[a-fA-F0-9]{40}")) {
+                    || !HEAD_SHA.matcher(values.get("--head")).matches()) {
                 throw new IllegalArgumentException("Invalid repository identity.");
             }
             final long bytes = Long.parseLong(values.get("--max-bytes"));

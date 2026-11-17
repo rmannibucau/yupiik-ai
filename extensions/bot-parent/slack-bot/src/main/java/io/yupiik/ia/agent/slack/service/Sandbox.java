@@ -19,7 +19,7 @@ import java.nio.file.Path;
 
 /** Lifecycle contract: stop must throw unless remote termination is confirmed. */
 public interface Sandbox extends AutoCloseable {
-    int execute(Path path, String runtimeId, String prompt);
+    int execute(Path path, String runtimeId, String prompt, Path temporaryDirectory);
 
     void stop(String runtimeId);
 

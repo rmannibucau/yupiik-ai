@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.todo;
 
+import io.yupiik.fusion.framework.api.container.Types;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.session.SessionStorageLayout;
@@ -25,8 +26,11 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 public class TodoStore {
+    private static final Pattern UNSAFE_KEY_CHARACTER = Pattern.compile("[^A-Za-z0-9._-]");
+
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
     private final String key;
@@ -58,7 +62,7 @@ public class TodoStore {
         if (key == null || key.isBlank()) {
             return null;
         }
-        return key.replaceAll("[^A-Za-z0-9._-]", "_");
+        return UNSAFE_KEY_CHARACTER.matcher(key).replaceAll("_");
     }
 
     /**
@@ -93,6 +97,10 @@ public class TodoStore {
         return all();
     }
 
+    /**
+     * Loads the persisted TodoItem array, including an empty array clearing the current list.
+     * Missing, corrupt or incorrectly typed files leave the current list unchanged.
+     */
     public synchronized void load() {
         var path = path();
         // backward compatibility: a session whose todos live in the legacy root file is still read
@@ -103,11 +111,10 @@ public class TodoStore {
             return;
         }
         try {
-            // read as a raw object graph then convert: keeps the parse independent of
-            // mapper array/list codec support, {@link #from} accepts maps or items
-            final var loaded = mapper.fromString(Object.class, Files.readString(path));
-            if (loaded instanceof final List<?> list && !list.isEmpty()) {
-                todos = List.copyOf(from(list));
+            final List<TodoItem> loaded = mapper.fromString(
+                    new Types.ParameterizedTypeImpl(List.class, TodoItem.class), Files.readString(path));
+            if (loaded != null) {
+                todos = List.copyOf(loaded);
             }
         } catch (final IOException | RuntimeException e) {
             // corrupted/legacy file: ignore and keep the in-memory list

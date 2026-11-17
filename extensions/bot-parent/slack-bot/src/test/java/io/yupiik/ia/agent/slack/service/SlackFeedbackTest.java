@@ -20,9 +20,11 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.ia.agent.bot.feedback.FeedbackMailbox;
 import io.yupiik.ia.agent.core.question.Question;
+import io.yupiik.ia.agent.slack.model.SlackJson;
 import io.yupiik.ia.agent.slack.model.SlackQuestion;
 import io.yupiik.ia.agent.slack.model.SlackQuestionItem;
 import io.yupiik.ia.agent.slack.model.SlackQuestionRequest;
+import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,6 +32,7 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -49,7 +52,7 @@ class SlackFeedbackTest {
                 final var request = mailbox.request(
                         List.of(new Question("choice", "{{untrusted}}", List.of("yes", "no"), false)),
                         System.currentTimeMillis() + 30000);
-                final var original = task("task", "U1", "running", 1);
+                final var original = task("task", "U1", TaskStatus.running, 1);
                 fixture.add(original);
                 final var feedback = feedback(fixture);
                 feedback.poll(original.id(), mailbox);
@@ -62,7 +65,7 @@ class SlackFeedbackTest {
                         Object.class, fixture.exchanges.getFirst().body());
                 assertEquals("C1", post.get("channel"));
                 assertEquals("1.1", post.get("thread_ts"));
-                feedback.interaction(action("U1", request.nonce(), "answer"));
+                interact(fixture, feedback, action("U1", request.nonce(), "answer"));
                 final var opening = fixture.exchanges.getLast();
                 assertEquals("/api/views.open", opening.request().uri().getPath());
                 final var open = (Map<?, ?>) fixture.json.fromString(Object.class, opening.body());
@@ -75,7 +78,7 @@ class SlackFeedbackTest {
                 final var element = (Map<?, ?>) block.get("element");
                 assertEquals("o0", ((Map<?, ?>) ((List<?>) element.get("options")).getFirst()).get("value"));
                 assertEquals("open", fixture.store.list().getFirst().question().state());
-                assertTrue(feedback.interaction(submission("U1", request.nonce(), "V1", "yca_feedback", "o1"))
+                assertTrue(interact(fixture, feedback, submission("U1", request.nonce(), "V1", "yca_feedback", "o1"))
                         .isEmpty());
                 feedback.poll(original.id(), mailbox);
                 assertEquals(
@@ -88,19 +91,59 @@ class SlackFeedbackTest {
     }
 
     @Test
+    void channelMemberFeedbackRemainsBoundToTheOriginalRequester() throws Exception {
+        try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
+            final var request = new SlackQuestionRequest(
+                    NONCE,
+                    System.currentTimeMillis() + 30000,
+                    List.of(new SlackQuestionItem("choice", "Choose", List.of("yes", "no"), false)));
+            fixture.add(task("task", "U3", TaskStatus.running, 1)
+                    .feedback(
+                            new SlackQuestion(request, "waiting", "2.1", null, null), TaskStatus.waiting_for_user, 1));
+            final var feedback = new SlackFeedback(
+                    fixture.channelMemberConfiguration(), SlackDomainFixture.prompts(), fixture.store, fixture.api);
+            for (final var actor : List.of("U1", "U4", "UBOT", "B1", "U.*")) {
+                interact(fixture, feedback, action(actor, NONCE, "answer"));
+                interact(fixture, feedback, action(actor, NONCE, "cancel"));
+                interact(fixture, feedback, submission(actor, NONCE, "V1", "yca_feedback", "o0"));
+            }
+            for (final var override : List.of(
+                    Map.of("team", Map.of("id", "T2")),
+                    Map.of("channel", Map.of("id", "C3")),
+                    Map.of("message", Map.of("ts", "3.1")))) {
+                final var invalid = new HashMap<>(action("U3", NONCE, "answer"));
+                invalid.putAll(override);
+                interact(fixture, feedback, invalid);
+            }
+            assertTrue(fixture.exchanges.isEmpty());
+            assertEquals("waiting", fixture.store.list().getFirst().question().state());
+            interact(fixture, feedback, action("U3", NONCE, "answer"));
+            assertEquals(1, fixture.exchanges.size());
+            interact(fixture, feedback, submission("U4", NONCE, "V1", "yca_feedback", "o0"));
+            assertEquals("open", fixture.store.list().getFirst().question().state());
+            interact(fixture, feedback, submission("U3", NONCE, "V1", "yca_feedback", "o0"));
+            assertEquals(
+                    Map.of("choice", "yes"),
+                    fixture.store.list().getFirst().question().answers());
+        }
+    }
+
+    @Test
     void rejectsOtherActorWorkspaceNonceChannelAndMessageBeforeHttp() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
             addQuestion(fixture, "waiting", System.currentTimeMillis() + 30000, "2.1", null);
             final var feedback = feedback(fixture);
-            assertTrue(feedback.interaction(action("U2", NONCE, "answer")).isEmpty());
-            assertTrue(feedback.interaction(action("U1", "wrong", "answer")).isEmpty());
+            assertTrue(
+                    interact(fixture, feedback, action("U2", NONCE, "answer")).isEmpty());
+            assertTrue(
+                    interact(fixture, feedback, action("U1", "wrong", "answer")).isEmpty());
             for (final var override : List.of(
                     Map.of("team", Map.of("id", "T2")),
                     Map.of("channel", Map.of("id", "C2")),
                     Map.of("message", Map.of("ts", "3.1")))) {
                 final var invalid = new HashMap<>(action("U1", NONCE, "answer"));
                 invalid.putAll(override);
-                assertTrue(feedback.interaction(invalid).isEmpty());
+                assertTrue(interact(fixture, feedback, invalid).isEmpty());
             }
             assertTrue(fixture.exchanges.isEmpty());
             assertEquals("waiting", fixture.store.list().getFirst().question().state());
@@ -112,11 +155,11 @@ class SlackFeedbackTest {
         try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
             addQuestion(fixture, "open", System.currentTimeMillis() + 30000, "2.1", "V1");
             final var feedback = feedback(fixture);
-            assertTrue(feedback.interaction(submission("U2", NONCE, "V1", "yca_feedback", "o0"))
+            assertTrue(interact(fixture, feedback, submission("U2", NONCE, "V1", "yca_feedback", "o0"))
                     .isPresent());
-            assertTrue(feedback.interaction(submission("U1", "wrong", "V1", "yca_feedback", "o0"))
+            assertTrue(interact(fixture, feedback, submission("U1", "wrong", "V1", "yca_feedback", "o0"))
                     .isPresent());
-            assertTrue(feedback.interaction(submission("U1", NONCE, "V2", "yca_feedback", "o0"))
+            assertTrue(interact(fixture, feedback, submission("U1", NONCE, "V2", "yca_feedback", "o0"))
                     .isPresent());
             assertEquals("open", fixture.store.list().getFirst().question().state());
             fixture.store.transaction(tasks -> {
@@ -125,10 +168,11 @@ class SlackFeedbackTest {
                         NONCE, 1, current.question().request().questions());
                 tasks.set(
                         0,
-                        current.feedback(new SlackQuestion(expired, "open", "2.1", "V1", null), "waiting_for_user", 1));
+                        current.feedback(
+                                new SlackQuestion(expired, "open", "2.1", "V1", null), TaskStatus.waiting_for_user, 1));
                 return null;
             });
-            assertTrue(feedback.interaction(submission("U1", NONCE, "V1", "yca_feedback", "o0"))
+            assertTrue(interact(fixture, feedback, submission("U1", NONCE, "V1", "yca_feedback", "o0"))
                     .isPresent());
             assertEquals("open", fixture.store.list().getFirst().question().state());
             assertTrue(fixture.exchanges.isEmpty());
@@ -140,17 +184,17 @@ class SlackFeedbackTest {
         try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
             addQuestion(fixture, "open", System.currentTimeMillis() + 30000, "2.1", "V1");
             final var feedback = feedback(fixture);
-            assertTrue(feedback.interaction(submission("U1", NONCE, "V1", "yca_feedback", "yes"))
+            assertTrue(interact(fixture, feedback, submission("U1", NONCE, "V1", "yca_feedback", "yes"))
                     .isPresent());
-            assertTrue(feedback.interaction(submission("U1", NONCE, "V1", "yca_feedback", "o99"))
+            assertTrue(interact(fixture, feedback, submission("U1", NONCE, "V1", "yca_feedback", "o99"))
                     .isPresent());
             final var valid = submission("U1", NONCE, "V1", "yca_feedback", "o0");
-            feedback.interaction(valid);
-            feedback.interaction(valid);
+            interact(fixture, feedback, valid);
+            interact(fixture, feedback, valid);
             assertEquals(
                     Map.of("choice", "yes"),
                     fixture.store.list().getFirst().question().answers());
-            assertEquals("running", fixture.store.list().getFirst().status());
+            assertEquals(TaskStatus.running, fixture.store.list().getFirst().status());
             assertTrue(fixture.exchanges.isEmpty());
         }
     }
@@ -159,7 +203,7 @@ class SlackFeedbackTest {
     void rejectsWrongCallback() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
             addQuestion(fixture, "open", System.currentTimeMillis() + 30000, "2.1", "V1");
-            feedback(fixture).interaction(submission("U1", NONCE, "V1", "other_callback", "o0"));
+            interact(fixture, feedback(fixture), submission("U1", NONCE, "V1", "other_callback", "o0"));
             assertEquals("open", fixture.store.list().getFirst().question().state());
             assertTrue(fixture.exchanges.isEmpty());
         }
@@ -170,10 +214,10 @@ class SlackFeedbackTest {
         try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
             addQuestion(fixture, "open", System.currentTimeMillis() + 30000, "2.1", "V1");
             final var feedback = feedback(fixture);
-            feedback.interaction(submission("U1", NONCE, "V1", "yca_feedback", "o0"));
-            feedback.interaction(action("U1", NONCE, "cancel"));
+            interact(fixture, feedback, submission("U1", NONCE, "V1", "yca_feedback", "o0"));
+            interact(fixture, feedback, action("U1", NONCE, "cancel"));
             assertEquals("answered", fixture.store.list().getFirst().question().state());
-            assertEquals("running", fixture.store.list().getFirst().status());
+            assertEquals(TaskStatus.running, fixture.store.list().getFirst().status());
         }
     }
 
@@ -181,11 +225,16 @@ class SlackFeedbackTest {
     void publishingQuestionRejectsInteractionWithoutThrowing() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
             addQuestion(fixture, "publishing", System.currentTimeMillis() + 30000, null, null);
-            assertDoesNotThrow(() -> feedback(fixture).interaction(action("U1", NONCE, "answer")));
+            assertDoesNotThrow(() -> interact(fixture, feedback(fixture), action("U1", NONCE, "answer")));
             assertTrue(fixture.exchanges.isEmpty());
             assertEquals(
                     "publishing", fixture.store.list().getFirst().question().state());
         }
+    }
+
+    private Optional<SlackJson.Reply> interact(
+            final SlackDomainFixture fixture, final SlackFeedback feedback, final Map<String, Object> payload) {
+        return feedback.interaction(fixture.payload(payload));
     }
 
     private SlackFeedback feedback(final SlackDomainFixture fixture) {
@@ -200,8 +249,8 @@ class SlackFeedbackTest {
             final String view) {
         final var request = new SlackQuestionRequest(
                 NONCE, expiry, List.of(new SlackQuestionItem("choice", "Choose", List.of("yes", "no"), false)));
-        fixture.add(task("task", "U1", "running", 1)
-                .feedback(new SlackQuestion(request, state, message, view, null), "waiting_for_user", 1));
+        fixture.add(task("task", "U1", TaskStatus.running, 1)
+                .feedback(new SlackQuestion(request, state, message, view, null), TaskStatus.waiting_for_user, 1));
     }
 
     private Map<String, Object> action(final String actor, final String nonce, final String action) {

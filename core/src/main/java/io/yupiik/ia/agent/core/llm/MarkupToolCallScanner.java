@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Tolerant single-pass scanner for the in-band tool-call markup that models leak through the
@@ -56,6 +57,7 @@ import java.util.Map;
  */
 @ApplicationScoped
 public class MarkupToolCallScanner {
+    private static final Pattern EXCESS_NEWLINES = Pattern.compile("\n{3,}");
 
     /** Fullwidth vertical bar used by DeepSeek markers. */
     private static final char FULLWIDTH_PIPE = '\uFF5C';
@@ -171,7 +173,7 @@ public class MarkupToolCallScanner {
             }
         }
         // collapse 3+ blank lines, mirroring the previous stripper
-        final var out = sb.toString().replaceAll("\n{3,}", "\n\n");
+        final var out = EXCESS_NEWLINES.matcher(sb.toString()).replaceAll("\n\n");
         return out.strip();
     }
 

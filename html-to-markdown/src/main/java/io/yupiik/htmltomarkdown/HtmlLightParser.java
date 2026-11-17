@@ -20,6 +20,7 @@ import java.util.Deque;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Tiny lenient HTML parser producing plain text or a light markdown representation.
@@ -28,6 +29,10 @@ import java.util.Set;
  * table) and skips script/style/template/svg content, decoding basic entities.
  */
 public class HtmlLightParser {
+    private static final Pattern TRAILING_LINE_WHITESPACE = Pattern.compile("(?m)[ \t]+\n");
+    private static final Pattern EXCESS_NEWLINES = Pattern.compile("\n{3,}");
+    private static final Pattern TRAILING_BLANK_LINE = Pattern.compile("(?m)\\s+\n$");
+
     private static final Set<String> SKIP_CONTENT =
             Set.of("script", "style", "noscript", "template", "title", "head", "textarea", "svg", "iframe", "noframes");
     private static final Set<String> VOID_ELEMENTS = Set.of(
@@ -318,9 +323,11 @@ public class HtmlLightParser {
 
     private static String normalize(final StringBuilder sb) {
         final var trimmed = sb.toString().strip();
-        return trimmed.replaceAll("(?m)[ \t]+\n", "\n")
-                .replaceAll("\n{3,}", "\n\n")
-                .replaceAll("(?m)\\s+\n$", "\n");
+        final var withoutTrailingSpaces =
+                TRAILING_LINE_WHITESPACE.matcher(trimmed).replaceAll("\n");
+        final var withoutExcessNewlines =
+                EXCESS_NEWLINES.matcher(withoutTrailingSpaces).replaceAll("\n\n");
+        return TRAILING_BLANK_LINE.matcher(withoutExcessNewlines).replaceAll("\n");
     }
 
     private static int findClosingTag(final String html, final int from, final String name) {

@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.nono;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
@@ -25,8 +26,24 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 class ApprovalProtocolTest {
-    private final JsonMapperImpl mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+    private final JsonMapperImpl mapper = mapper();
     private final ApprovalProtocol protocol = new ApprovalProtocol(mapper);
+
+    static JsonMapperImpl mapper() {
+        return new JsonMapperImpl(
+                List.of(
+                        new ApprovalProtocol$TaggedEnvelope$FusionJsonCodec(),
+                        new ApprovalProtocol$RequestTag$FusionJsonCodec(),
+                        new ApprovalProtocol$FilesystemEnvelope$FusionJsonCodec(),
+                        new ApprovalProtocol$NetworkEnvelope$FusionJsonCodec(),
+                        new ApprovalProtocol$EndpointEnvelope$FusionJsonCodec(),
+                        new ApprovalProtocol$CommandEnvelope$FusionJsonCodec(),
+                        new ApprovalProtocol$FilesystemRequest$FusionJsonCodec(),
+                        new ApprovalProtocol$NetworkRequest$FusionJsonCodec(),
+                        new ApprovalProtocol$EndpointRequest$FusionJsonCodec(),
+                        new ApprovalProtocol$CommandRequest$FusionJsonCodec()),
+                key -> Optional.empty());
+    }
 
     @AfterEach
     void closeMapper() {
@@ -37,7 +54,7 @@ class ApprovalProtocolTest {
     void decodesStockFilesystemRequest() {
         final var approval = protocol.parse(body("r1", "s1", "/outside/file"));
         assertEquals("r1", approval.id());
-        assertEquals("Read", approval.request().get("access"));
+        assertEquals("Read", ((ApprovalProtocol.FilesystemRequest) approval.request()).access());
         assertTrue(approval.presentation().contains("open descriptor"));
     }
 
@@ -69,7 +86,7 @@ class ApprovalProtocolTest {
                 .replace("\"path\":\"/outside/file\"", "\"path\":\"/ignored\",\"path\":\"/outside/file\"");
         final var approval = protocol.parse(duplicates.getBytes(StandardCharsets.UTF_8));
         assertEquals("desktop", approval.backend());
-        assertEquals("/outside/file", approval.request().get("path"));
+        assertEquals("/outside/file", ((ApprovalProtocol.FilesystemRequest) approval.request()).path());
         assertTrue(approval.presentation().contains("Path: \"/outside/file\"\n"));
         assertFalse(approval.presentation().contains("ignored"));
         assertThrows(
@@ -86,6 +103,12 @@ class ApprovalProtocolTest {
     @Test
     void validatesExactNumericRanges() {
         final var good = new String(body("r1", "s1", "/outside/file"), StandardCharsets.UTF_8);
+        for (final var equivalent : List.of("123.0", "1.23e2")) {
+            assertEquals(
+                    protocol.parse(body("r1", "s1", "/outside/file")),
+                    protocol.parse(good.replace("\"child_pid\":123", "\"child_pid\":" + equivalent)
+                            .getBytes(StandardCharsets.UTF_8)));
+        }
         for (final var invalid :
                 List.of("0", "-1", "2147483648", "9223372036854775808", "1.5", "1e100", "null", "true", "\"123\"")) {
             assertThrows(
@@ -96,16 +119,18 @@ class ApprovalProtocolTest {
         }
         assertEquals(
                 2147483647L,
-                protocol.parse(good.replace("\"child_pid\":123", "\"child_pid\":2147483647")
-                                .getBytes(StandardCharsets.UTF_8))
-                        .request()
-                        .get("child_pid"));
+                ((BigDecimal) protocol.parse(good.replace("\"child_pid\":123", "\"child_pid\":2147483647")
+                                        .getBytes(StandardCharsets.UTF_8))
+                                .request()
+                                .childPid())
+                        .longValueExact());
         assertEquals(
                 123L,
-                protocol.parse(good.replace("\"child_pid\":123", "\"child_pid\":1.23e2")
-                                .getBytes(StandardCharsets.UTF_8))
-                        .request()
-                        .get("child_pid"));
+                ((BigDecimal) protocol.parse(good.replace("\"child_pid\":123", "\"child_pid\":1.23e2")
+                                        .getBytes(StandardCharsets.UTF_8))
+                                .request()
+                                .childPid())
+                        .longValueExact());
         for (final var invalid : List.of("0", "-1", "65536", "443.5", "1e100", "null", "false", "\"443\"")) {
             assertThrows(
                     IllegalArgumentException.class,
@@ -117,9 +142,12 @@ class ApprovalProtocolTest {
         }
         assertEquals(
                 65535L,
-                variant("network", "\"host\":\"example.com\",\"port\":65535,\"protocol\":\"tcp\",\"resolved_ips\":[]")
-                        .request()
-                        .get("port"));
+                ((BigDecimal) ((ApprovalProtocol.NetworkRequest) variant(
+                                                "network",
+                                                "\"host\":\"example.com\",\"port\":65535,\"protocol\":\"tcp\",\"resolved_ips\":[]")
+                                        .request())
+                                .port())
+                        .longValueExact());
     }
 
     @Test
@@ -153,10 +181,10 @@ class ApprovalProtocolTest {
         final var approval =
                 variant("command", "\"command\":\"git\",\"args\":[\"status\"],\"caller\":null,\"intercept_rule\":null");
         assertThrows(
-                UnsupportedOperationException.class, () -> approval.request().put("command", "other"));
-        assertThrows(
                 UnsupportedOperationException.class,
-                () -> ((List<?>) approval.request().get("args")).clear());
+                () -> ((ApprovalProtocol.CommandRequest) approval.request())
+                        .args()
+                        .clear());
     }
 
     @Test
@@ -170,6 +198,71 @@ class ApprovalProtocolTest {
             assertNotNull(protocol.parse(("{\"backend\":\"desktop\",\"request\":{" + common + fields + "}}")
                     .getBytes(StandardCharsets.UTF_8)));
         }
+    }
+
+    @Test
+    void rejectsUnknownFieldsIncludingNullAndFieldsOfOtherCapabilities() {
+        final var variants = List.of(
+                new String[] {"capability", "\"path\":\"/file\",\"access\":\"Read\"", "caller"},
+                new String[] {
+                    "network", "\"host\":\"host\",\"port\":443,\"protocol\":\"tcp\",\"resolved_ips\":[]", "path"
+                },
+                new String[] {
+                    "endpoint", "\"route_id\":\"r\",\"upstream\":\"url\",\"method\":\"GET\",\"path\":\"/\"", "args"
+                },
+                new String[] {"command", "\"command\":\"git\",\"args\":[]", "rule_label"});
+        for (final var variant : variants) {
+            for (final var field : List.of("unexpected", variant[2])) {
+                for (final var value : List.of("null", "1", "{}")) {
+                    assertThrows(
+                            IllegalArgumentException.class,
+                            () -> variant(variant[0], variant[1] + ",\"" + field + "\":" + value),
+                            variant[0] + ": " + field + "=" + value);
+                }
+            }
+            final var body = new String(variantBody(variant[0], variant[1]), StandardCharsets.UTF_8);
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> protocol.parse(body.replace("\"backend\":", "\"extra\":null,\"backend\":")
+                            .getBytes(StandardCharsets.UTF_8)));
+        }
+    }
+
+    @Test
+    void preservesStrictStringTokensAndTextBounds() {
+        final var good = new String(body("r1", "s1", "/outside/file"), StandardCharsets.UTF_8);
+        for (final var token : List.of("123", "false", "{}", "[]", "null", "\"\"", "\" \"")) {
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> protocol.parse(
+                            good.replace("\"/outside/file\"", token).getBytes(StandardCharsets.UTF_8)),
+                    token);
+            if (!token.equals("null")) {
+                for (final var field : List.of("caller", "intercept_rule")) {
+                    assertThrows(
+                            IllegalArgumentException.class,
+                            () -> variant("command", "\"command\":\"git\",\"args\":[],\"" + field + "\":" + token),
+                            token);
+                }
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> variant(
+                                "endpoint",
+                                "\"route_id\":\"r\",\"upstream\":\"url\",\"method\":\"GET\",\"path\":\"/\",\"rule_label\":"
+                                        + token),
+                        token);
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> protocol.parse(good.replace("\"reason\":null", "\"reason\":" + token)
+                                .getBytes(StandardCharsets.UTF_8)),
+                        token);
+            }
+        }
+        assertNotNull(protocol.parse(body("r".repeat(256), "s", "x".repeat(8192))));
+        assertThrows(IllegalArgumentException.class, () -> protocol.parse(body("r".repeat(257), "s", "x")));
+        assertThrows(IllegalArgumentException.class, () -> protocol.parse(body("r", "s", "x".repeat(8193))));
+        assertThrows(IllegalArgumentException.class, () -> protocol.parse(body("bad id", "s", "x")));
+        assertNotNull(variant("command", "\"command\":\"git\",\"args\":[" + "\"\",".repeat(127) + "\"\"]"));
     }
 
     @Test
@@ -279,11 +372,9 @@ class ApprovalProtocolTest {
                 "command":"git\\nDetails\\rProcess: 1","args":["\\n","\\\\n","\\t","\\u001b[31m","\\u009b31m","\\u202e","\\u2028","\\u2029","\\u0000"],
                 "caller":"caller\\nBackend: forged","intercept_rule":"rule\\nAllow"
                 """;
-        final var approval = variant("command", fields);
-        final var request = new java.util.LinkedHashMap<>(approval.request());
-        request.put("reason", "why\nPath: forged\t\u001b[0m");
-        final var text = new ApprovalProtocol.Approval(
-                        approval.backend(), approval.id(), approval.session(), approval.type(), request)
+        final var text = protocol.parse(new String(variantBody("command", fields), StandardCharsets.UTF_8)
+                        .replace("\"reason\":null", "\"reason\":\"why\\nPath: forged\\t\\u001b[0m\"")
+                        .getBytes(StandardCharsets.UTF_8))
                 .presentation();
         assertTrue(text.startsWith("Allow command execution?\nCommand: \"git\\nDetails\\rProcess: 1\"\n"));
         assertTrue(text.contains("""
@@ -334,9 +425,13 @@ class ApprovalProtocolTest {
     }
 
     private ApprovalProtocol.Approval variant(final String type, final String fields) {
-        return protocol.parse(("{\"backend\":\"desktop\",\"request\":{\"request_id\":\"r\",\"session_id\":\"s\","
+        return protocol.parse(variantBody(type, fields));
+    }
+
+    private byte[] variantBody(final String type, final String fields) {
+        return ("{\"backend\":\"desktop\",\"request\":{\"request_id\":\"r\",\"session_id\":\"s\","
                         + "\"child_pid\":123,\"reason\":null,\"capability_type\":\"" + type + "\"," + fields + "}}")
-                .getBytes(StandardCharsets.UTF_8));
+                .getBytes(StandardCharsets.UTF_8);
     }
 
     static byte[] body(final String request, final String session, final String path) {

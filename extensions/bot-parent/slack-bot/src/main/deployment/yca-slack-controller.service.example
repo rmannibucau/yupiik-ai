@@ -24,10 +24,13 @@ LoadCredential=slack-bot-token:/etc/yca-slack/secrets/slack-bot-token
 # Install src/main/docker/controller.sh.example as this root-owned executable.
 # Source command: slack bot run. Keep attempt concurrency separate from queue bounds.
 ExecStart=/opt/yca-slack/bin/docker-controller slack bot run --parallelism 1
-ExecStop=-/usr/bin/docker stop --time 30 yca-slack-controller
-Restart=on-failure
-RestartSec=15
-TimeoutStopSec=60
+ExecStop=/opt/yca-slack/bin/docker-controller --stop
+# A graceful attached Docker client can exit 143 after SIGTERM; no other failures are success.
+SuccessExitStatus=143
+Restart=no
+TimeoutStopSec=infinity
+SendSIGKILL=no
+KillMode=process
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -39,6 +42,10 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Keep empty for this non-root service; provision readable inputs/systemd credentials.
+# A separately reviewed root host launcher reading another UID's mode-0400 files
+# may need CAP_DAC_READ_SEARCH here. Never add it to controller container arguments.
+# See the installation sample's host-launcher capabilities section.
 CapabilityBoundingSet=
 ReadWritePaths=/var/lib/yca-slack
 TasksMax=128

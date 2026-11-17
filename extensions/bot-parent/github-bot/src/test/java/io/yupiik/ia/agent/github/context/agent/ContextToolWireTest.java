@@ -117,8 +117,8 @@ class ContextToolWireTest {
             server.start();
             try {
                 final var config = configuration(server, provider, api, model);
-                try (final var http =
-                                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null));
+                try (final var http = new HttpClientProducer()
+                                .httpClient(config, new NativeProviderConfiguration(null, null));
                         final var client = new ChatClient(
                                 config, json, new ProviderManager(config, json), Clock.systemUTC(), http)) {
                     final var response = client.chat(request(provider, model, tools));
@@ -221,8 +221,8 @@ class ContextToolWireTest {
             server.start();
             try {
                 final var config = configuration(server, "fixture", api, "schema-fixture");
-                try (final var http =
-                                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null));
+                try (final var http = new HttpClientProducer()
+                                .httpClient(config, new NativeProviderConfiguration(null, null));
                         final var client = new ChatClient(
                                 config, json, new ProviderManager(config, json), Clock.systemUTC(), http)) {
                     for (final var tool : tools(json)) {

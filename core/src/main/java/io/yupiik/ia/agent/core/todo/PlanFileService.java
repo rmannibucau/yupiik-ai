@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.session.SessionStore;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Shared export/parse/reload of the editable plan file. Both the TamboUI
@@ -32,6 +33,11 @@ import java.util.List;
  */
 @ApplicationScoped
 public class PlanFileService {
+    private static final Pattern LIST_ITEM_PREFIX = Pattern.compile("^[-*+]\\s*");
+    private static final Pattern HEADING_PREFIX = Pattern.compile("(?m)^#{2,}\\s*");
+    private static final Pattern REPEATED_HYPHENS = Pattern.compile("-{2,}");
+    private static final Pattern EDGE_HYPHENS = Pattern.compile("(^-+)|(-+$)");
+
     private final SessionStore sessionStore;
 
     public PlanFileService(final SessionStore sessionStore) {
@@ -97,7 +103,7 @@ public class PlanFileService {
                 if (trimmed.isBlank() || trimmed.startsWith("#")) {
                     continue;
                 }
-                final var item = trimmed.replaceFirst("^[-*+]\\s*", "");
+                final var item = LIST_ITEM_PREFIX.matcher(trimmed).replaceFirst("");
                 final String status;
                 final String body;
                 if (item.startsWith("[x]")) {
@@ -167,7 +173,7 @@ public class PlanFileService {
         final var next = content.indexOf("\n# ", from);
         final var end = next < 0 ? content.length() : next;
         var text = content.substring(from, end).strip();
-        text = text.replaceAll("(?m)^#{2,}\\s*", "");
+        text = HEADING_PREFIX.matcher(text).replaceAll("");
         if (text.equals("(no todos yet)") || text.equals("(empty)")) {
             return "";
         }
@@ -179,7 +185,9 @@ public class PlanFileService {
         for (final var c : title.strip().toCharArray()) {
             sb.append((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ? c : '-');
         }
-        var out = sb.toString().replaceAll("-{2,}", "-").replaceAll("(^-+)|(-+$)", "");
+        var out = EDGE_HYPHENS
+                .matcher(REPEATED_HYPHENS.matcher(sb.toString()).replaceAll("-"))
+                .replaceAll("");
         return out.isBlank() ? "plan" : out;
     }
 

@@ -52,6 +52,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Pattern;
 import javax.crypto.Cipher;
 import javax.crypto.KEM;
 import javax.crypto.KeyAgreement;
@@ -69,6 +70,8 @@ import javax.net.ssl.X509TrustManager;
  * One reader and one writer may operate concurrently. Closing the owned socket interrupts I/O.
  */
 final class OpenCodeTlsConnection implements AutoCloseable {
+    private static final Pattern NUMERIC_HOST = Pattern.compile("[0-9.]+");
+
     private static final int LIMIT = 1024 * 1024;
     private static final byte[] EMPTY = new byte[0];
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -113,7 +116,7 @@ final class OpenCodeTlsConnection implements AutoCloseable {
         this.socket = socket;
         require(host != null && !host.isEmpty(), "Missing TLS hostname");
         final var literal = host.startsWith("[") && host.endsWith("]") ? host.substring(1, host.length() - 1) : host;
-        if (literal.indexOf(':') >= 0 || literal.matches("[0-9.]+")) {
+        if (literal.indexOf(':') >= 0 || NUMERIC_HOST.matcher(literal).matches()) {
             require(literal.indexOf('%') < 0, "Scoped IP literals are unsupported");
             address = InetAddress.ofLiteral(literal).getAddress(); // Never performs DNS resolution.
             this.host = literal;

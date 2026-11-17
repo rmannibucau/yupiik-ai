@@ -15,33 +15,41 @@
  */
 package io.yupiik.ia.agent.bot.runtime;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
+import io.yupiik.ia.agent.core.llm.ProviderRequestBudget;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /** Trusted forwarding configuration. These variables must never be passed to an agent. */
 public final class ProviderBudgetEnvironment {
-    public static final String ROOT = "YCA_PROVIDER_BUDGET_ROOT";
-    public static final String ID = "YCA_PROVIDER_BUDGET_ID";
-    public static final String SLOTS = "YCA_PROVIDER_BUDGET_SLOTS";
+    private static final Pattern ID_PATTERN = Pattern.compile("[A-Za-z0-9_-]{1,64}");
+    private static final Pattern SLOT_PATTERN = Pattern.compile("[1-9][0-9]{0,3}");
+    public static final String ROOT = ProviderRequestBudget.ROOT;
+    public static final String ID = ProviderRequestBudget.ID;
+    public static final String SLOTS = ProviderRequestBudget.SLOTS;
     public static final Set<String> KEYS = Set.of(ROOT, ID, SLOTS);
 
     private ProviderBudgetEnvironment() {}
 
-    public static Map<String, String> select(final Configuration configuration, final Path... excludedRoots) {
-        final var root = configuration.get(ROOT).orElse("");
-        if (root.isBlank()) {
-            if (configuration.get(ID).isPresent() || configuration.get(SLOTS).isPresent()) {
+    public static Map<String, String> select(
+            final ProviderBudgetConfiguration configuration, final Path... excludedRoots) {
+        final var root = configuration.root();
+        if (root == null || root.isBlank()) {
+            if (configuration.id() != null || configuration.slots() != null) {
                 throw new IllegalArgumentException("Incomplete provider request budget configuration");
             }
             return Map.of();
         }
-        final var id = configuration.get(ID).orElse("");
-        final var count = configuration.get(SLOTS).orElse("");
-        if (!id.matches("[A-Za-z0-9_-]{1,64}") || !count.matches("[1-9][0-9]{0,3}")) {
+        final var id = configuration.id();
+        final var count = configuration.slots();
+        if (id == null
+                || !ID_PATTERN.matcher(id).matches()
+                || count == null
+                || !SLOT_PATTERN.matcher(count).matches()) {
             throw new IllegalArgumentException("Explicit provider budget identity and positive slot count required");
         }
         final var path = Path.of(root);

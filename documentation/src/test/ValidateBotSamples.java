@@ -7,9 +7,11 @@
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 /** Offline source checks. From the repository root: java documentation/src/test/ValidateBotSamples.java */
@@ -25,7 +27,8 @@ public class ValidateBotSamples {
         final var breadcrumbs = Pattern.compile("\\[([^] ]+\\.html)]");
         int links = 0;
         for (final var relative : List.of("slack-bot/index.adoc", "slack-bot/configuration.adoc",
-                "slack-bot/deployment.adoc", "bots/cohosting.adoc")) {
+                "slack-bot/deployment.adoc", "slack-bot/installation.adoc", "slack-bot/docker.adoc", "slack-bot/context.adoc",
+                "github-bot/index.adoc", "github-bot/docker.adoc", "bots/cohosting.adoc", "bots/docker-shared-slots.adoc")) {
             final var page = content.resolve(relative);
             final var source = Files.readString(page);
             final var matcher = references.matcher(source);
@@ -51,9 +54,21 @@ public class ValidateBotSamples {
         }
 
         final var deployment = Files.readString(content.resolve("slack-bot/deployment.adoc"));
+        final var context = Files.readString(content.resolve("slack-bot/context.adoc"));
+        final var searchManifest = Files.readString(slack.resolve("deployment/slack-app-search-manifest.yaml"));
+        require(context.contains("slack-app-search-manifest.yaml"), "Missing opt-in search manifest documentation");
+        for (final var scope : List.of("app_mentions:read", "chat:write", "users:read", "search:read.public")) {
+            require(searchManifest.contains("      - " + scope + "\n"), "Missing opt-in bot scope: " + scope);
+        }
+        require(!searchManifest.contains("search:read.private") && !searchManifest.contains("search:read.im"),
+                "Search sample must not enable private/DM access");
+        final var minimalManifest = Files.readString(slack.resolve("resources/slack-app-manifest.json"));
+        require(!minimalManifest.contains("search:read") && !minimalManifest.contains("users:read"),
+                "Minimal manifest must remain minimal");
         for (final var relative : List.of("deployment/controller.env.example",
                 "deployment/agent-restricted-services.json.example", "docker/controller.sh.example",
                 "docker/Dockerfile.agent-ca.example", "deployment/yca-slack-controller.service.example",
+                "deployment/uninstall.sh.example",
                 "resources/slack-app-manifest.json")) {
             require(Files.isRegularFile(slack.resolve(relative)), "Missing sample " + relative);
             require(deployment.contains(slack.resolve(relative).getFileName().toString()), "Undocumented sample " + relative);
@@ -88,7 +103,82 @@ public class ValidateBotSamples {
         for (final var feature : List.of("memory", "skills", "subagents", "mcp", "notifications")) {
             require(agent.contains("\"" + feature + "\": { \"enabled\": false }"), "Feature not disabled: " + feature);
         }
-        System.out.println("Validated " + links + " local documentation links/anchors and restricted Slack deployment sample wiring (offline).");
+        require(unit.contains("ExecStop=/opt/yca-slack/bin/docker-controller --stop\n"), "Missing owned graceful stop");
+        for (final var setting : List.of("Restart=no", "TimeoutStopSec=infinity", "SendSIGKILL=no", "KillMode=process", "SuccessExitStatus=143")) {
+            require(unit.contains(setting + "\n"), "Unsafe lifecycle setting: " + setting);
+        }
+        require(wrapper.contains("--stop-timeout=-1"), "Docker's own stop deadline must also be infinite");
+        validateWrapperStop(wrapper);
+        System.out.println("Validated " + links + " local documentation links/anchors, restricted Slack deployment wiring and 7 mocked graceful-stop cases (offline).");
+    }
+
+    private void validateWrapperStop(final String wrapper) throws Exception {
+        final var root = Files.createTempDirectory("slack-wrapper-check-");
+        try {
+            final var docker = root.resolve("docker");
+            final var id = "a".repeat(64);
+            Files.writeString(docker, """
+                    #!/bin/sh
+                    set -eu
+                    printf '%s\\n' "$*" >> "$TRACE"
+                    case "$1 $2" in
+                      'container inspect')
+                        case "$SCENARIO" in
+                          owned|stop-failed) printf '%s|io.yupiik.yca.slack-bot|controller\\n' "$FAKE_ID" ;;
+                          foreign) printf '%s|foreign|controller\\n' "$FAKE_ID" ;;
+                          malformed) printf 'bad-id|io.yupiik.yca.slack-bot|controller\\n' ;;
+                          absent|unreadable|daemon) exit 1 ;;
+                          *) exit 90 ;;
+                        esac ;;
+                      'container ls')
+                        case "$SCENARIO" in
+                          absent) printf 'unrelated-controller\\n' ;;
+                          unreadable) printf 'yca-slack-controller\\n' ;;
+                          daemon) exit 2 ;;
+                          *) exit 91 ;;
+                        esac ;;
+                      'stop --time')
+                        if [ "$SCENARIO" = stop-failed ]; then
+                          exit 7
+                        fi
+                        test "$3" = -1 && test "$4" = "$FAKE_ID" ;;
+                      *) exit 92 ;;
+                    esac
+                    """);
+            require(docker.toFile().setExecutable(true, true), "Cannot make fake Docker executable");
+            final var copy = root.resolve("controller.sh");
+            Files.writeString(copy, wrapper.replace("/usr/bin/docker", "'" + docker.toString().replace("'", "'\\''") + "'"));
+            for (final var scenario : List.of("owned", "foreign", "malformed", "absent", "unreadable", "daemon", "stop-failed")) {
+                final var trace = root.resolve(scenario + ".trace");
+                final var command = new ProcessBuilder("sh", copy.toString(), "--stop")
+                        .redirectOutput(root.resolve(scenario + ".out").toFile())
+                        .redirectError(root.resolve(scenario + ".err").toFile());
+                // Stopping must not read any credential or require a live-service environment.
+                command.environment().clear();
+                command.environment().put("PATH", "/usr/bin:/bin");
+                command.environment().put("SCENARIO", scenario);
+                command.environment().put("FAKE_ID", id);
+                command.environment().put("TRACE", trace.toString());
+                final var process = command.start();
+                if (!process.waitFor(10, TimeUnit.SECONDS)) {
+                    process.destroyForcibly().waitFor();
+                    throw new IllegalStateException("Local fake Docker hung: " + scenario);
+                }
+                final var success = "owned".equals(scenario) || "absent".equals(scenario);
+                require((process.exitValue() == 0) == success, "Unexpected stop outcome: " + scenario);
+                final var calls = Files.readString(trace);
+                require(calls.contains("stop --time -1 " + id) ==
+                                ("owned".equals(scenario) || "stop-failed".equals(scenario)),
+                        "Foreign/unverifiable container touched or owned stop skipped: " + scenario);
+                require(!calls.contains("run "), "Stop must never launch the controller");
+            }
+        } finally {
+            try (final var paths = Files.walk(root)) {
+                for (final var path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                    Files.delete(path);
+                }
+            }
+        }
     }
 
     private HashSet<String> anchors(final String source) {

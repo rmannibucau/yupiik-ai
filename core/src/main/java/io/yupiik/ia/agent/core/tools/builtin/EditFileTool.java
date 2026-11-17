@@ -33,8 +33,6 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class EditFileTool implements EmbeddedTool {
@@ -123,11 +121,7 @@ public class EditFileTool implements EmbeddedTool {
                         + "Re-read the file for current content. File starts with: "
                         + snippet(content) + ".");
             }
-            Files.writeString(
-                    path,
-                    optBool(args, "replaceAll", false)
-                            ? content.replace(oldString, newString)
-                            : content.replaceFirst(Pattern.quote(oldString), Matcher.quoteReplacement(newString)));
+            Files.writeString(path, content.replace(oldString, newString));
             final var notice = reRoutedNotice(context, raw, path);
             return ToolResult.ok(notice + "Replaced " + (optBool(args, "replaceAll", false) ? count : 1)
                     + " occurrence(s) in " + path);

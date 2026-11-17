@@ -18,11 +18,13 @@ package io.yupiik.ia.agent.github.service;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.bot.runtime.DockerControlConfiguration;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.command.WorkerCommand$Options$FusionConfigurationFactory;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.model.TaskState;
 import io.yupiik.ia.agent.github.store.TaskStore;
@@ -135,8 +137,10 @@ class WorkerAdmissionTest {
         final var values = Map.of(
                 "github.executor.attemptRoot", home.resolve("attempts").toString(),
                 "github.executor.docker.executable", home.resolve("docker").toString());
-        final var execution =
-                new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(values.get(key))).get();
+        final var execution = new GithubExecutorConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(values.get(key)))
+                .get()
+                .shared();
         return new Worker(
                 conf,
                 store,
@@ -156,6 +160,8 @@ class WorkerAdmissionTest {
                 null,
                 admission,
                 BotTestConfiguration.CLOCK,
-                key -> Optional.ofNullable(values.get(key)));
+                key -> Optional.ofNullable(values.get(key)),
+                new ProviderBudgetConfiguration(null, null, null),
+                new DockerControlConfiguration("", ""));
     }
 }

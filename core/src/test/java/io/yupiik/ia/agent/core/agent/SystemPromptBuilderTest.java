@@ -23,8 +23,11 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.skills.SkillLocator;
+import io.yupiik.ia.agent.core.todo.TodoItem;
+import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
@@ -33,6 +36,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -167,8 +171,8 @@ class SystemPromptBuilderTest {
         final var cfg = config(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString()));
-        final var todos = new io.yupiik.ia.agent.core.todo.TodoStore(cfg, mapper);
-        todos.replace(List.of(new io.yupiik.ia.agent.core.todo.TodoItem("step one", "pending")));
+        final var todos = new TodoStore(cfg, mapper);
+        todos.replace(List.of(new TodoItem("step one", "pending")));
         final var builder = new SystemPromptBuilder(cfg, null, todos, null, null, null, null, null, null);
         final var prompt = builder.build();
         assertFalse(prompt.contains("Current todo list"), "todos must not be part of the system prompt anymore");
@@ -186,7 +190,7 @@ class SystemPromptBuilderTest {
         final var cfg = config(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString()));
-        final var memory = new io.yupiik.ia.agent.core.memory.MemoryStore(cfg);
+        final var memory = new MemoryStore(cfg);
         memory.append(true, List.of("- a durable global fact"));
         final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null, null);
         final var prompt = builder.build();
@@ -207,7 +211,7 @@ class SystemPromptBuilderTest {
         final var cfg = config(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString()));
-        final var memory = new io.yupiik.ia.agent.core.memory.MemoryStore(cfg);
+        final var memory = new MemoryStore(cfg);
         memory.append(true, List.of("- fact one", "- fact one", "- fact two"));
         final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null, null);
         final var prompt = builder.build();
@@ -221,7 +225,7 @@ class SystemPromptBuilderTest {
         final var cfg = config(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString()));
-        final var memory = new io.yupiik.ia.agent.core.memory.MemoryStore(cfg);
+        final var memory = new MemoryStore(cfg);
         memory.append(true, List.of("- a durable global fact"));
         final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null, null);
         final var first = builder.build();
@@ -526,7 +530,10 @@ class SystemPromptBuilderTest {
                 "yca.mode", "build",
                 "yca.todos.guidance", "never stop with an open todo",
                 "yca.provider.providers.length", "1",
-                "yca.provider.providers.0.baseUrl", "http://192.168.52.32:8000/v1",
+                "yca.provider.providers.0.baseUrl",
+                        "http://10." + ThreadLocalRandom.current().nextInt(256) + "."
+                                + ThreadLocalRandom.current().nextInt(256) + "."
+                                + ThreadLocalRandom.current().nextInt(1, 255) + ":8000/v1",
                 "yca.provider.providers.0.model", "qwen3.6-27b"));
         final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
         assertTrue(prompt.contains("<todo-guidance>"));
@@ -545,7 +552,10 @@ class SystemPromptBuilderTest {
                 "yca.mode", "build",
                 "yca.todos.guidance", "global guidance",
                 "yca.provider.providers.length", "1",
-                "yca.provider.providers.0.baseUrl", "http://192.168.52.32:8000/v1",
+                "yca.provider.providers.0.baseUrl",
+                        "http://10." + ThreadLocalRandom.current().nextInt(256) + "."
+                                + ThreadLocalRandom.current().nextInt(256) + "."
+                                + ThreadLocalRandom.current().nextInt(1, 255) + ":8000/v1",
                 "yca.provider.providers.0.model", "qwen3.6-27b",
                 "yca.provider.providers.0.prompt.todo", "provider guidance"));
         final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();

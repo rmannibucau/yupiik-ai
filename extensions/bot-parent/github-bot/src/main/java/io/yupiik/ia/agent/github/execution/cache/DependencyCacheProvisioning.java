@@ -32,6 +32,8 @@ import java.util.regex.Pattern;
 
 /** Provisions only per-attempt tool data and fresh nonsecret configuration, never host cache contents. */
 public final class DependencyCacheProvisioning {
+    private static final Pattern CACHE_PATH = Pattern.compile("[-A-Za-z0-9_./:]+");
+
     private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([^}]*)}");
 
     private DependencyCacheProvisioning() {}
@@ -77,7 +79,9 @@ public final class DependencyCacheProvisioning {
             if ((mavenPreset && entry.id().equals("maven"))
                     || (mavenOptions.contains("-Dmaven.repo.local=")
                             && (mavenOptions.contains(placeholder) || mavenOptions.contains("${storage}")))) {
-                if (!substitutions.get("cache." + entry.id()).matches("[-A-Za-z0-9_./:]+")) {
+                if (!CACHE_PATH
+                        .matcher(substitutions.get("cache." + entry.id()))
+                        .matches()) {
                     throw new IOException(
                             "Maven cache paths require plain paths without spaces or shell/XML metacharacters");
                 }

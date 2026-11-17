@@ -20,27 +20,31 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.bot.runtime.DockerControlConfiguration;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.bot.runtime.execution.DockerExecutionBackend;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.client.DiscussionClient;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.command.WorkerCommand$Options$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.context.GithubContextSnapshot;
 import io.yupiik.ia.agent.github.context.GithubPrivateContext;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
-import io.yupiik.ia.agent.github.execution.DockerExecutionBackend;
+import io.yupiik.ia.agent.github.execution.GithubExecutionPolicy;
 import io.yupiik.ia.agent.github.model.TaskState;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import io.yupiik.ia.agent.github.support.TaskFixtures;
+import io.yupiik.ia.agent.github.support.TestScript;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -169,14 +173,24 @@ class WorkerBrokerTest {
                 final var executable = home.resolve("environment-docker");
                 Files.writeString(
                         executable,
-                        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > '" + fixture.invocations + "'\n"
+                        "#!/bin/sh\nset -eu\n" + TestScript.githubAgentState()
+                                + "if [ \"$1 $2 $3\" = 'container inspect --format' ]; then agent_state \"$@\"; exit 0; fi\n"
+                                + "printf '%s\\n' \"$@\" > '" + fixture.invocations + "'\n"
                                 + "test \"${YCA_CONTEXT_TOKEN-}\" = 'control-secret'\n"
                                 + "test \"${YCA_CONTEXT_GIT_TOKEN-}\" = 'git-secret'\n"
                                 + "test -z \"${GH_TOKEN-}\"\ntest -z \"${GITHUB_BOT_FORK_TOKEN-}\"\n"
                                 + "test -z \"${GITHUB_SOURCE_TOKEN-}\"\nexit 0\n");
                 Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
                 final var backend = new DockerExecutionBackend(
-                        executable.toString(), "trusted-agent", Duration.ofSeconds(5), "", null, "shown");
+                        GithubExecutionPolicy.POLICY,
+                        executable.toString(),
+                        "trusted-agent",
+                        Duration.ofSeconds(5),
+                        "",
+                        null,
+                        null,
+                        "shown",
+                        false);
                 assertEquals(
                         0,
                         backend.execute(
@@ -246,9 +260,10 @@ class WorkerBrokerTest {
                     "5",
                     "github.executor.attemptRoot",
                     attempts.toString());
-            backend = new ExecutorConfiguration$FusionConfigurationFactory(
+            backend = new GithubExecutorConfiguration$FusionConfigurationFactory(
                             key -> Optional.ofNullable(settings.get(key)))
-                    .get();
+                    .get()
+                    .shared();
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/", exchange -> {
                 calls.add(exchange.getRequestMethod() + " " + exchange.getRequestURI());
@@ -338,7 +353,9 @@ class WorkerBrokerTest {
                     new FixPublisher(github, store, json, new FixConfiguration(false, "")),
                     new HostAdmissionConfiguration("", 1, ""),
                     BotTestConfiguration.CLOCK,
-                    key -> Optional.empty());
+                    key -> Optional.empty(),
+                    new ProviderBudgetConfiguration(null, null, null),
+                    new DockerControlConfiguration("", ""));
         }
 
         @Override

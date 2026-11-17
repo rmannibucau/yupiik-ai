@@ -21,6 +21,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
+import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -354,7 +355,7 @@ class TeamAuthorizationTest {
 
     private static final class Fixture implements AutoCloseable {
         private final MutableClock clock = new MutableClock();
-        private final JsonMapperImpl json = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        private final JsonMapperImpl json = BotJsonMapper.create(List.of(), key -> Optional.empty());
         private final Map<String, Object> responses = new ConcurrentHashMap<>();
         private final Map<String, Integer> statuses = new ConcurrentHashMap<>();
         private final List<String> requests = Collections.synchronizedList(new ArrayList<>());

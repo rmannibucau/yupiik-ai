@@ -68,7 +68,7 @@ class AnthropicMessagesClientTest {
     void start(final JsonMapper mapper) throws IOException {
         this.mapper = mapper;
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
-        http = new HttpClientProducer().httpClient(configuration(), new NativeProviderConfiguration(null));
+        http = new HttpClientProducer().httpClient(configuration(), new NativeProviderConfiguration(null, null));
     }
 
     @AfterEach

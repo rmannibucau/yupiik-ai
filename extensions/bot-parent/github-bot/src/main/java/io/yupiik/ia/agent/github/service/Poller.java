@@ -15,9 +15,11 @@
  */
 package io.yupiik.ia.agent.github.service;
 
+import io.yupiik.fusion.framework.api.container.Types;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.github.client.GitHubClient;
 import io.yupiik.ia.agent.github.client.MentionSearchClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.configuration.FixConfiguration;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration;
 import io.yupiik.ia.agent.github.configuration.PollOptions;
@@ -43,7 +45,6 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -327,34 +328,34 @@ public class Poller {
             int pages = 0;
             while (next != null && pages++ < budget) {
                 overlap = next;
-                final var page = github.page(next);
-                if (!(page.body() instanceof List<?> items)) {
+                final var page = github.<List<RestResponses.FeedItem>>page(
+                        next, new Types.ParameterizedTypeImpl(List.class, RestResponses.FeedItem.class));
+                final var items = page.body();
+                if (items == null) {
                     throw new IllegalStateException("Expected GitHub list");
                 }
-                for (final var raw : items) {
-                    final var item = TaskStore.map(raw);
-                    final var user = item.get("user") instanceof Map<?, ?>
-                            ? TaskStore.map(item.get("user"))
-                            : Map.<String, Object>of();
-                    final var parsed = mentionParser.parse(String.valueOf(item.getOrDefault("body", "")), conf.login());
+                for (final var item : items) {
+                    final var user = item.user() == null ? new RestResponses.FeedUser(null, null, null) : item.user();
+                    final var parsed =
+                            mentionParser.parse(String.valueOf(item.body() == null ? "" : item.body()), conf.login());
                     if (parsed.isEmpty()) {
                         continue;
                     }
-                    if (conf.login().equalsIgnoreCase(String.valueOf(user.get("login")))
-                            || "Bot".equals(user.get("type"))
-                            || !authorization.allows(repo, user.get("id"), String.valueOf(user.get("login")))) {
+                    if (conf.login().equalsIgnoreCase(String.valueOf(user.login()))
+                            || "Bot".equals(user.type())
+                            || !authorization.allows(repo, user.id(), String.valueOf(user.login()))) {
                         if (audit != null) {
                             final var identifiers = MutableTask.create();
                             identifiers.repository(repo);
-                            if (user.get("id") != null) {
-                                identifiers.actorId(String.valueOf(user.get("id")));
+                            if (user.id() != null) {
+                                identifiers.actorId(String.valueOf(user.id()));
                             }
                             audit.record("auth-denied", identifiers.document());
                         }
                         continue;
                     }
                     final var invocation = parsed.orElseThrow();
-                    final var ref = String.valueOf(item.get("html_url"));
+                    final var ref = String.valueOf(item.html_url());
                     final var uri = URI.create(ref);
                     final var parts = uri.getPath().split("/");
                     if (parts.length < 5 || !(parts[3].equals("issues") || parts[3].equals("pull"))) {
@@ -375,8 +376,7 @@ public class Poller {
                                     || (uri.getPort() != -1 && uri.getPort() != 443)
                                     || uri.getQuery() != null
                                     || !uri.getRawPath().equalsIgnoreCase("/" + repo + "/pull/" + number)
-                                    || (endpoint.equals("issues")
-                                            && !(item.get("pull_request") instanceof Map<?, ?>)))) {
+                                    || (endpoint.equals("issues") && item.pull_request() == null))) {
                         continue;
                     }
                     final var task = MutableTask.create();
@@ -385,16 +385,18 @@ public class Poller {
                     task.reference(ref);
                     task.kind(TaskKind.valueOf(invocation.kind()));
                     if (task.kind() == TaskKind.review) {
-                        final var parent = endpoint.equals("issues")
-                                ? item
-                                : TaskStore.map(github.get("/repos/" + repo + "/issues/" + number));
-                        task.reviewTarget(parent.get("pull_request") instanceof Map<?, ?> ? "pull_request" : "issue");
+                        final boolean pull = endpoint.equals("issues")
+                                ? item.pull_request() != null
+                                : github.get("/repos/" + repo + "/issues/" + number, RestResponses.Issue.class)
+                                                .pull_request()
+                                        != null;
+                        task.reviewTarget(pull ? "pull_request" : "issue");
                     }
                     task.request(invocation.request());
-                    task.actorId(String.valueOf(user.get("id")));
+                    task.actorId(String.valueOf(user.id()));
                     task.batchId(batch);
                     task.createdAt(clock.instant().toString());
-                    final var receipt = key + ":" + item.get("id");
+                    final var receipt = key + ":" + item.id();
                     if (task.kind() == TaskKind.fix) {
                         if (store.transaction(state -> state.receipts().containsKey(receipt))) {
                             continue;

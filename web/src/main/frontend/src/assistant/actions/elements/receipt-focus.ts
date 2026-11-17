@@ -1,4 +1,4 @@
-// Adapted from assistant-ui Elements (MIT). See ../UPSTREAM.md and ../LICENSE.assistant-ui.
+// Adapted from assistant-ui Elements (MIT). See ../upstream-manifest.json and ../LICENSE.assistant-ui.
 "use client";
 
 import { useRef, type ComponentProps } from "react";

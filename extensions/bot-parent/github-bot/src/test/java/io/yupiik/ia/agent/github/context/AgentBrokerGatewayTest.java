@@ -20,6 +20,7 @@ import static io.yupiik.ia.agent.github.execution.RestrictedServicesGateway.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.context.agent.AgentBrokerSource;
 import io.yupiik.ia.agent.github.execution.RestrictedServicesGateway;
 import io.yupiik.ia.agent.github.support.TestJava;
@@ -125,7 +126,8 @@ class AgentBrokerGatewayTest {
                                 20,
                                 1024,
                                 16 * 1024 * 1024),
-                        Configuration.of(secrets))) {
+                        Configuration.of(secrets),
+                        new ProviderBudgetConfiguration(null, null, null))) {
                     final var workspace = Files.createDirectory(temporary.resolve("agent"));
                     final var command = TestJava.javaCommand(
                             "-XX:ActiveProcessorCount=" + processors,

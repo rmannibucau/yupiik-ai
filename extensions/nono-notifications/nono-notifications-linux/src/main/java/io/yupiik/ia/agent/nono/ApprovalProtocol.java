@@ -15,22 +15,24 @@
  */
 package io.yupiik.ia.agent.nono;
 
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.fusion.framework.build.api.json.JsonOthers;
+import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 import io.yupiik.fusion.json.JsonMapper;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /** Bounded decoder and validator for the pinned nono 0.81.0 webhook contract. */
 public final class ApprovalProtocol {
+    private static final Pattern PROTOCOL_IDENTIFIER = Pattern.compile("[A-Za-z0-9_.:-]+");
+
     public static final int MAX_BODY = 32768;
-    private static final Set<String> COMMON =
-            Set.of("capability_type", "request_id", "session_id", "reason", "child_pid");
     private final JsonMapper mapper;
 
     public ApprovalProtocol(final JsonMapper mapper) {
@@ -47,61 +49,60 @@ public final class ApprovalProtocol {
                     .onMalformedInput(CodingErrorAction.REPORT)
                     .decode(ByteBuffer.wrap(bytes))
                     .toString();
-            // Use the shared mapper's JSON semantics; validate and display only this decoded object.
-            if (!(mapper.fromString(Object.class, text) instanceof Map<?, ?> root)
-                    || !root.keySet().equals(Set.of("backend", "request"))) {
-                throw new IllegalArgumentException("Invalid envelope");
-            }
-            final var backend = identifier(root, "backend");
-            if (!(root.get("request") instanceof Map<?, ?> raw)) {
-                throw new IllegalArgumentException("Missing request");
-            }
-            final var request = new LinkedHashMap<String, Object>();
-            raw.forEach((k, v) -> request.put((String) k, v));
-            final var type = identifier(request, "capability_type");
-            final var fields =
+            // Fusion has no discriminator codec generation. This projection only selects a codec;
+            // the complete envelope is then decoded by that codec, including strict extras checks.
+            final var tag = mapper.fromString(TaggedEnvelope.class, text);
+            final var type = identifier(tag.request().capabilityType());
+            final WireEnvelope envelope =
                     switch (type) {
-                        case "capability" -> Set.of("path", "access");
-                        case "network" -> Set.of("host", "port", "protocol", "resolved_ips");
-                        case "endpoint" -> Set.of("route_id", "upstream", "method", "path", "rule_label");
-                        case "command" -> Set.of("command", "args", "caller", "intercept_rule");
+                        case "capability" -> mapper.fromString(FilesystemEnvelope.class, text);
+                        case "network" -> mapper.fromString(NetworkEnvelope.class, text);
+                        case "endpoint" -> mapper.fromString(EndpointEnvelope.class, text);
+                        case "command" -> mapper.fromString(CommandEnvelope.class, text);
                         default -> throw new IllegalArgumentException("Unknown capability");
                     };
-            if (!request.keySet().stream().allMatch(k -> COMMON.contains(k) || fields.contains(k))) {
-                throw new IllegalArgumentException("Unknown field");
-            }
-            final var id = identifier(request, "request_id");
-            final var session = identifier(request, "session_id");
-            request.put("child_pid", integer(request.get("child_pid"), Integer.MAX_VALUE));
-            for (final var key : fields) {
-                final var value = request.get(key);
-                if (key.equals("port")) {
-                    request.put(key, integer(value, 65535));
-                } else if (key.equals("args") || key.equals("resolved_ips")) {
-                    if (!(value instanceof List<?> list)
-                            || list.size() > 128
-                            || !list.stream().allMatch(v -> v instanceof String)) {
-                        throw new IllegalArgumentException("Invalid list");
+            noExtras(envelope.extras());
+            final var backend = identifier(envelope.backend());
+            final var request = envelope.request();
+            noExtras(request.extras());
+            final var id = identifier(request.requestId());
+            final var session = identifier(request.sessionId());
+            integer(request.childPid(), Integer.MAX_VALUE);
+            optionalString(request.reason());
+            switch (request) {
+                case FilesystemRequest r -> {
+                    string(r.path());
+                    if (!Set.of("Read", "Write", "ReadWrite").contains(string(r.access()))) {
+                        throw new IllegalArgumentException("Invalid access");
                     }
-                    request.put(key, List.copyOf(list));
-                } else if (!Set.of("caller", "intercept_rule", "rule_label").contains(key) || value != null) {
-                    string(request, key);
+                }
+                case NetworkRequest r -> {
+                    string(r.host());
+                    integer(r.port(), 65535);
+                    string(r.protocol());
+                    strings(r.resolvedIps());
+                }
+                case EndpointRequest r -> {
+                    string(r.routeId());
+                    string(r.upstream());
+                    string(r.method());
+                    string(r.path());
+                    optionalString(r.ruleLabel());
+                }
+                case CommandRequest r -> {
+                    string(r.command());
+                    strings(r.args());
+                    optionalString(r.caller());
+                    optionalString(r.interceptRule());
                 }
             }
-            if (request.get("reason") != null) {
-                string(request, "reason");
-            }
-            if (type.equals("capability")
-                    && !Set.of("Read", "Write", "ReadWrite").contains(request.get("access"))) {
-                throw new IllegalArgumentException("Invalid access");
-            }
-            return new Approval(backend, id, session, type, Collections.unmodifiableMap(request));
+            return new Approval(backend, id, session, type, request);
         } catch (final Exception error) {
             throw new IllegalArgumentException("Invalid approval request");
         }
     }
 
-    private long integer(final Object value, final long maximum) {
+    private static long integer(final Object value, final long maximum) {
         if (!(value instanceof BigDecimal number)) {
             throw new IllegalArgumentException("Invalid integer");
         }
@@ -112,64 +113,215 @@ public final class ApprovalProtocol {
         return integer;
     }
 
-    private String identifier(final Map<?, ?> map, final String key) {
-        final var value = string(map, key);
-        if (value.length() > 256 || !value.matches("[A-Za-z0-9_.:-]+")) {
+    private static String identifier(final String value) {
+        string(value);
+        if (value.length() > 256 || !PROTOCOL_IDENTIFIER.matcher(value).matches()) {
             throw new IllegalArgumentException("Invalid identity");
         }
         return value;
     }
 
-    private String string(final Map<?, ?> map, final String key) {
-        if (!(map.get(key) instanceof String value) || value.isBlank() || value.length() > 8192) {
+    private static String string(final String value) {
+        if (value == null || value.isBlank() || value.length() > 8192) {
             throw new IllegalArgumentException("Invalid string");
         }
         return value;
     }
 
-    public record Approval(String backend, String id, String session, String type, Map<String, Object> request) {
+    private static void optionalString(final Object value) {
+        if (value != null) {
+            if (!(value instanceof String text)) {
+                throw new IllegalArgumentException("Invalid string");
+            }
+            string(text);
+        }
+    }
+
+    private static void strings(final List<String> values) {
+        if (values == null || values.size() > 128 || values.stream().anyMatch(v -> v == null)) {
+            throw new IllegalArgumentException("Invalid list");
+        }
+    }
+
+    private static void noExtras(final Map<String, Object> extras) {
+        if (extras != null && !extras.isEmpty()) {
+            throw new IllegalArgumentException("Unknown field");
+        }
+    }
+
+    @JsonModel
+    public record TaggedEnvelope(RequestTag request) {}
+
+    @JsonModel
+    public record RequestTag(
+            @JsonProperty("capability_type") String capabilityType) {}
+
+    private sealed interface WireEnvelope {
+        String backend();
+
+        Request request();
+
+        Map<String, Object> extras();
+    }
+
+    @JsonModel
+    public record FilesystemEnvelope(
+            String backend,
+            FilesystemRequest request,
+            @JsonOthers Map<String, Object> extras) implements WireEnvelope {}
+
+    @JsonModel
+    public record NetworkEnvelope(
+            String backend,
+            NetworkRequest request,
+            @JsonOthers Map<String, Object> extras) implements WireEnvelope {}
+
+    @JsonModel
+    public record EndpointEnvelope(
+            String backend,
+            EndpointRequest request,
+            @JsonOthers Map<String, Object> extras) implements WireEnvelope {}
+
+    @JsonModel
+    public record CommandEnvelope(
+            String backend,
+            CommandRequest request,
+            @JsonOthers Map<String, Object> extras) implements WireEnvelope {}
+
+    public sealed interface Request {
+        String capabilityType();
+
+        String requestId();
+
+        String sessionId();
+
+        Object reason();
+
+        Object childPid();
+
+        Map<String, Object> extras();
+    }
+
+    // Numeric leaves deliberately use Object: BigDecimal codecs also accept quoted numbers,
+    // but this protocol requires a JSON number token before exact range validation.
+    // Nullable text leaves also need token preservation: generated String fields can map
+    // wrong-type tokens to null, which is indistinguishable from an allowed absent/null value.
+    @JsonModel
+    public record FilesystemRequest(
+            @JsonProperty("capability_type") String capabilityType,
+            @JsonProperty("request_id") String requestId,
+            @JsonProperty("session_id") String sessionId,
+            Object reason,
+            @JsonProperty("child_pid") Object childPid,
+            String path,
+            String access,
+            @JsonOthers Map<String, Object> extras)
+            implements Request {
+        public FilesystemRequest {
+            childPid = BigDecimal.valueOf(integer(childPid, Integer.MAX_VALUE));
+        }
+    }
+
+    @JsonModel
+    public record NetworkRequest(
+            @JsonProperty("capability_type") String capabilityType,
+            @JsonProperty("request_id") String requestId,
+            @JsonProperty("session_id") String sessionId,
+            Object reason,
+            @JsonProperty("child_pid") Object childPid,
+            String host,
+            Object port,
+            String protocol,
+            @JsonProperty("resolved_ips") List<String> resolvedIps,
+            @JsonOthers Map<String, Object> extras)
+            implements Request {
+        public NetworkRequest {
+            childPid = BigDecimal.valueOf(integer(childPid, Integer.MAX_VALUE));
+            port = BigDecimal.valueOf(integer(port, 65535));
+            resolvedIps = resolvedIps == null ? null : List.copyOf(resolvedIps);
+        }
+    }
+
+    @JsonModel
+    public record EndpointRequest(
+            @JsonProperty("capability_type") String capabilityType,
+            @JsonProperty("request_id") String requestId,
+            @JsonProperty("session_id") String sessionId,
+            Object reason,
+            @JsonProperty("child_pid") Object childPid,
+            @JsonProperty("route_id") String routeId,
+            String upstream,
+            String method,
+            String path,
+            @JsonProperty("rule_label") Object ruleLabel,
+            @JsonOthers Map<String, Object> extras)
+            implements Request {
+        public EndpointRequest {
+            childPid = BigDecimal.valueOf(integer(childPid, Integer.MAX_VALUE));
+        }
+    }
+
+    @JsonModel
+    public record CommandRequest(
+            @JsonProperty("capability_type") String capabilityType,
+            @JsonProperty("request_id") String requestId,
+            @JsonProperty("session_id") String sessionId,
+            Object reason,
+            @JsonProperty("child_pid") Object childPid,
+            String command,
+            List<String> args,
+            Object caller,
+            @JsonProperty("intercept_rule") Object interceptRule,
+            @JsonOthers Map<String, Object> extras)
+            implements Request {
+        public CommandRequest {
+            childPid = BigDecimal.valueOf(integer(childPid, Integer.MAX_VALUE));
+            args = args == null ? null : List.copyOf(args);
+        }
+    }
+
+    public record Approval(String backend, String id, String session, String type, Request request) {
         public String presentation() {
             final var text = new StringBuilder();
-            switch (type) {
-                case "capability" -> {
+            switch (request) {
+                case FilesystemRequest r -> {
                     text.append("Allow filesystem access?\n");
-                    field(text, "Access", request.get("access"));
-                    field(text, "Path", request.get("path"));
+                    field(text, "Access", r.access());
+                    field(text, "Path", r.path());
                     text.append("\nAn open descriptor or filesystem changes can outlast this approval.\n");
                 }
-                case "network" -> {
+                case NetworkRequest r -> {
                     text.append("Allow network connection?\n");
-                    field(text, "Host", request.get("host"));
-                    field(text, "Port", request.get("port"));
-                    field(text, "Protocol", request.get("protocol"));
-                    indexed(text, "Resolved IPs", request.get("resolved_ips"));
+                    field(text, "Host", r.host());
+                    field(text, "Port", integer(r.port(), 65535));
+                    field(text, "Protocol", r.protocol());
+                    indexed(text, "Resolved IPs", r.resolvedIps());
                     text.append("\nThe connection and transferred data can have lasting effects.\n");
                 }
-                case "endpoint" -> {
+                case EndpointRequest r -> {
                     text.append("Allow endpoint request?\n");
-                    field(text, "Route", request.get("route_id"));
-                    field(text, "Upstream", request.get("upstream"));
-                    field(text, "Method", request.get("method"));
-                    field(text, "Path", request.get("path"));
-                    field(text, "Rule", request.get("rule_label"));
+                    field(text, "Route", r.routeId());
+                    field(text, "Upstream", r.upstream());
+                    field(text, "Method", r.method());
+                    field(text, "Path", r.path());
+                    field(text, "Rule", r.ruleLabel());
                     text.append("\nThe request and transferred data can have lasting effects.\n");
                 }
-                case "command" -> {
+                case CommandRequest r -> {
                     text.append("Allow command execution?\n");
-                    field(text, "Command", request.get("command"));
-                    indexed(text, "Arguments", request.get("args"));
-                    field(text, "Caller", request.get("caller"));
-                    field(text, "Intercept rule", request.get("intercept_rule"));
+                    field(text, "Command", r.command());
+                    indexed(text, "Arguments", r.args());
+                    field(text, "Caller", r.caller());
+                    field(text, "Intercept rule", r.interceptRule());
                     text.append("\nThe process and its changes can outlast this approval.\n");
                 }
-                default -> throw new IllegalArgumentException("Unknown capability");
             }
             text.append("\nDetails\n");
             field(text, "Session", session);
-            field(text, "Process", request.get("child_pid"));
+            field(text, "Process", integer(request.childPid(), Integer.MAX_VALUE));
             field(text, "Request", id);
             field(text, "Backend", backend);
-            field(text, "Reason", request.get("reason"));
+            field(text, "Reason", request.reason());
             return text.toString();
         }
 
@@ -183,8 +335,7 @@ public final class ApprovalProtocol {
             text.append('\n');
         }
 
-        private static void indexed(final StringBuilder text, final String label, final Object value) {
-            final var values = (List<?>) value;
+        private static void indexed(final StringBuilder text, final String label, final List<String> values) {
             text.append(label).append(" (").append(values.size()).append("):\n");
             for (int i = 0; i < values.size(); i++) {
                 field(text, "  [" + i + "]", values.get(i));

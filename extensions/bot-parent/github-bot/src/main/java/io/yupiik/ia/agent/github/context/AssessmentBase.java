@@ -16,15 +16,21 @@
 package io.yupiik.ia.agent.github.context;
 
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.model.TaskDocument;
 import io.yupiik.ia.agent.github.model.TaskKind;
 import java.math.BigDecimal;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /** Host-only default-branch snapshot for advisory issue/Discussion reviews, never publication authority. */
 public record AssessmentBase(String branch, String sha, boolean emptyRepository) {
+    private static final Pattern REPOSITORY_NAME =
+            Pattern.compile("[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}");
+    private static final Pattern COMMIT_SHA = Pattern.compile("[0-9a-f]{40}");
+
     /**
      * Resolve once before execution and persist recovery() in the task under the worker lease.
      * Subsequent attempts consume the saved pin without resolving a moving branch again.
@@ -32,7 +38,7 @@ public record AssessmentBase(String branch, String sha, boolean emptyRepository)
     public static AssessmentBase pin(final GitHubClient github, final TaskDocument task) {
         if (!isAssessment(task)
                 || task.repository() == null
-                || !task.repository().matches("[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}")
+                || !REPOSITORY_NAME.matcher(task.repository()).matches()
                 || task.repository().endsWith("/.")
                 || task.repository().endsWith("/..")) {
             throw new IllegalArgumentException("Expected an issue or Discussion review with a valid repository");
@@ -50,18 +56,20 @@ public record AssessmentBase(String branch, String sha, boolean emptyRepository)
                     string(recovery.get("assessmentBaseSha")),
                     Boolean.TRUE.equals(empty));
         }
-        final var repository = object(github.get("/repos/" + task.repository()));
-        final var branch = string(repository.get("default_branch"));
+        final var repository = github.get("/repos/" + task.repository(), RestResponses.Repository.class);
+        final var branch = repository.default_branch();
         validateBranch(branch);
         try {
-            final var commit = object(github.get("/repos/" + task.repository() + "/commits/"
-                    + URLEncoder.encode(branch, StandardCharsets.UTF_8).replace("+", "%20")));
-            return new AssessmentBase(branch, string(commit.get("sha")), false);
+            final var commit = github.get(
+                    "/repos/" + task.repository() + "/commits/"
+                            + URLEncoder.encode(branch, StandardCharsets.UTF_8).replace("+", "%20"),
+                    RestResponses.Commit.class);
+            return new AssessmentBase(branch, commit.sha(), false);
         } catch (final GitHubClient.HttpException failure) {
             // Only an accessible zero-sized repository plus a commit conflict means no source.
             // Never downgrade a 401/403/404, rate limit or malformed success to source absence.
             if (failure.status() != 409
-                    || !(repository.get("size") instanceof Number size)
+                    || !(repository.size() instanceof Number size)
                     || new BigDecimal(size.toString()).compareTo(BigDecimal.ZERO) != 0) {
                 throw failure;
             }
@@ -71,7 +79,9 @@ public record AssessmentBase(String branch, String sha, boolean emptyRepository)
 
     public AssessmentBase {
         validateBranch(branch);
-        if (emptyRepository ? sha != null : sha == null || !sha.matches("[0-9a-f]{40}")) {
+        if (emptyRepository
+                ? sha != null
+                : sha == null || !COMMIT_SHA.matcher(sha).matches()) {
             throw new IllegalArgumentException("Invalid assessment snapshot pin");
         }
     }
@@ -104,12 +114,5 @@ public record AssessmentBase(String branch, String sha, boolean emptyRepository)
             throw new IllegalArgumentException("Invalid assessment pin field");
         }
         return text;
-    }
-
-    private static Map<?, ?> object(final Object value) {
-        if (!(value instanceof Map<?, ?> map)) {
-            throw new IllegalStateException("Expected assessment repository metadata");
-        }
-        return map;
     }
 }

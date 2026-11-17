@@ -32,7 +32,12 @@ import java.nio.file.attribute.UserPrincipal;
 import java.util.Optional;
 import java.util.Set;
 
-/** Opt-in, local-filesystem controller admission with durable fail-closed crash debt. */
+/**
+ * Opt-in, local-filesystem controller admission with durable fail-closed crash debt.
+ * Validate state/attempt root disjointness before acquiring a lease, including default attempt paths.
+ * Acquire immediately before claiming/preparing work; an empty result must not claim work.
+ * Retain the lease through launcher quiescence and confirmed runtime/gateway termination.
+ */
 public final class HostAdmission {
     private final HostAdmissionConfiguration configuration;
     private final Path root;
@@ -64,6 +69,13 @@ public final class HostAdmission {
         }
     }
 
+    /**
+     * Nonblocking acquisition: empty means busy/full; disabled admission returns a no-op lease.
+     * Enabled leases start uncertain, and unresolved reservations fail closed across processes.
+     *
+     * @return the lease to close on every outcome, or empty when no slot can be acquired
+     * @throws IOException if storage is unsafe, inconsistent or contains unresolved crash debt
+     */
     public Optional<Lease> tryAcquire() throws IOException {
         if (root == null) {
             return Optional.of(new Lease(null, null));
@@ -231,7 +243,10 @@ public final class HostAdmission {
         }
     }
 
-    /** A close without confirmation retains durable debt, even across controller restarts. */
+    /**
+     * Always close the lease, but first record the lifecycle outcome explicitly.
+     * A close without confirmation releases the OS lock while retaining durable debt across restarts.
+     */
     public final class Lease implements AutoCloseable {
         private final SlotLease slot;
         private final Path reservation;
@@ -243,6 +258,7 @@ public final class HostAdmission {
             this.reservation = reservation;
         }
 
+        /** Confirm only positive runtime/gateway termination or proof that launch was never possible. */
         public void confirmTermination() {
             if (closed) {
                 throw new IllegalStateException("Admission lease already closed");
@@ -250,6 +266,7 @@ public final class HostAdmission {
             confirmed = true;
         }
 
+        /** Revoke prior confirmation before every point at which launch becomes possible. */
         public void markUncertain() {
             if (closed) {
                 throw new IllegalStateException("Admission lease already closed");

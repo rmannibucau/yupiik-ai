@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.core.llm.ProviderRequestBudget;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -80,7 +81,11 @@ class RestrictedServicesGatewayBudgetTest {
                 "g".repeat(43),
                 RestrictedServicesGateway.YCA_SERVICES_KEYSTORE_PASSWORD,
                 "changeit");
-        final var budget = ProviderRequestBudget.fromConfiguration(Configuration.of(settings));
+        final var budgetConfiguration = new ProviderBudgetConfiguration(
+                settings.get(ProviderRequestBudget.ROOT),
+                settings.get(ProviderRequestBudget.ID),
+                settings.get(ProviderRequestBudget.SLOTS));
+        final var budget = ProviderRequestBudget.fromConfiguration(budgetConfiguration);
         final var release = new CountDownLatch(1);
         final var upstream = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -120,7 +125,8 @@ class RestrictedServicesGatewayBudgetTest {
                     5,
                     1024,
                     1024);
-            try (final var gateway = new RestrictedServicesGateway(policy, Configuration.of(settings));
+            try (final var gateway =
+                            new RestrictedServicesGateway(policy, Configuration.of(settings), budgetConfiguration);
                     final var client = HttpClient.newBuilder()
                             .sslContext(tls)
                             .version(HttpClient.Version.HTTP_1_1)
@@ -170,7 +176,7 @@ class RestrictedServicesGatewayBudgetTest {
                     gateway.close();
                     assertTrue(budget.tryAcquire().isEmpty());
                 }
-                assertTrue(ProviderRequestBudget.fromConfiguration(Configuration.of(settings))
+                assertTrue(ProviderRequestBudget.fromConfiguration(budgetConfiguration)
                         .tryAcquire()
                         .isEmpty());
             } finally {

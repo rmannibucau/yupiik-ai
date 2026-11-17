@@ -18,8 +18,9 @@ package io.yupiik.ia.agent.github.execution;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.command.WorkerCommand$Options$FusionConfigurationFactory;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.github.execution.cache.DependencyCacheProvisioning;
 import io.yupiik.ia.agent.github.store.TaskStore;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
@@ -32,6 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -43,6 +45,11 @@ class AttemptServicesTest {
     @TempDir
     Path home;
 
+    private final String privateSubnet = "10." + ThreadLocalRandom.current().nextInt(256) + "."
+            + ThreadLocalRandom.current().nextInt(256);
+    private final String providerBaseUrl = "http://" + privateSubnet + ".1:8000/v1";
+    private final String contextBaseUrl = "http://" + privateSubnet + ".2:12345";
+
     @Test
     void forwardsOnlySelectedSecretsAndBudgetFromConfiguration() throws Exception {
         final var budgetRoot = Files.createTempDirectory(home.getParent(), "services-budget-");
@@ -50,9 +57,6 @@ class AttemptServicesTest {
             final var values = Map.of(
                     "YCA_SERVICES_KEYSTORE_PASSWORD", "configured-tls-secret",
                     "OPENAI_API_KEY", "configured-provider-secret",
-                    "YCA_PROVIDER_BUDGET_ROOT", budgetRoot.toString(),
-                    "YCA_PROVIDER_BUDGET_ID", "configured-budget",
-                    "YCA_PROVIDER_BUDGET_SLOTS", "2",
                     "UNRELATED_HOST_SECRET", "never-forward");
             try (final var json = BotJsonMapper.create(
                             List.of(new RestrictedServicesGateway$Settings$FusionJsonCodec()),
@@ -62,10 +66,11 @@ class AttemptServicesTest {
                             privateDirectory(),
                             json,
                             settings(),
-                            "http://172.30.0.2:12345" + ROUTE,
+                            contextBaseUrl + ROUTE,
                             "https://attempt-services.yca.internal:8443" + ROUTE,
                             CONTEXT,
                             Configuration.of(values),
+                            new ProviderBudgetConfiguration(budgetRoot.toString(), "configured-budget", "2"),
                             Duration.ofSeconds(60))) {
                 assertEquals("configured-tls-secret", services.credentials().get("YCA_SERVICES_KEYSTORE_PASSWORD"));
                 assertEquals(
@@ -104,10 +109,11 @@ class AttemptServicesTest {
                     privateDirectory(),
                     json,
                     settings(),
-                    "http://172.30.0.2:12345" + ROUTE,
+                    contextBaseUrl + ROUTE,
                     "https://attempt-services.yca.internal:8443" + ROUTE,
                     CONTEXT,
                     Configuration.of(Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret")),
+                    new ProviderBudgetConfiguration(null, null, null),
                     Duration.ofSeconds(60))) {
                 final var rewritten = TaskStore.map(json.fromString(Object.class, Files.readString(configuration)));
                 assertEquals(mcp, TaskStore.map(rewritten.get("yca")).get("mcp"));
@@ -135,10 +141,11 @@ class AttemptServicesTest {
                     privateDirectory(),
                     json,
                     disabled,
-                    "http://172.30.0.2:12345" + ROUTE,
+                    contextBaseUrl + ROUTE,
                     "https://attempt-services.yca.internal:8443" + ROUTE,
                     CONTEXT,
                     Configuration.of(Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret")),
+                    new ProviderBudgetConfiguration(null, null, null),
                     Duration.ofSeconds(60))) {
                 assertFalse(Files.exists(home.resolve("storage/.m2/settings.xml")));
             }
@@ -160,10 +167,11 @@ class AttemptServicesTest {
                             privateDirectory,
                             json,
                             settings(),
-                            "http://172.30.0.2:12345" + ROUTE,
+                            contextBaseUrl + ROUTE,
                             "https://attempt-services.yca.internal:8443" + ROUTE,
                             CONTEXT,
                             Configuration.of(Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret")),
+                            new ProviderBudgetConfiguration(null, null, null),
                             Duration.ofSeconds(60)));
             assertFalse(Files.exists(outside.resolve(".m2")));
         }
@@ -193,10 +201,11 @@ class AttemptServicesTest {
                         privateDirectory(),
                         json,
                         settings(),
-                        "http://172.30.0.2:12345" + ROUTE,
+                        contextBaseUrl + ROUTE,
                         "https://attempt-services.yca.internal:8443" + ROUTE,
                         CONTEXT,
                         Configuration.of(Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret")),
+                        new ProviderBudgetConfiguration(null, null, null),
                         Duration.ofSeconds(60))) {
             final var settings = Files.readString(home.resolve("storage/.m2/settings.xml"));
             assertTrue(settings.contains("<host>egress</host>"));
@@ -217,10 +226,11 @@ class AttemptServicesTest {
                         privateDirectory(),
                         json,
                         settings(),
-                        "http://172.30.0.2:12345" + ROUTE,
+                        contextBaseUrl + ROUTE,
                         "https://attempt-services.yca.internal:8443" + ROUTE,
                         CONTEXT,
                         Configuration.of(Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret")),
+                        new ProviderBudgetConfiguration(null, null, null),
                         Duration.ofSeconds(60))) {
             assertEquals("keep original bytes", Files.readString(original));
             assertFalse(Files.isSameFile(original, maven.resolve("settings.xml")));
@@ -242,10 +252,11 @@ class AttemptServicesTest {
                             privateDirectory(),
                             json,
                             settings(),
-                            "http://172.30.0.2:12345" + ROUTE,
+                            contextBaseUrl + ROUTE,
                             "https://attempt-services.yca.internal:8443" + ROUTE,
                             CONTEXT,
                             Configuration.of(Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret")),
+                            new ProviderBudgetConfiguration(null, null, null),
                             Duration.ofSeconds(60)));
             assertFalse(Files.exists(outside.resolve("settings.xml")));
         }
@@ -265,10 +276,11 @@ class AttemptServicesTest {
                             privateDirectory(),
                             json,
                             settings(),
-                            "http://172.30.0.2:12345" + ROUTE,
+                            contextBaseUrl + ROUTE,
                             "https://attempt-services.yca.internal:8443" + ROUTE,
                             CONTEXT,
                             Configuration.of(Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret")),
+                            new ProviderBudgetConfiguration(null, null, null),
                             Duration.ofSeconds(60)));
             assertEquals("unchanged", Files.readString(outside));
         }
@@ -276,8 +288,8 @@ class AttemptServicesTest {
 
     private Path minimalConfiguration() throws Exception {
         return Files.writeString(home.resolve("configuration.json"), """
-                {"yca":{"provider":{"baseUrl":"http://192.168.52.32:8000/v1","model":"fixture"}}}
-                """);
+                {"yca":{"provider":{"baseUrl":"%s","model":"fixture"}}}
+                """.formatted(providerBaseUrl));
     }
 
     @Test
@@ -289,7 +301,7 @@ class AttemptServicesTest {
                     "id",
                     "local",
                     "baseUrl",
-                    "http://192.168.52.32:8000/v1",
+                    providerBaseUrl,
                     "apiKey",
                     "upstream-secret",
                     "model",
@@ -323,10 +335,11 @@ class AttemptServicesTest {
                     privateDirectory,
                     json,
                     settings(),
-                    "http://172.30.0.2:12345" + ROUTE,
+                    contextBaseUrl + ROUTE,
                     "https://attempt-services.yca.internal:8443" + ROUTE,
                     CONTEXT,
                     Configuration.of(Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret")),
+                    new ProviderBudgetConfiguration(null, null, null),
                     Duration.ofSeconds(60))) {
                 final var text = Files.readString(configuration);
                 for (final var secret :
@@ -383,11 +396,7 @@ class AttemptServicesTest {
                     configuration,
                     json.toString(Map.of(
                             "provider",
-                            Map.of(
-                                    "baseUrl",
-                                    "http://192.168.52.32:8000/v1/chat/completions",
-                                    "model",
-                                    "test-model"))));
+                            Map.of("baseUrl", providerBaseUrl + "/chat/completions", "model", "test-model"))));
             final var privateDirectory = privateDirectory();
             final var environment = Configuration.of(
                     Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret", "OPENAI_API_KEY", "env-provider-secret"));
@@ -402,6 +411,7 @@ class AttemptServicesTest {
                             "https://attempt-services.yca.internal:8443" + ROUTE,
                             CONTEXT,
                             environment,
+                            new ProviderBudgetConfiguration(null, null, null),
                             Duration.ofSeconds(60)));
             assertThrows(
                     IllegalArgumentException.class,
@@ -410,20 +420,22 @@ class AttemptServicesTest {
                             privateDirectory,
                             json,
                             settings(),
-                            "http://172.30.0.2:12345" + ROUTE,
+                            contextBaseUrl + ROUTE,
                             "https://other.invalid:8443" + ROUTE,
                             CONTEXT,
                             environment,
+                            new ProviderBudgetConfiguration(null, null, null),
                             Duration.ofSeconds(60)));
             try (final var services = new AttemptServices(
                     configuration,
                     privateDirectory,
                     json,
                     settings(),
-                    "http://172.30.0.2:12345" + ROUTE,
+                    contextBaseUrl + ROUTE,
                     "https://attempt-services.yca.internal:8443" + ROUTE,
                     CONTEXT,
                     environment,
+                    new ProviderBudgetConfiguration(null, null, null),
                     Duration.ofSeconds(60))) {
                 assertEquals("env-provider-secret", services.credentials().get("YCA_SERVICES_UPSTREAM_TOKEN"));
                 assertFalse(Files.readString(configuration).contains("env-provider-secret"));
@@ -445,8 +457,7 @@ class AttemptServicesTest {
                 for (int index = 0; index < runs.size(); index++) {
                     final var directory = Files.createDirectory(home.resolve(wrapped + "-" + index));
                     final var configuration = directory.resolve("configuration.json");
-                    final var provider =
-                            Map.of("provider", Map.of("baseUrl", "http://192.168.52.32:8000/v1", "model", "fixture"));
+                    final var provider = Map.of("provider", Map.of("baseUrl", providerBaseUrl, "model", "fixture"));
                     final var document = new LinkedHashMap<String, Object>();
                     if (wrapped) {
                         document.put("yca", provider);
@@ -464,10 +475,11 @@ class AttemptServicesTest {
                             privateDirectory,
                             json,
                             settings(),
-                            "http://172.30.0.2:12345" + ROUTE,
+                            contextBaseUrl + ROUTE,
                             "https://attempt-services.yca.internal:8443" + ROUTE,
                             CONTEXT,
                             Configuration.of(Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret")),
+                            new ProviderBudgetConfiguration(null, null, null),
                             Duration.ofSeconds(60))) {
                         final var rewritten =
                                 TaskStore.map(json.fromString(Object.class, Files.readString(configuration)));
@@ -489,7 +501,7 @@ class AttemptServicesTest {
         try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty())) {
             final var configuration = home.resolve("configuration.json");
             final var original = json.toString(
-                    Map.of("provider", Map.of("baseUrl", "http://192.168.52.33:8000/v1", "model", "test")));
+                    Map.of("provider", Map.of("baseUrl", "http://" + privateSubnet + ".3:8000/v1", "model", "test")));
             Files.writeString(configuration, original);
             final var privateDirectory = privateDirectory();
             assertThrows(
@@ -499,10 +511,11 @@ class AttemptServicesTest {
                             privateDirectory,
                             json,
                             settings(),
-                            "http://172.30.0.2:12345" + ROUTE,
+                            contextBaseUrl + ROUTE,
                             "https://attempt-services.yca.internal:8443" + ROUTE,
                             CONTEXT,
                             Configuration.of(Map.of("YCA_SERVICES_KEYSTORE_PASSWORD", "tls-secret")),
+                            new ProviderBudgetConfiguration(null, null, null),
                             Duration.ofSeconds(60)));
             assertEquals(original, Files.readString(configuration));
             assertFalse(Files.exists(privateDirectory.resolve("services.json")));
@@ -522,7 +535,7 @@ class AttemptServicesTest {
                 home.resolve("tls.p12").toString(),
                 "YCA_SERVICES_KEYSTORE_PASSWORD",
                 "attempt-services.yca.internal",
-                "http://192.168.52.32:8000/v1",
+                providerBaseUrl,
                 null);
     }
 }

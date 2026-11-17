@@ -18,10 +18,12 @@ package io.yupiik.ia.agent.github.client;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
+import io.yupiik.fusion.framework.api.container.Types;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
 import java.io.IOException;
+import java.lang.reflect.Type;
 import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -42,6 +44,110 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class GitHubClientTest {
+    // Arbitrary transport fixtures, not a GitHub domain response schema.
+    private static final Type RESPONSE = new Types.ParameterizedTypeImpl(Map.class, String.class, Object.class);
+
+    @Test
+    void requiresExplicitResponseTypesForEveryTransportOperation() {
+        assertThrows(NoSuchMethodException.class, () -> GitHubClient.class.getMethod("get", String.class));
+        assertThrows(NoSuchMethodException.class, () -> GitHubClient.class.getMethod("page", String.class));
+        assertThrows(
+                NoSuchMethodException.class,
+                () -> GitHubClient.class.getMethod("post", String.class, GitHubClient.MutationRequest.class));
+        assertThrows(
+                NoSuchMethodException.class, () -> GitHubClient.class.getMethod("graphql", String.class, Map.class));
+    }
+
+    @Test
+    void typedGetsDecodeRawConditionalBodiesForEachRequestedType() throws Exception {
+        final var calls = new AtomicInteger();
+        final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final var base = "http://127.0.0.1:" + server.getAddress().getPort();
+        server.createContext("/", exchange -> {
+            calls.incrementAndGet();
+            if (exchange.getRequestHeaders().containsKey("If-None-Match")) {
+                exchange.sendResponseHeaders(304, -1);
+            } else {
+                final var bytes = (exchange.getRequestURI().getPath().equals("/list")
+                                ? "[{\"sha\":\"abc\"}]"
+                                : "{\"sha\":\"abc\",\"tree\":{\"sha\":\"def\"}}")
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("ETag", "\"raw\"");
+                exchange.getResponseHeaders().set("Link", "<" + base + "/next>; rel=\"next\"");
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+            }
+            exchange.close();
+        });
+        server.start();
+        try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty());
+                final var client =
+                        new GitHubClient(URI.create(base), json, () -> "secret", BotTestConfiguration.CLOCK)) {
+            final var first = client.page("/commit", RestResponses.Commit.class);
+            assertEquals(new RestResponses.Commit("abc", new RestResponses.ObjectId("def")), first.body());
+            assertEquals(base + "/next", first.next());
+            assertEquals(
+                    "{\"sha\":\"abc\",\"tree\":{\"sha\":\"def\"}}".getBytes(StandardCharsets.UTF_8).length,
+                    first.responseBytes());
+            assertEquals(new RestResponses.ObjectId("abc"), client.get("/commit", RestResponses.ObjectId.class));
+            assertEquals(first, client.page("/commit", RestResponses.Commit.class));
+            assertEquals(
+                    new RestResponses.Commit("abc", new RestResponses.ObjectId("def")),
+                    client.get("/commit", RestResponses.Commit.class));
+            final var type = new Types.ParameterizedTypeImpl(List.class, RestResponses.ObjectId.class);
+            final List<RestResponses.ObjectId> list = client.get("/list", type);
+            assertEquals(List.of(new RestResponses.ObjectId("abc")), list);
+            assertEquals(
+                    list,
+                    client.<List<RestResponses.ObjectId>>page("/list", type).body());
+            assertEquals(6, calls.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void typedMutationUsesGeneratedCodecAndInvalidSuccessIsNotRetried() throws Exception {
+        final var calls = new AtomicInteger();
+        final var response = new AtomicReference<>("{\"sha\":\"ack\"}");
+        final var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            calls.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            final var bytes = response.get().getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty());
+                final var client = new GitHubClient(
+                        URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                        json,
+                        () -> "secret",
+                        BotTestConfiguration.CLOCK)) {
+            assertEquals(
+                    new RestResponses.ObjectId("ack"),
+                    client.post("/", new GitHubClient.CommentRequest("body"), RestResponses.ObjectId.class));
+            response.set("{\"sha\":{\"unexpected\":true}}");
+            assertThrows(RuntimeException.class, () -> client.get("/", RestResponses.ObjectId.class));
+            assertEquals(2, calls.get());
+            response.set("{\"id\":1.5,\"full_name\":\"o/r\"}");
+            assertEquals(
+                    new BigDecimal("1.5"),
+                    client.get("/", RestResponses.Repository.class).id());
+            response.set("{\"id\":\"1.5\",\"size\":\"0\"}");
+            final var quoted = client.get("/", RestResponses.Repository.class);
+            assertEquals("1.5", quoted.id(), "Authority checks must still distinguish quoted numbers");
+            assertEquals("0", quoted.size(), "A quoted size must never prove an empty repository");
+            response.set("{\"archived\":\"false\"}");
+            assertNull(client.get("/", RestResponses.Repository.class).archived());
+            assertEquals(5, calls.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
     @Test
     void injectedClockControlsRelativeAbsoluteAndResetDeadlinesAndRateLimitExpiry() throws Exception {
         final var start = Instant.parse("2035-02-03T04:05:06Z");
@@ -96,15 +202,17 @@ class GitHubClientTest {
                             json,
                             () -> "secret",
                             clock)) {
-                final var deferred = assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/"));
+                final var deferred =
+                        assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/", RESPONSE));
                 assertEquals(deadline, deferred.retryAt(), mode);
                 if (!mode.equals("transient-http-date")) {
-                    final var gated = assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/"));
+                    final var gated =
+                            assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/", RESPONSE));
                     assertEquals(deadline, gated.retryAt(), mode);
                     assertEquals(1, calls.get(), mode);
                 }
                 now.set(deadline);
-                assertEquals(Map.of(), client.get("/"), mode);
+                assertEquals(Map.of(), client.get("/", RESPONSE), mode);
                 assertEquals(2, calls.get(), mode);
             } finally {
                 server.stop(0);
@@ -141,17 +249,26 @@ class GitHubClientTest {
                         () -> "private-token",
                         BotTestConfiguration.CLOCK)) {
             assertEquals(new GitHubClient.Statistics(0, 0, 0), client.statistics());
-            client.get("/cached?private-query");
-            client.get("/cached?private-query");
-            client.get("/retry");
-            assertThrows(GitHubClient.HttpException.class, () -> client.get("/failure"));
+            client.get(
+                    "/cached?private-query", new Types.ParameterizedTypeImpl(List.class, RestResponses.ObjectId.class));
+            client.get(
+                    "/cached?private-query", new Types.ParameterizedTypeImpl(List.class, RestResponses.ObjectId.class));
+            client.get("/retry", new Types.ParameterizedTypeImpl(List.class, RestResponses.ObjectId.class));
+            assertThrows(
+                    GitHubClient.HttpException.class,
+                    () -> client.get(
+                            "/failure", new Types.ParameterizedTypeImpl(List.class, RestResponses.ObjectId.class)));
             final var statistics = client.statistics();
             assertEquals(6, requests.get());
             assertEquals(requests.get(), statistics.requests());
             assertTrue(statistics.httpNanos() > 0);
             assertTrue(statistics.pacingNanos() >= 0);
             assertFalse(statistics.toString().contains("private"));
-            assertThrows(IllegalArgumentException.class, () -> client.get("https://other.example/private"));
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> client.get(
+                            "https://other.example/private",
+                            new Types.ParameterizedTypeImpl(List.class, RestResponses.ObjectId.class)));
             assertEquals(statistics, client.statistics(), "Rejected origins must not increment transport counters");
         } finally {
             server.stop(0);
@@ -181,13 +298,14 @@ class GitHubClientTest {
                         BotTestConfiguration.CLOCK)) {
             final var query = "query($id:ID!){node(id:$id){id}}";
             assertEquals(
-                    Map.of("data", Map.of("node", Map.of("id", "D_1"))), client.graphql(query, Map.of("id", "D_1")));
+                    Map.of("data", Map.of("node", Map.of("id", "D_1"))),
+                    client.graphql(query, Map.of("id", "D_1"), RESPONSE));
             final var wire = json.fromString(GitHubClient.GraphqlRequest.class, received.get());
             assertEquals(query, wire.query());
             assertEquals(Map.of("id", "D_1"), wire.variables());
             response.set("{\"data\":{\"node\":null},\"errors\":[{\"message\":\"private detail\"}]}");
-            final var failure =
-                    assertThrows(IllegalStateException.class, () -> client.graphql(query, Map.of("id", "D_1")));
+            final var failure = assertThrows(
+                    IllegalStateException.class, () -> client.graphql(query, Map.of("id", "D_1"), RESPONSE));
             assertFalse(failure.getMessage().contains("private detail"));
             final var variables = new DiscussionClient.Variables(null, null, null, "D_1", null);
             for (final var invalid : List.of(
@@ -251,7 +369,7 @@ class GitHubClientTest {
                         () -> "secret",
                         BotTestConfiguration.CLOCK)) {
             for (final var path : List.of("/fixed", "/chunked")) {
-                final var failure = assertThrows(IllegalStateException.class, () -> client.get(path));
+                final var failure = assertThrows(IllegalStateException.class, () -> client.get(path, RESPONSE));
                 assertTrue(failure.getMessage().contains("transport byte limit"));
             }
             assertEquals(2, requests.get());
@@ -283,11 +401,11 @@ class GitHubClientTest {
                         json,
                         () -> "secret",
                         BotTestConfiguration.CLOCK)) {
-            client.get("/first");
-            client.get("/second");
-            client.get("/second");
+            client.get("/first", RESPONSE);
+            client.get("/second", RESPONSE);
+            client.get("/second", RESPONSE);
             assertEquals(1, conditional.get());
-            client.get("/first");
+            client.get("/first", RESPONSE);
             assertEquals(1, conditional.get(), "First large page must have been evicted");
         } finally {
             server.stop(0);
@@ -334,7 +452,7 @@ class GitHubClientTest {
                         json,
                         () -> "secret",
                         BotTestConfiguration.CLOCK)) {
-            assertEquals(Map.of(), client.post("/comments", new GitHubClient.CommentRequest("line\n\"quoted\"")));
+            assertNull(client.post("/comments", new GitHubClient.CommentRequest("line\n\"quoted\""), RESPONSE));
             assertEquals("{\"body\":\"line\\n\\\"quoted\\\"\"}", received.get());
         } finally {
             server.stop(0);
@@ -373,9 +491,9 @@ class GitHubClientTest {
                     () -> new GitHubClient(
                             base, json, () -> "secret", Duration.ofSeconds(61), BotTestConfiguration.CLOCK));
             final long start = System.nanoTime();
-            client.get("/read");
-            client.post("/write", new GitHubClient.CommentRequest("write"));
-            client.get("/read-again");
+            client.get("/read", RESPONSE);
+            client.post("/write", new GitHubClient.CommentRequest("write"), RESPONSE);
+            client.get("/read-again", RESPONSE);
             assertTrue(System.nanoTime() - start >= Duration.ofMillis(200).toNanos());
         } finally {
             server.stop(0);
@@ -434,17 +552,18 @@ class GitHubClientTest {
                         BotTestConfiguration.CLOCK)) {
             assertEquals(
                     404,
-                    assertThrows(GitHubClient.HttpException.class, () -> client.get("/missing"))
+                    assertThrows(GitHubClient.HttpException.class, () -> client.get("/missing", RESPONSE))
                             .status());
             assertEquals(
                     403,
-                    assertThrows(GitHubClient.HttpException.class, () -> client.get("/forbidden"))
+                    assertThrows(GitHubClient.HttpException.class, () -> client.get("/forbidden", RESPONSE))
                             .status());
             assertEquals(
                     403,
                     assertThrows(
                                     GitHubClient.HttpException.class,
-                                    () -> client.post("/forbidden", new GitHubClient.CommentRequest("forbidden")))
+                                    () -> client.post(
+                                            "/forbidden", new GitHubClient.CommentRequest("forbidden"), RESPONSE))
                             .status());
         } finally {
             server.stop(0);
@@ -480,11 +599,11 @@ class GitHubClientTest {
                         json,
                         () -> credential.get(),
                         BotTestConfiguration.CLOCK)) {
-            client.get("/items?q=%2f");
-            client.get("/items?q=%2F");
-            client.get("/items?q=%2f");
+            client.get("/items?q=%2f", RESPONSE);
+            client.get("/items?q=%2F", RESPONSE);
+            client.get("/items?q=%2f", RESPONSE);
             credential.set("rotated");
-            client.get("/items?q=%2f");
+            client.get("/items?q=%2f", RESPONSE);
             assertEquals(
                     List.of("/items?q=%2f:null", "/items?q=%2F:null", "/items?q=%2f:\"cached\"", "/items?q=%2f:null"),
                     seen);
@@ -525,10 +644,10 @@ class GitHubClientTest {
                                 new AuthTokenProvider$JwtClaims$FusionJsonCodec()),
                         key -> Optional.empty());
                 final var client = new GitHubClient(base, json, () -> "secret", BotTestConfiguration.CLOCK)) {
-            final var first = client.page("/items?page=1");
-            assertEquals(first, client.page("/items?page=1"));
+            final var first = client.page("/items?page=1", RESPONSE);
+            assertEquals(first, client.page("/items?page=1", RESPONSE));
             assertEquals(base + "/items?page=2", first.next());
-            assertEquals(Map.of("page", "page=2"), client.get(first.next()));
+            assertEquals(Map.of("page", "page=2"), client.get(first.next(), RESPONSE));
             assertEquals(3, calls.get());
         } finally {
             server.stop(0);
@@ -589,21 +708,23 @@ class GitHubClientTest {
                                 new AuthTokenProvider$JwtClaims$FusionJsonCodec()),
                         key -> Optional.empty());
                 final var client = new GitHubClient(base, json, () -> "secret", BotTestConfiguration.CLOCK)) {
-            assertEquals(Map.of(), client.get("/retry"));
+            assertEquals(Map.of(), client.get("/retry", RESPONSE));
             assertEquals(3, gets.get());
-            assertThrows(IllegalStateException.class, () -> client.get("/redirect"));
+            assertThrows(IllegalStateException.class, () -> client.get("/redirect", RESPONSE));
             assertEquals(3, gets.get());
             assertThrows(
-                    IllegalStateException.class, () -> client.post("/retry", new GitHubClient.CommentRequest("retry")));
+                    IllegalStateException.class,
+                    () -> client.post("/retry", new GitHubClient.CommentRequest("retry"), RESPONSE));
             assertEquals(1, posts.get());
-            final var limit = assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/limit"));
+            final var limit =
+                    assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/limit", RESPONSE));
             assertEquals(429, limit.status());
             assertEquals(BotTestConfiguration.CLOCK.instant().plusSeconds(3600), limit.retryAt());
-            assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/reset"));
-            assertThrows(IllegalArgumentException.class, () -> client.get("https://example.com/leak"));
-            assertThrows(IllegalArgumentException.class, () -> client.get("//example.com/leak"));
-            assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/link"));
-            assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/retry"));
+            assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/reset", RESPONSE));
+            assertThrows(IllegalArgumentException.class, () -> client.get("https://example.com/leak", RESPONSE));
+            assertThrows(IllegalArgumentException.class, () -> client.get("//example.com/leak", RESPONSE));
+            assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/link", RESPONSE));
+            assertThrows(GitHubClient.DeferredRequestException.class, () -> client.get("/retry", RESPONSE));
             assertEquals(3, gets.get());
         } finally {
             server.stop(0);

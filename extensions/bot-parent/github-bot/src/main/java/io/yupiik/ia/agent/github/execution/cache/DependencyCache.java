@@ -47,6 +47,7 @@ import java.util.Objects;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * Repository-isolated, whole-directory optimistic cache.
@@ -84,6 +85,8 @@ import java.util.concurrent.TimeUnit;
  * Version 1 stores require replacement, not an unbounded startup migration.
  */
 public final class DependencyCache {
+    private static final Pattern CACHE_DIGEST = Pattern.compile("[0-9a-f]{64}");
+
     private static final int MAGIC = 0x59434431;
     private static final int RECORD = 64;
     private static final int FIFO_RECORD = 80;
@@ -1006,7 +1009,7 @@ public final class DependencyCache {
     }
 
     private Path object(final int type, final String digest) throws IOException {
-        if (digest == null || !digest.matches("[0-9a-f]{64}")) {
+        if (digest == null || !CACHE_DIGEST.matcher(digest).matches()) {
             throw new IOException("Invalid cache object digest");
         }
         final var directory =

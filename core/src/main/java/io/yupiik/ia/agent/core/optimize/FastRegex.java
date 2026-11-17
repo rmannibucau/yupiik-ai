@@ -41,6 +41,8 @@ import java.util.regex.Pattern;
  * <p>Usage: {@code new FastRegex("\\b(WARNING|ERROR)\\b")} then {@code fast.find(line)}.</p>
  */
 public final class FastRegex {
+    private static final Pattern WORD_ALTERNATION = Pattern.compile("[A-Za-z0-9_]+(\\|[A-Za-z0-9_]+)*");
+    private static final Pattern SIMPLE_ALTERNATION_BODY = Pattern.compile("[A-Za-z0-9 _|.,-]+");
 
     /** Fast predicate; never throws. */
     private final Predicate<CharSequence> matcher;
@@ -91,7 +93,7 @@ public final class FastRegex {
             return null;
         }
         r = r.substring(3, r.length() - 1);
-        if (!r.matches("[A-Za-z0-9_]+(\\|[A-Za-z0-9_]+)*")) {
+        if (!WORD_ALTERNATION.matcher(r).matches()) {
             return null;
         }
         final var branches = r.split("\\|");
@@ -116,7 +118,7 @@ public final class FastRegex {
                 return null;
             }
             final String body = r.substring(1, close);
-            if (!body.matches("[A-Za-z0-9 _|.,-]+")) {
+            if (!SIMPLE_ALTERNATION_BODY.matcher(body).matches()) {
                 return null;
             }
             branches = body.split("\\|");

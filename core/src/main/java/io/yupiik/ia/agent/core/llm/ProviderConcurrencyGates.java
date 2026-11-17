@@ -33,6 +33,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /**
  * Owns one concurrency budget per provider id across clients, until application shutdown.
@@ -48,6 +49,8 @@ import java.util.logging.Logger;
  */
 @ApplicationScoped
 public class ProviderConcurrencyGates implements AutoCloseable {
+    private static final Pattern SAFE_PROVIDER_ID = Pattern.compile("[a-zA-Z0-9_.-]+");
+
     private static final Logger LOGGER = Logger.getLogger(ProviderConcurrencyGates.class.getName());
     private static final String HASH_PREFIX = "~sha256-";
 
@@ -128,7 +131,7 @@ public class ProviderConcurrencyGates implements AutoCloseable {
 
     /** Safe ids retain their directory; all other ids use a disjoint, bounded SHA-256 namespace. */
     private static String directoryKey(final String id) {
-        if (id.length() <= 120 && id.matches("[a-zA-Z0-9_.-]+") && !id.equals(".") && !id.equals("..")) {
+        if (id.length() <= 120 && SAFE_PROVIDER_ID.matcher(id).matches() && !id.equals(".") && !id.equals("..")) {
             return id;
         }
         try {

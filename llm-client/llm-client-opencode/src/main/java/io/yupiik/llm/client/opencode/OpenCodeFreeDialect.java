@@ -43,9 +43,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Pattern;
 
 /** Experimental OpenCode streaming completions. Availability to third-party clients is not guaranteed. */
 public class OpenCodeFreeDialect extends OpenAICompletionsDialect implements AutoCloseable {
+    private static final Pattern SESSION_ID = Pattern.compile("ses_[0-9a-f]{12}[0-9A-Za-z]{14}");
+
     private static final String WORKING_DIRECTORY = "Working directory:";
     private static final String ENVIRONMENT = "<env>";
     private final OpenCodeHttpClient ownedTransport;
@@ -243,7 +246,7 @@ public class OpenCodeFreeDialect extends OpenAICompletionsDialect implements Aut
     }
 
     private String sessionAffinity(final String session) {
-        if (session.matches("ses_[0-9a-f]{12}[0-9A-Za-z]{14}")) {
+        if (SESSION_ID.matcher(session).matches()) {
             return session;
         }
         final var uuid = UUID.nameUUIDFromBytes(session.getBytes(StandardCharsets.UTF_8));

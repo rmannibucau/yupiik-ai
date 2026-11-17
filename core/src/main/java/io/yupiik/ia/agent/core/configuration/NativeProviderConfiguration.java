@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.configuration;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.ia.agent.core.llm.ApiFlavor;
 
 @JsonModel
 @RootConfiguration("yca.native.provider")
@@ -25,4 +26,10 @@ public record NativeProviderConfiguration(
         @Property(
                 documentation =
                         "Absolute launcher-prepared Unix socket for the native provider bridge. Unset disables the transport. This is a trusted launcher setting, not a provider destination or a network isolation policy.")
-        String socket) {}
+        String socket,
+
+        @Property(
+                defaultValue = "io.yupiik.ia.agent.core.llm.ApiFlavor.COMPLETIONS",
+                documentation =
+                        "Launcher-pinned provider API: COMPLETIONS or RESPONSES. Must match the controller bridge.")
+        ApiFlavor api) {}

@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.sun.net.httpserver.Headers;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
@@ -81,7 +82,7 @@ class ProviderServicesGatewayTest {
                             "/services/tls.p12",
                             env,
                             ROUTE,
-                            "http://10.0.0.1:8080/v1",
+                            "http://10.0.0.1:8080/v1/chat/completions",
                             60,
                             5,
                             1024,
@@ -105,7 +106,7 @@ class ProviderServicesGatewayTest {
                             "/services/tls.p12",
                             "TLS_PASSWORD",
                             ROUTE,
-                            "http://10.0.0.1:8080/v1",
+                            "http://10.0.0.1:8080/v1/chat/completions",
                             limits[0],
                             (int) limits[1],
                             limits[2],
@@ -116,7 +117,7 @@ class ProviderServicesGatewayTest {
 
     @Test
     void fixedRequestPolicyRejectsProxyAndBusinessRoutesWithoutTransportStartup() {
-        final var settings = settings("http://10.0.0.1:8080/v1", ROUTE, 4);
+        final var settings = settings("http://10.0.0.1:8080/v1/chat/completions", ROUTE, 4);
         assertEquals(0, settings.reject("POST", URI.create(ROUTE), headers(), 8443, AUTH));
         for (final var route : List.of(
                 "/context/12345678-1234-1234-1234-123456789abc/rpc",
@@ -129,6 +130,7 @@ class ProviderServicesGatewayTest {
                 ROUTE + "#fragment")) {
             assertEquals(400, settings.reject("POST", URI.create(route), headers(), 8443, AUTH), route);
         }
+
         for (final var method : List.of("GET", "PUT", "CONNECT", "OPTIONS")) {
             assertEquals(405, settings.reject(method, URI.create(ROUTE), headers(), 8443, AUTH));
         }
@@ -141,8 +143,25 @@ class ProviderServicesGatewayTest {
     }
 
     @Test
+    void responsesPinsOneExactRouteAndRejectsMismatchedOrUnsupportedTargets() {
+        final var route = ROUTE.replace("/chat/completions", "/responses");
+        final var settings = settings("http://10.0.0.1:8080/v1/responses", route, 1);
+        assertEquals(0, settings.reject("POST", URI.create(route), headers(), 8443, AUTH));
+        for (final var rejected : List.of(
+                ROUTE, route + "/", route + "/compact", route + "/id", route.replace("responses", "%72esponses"))) {
+            assertEquals(400, settings.reject("POST", URI.create(rejected), headers(), 8443, AUTH));
+        }
+        assertEquals(405, settings.reject("POST", URI.create(route + "?target=other"), headers(), 8443, AUTH));
+        assertEquals(405, settings.reject("GET", URI.create(route), headers(), 8443, AUTH));
+        for (final var target : List.of("/chat/completions", "/messages", "/responses/compact", "/responses/id", "")) {
+            assertThrows(IllegalArgumentException.class, () -> settings("http://10.0.0.1:8080/v1" + target, route, 1));
+        }
+        assertThrows(IllegalArgumentException.class, () -> settings("http://10.0.0.1:8080/v1/responses", ROUTE, 1));
+    }
+
+    @Test
     void headerAndBodyFramingPolicyIsBounded() {
-        final var settings = settings("http://10.0.0.1:8080/v1", ROUTE, 4);
+        final var settings = settings("http://10.0.0.1:8080/v1/chat/completions", ROUTE, 4);
         for (final var name : List.of("Host", "Authorization", "Content-Type", "Content-Length", "X-Header")) {
             final var headers = headers();
             headers.add(name, "duplicate");
@@ -190,12 +209,15 @@ class ProviderServicesGatewayTest {
 
     @Test
     void configurationRejectsGithubCapabilityPresenceEvenWhenBlank() {
-        final var settings = settings("http://10.0.0.1:8080/v1", ROUTE, 1);
+        final var settings = settings("http://10.0.0.1:8080/v1/chat/completions", ROUTE, 1);
         for (final var key : List.of("YCA_CONTEXT_TOKEN", "YCA_CONTEXT_GIT_TOKEN")) {
             for (final var value : List.of("", "c".repeat(43))) {
                 final var rejected = assertThrows(
                         IllegalArgumentException.class,
-                        () -> new ProviderServicesGateway(settings, Configuration.of(Map.of(key, value))));
+                        () -> new ProviderServicesGateway(
+                                settings,
+                                Configuration.of(Map.of(key, value)),
+                                new ProviderBudgetConfiguration(null, null, null)));
                 assertEquals("GitHub capabilities are not supported", rejected.getMessage());
             }
         }
@@ -203,10 +225,11 @@ class ProviderServicesGatewayTest {
 
     @Test
     void invalidCredentialsAreRejectedBeforeOpeningTlsAndDoNotEscapeInDiagnostics() {
-        final var settings = settings("http://10.0.0.1:8080/v1", ROUTE, 1);
+        final var settings = settings("http://10.0.0.1:8080/v1/chat/completions", ROUTE, 1);
         final var missing = assertThrows(
                 IllegalArgumentException.class,
-                () -> new ProviderServicesGateway(settings, Configuration.of(Map.of())));
+                () -> new ProviderServicesGateway(
+                        settings, Configuration.of(Map.of()), new ProviderBudgetConfiguration(null, null, null)));
         assertEquals("Invalid services credential", missing.getMessage());
         for (final var credential : List.of("secret\r\ninjected: true", "secret value", "s".repeat(4097))) {
             final var invalid = assertThrows(
@@ -217,7 +240,8 @@ class ProviderServicesGatewayTest {
                                     ProviderServicesGateway.YCA_SERVICES_PROVIDER_TOKEN,
                                     "p".repeat(43),
                                     ProviderServicesGateway.YCA_SERVICES_UPSTREAM_TOKEN,
-                                    credential))));
+                                    credential)),
+                            new ProviderBudgetConfiguration(null, null, null)));
             assertEquals("Invalid upstream credential", invalid.getMessage());
         }
     }
@@ -226,7 +250,7 @@ class ProviderServicesGatewayTest {
     void settingsJsonRoundTripIncludesExplicitLocalConcurrencyLimit() {
         try (final var json = new JsonMapperImpl(
                 List.of(new ProviderServicesGateway$Settings$FusionJsonCodec()), ignored -> Optional.empty())) {
-            final var settings = settings("http://10.0.0.1:8080/v1", ROUTE, 3);
+            final var settings = settings("http://10.0.0.1:8080/v1/chat/completions", ROUTE, 3);
             final var encoded = json.toString(settings);
             assertEquals(settings, json.fromString(ProviderServicesGateway.Settings.class, encoded));
             assertTrue(encoded.contains("\"maxConcurrent\":3"));

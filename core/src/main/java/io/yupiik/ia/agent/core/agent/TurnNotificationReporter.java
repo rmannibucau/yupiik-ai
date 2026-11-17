@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /**
  * Turn-finalization reporting: per-turn metrics emission, the OS turn-end notification and the
@@ -34,6 +35,8 @@ import java.util.function.Supplier;
  * state, builds the events and hands them to the configured {@link Consumer}.
  */
 public final class TurnNotificationReporter {
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+
     private final TurnState turnState;
     private final PrecisionDurationMarkerProvider precisionDurationMarker;
     private final NotificationService notificationService;
@@ -133,7 +136,7 @@ public final class TurnNotificationReporter {
                     || !(message.content() instanceof String content)) {
                 continue;
             }
-            final var singleLine = content.replaceAll("\\s+", " ").strip();
+            final var singleLine = WHITESPACE.matcher(content).replaceAll(" ").strip();
             return singleLine.length() <= 400 ? singleLine : singleLine.substring(0, 397) + "...";
         }
         return "";

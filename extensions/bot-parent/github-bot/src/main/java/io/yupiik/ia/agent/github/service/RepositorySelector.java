@@ -15,8 +15,10 @@
  */
 package io.yupiik.ia.agent.github.service;
 
+import io.yupiik.fusion.framework.api.container.Types;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -26,7 +28,6 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -125,9 +126,10 @@ public final class RepositorySelector {
                 if (!visited.add(next) || visited.size() > 1000) {
                     throw new IllegalStateException("Incomplete repository discovery");
                 }
-                final var page = client.page(next);
-                for (final var item : (List<?>) page.body()) {
-                    final var repo = repository((Map<?, ?>) item);
+                final var page = client.<List<RestResponses.Repository>>page(
+                        next, new Types.ParameterizedTypeImpl(List.class, RestResponses.Repository.class));
+                for (final var item : page.body()) {
+                    final var repo = repository(item);
                     discovered.put(repo.fullName().toLowerCase(Locale.ROOT), repo);
                 }
                 next = page.next();
@@ -148,7 +150,7 @@ public final class RepositorySelector {
                         name,
                         discovered.containsKey(name)
                                 ? discovered.get(name)
-                                : repository((Map<?, ?>) client.get("/repos/" + include)));
+                                : repository(client.get("/repos/" + include, RestResponses.Repository.class)));
             }
         }
         final var result = new ArrayList<Repository>();
@@ -166,17 +168,17 @@ public final class RepositorySelector {
         return cached;
     }
 
-    private static Repository repository(final Map<?, ?> value) {
-        final var name = (String) value.get("full_name");
+    private static Repository repository(final RestResponses.Repository value) {
+        final var name = value.full_name();
         if (name == null || !REPOSITORY_NAME.matcher(name).matches()) {
             throw new IllegalStateException("Invalid repository response");
         }
-        final var raw = value.get("visibility");
+        final var raw = value.visibility();
         final var visibility = raw == null
-                ? (Boolean.TRUE.equals(value.get("private")) ? Visibility.PRIVATE : Visibility.PUBLIC)
+                ? (Boolean.TRUE.equals(value.privateRepository()) ? Visibility.PRIVATE : Visibility.PUBLIC)
                 : Visibility.valueOf(raw.toString().toUpperCase(Locale.ROOT));
         return new Repository(
-                name, visibility, Boolean.TRUE.equals(value.get("archived")), Boolean.TRUE.equals(value.get("fork")));
+                name, visibility, Boolean.TRUE.equals(value.archived()), Boolean.TRUE.equals(value.fork()));
     }
 
     private static Pattern glob(final String value) {

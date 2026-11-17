@@ -17,13 +17,16 @@ package io.yupiik.ia.agent.slack.command;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
+import java.util.regex.Pattern;
 
 @RootConfiguration("-")
 public record TaskOptions(
         @Property(documentation = "Exact durable task SHA-256 ID.")
         String id) {
+    private static final Pattern TASK_ID = Pattern.compile("[a-f0-9]{64}");
+
     public TaskOptions {
-        if (id == null || !id.matches("[a-f0-9]{64}")) {
+        if (id == null || !TASK_ID.matcher(id).matches()) {
             throw new IllegalArgumentException("An exact Slack task ID is required");
         }
     }

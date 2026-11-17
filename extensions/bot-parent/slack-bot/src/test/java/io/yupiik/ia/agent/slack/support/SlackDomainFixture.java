@@ -21,15 +21,22 @@ import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.bot.feedback.FeedbackMailbox$Item$FusionJsonCodec;
 import io.yupiik.ia.agent.bot.feedback.FeedbackMailbox$Request$FusionJsonCodec;
 import io.yupiik.ia.agent.bot.feedback.FeedbackMailbox$Response$FusionJsonCodec;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
-import io.yupiik.ia.agent.github.model.AgentConfigurationDocument$FusionJsonCodec;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument$FusionJsonCodec;
 import io.yupiik.ia.agent.slack.configuration.SlackConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
+import io.yupiik.ia.agent.slack.context.SlackActionRegistry;
+import io.yupiik.ia.agent.slack.context.SlackContextAttempt;
+import io.yupiik.ia.agent.slack.context.SlackContextMailbox$Request$FusionJsonCodec;
+import io.yupiik.ia.agent.slack.context.SlackContextMailbox$Response$FusionJsonCodec;
+import io.yupiik.ia.agent.slack.model.SlackJson;
 import io.yupiik.ia.agent.slack.model.SlackQuestion$FusionJsonCodec;
 import io.yupiik.ia.agent.slack.model.SlackQuestionItem$FusionJsonCodec;
 import io.yupiik.ia.agent.slack.model.SlackQuestionRequest$FusionJsonCodec;
 import io.yupiik.ia.agent.slack.model.SlackTask;
 import io.yupiik.ia.agent.slack.model.SlackTask$FusionJsonCodec;
+import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackState$FusionJsonCodec;
 import io.yupiik.ia.agent.slack.store.SlackStore;
 import io.yupiik.ia.agent.slack.transport.SlackWebApi;
@@ -46,6 +53,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -61,18 +69,23 @@ import javax.net.ssl.SSLSession;
 
 /** No container boot, network, scheduler, credentials, Docker, or model in domain tests. */
 public final class SlackDomainFixture implements AutoCloseable {
-    public final JsonMapperImpl json = new JsonMapperImpl(
-            List.of(
-                    new SlackState$FusionJsonCodec(),
-                    new SlackTask$FusionJsonCodec(),
-                    new SlackQuestion$FusionJsonCodec(),
-                    new SlackQuestionRequest$FusionJsonCodec(),
-                    new SlackQuestionItem$FusionJsonCodec(),
-                    new FeedbackMailbox$Item$FusionJsonCodec(),
-                    new FeedbackMailbox$Request$FusionJsonCodec(),
-                    new FeedbackMailbox$Response$FusionJsonCodec(),
-                    new AgentConfigurationDocument$FusionJsonCodec()),
-            ignored -> Optional.empty());
+    public final JsonMapperImpl json = SlackJsonMapper.create(
+            new SlackState$FusionJsonCodec(),
+            new SlackTask$FusionJsonCodec(),
+            new SlackQuestion$FusionJsonCodec(),
+            new SlackQuestionRequest$FusionJsonCodec(),
+            new SlackQuestionItem$FusionJsonCodec(),
+            new FeedbackMailbox$Item$FusionJsonCodec(),
+            new FeedbackMailbox$Request$FusionJsonCodec(),
+            new FeedbackMailbox$Response$FusionJsonCodec(),
+            new SlackContextMailbox$Request$FusionJsonCodec(),
+            new SlackContextMailbox$Response$FusionJsonCodec(),
+            new AgentConfigurationDocument$FusionJsonCodec());
+    public final SlackContextConfiguration contextConfiguration =
+            new SlackContextConfiguration(false, true, false, List.of(), 30, 32, 12, 20, 131072, 20, 2, 600);
+    public final SlackActionRegistry actions = new SlackActionRegistry(contextConfiguration, Clock.systemUTC());
+    public final SlackContextAttempt.Dispatcher contextDispatcher =
+            new SlackContextAttempt.Dispatcher(contextConfiguration);
     public final SlackConfiguration configuration;
     public final SlackStore store;
     public final List<Exchange> exchanges = new ArrayList<>();
@@ -95,6 +108,7 @@ public final class SlackDomainFixture implements AutoCloseable {
                 List.of("C1", "C2"),
                 List.of("U1", "U2"),
                 false,
+                false,
                 "SLACK_APP_TOKEN",
                 "SLACK_BOT_TOKEN",
                 root.resolve("state").toString(),
@@ -106,6 +120,26 @@ public final class SlackDomainFixture implements AutoCloseable {
                 60,
                 86400);
         store = new SlackStore(configuration, json);
+    }
+
+    public SlackConfiguration channelMemberConfiguration() {
+        return new SlackConfiguration(
+                configuration.workspace(),
+                configuration.botUser(),
+                configuration.channels(),
+                List.of(),
+                true,
+                configuration.allowSlackConnect(),
+                configuration.appTokenEnv(),
+                configuration.botTokenEnv(),
+                configuration.home(),
+                configuration.agentConfiguration(),
+                configuration.maxPending(),
+                configuration.maxPendingPerUser(),
+                configuration.maxInputChars(),
+                configuration.maxAnswerChars(),
+                configuration.questionTimeoutSeconds(),
+                configuration.retentionSeconds());
     }
 
     public static SlackPrompts prompts() {
@@ -131,7 +165,7 @@ public final class SlackDomainFixture implements AutoCloseable {
                 null);
     }
 
-    public static SlackTask task(final String key, final String requester, final String state, final long created) {
+    public static SlackTask task(final String key, final String requester, final TaskStatus state, final long created) {
         return new SlackTask(
                 SlackStore.identity(key),
                 "T1",
@@ -149,6 +183,8 @@ public final class SlackDomainFixture implements AutoCloseable {
                 null,
                 null,
                 null,
+                null,
+                false,
                 null);
     }
 
@@ -159,8 +195,14 @@ public final class SlackDomainFixture implements AutoCloseable {
         });
     }
 
+    public SlackJson.Payload payload(final Map<String, Object> value) {
+        return json.fromString(SlackJson.Payload.class, json.toString(value));
+    }
+
     @Override
     public void close() {
+        contextDispatcher.close();
+        actions.close();
         http.close();
         json.close();
     }

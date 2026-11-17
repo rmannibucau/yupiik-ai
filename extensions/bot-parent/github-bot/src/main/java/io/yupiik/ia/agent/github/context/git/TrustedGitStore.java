@@ -55,6 +55,8 @@ import java.util.regex.Pattern;
  * (sampled during processes), not an OS quota. Each operation has a single wall-clock deadline.
  */
 public final class TrustedGitStore implements AutoCloseable {
+    private static final Pattern CONFIG_KEY = Pattern.compile("[a-z][a-z0-9-]*");
+
     private static final Pattern REPOSITORY =
             Pattern.compile("https://github\\.com/[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_][A-Za-z0-9_.-]*\\.git");
     private static final Pattern SHA = Pattern.compile("[0-9a-f]{40}");
@@ -574,7 +576,7 @@ public final class TrustedGitStore implements AutoCloseable {
             }
             final var key = line.substring(0, colon).toLowerCase(Locale.ROOT);
             final var value = line.substring(colon + 1).strip();
-            if (!key.matches("[a-z][a-z0-9-]*") || value.chars().anyMatch(c -> c < 32 || c > 126)) {
+            if (!CONFIG_KEY.matcher(key).matches() || value.chars().anyMatch(c -> c < 32 || c > 126)) {
                 throw new IOException("Unsafe Git CGI header");
             }
             if ("status".equals(key)) {

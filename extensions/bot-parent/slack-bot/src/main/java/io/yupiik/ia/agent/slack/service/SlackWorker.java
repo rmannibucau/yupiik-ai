@@ -15,14 +15,21 @@
  */
 package io.yupiik.ia.agent.slack.service;
 
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.bot.feedback.FeedbackMailbox;
 import io.yupiik.ia.agent.bot.runtime.AttemptPreparation;
 import io.yupiik.ia.agent.bot.runtime.ResultReader;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
+import io.yupiik.ia.agent.slack.context.SlackActionRegistry;
+import io.yupiik.ia.agent.slack.context.SlackContextAttempt;
+import io.yupiik.ia.agent.slack.context.SlackContextStorage;
+import io.yupiik.ia.agent.slack.model.SlackJson;
 import io.yupiik.ia.agent.slack.model.SlackTask;
+import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackStore;
 import io.yupiik.ia.agent.slack.transport.SlackWebApi;
 import java.io.IOException;
@@ -31,6 +38,7 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +61,10 @@ public final class SlackWorker {
     private final SlackWebApi api;
     private final String fingerprint;
     private final HostAdmission admission;
+    private final SlackContextConfiguration contextConfiguration;
+    private final SlackActionRegistry actions;
+    private final SlackContextAttempt.Dispatcher contextDispatcher;
+    private final SlackContextStorage contextStorage;
 
     public SlackWorker(
             final SlackConfiguration configuration,
@@ -63,7 +75,11 @@ public final class SlackWorker {
             final Sandbox sandbox,
             final SlackFeedback feedback,
             final SlackWebApi api,
-            final HostAdmission admission) {
+            final HostAdmission admission,
+            final SlackContextConfiguration contextConfiguration,
+            final SlackActionRegistry actions,
+            final SlackContextAttempt.Dispatcher contextDispatcher,
+            final SlackContextStorage contextStorage) {
         this.configuration = configuration;
         this.executor = executor;
         this.json = json;
@@ -73,29 +89,42 @@ public final class SlackWorker {
         this.feedback = feedback;
         this.api = api;
         this.admission = admission;
-        fingerprint = SlackStore.identity("slack-runtime-v1:" + executor
+        this.contextConfiguration = contextConfiguration;
+        this.actions = actions;
+        this.contextDispatcher = contextDispatcher;
+        this.contextStorage = contextStorage;
+        fingerprint = SlackStore.identity("runtime-ownership-v2:" + SlackExecutionPolicy.POLICY + ':' + executor
                 + (sandbox.recoveryIdentity().isBlank() ? "" : ':' + sandbox.recoveryIdentity()));
     }
 
     public void recover() {
         for (final var task : store.list()) {
-            if (task.terminal() || "queued".equals(task.status())) {
+            if (task.terminal() || task.status() == TaskStatus.queued) {
                 continue;
             }
             if (task.runtimeId() == null) {
-                update(task.id(), current -> current.transition("recovery_blocked", System.currentTimeMillis()));
+                update(
+                        task.id(),
+                        current -> current.transition(TaskStatus.recovery_blocked, System.currentTimeMillis()));
                 continue;
             }
             if (!validRuntime(task)) {
-                update(task.id(), current -> current.transition("recovery_blocked", System.currentTimeMillis()));
+                update(
+                        task.id(),
+                        current -> current.transition(TaskStatus.recovery_blocked, System.currentTimeMillis()));
                 continue;
             }
             try {
                 sandbox.stop(task.runtimeId());
-                // Unknown publication outcomes and stale live question controls are intentionally not resumed.
-                update(task.id(), current -> current.feedback(null, "recovery_blocked", System.currentTimeMillis()));
+                // Unknown publication outcomes and stale live question controls are intentionally not
+                // resumed.
+                update(
+                        task.id(),
+                        current -> current.feedback(null, TaskStatus.recovery_blocked, System.currentTimeMillis()));
             } catch (final RuntimeException unknown) {
-                update(task.id(), current -> current.transition("recovery_blocked", System.currentTimeMillis()));
+                update(
+                        task.id(),
+                        current -> current.transition(TaskStatus.recovery_blocked, System.currentTimeMillis()));
             }
         }
     }
@@ -107,7 +136,8 @@ public final class SlackWorker {
                 return false;
             }
             try (final var lease = admitted.orElseThrow()) {
-                lease.confirmTermination(); // No launch is possible until execute marks this lease uncertain.
+                lease.confirmTermination(); // No launch is possible until execute marks this lease
+                // uncertain.
                 return runAdmitted(lease);
             }
         } catch (final IOException failure) {
@@ -117,18 +147,19 @@ public final class SlackWorker {
 
     private boolean runAdmitted(final HostAdmission.Lease lease) {
         final var claimed = store.transaction(tasks -> {
-            if (tasks.stream().anyMatch(task -> "recovery_blocked".equals(task.status()))) {
-                return null; // Unknown runtimes/publication state require operator reconciliation before new work.
+            if (tasks.stream().anyMatch(task -> task.status() == TaskStatus.recovery_blocked)) {
+                return null; // Unknown runtimes/publication state require operator reconciliation before
+                // new work.
             }
             for (int i = 0; i < tasks.size(); i++) {
                 final var task = tasks.get(i);
-                if ("queued".equals(task.status())
+                if (task.status() == TaskStatus.queued
                         && tasks.stream()
                                 .noneMatch(other -> !other.id().equals(task.id())
                                         && other.conversation().equals(task.conversation())
                                         && !other.terminal()
-                                        && !"queued".equals(other.status()))) {
-                    final var next = task.transition("preparing", System.currentTimeMillis());
+                                        && other.status() != TaskStatus.queued)) {
+                    final var next = task.transition(TaskStatus.preparing, System.currentTimeMillis());
                     tasks.set(i, next);
                     return next;
                 }
@@ -148,23 +179,41 @@ public final class SlackWorker {
         boolean terminated = false;
         boolean restoreInterrupt = Thread.interrupted();
         Thread executionThread = null;
+        SlackContextAttempt context = null;
+        SlackActionRegistry.Grant grant = null;
         final var completion = new CompletableFuture<Integer>();
         try {
+            if (contextConfiguration.enabled()) {
+                grant = actions.claim(claimed, claimed.attempt(), System.currentTimeMillis())
+                        .orElse(null);
+            }
+            if (grant != null) {
+                contextStorage.validate(executor);
+            }
             final var root = Path.of(executor.attemptRoot()).toAbsolutePath().normalize();
             directory = new AttemptPreparation(json)
                     .prepare(Path.of(configuration.agentConfiguration()), root, "yca-slack-");
-            Files.createDirectory(
-                    directory.resolve("feedback"),
-                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
-            Files.writeString(
-                    directory.resolve(".feedback-timeout"),
-                    Integer.toString(configuration.questionTimeoutSeconds()),
-                    StandardOpenOption.CREATE_NEW);
-            final var prompt = prompts.render(claimed, store.list());
+            if (grant == null) {
+                Files.createDirectory(
+                        directory.resolve("feedback"),
+                        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+                Files.writeString(
+                        directory.resolve(".feedback-timeout"),
+                        Integer.toString(configuration.questionTimeoutSeconds()),
+                        StandardOpenOption.CREATE_NEW);
+            } else {
+                // SlackFeedback retains question text/options/answers in durable state. Do not enable
+                // that transport in transient mode until it too has an in-memory lifecycle.
+                contextStorage.sanitize(directory.resolve("configuration.json"), json);
+                context = new SlackContextAttempt(
+                        directory, json, contextConfiguration, api, grant, Clock.systemUTC(), contextDispatcher);
+            }
+            final var prompt = prompts.render(claimed, store.list(), context != null);
             runtime = "yca-slack-" + claimed.id().substring(0, 32) + "-" + (claimed.attempt() + 1);
-            final var durable = claimed.running(directory.toString(), runtime, fingerprint, System.currentTimeMillis());
+            final var durable = claimed.running(
+                    directory.toString(), runtime, fingerprint, context != null, System.currentTimeMillis());
             update(claimed.id(), current -> {
-                if (!"preparing".equals(current.status())) {
+                if (current.status() != TaskStatus.preparing) {
                     throw new IllegalStateException("Task was cancelled during preparation");
                 }
                 return durable;
@@ -172,28 +221,45 @@ public final class SlackWorker {
             Files.delete(directory.resolve(".prepared-only"));
             final var attempt = directory;
             final var identity = runtime;
+            final var temporaryDirectory = context == null
+                    ? null
+                    : Files.createDirectory(
+                            directory.resolve("tmp"),
+                            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
             // A borrowed worker slot is retained while the agent synchronously waits for ask_user.
             lease.markUncertain();
             executionThread = Thread.ofVirtual().name(identity).start(() -> {
                 try {
-                    completion.complete(sandbox.execute(attempt, identity, prompt));
+                    completion.complete(sandbox.execute(attempt, identity, prompt, temporaryDirectory));
                 } catch (final Throwable failure) {
                     completion.completeExceptionally(failure);
                 }
             });
-            try (final var mailbox = new FeedbackMailbox(directory.resolve("feedback"), json)) {
+            try (final var mailbox =
+                    context == null ? new FeedbackMailbox(directory.resolve("feedback"), json) : null) {
                 while (!completion.isDone()) {
                     final var current = find(claimed.id());
-                    if ("cancel_requested".equals(current.status()) || "recovery_blocked".equals(current.status())) {
+                    if (current.status() == TaskStatus.cancel_requested
+                            || current.status() == TaskStatus.recovery_blocked) {
+                        if (context != null) {
+                            context.close();
+                        }
                         quiesce(runtime, executionThread, completion);
                         restoreInterrupt |= Thread.interrupted();
                         terminated = true;
-                        if (!"recovery_blocked".equals(current.status())) {
-                            update(claimed.id(), task -> task.feedback(null, "cancelled", System.currentTimeMillis()));
+                        if (current.status() != TaskStatus.recovery_blocked) {
+                            update(
+                                    claimed.id(),
+                                    task -> task.feedback(null, TaskStatus.cancelled, System.currentTimeMillis()));
                         }
                         return;
                     }
-                    feedback.poll(claimed.id(), mailbox);
+                    if (mailbox != null) {
+                        feedback.poll(claimed.id(), mailbox);
+                    }
+                    if (context != null) {
+                        context.poll();
+                    }
                     try {
                         completion.get(25, TimeUnit.MILLISECONDS);
                     } catch (final TimeoutException waiting) {
@@ -204,21 +270,26 @@ public final class SlackWorker {
                     throw new IllegalStateException("Sandbox execution did not succeed");
                 }
             }
+            if (context != null) {
+                context.close();
+            }
             sandbox.stop(runtime);
             terminated = true;
             final var current = find(claimed.id());
-            if ("cancel_requested".equals(current.status())) {
-                update(claimed.id(), task -> task.feedback(null, "cancelled", System.currentTimeMillis()));
+            if (current.status() == TaskStatus.cancel_requested) {
+                update(claimed.id(), task -> task.feedback(null, TaskStatus.cancelled, System.currentTimeMillis()));
                 return;
             }
-            final var parsed = json.fromString(
-                    Object.class,
+            final var result = json.fromString(
+                    Result.class,
                     ResultReader.read(
                             directory.resolve("output/result.json"), configuration.maxAnswerChars() * 6 + 1024));
-            if (!(parsed instanceof Map<?, ?> result)
-                    || !result.keySet().equals(Set.of("taskId", "summary"))
-                    || !claimed.id().equals(result.get("taskId"))
-                    || !(result.get("summary") instanceof String answer)
+            if (result == null) {
+                throw new IllegalStateException("Invalid bounded Slack result contract");
+            }
+            final var answer = result.summary();
+            if (!claimed.id().equals(result.taskId())
+                    || answer == null
                     || answer.isBlank()
                     || answer.length() > configuration.maxAnswerChars()) {
                 throw new IllegalStateException("Invalid bounded Slack result contract");
@@ -227,17 +298,18 @@ public final class SlackWorker {
                 for (int index = 0; index < tasks.size(); index++) {
                     final var task = tasks.get(index);
                     if (task.id().equals(claimed.id())) {
-                        if ("cancel_requested".equals(task.status())) {
-                            tasks.set(index, task.feedback(null, "cancelled", System.currentTimeMillis()));
+                        if (task.status() == TaskStatus.cancel_requested) {
+                            tasks.set(index, task.feedback(null, TaskStatus.cancelled, System.currentTimeMillis()));
                             return false;
                         }
-                        if (!Set.of("running", "waiting_for_user").contains(task.status())) {
+                        if (!Set.of(TaskStatus.running, TaskStatus.waiting_for_user)
+                                .contains(task.status())) {
                             return false;
                         }
                         tasks.set(
                                 index,
-                                task.feedback(null, "running", System.currentTimeMillis())
-                                        .publication(answer, null, "publishing", System.currentTimeMillis()));
+                                task.feedback(null, TaskStatus.running, System.currentTimeMillis())
+                                        .publication(answer, null, TaskStatus.publishing, System.currentTimeMillis()));
                         return true;
                     }
                 }
@@ -247,36 +319,33 @@ public final class SlackWorker {
                 return;
             }
             try {
-                final var response = api.postMessage(Map.of(
-                                "channel",
+                final var response = api.postMessage(new SlackJson.PostMessage(
                                 claimed.channel(),
-                                "thread_ts",
                                 claimed.thread(),
-                                "text",
                                 "Assistant response",
-                                "unfurl_links",
                                 false,
-                                "unfurl_media",
                                 false,
-                                "blocks",
                                 answerBlocks(answer)))
                         .toCompletableFuture()
                         .join();
-                if (!(response.get("ts") instanceof String ts)
-                        || !claimed.channel().equals(response.get("channel"))) {
+                final var ts = response.ts();
+                if (ts == null || !claimed.channel().equals(response.channel())) {
                     throw new IllegalStateException("Invalid Slack publication receipt");
                 }
-                update(claimed.id(), task -> task.publication(answer, ts, "done", System.currentTimeMillis()));
+                update(claimed.id(), task -> task.publication(answer, ts, TaskStatus.done, System.currentTimeMillis()));
             } catch (final RuntimeException ambiguous) {
-                update(claimed.id(), task -> task.transition("recovery_blocked", System.currentTimeMillis()));
+                update(claimed.id(), task -> task.transition(TaskStatus.recovery_blocked, System.currentTimeMillis()));
             }
         } catch (final Exception failure) {
+            if (context != null) {
+                context.close();
+            }
             if (failure instanceof InterruptedException) {
                 restoreInterrupt = true;
             }
             restoreInterrupt |= Thread.interrupted();
             if (runtime == null) {
-                update(claimed.id(), task -> task.transition("failed", System.currentTimeMillis()));
+                update(claimed.id(), task -> task.transition(TaskStatus.failed, System.currentTimeMillis()));
             } else {
                 try {
                     quiesce(runtime, executionThread, completion);
@@ -287,22 +356,31 @@ public final class SlackWorker {
                             task -> task.question() != null
                                             && Set.of("publishing", "opening")
                                                     .contains(task.question().state())
-                                    ? task.transition("recovery_blocked", System.currentTimeMillis())
-                                    : task.feedback(null, "failed", System.currentTimeMillis()));
+                                    ? task.transition(TaskStatus.recovery_blocked, System.currentTimeMillis())
+                                    : task.feedback(null, TaskStatus.failed, System.currentTimeMillis()));
                 } catch (final RuntimeException unknown) {
                     restoreInterrupt |= Thread.interrupted();
-                    update(claimed.id(), task -> task.transition("recovery_blocked", System.currentTimeMillis()));
+                    update(
+                            claimed.id(),
+                            task -> task.transition(TaskStatus.recovery_blocked, System.currentTimeMillis()));
                 }
             }
         } finally {
+            if (context != null) {
+                context.close();
+            }
+            if (grant != null) {
+                grant.close();
+            }
             restoreInterrupt |= Thread.interrupted();
             if (runtime == null || terminated) {
                 lease.confirmTermination();
             }
             if (directory != null && (runtime == null || terminated)) {
-                // Preserve blocked publication state/results for manual reconciliation.
+                // Context result bodies are transient even when publication is ambiguous. Only
+                // bounded durable metadata survives. Unconfirmed runtimes still retain their attempt.
                 final var finalState = find(claimed.id());
-                if (!"recovery_blocked".equals(finalState.status())) {
+                if (finalState.contextBearing() || finalState.status() != TaskStatus.recovery_blocked) {
                     try {
                         AttemptPreparation.delete(directory);
                     } catch (final IOException ignored) {
@@ -315,6 +393,9 @@ public final class SlackWorker {
             }
         }
     }
+
+    @JsonModel
+    public record Result(String taskId, String summary) {}
 
     private void quiesce(final String runtime, final Thread thread, final CompletableFuture<Integer> completion) {
         if (thread == null) {

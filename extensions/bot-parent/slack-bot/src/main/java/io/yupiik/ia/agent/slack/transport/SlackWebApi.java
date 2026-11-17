@@ -15,8 +15,8 @@
  */
 package io.yupiik.ia.agent.slack.transport;
 
-import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.slack.model.SlackJson;
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -37,9 +37,22 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
-/** Bounded, non-replaying Slack JSON POST transport. Dependencies are borrowed, not closed. */
+/**
+ * Bounded, same-origin Slack JSON POST transport with typed {@link SlackJson} requests/responses and no retries.
+ * The parent constructs this object and owns the mapper, HTTP client and token suppliers; close Socket Mode
+ * before closing borrowed dependencies. The client must be redirect-never, authenticator-free and cookie-free;
+ * listeners must neither log authorization/bodies nor replay POSTs. HTTPS is required except numeric loopback fixtures.
+ *
+ * <p>Connection discovery uses the app token; message/view publication uses the bot token. Requests have a timeout
+ * and request/response byte limits. Failures expose only sanitized {@link SlackApiException} metadata, never bodies,
+ * credentials, WebSocket tickets, request URIs or nested transport exceptions. The parent must defer on 429 using
+ * {@link SlackApiException#retryAfter()} and never blindly retry a publication with an uncertain outcome.
+ */
 public final class SlackWebApi {
+    private static final Pattern TOKEN_CHARACTERS = Pattern.compile("[A-Za-z0-9-]+");
+
     private static final Set<String> SAFE_ERRORS = Set.of(
             "invalid_auth",
             "not_authed",
@@ -60,16 +73,20 @@ public final class SlackWebApi {
             "disabled",
             "not_enabled",
             "restricted_action",
+            "invalid_action_token",
+            "action_token_expired",
+            "expired_action_token",
+            "user_not_found",
             "message_too_long");
     private final JsonMapper json;
-    private final ExtendedHttpClient client;
+    private final HttpClient client;
     private final Settings settings;
     private final Supplier<String> appToken;
     private final Supplier<String> botToken;
 
     public SlackWebApi(
             final JsonMapper json,
-            final ExtendedHttpClient client,
+            final HttpClient client,
             final Settings settings,
             final Supplier<String> appToken,
             final Supplier<String> botToken) {
@@ -108,13 +125,14 @@ public final class SlackWebApi {
     }
 
     public CompletionStage<URI> openConnection() {
-        final var source = post("apps.connections.open", Map.of(), appToken, "xapp-");
+        final var source =
+                post("apps.connections.open", Map.of(), appToken, "xapp-", SlackJson.ConnectionResponse.class);
         final var result = source.thenApply(body -> {
             try {
-                if (!(body.get("url") instanceof String url)) {
+                if (body.url() == null) {
                     throw failure(200, "invalid_response", Optional.empty());
                 }
-                final var uri = URI.create(url);
+                final var uri = URI.create(body.url());
                 final var loopback =
                         Set.of("127.0.0.1", "[::1]", "::1").contains(uri.getHost() == null ? "" : uri.getHost());
                 if (uri.getHost() == null
@@ -137,29 +155,41 @@ public final class SlackWebApi {
         return result;
     }
 
-    public CompletionStage<Map<String, Object>> postMessage(final Map<String, Object> payload) {
-        return post("chat.postMessage", payload, botToken, "xoxb-");
+    public CompletionStage<SlackJson.ApiResponse> postMessage(final SlackJson.PostMessage payload) {
+        return post("chat.postMessage", payload, botToken, "xoxb-", SlackJson.ApiResponse.class);
     }
 
-    public CompletionStage<Map<String, Object>> openView(final Map<String, Object> payload) {
-        return post("views.open", payload, botToken, "xoxb-");
+    public CompletionStage<SlackJson.ApiResponse> openView(final SlackJson.OpenView payload) {
+        return post("views.open", payload, botToken, "xoxb-", SlackJson.ApiResponse.class);
     }
 
-    private CompletableFuture<Map<String, Object>> post(
+    public CompletionStage<SlackJson.UserInfoResponse> memberInfo(final String userId) {
+        return post("users.info", Map.of("user", userId), botToken, "xoxb-", SlackJson.UserInfoResponse.class);
+    }
+
+    public CompletionStage<SlackJson.SearchResponse> searchContext(final SlackJson.SearchRequest payload) {
+        return post("assistant.search.context", payload, botToken, "xoxb-", SlackJson.SearchResponse.class);
+    }
+
+    private <T extends SlackJson.Result> CompletableFuture<T> post(
             final String method,
-            final Map<String, Object> payload,
+            final Object payload,
             final Supplier<String> tokenSupplier,
-            final String prefix) {
+            final String prefix,
+            final Class<T> responseType) {
         try {
             final var token = tokenSupplier.get();
-            if (token == null || !token.startsWith(prefix) || !token.matches("[A-Za-z0-9-]+")) {
+            if (token == null
+                    || !token.startsWith(prefix)
+                    || !TOKEN_CHARACTERS.matcher(token).matches()) {
                 return CompletableFuture.failedFuture(failure(0, "invalid_token", Optional.empty()));
             }
             final var body = json.toString(Objects.requireNonNull(payload)).getBytes(StandardCharsets.UTF_8);
             if (body.length > settings.maxRequestBytes()) {
                 return CompletableFuture.failedFuture(failure(0, "request_too_large", Optional.empty()));
             }
-            // Only constant method names reach this private method. No caller-controlled URLs or response_url support.
+            // Only constant method names reach this private method. No caller-controlled URLs or
+            // response_url support.
             final var request = HttpRequest.newBuilder(settings.base().resolve(method))
                     .timeout(settings.requestTimeout())
                     .header("Authorization", "Bearer " + token)
@@ -172,7 +202,7 @@ public final class SlackWebApi {
                 metadata.set(info);
                 return new BoundedBody(settings.maxResponseBytes());
             });
-            final var result = new CompletableFuture<Map<String, Object>>();
+            final var result = new CompletableFuture<T>();
             exchange.whenComplete((response, error) -> {
                 if (error != null) {
                     final var info = metadata.get();
@@ -195,7 +225,7 @@ public final class SlackWebApi {
                     return;
                 }
                 try {
-                    result.complete(decode(response));
+                    result.complete(decode(response, responseType));
                 } catch (final SlackApiException safe) {
                     result.completeExceptionally(safe);
                 } catch (final RuntimeException unsafe) {
@@ -213,8 +243,7 @@ public final class SlackWebApi {
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> decode(final HttpResponse<byte[]> response) {
+    private <T extends SlackJson.Result> T decode(final HttpResponse<byte[]> response, final Class<T> responseType) {
         final var status = response.statusCode();
         final var retry = retryAfter(response.headers());
         if (status == 429) {
@@ -223,16 +252,15 @@ public final class SlackWebApi {
         if (status < 200 || status >= 300) {
             throw failure(status, "http_error", retry);
         }
-        final var decoded = json.fromString(Object.class, new String(response.body(), StandardCharsets.UTF_8));
-        if (!(decoded instanceof Map<?, ?> body) || !(body.get("ok") instanceof Boolean ok)) {
+        final var body = json.fromString(responseType, new String(response.body(), StandardCharsets.UTF_8));
+        if (body == null || body.ok() == null) {
             throw failure(status, "invalid_response", Optional.empty());
         }
-        if (!ok) {
-            final var code = body.get("error");
-            throw failure(
-                    status, code instanceof String text && SAFE_ERRORS.contains(text) ? text : "api_error", retry);
+        if (!body.ok()) {
+            final var code = body.error();
+            throw failure(status, code != null && SAFE_ERRORS.contains(code) ? code : "api_error", retry);
         }
-        return (Map<String, Object>) body;
+        return body;
     }
 
     private Optional<Duration> retryAfter(final HttpHeaders headers) {

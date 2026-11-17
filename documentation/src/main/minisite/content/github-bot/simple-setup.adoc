@@ -10,11 +10,14 @@
 This runbook deploys the JVM dispatcher and Docker agent in strict mode on a dedicated Linux server with systemd.
 Commands target an Ubuntu-like host; adapt package installation to the supported distribution actually installed.
 
+TIP: For a containerized dispatcher as well as agents and gateways, use xref:docker.adoc[the full Docker setup] with strict broker services and private TLS instead.
+Optional cross-bot limits belong to the separate xref:../bots/docker-shared-slots.adoc[Docker shared-slots add-on], not this stand-alone setup.
+
 Run workstation commands from the project checkout and server commands on the target host.
 Commands are examples to execute deliberately, phase by phase, not a single unattended installation script.
 
-This is a complete, deliberately simple setup case, not pseudocode: one server, one dispatcher identity, one worker, a verified fork and an existing provider configuration.
-It uses the same strict Docker workflow exercised by the live review and solve-to-PR acceptance tests.
+This is a deliberately simple setup case: one server, one dispatcher identity, one worker, a verified fork and an existing provider configuration.
+Qualify its examples against the current command metadata and your actual images, permissions, tools and provider before unattended use.
 
 Only your host names, identities, approved artifact references and credentials need replacing; do not copy the disposable test identities into a real deployment.
 No server changes are performed by reading or building this documentation.
@@ -56,16 +59,9 @@ Use a dedicated host or VM with no unrelated workloads, credentials, or sensitiv
 
 The backend currently limits each agent to 2 CPUs, 4 GiB memory, 512 PIDs, and a 1 GiB temporary filesystem; allow additional capacity for the dispatcher and Docker.
 
-Previously verified live workflows include private PR review, Discussions help/body/comment/reply routing, strict solve through a separate fork, and review acknowledgement-loss reconciliation.
-This evidence is summarized on xref:index.adoc[validation history and version 0 limits].
-It does not replace acceptance on this server with its actual identity, tools, permissions and provider.
-That historical evidence does not establish acceptance of the new broker/context-service or existing-PR fix implementation in this checkout.
-The operator host now has promoted private TLS, a fixed control bridge and immutable images, with read-only CLI startup passing and timers still paused.
-Live GitHub/model acceptance is recorded separately in operator release evidence.
-
-The final reactor package/Jib run recorded 2903 tests, zero failures, zero errors and seven skips, including 575 GitHub bot tests with zero failures and six skips.
-See xref:egress.adoc#restricted-services-evidence[the current build and synthetic final-image evidence] for logs and limitations; older failing runs and the 538-test broker baseline are historical.
-Do not enable timers before the manual acceptance phase passes.
+See xref:index.adoc[validation history and version 0 limits] for the scope of recorded evidence.
+It does not establish acceptance of your host, the broker/context-service route or every remote mutation window.
+Run the manual acceptance phase with the installed release and keep scheduling disabled until it passes.
 
 == Deployment values
 
@@ -470,7 +466,7 @@ Disposable `/tmp` deployment probes are local acceptance artifacts, not installe
 
 This is an alternative to the unrestricted export walkthrough, not a change to its defaults.
 The implementation, package/Jib run and final native AMD64 synthetic image acceptance are complete; the latter uses synthetic HTTP Git/RPC fixtures, NOT production ContextService.
-The operator host's private TLS, fixed control bridge and immutable images have been promoted and read-only CLI startup passed, but timers remain paused pending separate live acceptance.
+Qualify private TLS, the fixed control bridge and immutable images on the target daemon before live acceptance; read-only CLI startup is only an initial wiring check.
 Live GitHub/model acceptance is recorded separately in operator release evidence; see xref:egress.adoc#restricted-services-evidence[completed checks and their limits].
 
 . Pause the actual poll, worker and maintenance schedules, coordinate manual writers/shared execution locks, drain or reconcile active runtimes and publication intents, and record exact image pins and timer states.

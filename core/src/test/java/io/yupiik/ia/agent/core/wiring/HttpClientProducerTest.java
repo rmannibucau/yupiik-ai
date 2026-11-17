@@ -36,7 +36,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.SecureRandom;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -113,14 +115,15 @@ class HttpClientProducerTest {
         final var config = TestConfigs.codingAgent(Map.of());
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new HttpClientProducer().httpClient(config, new NativeProviderConfiguration("relative")));
+                () -> new HttpClientProducer().httpClient(config, new NativeProviderConfiguration("relative", null)));
     }
 
     @Test
     void debugEnablesCurlLoggerWithPayload() throws Exception {
         final var config = TestConfigs.codingAgent(Map.of("yca.httpClient.debug", "true"));
         final var url = "http://127.0.0.1:" + server.getAddress().getPort() + "/echo";
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             client.send(HttpRequest.newBuilder(URI.create(url))
                     .header("Authorization", "Bearer secret-token")
                     .header("Content-Type", "application/json")
@@ -138,7 +141,8 @@ class HttpClientProducerTest {
     @Test
     void debugDisabledSkipsCurlLogger() throws Exception {
         final var config = TestConfigs.codingAgent(Map.of("yca.httpClient.debug", "false"));
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             final var url = "http://127.0.0.1:" + server.getAddress().getPort() + "/echo";
             client.send(HttpRequest.newBuilder(URI.create(url))
                     .POST(HttpRequest.BodyPublishers.ofString("{\"a\":1}"))
@@ -152,7 +156,8 @@ class HttpClientProducerTest {
         final var config = TestConfigs.codingAgent(Map.of(
                 "yca.httpClient.proxy.host", "proxy.example.com",
                 "yca.httpClient.proxy.port", "3128"));
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             final var selector = client.proxy().orElseThrow(() -> new AssertionError("proxy selector expected"));
             final var proxies = selector.select(
                     URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/"));
@@ -166,7 +171,8 @@ class HttpClientProducerTest {
     @Test
     void noProxyKeepsJdkDefaultSelection() throws Exception {
         final var config = TestConfigs.codingAgent(Map.of());
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             Assertions.assertTrue(client.proxy().isEmpty(), "no explicit proxy selector expected without proxy config");
         }
     }
@@ -202,7 +208,7 @@ class HttpClientProducerTest {
                     "yca.httpClient.proxy.user", "alice",
                     "yca.httpClient.proxy.password", "s3cret"));
             try (final var client =
-                    new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+                    new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
                 final var resp = client.send(HttpRequest.newBuilder(URI.create("http://test.invalid/"))
                         .build());
                 Assertions.assertEquals(200, resp.statusCode(), "the proxy must accept the authenticated retry");
@@ -218,7 +224,8 @@ class HttpClientProducerTest {
         final var config = TestConfigs.codingAgent(Map.of(
                 "yca.httpClient.proxy.host", "proxy.example.com",
                 "yca.httpClient.proxy.port", "3128"));
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             Assertions.assertTrue(
                     client.authenticator().isEmpty(), "no authenticator expected without proxy credentials");
         }
@@ -233,7 +240,8 @@ class HttpClientProducerTest {
                 "3128",
                 "yca.httpClient.proxy.noProxyHosts",
                 "127.0.0.1,.internal.corp,*.wild.corp,foo.*.corp"));
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             final var selector = client.proxy().orElseThrow(() -> new AssertionError("proxy selector expected"));
             assertTrue(isNoProxy(selector, "http://127.0.0.1:8080/path"), "exact host must bypass");
             assertTrue(
@@ -250,12 +258,59 @@ class HttpClientProducerTest {
     }
 
     @Test
+    void noProxyHelperPreservesLiteralGlobDotAndCaseSemantics() {
+        assertTrue(HttpClientProducer.matchesNoProxy("API.EXAMPLE", List.of(" api.example ")));
+        assertFalse(HttpClientProducer.matchesNoProxy("x.api.example", List.of("api.example")));
+        assertTrue(HttpClientProducer.matchesNoProxy("example", List.of(".EXAMPLE")));
+        assertTrue(HttpClientProducer.matchesNoProxy("a.b.example", List.of(".example")));
+        assertFalse(HttpClientProducer.matchesNoProxy("notexample", List.of(".example")));
+        assertFalse(HttpClientProducer.matchesNoProxy("example", List.of("*.example")));
+        assertTrue(HttpClientProducer.matchesNoProxy("a.b.example", List.of("*.example")));
+        assertTrue(HttpClientProducer.matchesNoProxy("myCORPservice", List.of("*corp*")));
+        assertTrue(HttpClientProducer.matchesNoProxy("a[1].example", List.of("a[1].*")));
+        assertFalse(HttpClientProducer.matchesNoProxy("a1.example", List.of("a[1].*")));
+        assertFalse(HttpClientProducer.matchesNoProxy("example", Arrays.asList(null, "", "  ")));
+        assertTrue(HttpClientProducer.matchesNoProxy("anything", List.of("*")));
+    }
+
+    @Test
+    void noProxySelectorRepeatedSelectionsKeepMatchingSemantics() throws Exception {
+        final var entries = List.of("API.EXAMPLE", ".internal.corp", "*.wild.corp", "foo.*.corp", "*corp*");
+        final var config = TestConfigs.codingAgent(Map.of(
+                "yca.httpClient.proxy.host", "proxy.example.com",
+                "yca.httpClient.proxy.port", "3128",
+                "yca.httpClient.proxy.noProxyHosts", String.join(",", entries)));
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
+            final var selector = client.proxy().orElseThrow();
+            for (int i = 0; i < 3; i++) {
+                for (final var host : List.of(
+                        "API.EXAMPLE",
+                        "x.api.example",
+                        "internal.corp",
+                        "a.internal.corp",
+                        "a.b.wild.corp",
+                        "foo.bar.corp",
+                        "mycorpservice",
+                        "unlisted.example")) {
+                    Assertions.assertEquals(
+                            HttpClientProducer.matchesNoProxy(host, entries),
+                            isNoProxy(selector, "https://" + host + "/"),
+                            host);
+                }
+            }
+            assertTrue(isNoProxy(selector, URI.create("file:///tmp/no-host")));
+        }
+    }
+
+    @Test
     void noProxyHostsCaseInsensitive() throws Exception {
         final var config = TestConfigs.codingAgent(Map.of(
                 "yca.httpClient.proxy.host", "proxy.example.com",
                 "yca.httpClient.proxy.port", "3128",
                 "yca.httpClient.proxy.noProxyHosts", "API.INTERNAL.CORP"));
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             final var selector = client.proxy().orElseThrow(() -> new AssertionError("proxy selector expected"));
             assertTrue(isNoProxy(selector, "http://api.internal.corp/"), "host matching must be case-insensitive");
         }
@@ -267,7 +322,8 @@ class HttpClientProducerTest {
                 "yca.httpClient.proxy.host", "proxy.example.com",
                 "yca.httpClient.proxy.port", "3128",
                 "yca.httpClient.proxy.noProxyHosts", "*"));
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             final var selector = client.proxy().orElseThrow(() -> new AssertionError("proxy selector expected"));
             assertTrue(isNoProxy(selector, "http://anything.example.com/"), "a lone * must bypass every host");
         }
@@ -278,7 +334,8 @@ class HttpClientProducerTest {
         final var config = TestConfigs.codingAgent(Map.of(
                 "yca.httpClient.proxy.host", "proxy.example.com",
                 "yca.httpClient.proxy.port", "3128"));
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             final var selector = client.proxy().orElseThrow(() -> new AssertionError("proxy selector expected"));
             assertTrue(isNoProxy(selector, URI.create("file:///tmp/x")), "a URI without host cannot be proxied");
         }
@@ -303,7 +360,7 @@ class HttpClientProducerTest {
                     "yca.httpClient.proxy.noProxyHosts", "127.0.0.1"));
             final var url = "http://127.0.0.1:" + server.getAddress().getPort() + "/direct";
             try (final var client =
-                    new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+                    new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
                 final var resp =
                         client.send(HttpRequest.newBuilder(URI.create(url)).build());
                 Assertions.assertEquals(200, resp.statusCode(), "the request must reach the real server directly");
@@ -322,7 +379,8 @@ class HttpClientProducerTest {
                 "yca.httpClient.certificates.custom.length", "1",
                 "yca.httpClient.certificates.custom.0.pem", pem));
         final var https = httpsServer();
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             final var resp = client.send(HttpRequest.newBuilder(
                             URI.create("https://localhost:" + https.getAddress().getPort() + "/"))
                     .build());
@@ -340,7 +398,7 @@ class HttpClientProducerTest {
                 "yca.httpClient.certificates.custom.0.pem", "not-a-pem"));
         assertThrows(
                 IllegalStateException.class,
-                () -> new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null)),
+                () -> new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null)),
                 "a malformed PEM must fail the client creation loudly");
     }
 
@@ -352,7 +410,8 @@ class HttpClientProducerTest {
                 "yca.httpClient.certificates.custom.length", "1",
                 "yca.httpClient.certificates.custom.0.pem", pem));
         final var https = httpsServer();
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             final var resp = client.send(HttpRequest.newBuilder(
                             URI.create("https://localhost:" + https.getAddress().getPort() + "/"))
                     .build());
@@ -369,7 +428,8 @@ class HttpClientProducerTest {
                 "yca.httpClient.certificates.importGlobalCertificate", "false",
                 "yca.httpClient.certificates.custom.length", "0"));
         final var https = httpsServer();
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             final var resp = client.send(HttpRequest.newBuilder(
                             URI.create("https://localhost:" + https.getAddress().getPort() + "/"))
                     .build());
@@ -383,7 +443,8 @@ class HttpClientProducerTest {
     void withoutCertificatesSelfSignedIsRejected() throws Exception {
         final var config = TestConfigs.codingAgent(Map.of());
         final var https = httpsServer();
-        try (final var client = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null))) {
+        try (final var client =
+                new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null))) {
             final var resp = client.send(HttpRequest.newBuilder(
                             URI.create("https://localhost:" + https.getAddress().getPort() + "/"))
                     .build());

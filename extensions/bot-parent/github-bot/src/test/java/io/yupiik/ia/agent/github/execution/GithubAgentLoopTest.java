@@ -24,7 +24,6 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.api.ConfiguringContainer;
 import io.yupiik.fusion.framework.api.RuntimeContainer;
-import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.configuration.impl.MapConfigSource;
 import io.yupiik.fusion.framework.api.container.FusionListener;
 import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
@@ -32,12 +31,14 @@ import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegis
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.bot.runtime.execution.AttemptRelay;
 import io.yupiik.ia.agent.core.cli.RunCommand;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.github.client.GitHubClient;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.store.MutableTask;
 import io.yupiik.ia.agent.github.store.TaskStore;
@@ -82,7 +83,9 @@ class GithubAgentLoopTest {
             final var preparation = new AttemptPreparation(
                     json,
                     new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                    new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get());
+                    new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                            .get()
+                            .shared());
             final var expected = Map.<String, Object>of(
                     "schemaVersion",
                     1,
@@ -137,7 +140,7 @@ class GithubAgentLoopTest {
                         json,
                         "127.0.0.1",
                         "http://127.0.0.1",
-                        Configuration.of(Map.of()))) {
+                        new ProviderBudgetConfiguration(null, null, null))) {
                     final var prepared = Files.readString(attempt.resolve("configuration.json"));
                     assertFalse(prepared.contains("regression-key"));
                     final var workspace = attempt.resolve("workspace");

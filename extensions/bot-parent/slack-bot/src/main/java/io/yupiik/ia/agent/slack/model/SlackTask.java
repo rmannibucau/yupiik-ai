@@ -26,7 +26,7 @@ public record SlackTask(
         String requester,
         String request,
         String conversation,
-        String status,
+        TaskStatus status,
         long created,
         long updated,
         int attempt,
@@ -35,12 +35,20 @@ public record SlackTask(
         String fingerprint,
         String answer,
         String messageTs,
-        SlackQuestion question) {
-    public boolean terminal() {
-        return "done".equals(status) || "cancelled".equals(status) || "failed".equals(status);
+        SlackQuestion question,
+        boolean contextBearing,
+        String publicationId) {
+    public SlackTask {
+        if (contextBearing && (answer != null || question != null)) {
+            throw new IllegalArgumentException("Context-bearing tasks cannot retain answer or feedback bodies");
+        }
     }
 
-    public SlackTask transition(final String state, final long now) {
+    public boolean terminal() {
+        return status.terminal();
+    }
+
+    public SlackTask transition(final TaskStatus state, final long now) {
         return new SlackTask(
                 id,
                 workspace,
@@ -58,10 +66,17 @@ public record SlackTask(
                 fingerprint,
                 answer,
                 messageTs,
-                question);
+                question,
+                contextBearing,
+                publicationId);
     }
 
-    public SlackTask running(final String path, final String runtime, final String configHash, final long now) {
+    public SlackTask running(
+            final String path,
+            final String runtime,
+            final String configHash,
+            final boolean withContext,
+            final long now) {
         return new SlackTask(
                 id,
                 workspace,
@@ -70,7 +85,7 @@ public record SlackTask(
                 requester,
                 request,
                 conversation,
-                "running",
+                TaskStatus.running,
                 created,
                 now,
                 attempt + 1,
@@ -79,10 +94,12 @@ public record SlackTask(
                 configHash,
                 null,
                 null,
+                null,
+                withContext,
                 null);
     }
 
-    public SlackTask publication(final String text, final String ts, final String state, final long now) {
+    public SlackTask publication(final String text, final String ts, final TaskStatus state, final long now) {
         return new SlackTask(
                 id,
                 workspace,
@@ -98,12 +115,14 @@ public record SlackTask(
                 attemptPath,
                 runtimeId,
                 fingerprint,
-                text,
+                contextBearing ? null : text,
                 ts,
-                question);
+                question,
+                contextBearing,
+                contextBearing && publicationId == null ? runtimeId + "-answer" : publicationId);
     }
 
-    public SlackTask feedback(final SlackQuestion next, final String state, final long now) {
+    public SlackTask feedback(final SlackQuestion next, final TaskStatus state, final long now) {
         return new SlackTask(
                 id,
                 workspace,
@@ -121,6 +140,8 @@ public record SlackTask(
                 fingerprint,
                 answer,
                 messageTs,
-                next);
+                next,
+                contextBearing,
+                publicationId);
     }
 }

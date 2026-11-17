@@ -30,7 +30,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -392,7 +391,7 @@ class PrivateStateTest {
     }
 
     private static JsonMapperImpl mapper() {
-        return new JsonMapperImpl(List.of(), key -> Optional.empty());
+        return ApprovalProtocolTest.mapper();
     }
 
     private static void removeTree(final Path directory) throws IOException {

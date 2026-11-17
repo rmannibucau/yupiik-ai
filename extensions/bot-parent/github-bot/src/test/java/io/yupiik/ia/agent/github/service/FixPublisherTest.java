@@ -102,6 +102,46 @@ class FixPublisherTest {
     }
 
     @Test
+    void mixedDeletionAndTypedRequestsKeepExactDurableWireEvidenceAfterRestart() throws Exception {
+        try (final var f = new Fixture()) {
+            f.prepare();
+            f.setChanges(List.of(
+                    change("src/new.txt", "Quotes: \"yes\"\nBackslash: \\ and accents: \u00e9"),
+                    new AgentResult.Change("src/run.sh", null, true, null)));
+            assertEquals(URL, f.publish());
+            final var request =
+                    TaskStore.map(TaskStore.map(f.journal().get("tree")).get("request"));
+            final var entries = (List<?>) request.get("tree");
+            final var deletion = new LinkedHashMap<String, Object>();
+            deletion.put("path", "src/run.sh");
+            deletion.put("mode", "100755");
+            deletion.put("type", "blob");
+            deletion.put("sha", null);
+            assertEquals(
+                    Map.of(
+                            "base_tree",
+                            ROOT,
+                            "tree",
+                            List.of(
+                                    Map.of("path", "src/new.txt", "mode", "100644", "type", "blob", "sha", BLOB),
+                                    deletion)),
+                    request);
+            final var blob =
+                    TaskStore.map(TaskStore.map(f.journal().get("blob-0")).get("request"));
+            assertEquals(
+                    Map.of(
+                            "content",
+                            f.result.strictSolve().changes().getFirst().content(),
+                            "encoding",
+                            "base64"),
+                    blob);
+            assertEquals(URL, f.restart().publish(f.task(), f.result));
+            assertEquals(List.of("blob-0", "tree", "commit", "cas"), f.writes);
+            assertTrue(f.unexpected.isEmpty(), f.unexpected.toString());
+        }
+    }
+
+    @Test
     void disabledAndEmptyExactAllowlistDenyBeforeWrites() throws Exception {
         try (final var f = new Fixture()) {
             for (final var config : List.of(

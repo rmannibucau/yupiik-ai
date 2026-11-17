@@ -37,6 +37,8 @@ public record ToolCard(
         long elapsedMs,
         boolean running,
         long ordinal) {
+    private static final Pattern TRAILING_ASTERISKS = Pattern.compile("\\*$");
+
     /** Uses the completed capture when the transcript contains only streamed/capped stdout. */
     public ToolCard withCapturedStatus(final ToolOutputStore.Entry entry) {
         if (entry == null || running || pending || entry.running() || entry.pending()) {
@@ -152,7 +154,7 @@ public record ToolCard(
                 rest = rest.substring(0, open).strip();
             }
         }
-        rest = rest.replaceAll("\\*$", "").strip();
+        rest = TRAILING_ASTERISKS.matcher(rest).replaceAll("").strip();
         if (rest.startsWith(":")) {
             rest = rest.substring(1).strip();
         }

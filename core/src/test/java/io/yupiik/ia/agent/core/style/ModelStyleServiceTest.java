@@ -66,7 +66,7 @@ class ModelStyleServiceTest {
 
     private ChatClient client(final CodingAgentConfiguration configuration, final ProviderManager providers) {
         final var httpClient =
-                new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null));
+                new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null, null));
         httpClients.add(httpClient);
         final var client = new ChatClient(configuration, mapper, providers, Clock.systemUTC(), httpClient);
         chatClients.add(client);

@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.core.llm.ProviderRequestBudget;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -54,7 +55,8 @@ class ProviderServicesGatewayBudgetTest {
     @Test
     void completedUpstreamErrorResponseReleasesBudgetAtEof() throws Exception {
         try (final var fixture = new Fixture(directory, false);
-                final var gateway = new ProviderServicesGateway(fixture.policy, Configuration.of(fixture.settings));
+                final var gateway = new ProviderServicesGateway(
+                        fixture.policy, Configuration.of(fixture.settings), budgetConfiguration(fixture.settings));
                 final var client = HttpClient.newBuilder()
                         .sslContext(fixture.tls)
                         .version(HttpClient.Version.HTTP_1_1)
@@ -72,8 +74,10 @@ class ProviderServicesGatewayBudgetTest {
     @Test
     void streamsShareTrustedBudgetAndCancellationRetainsDebt() throws Exception {
         try (final var fixture = new Fixture(directory, true);
-                final var first = new ProviderServicesGateway(fixture.policy, Configuration.of(fixture.settings));
-                final var second = new ProviderServicesGateway(fixture.policy, Configuration.of(fixture.settings));
+                final var first = new ProviderServicesGateway(
+                        fixture.policy, Configuration.of(fixture.settings), budgetConfiguration(fixture.settings));
+                final var second = new ProviderServicesGateway(
+                        fixture.policy, Configuration.of(fixture.settings), budgetConfiguration(fixture.settings));
                 final var client = HttpClient.newBuilder()
                         .sslContext(fixture.tls)
                         .version(HttpClient.Version.HTTP_1_1)
@@ -101,10 +105,17 @@ class ProviderServicesGatewayBudgetTest {
                 first.close();
                 assertTrue(fixture.budget.tryAcquire().isEmpty());
             }
-            assertTrue(ProviderRequestBudget.fromConfiguration(Configuration.of(fixture.settings))
+            assertTrue(ProviderRequestBudget.fromConfiguration(budgetConfiguration(fixture.settings))
                     .tryAcquire()
                     .isEmpty());
         }
+    }
+
+    private static ProviderBudgetConfiguration budgetConfiguration(final Map<String, String> settings) {
+        return new ProviderBudgetConfiguration(
+                settings.get(ProviderRequestBudget.ROOT),
+                settings.get(ProviderRequestBudget.ID),
+                settings.get(ProviderRequestBudget.SLOTS));
     }
 
     private static HttpRequest request(final ProviderServicesGateway gateway, final String token) {
@@ -153,10 +164,10 @@ class ProviderServicesGatewayBudgetTest {
                     "configured-upstream-token",
                     ProviderServicesGateway.YCA_SERVICES_KEYSTORE_PASSWORD,
                     "changeit");
-            budget = ProviderRequestBudget.fromConfiguration(Configuration.of(settings));
+            budget = ProviderRequestBudget.fromConfiguration(budgetConfiguration(settings));
             upstream = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             upstream.setExecutor(executor);
-            upstream.createContext("/chat", exchange -> {
+            upstream.createContext("/chat/completions", exchange -> {
                 assertEquals(
                         "Bearer configured-upstream-token",
                         exchange.getRequestHeaders().getFirst("Authorization"));
@@ -182,7 +193,7 @@ class ProviderServicesGatewayBudgetTest {
                     keyStore.toString(),
                     ProviderServicesGateway.YCA_SERVICES_KEYSTORE_PASSWORD,
                     ROUTE,
-                    "http://127.0.0.1:" + upstream.getAddress().getPort() + "/chat",
+                    "http://127.0.0.1:" + upstream.getAddress().getPort() + "/chat/completions",
                     60,
                     5,
                     1024,

@@ -1,4 +1,5 @@
-// Local YCA theme adapter for assistant-ui Elements (MIT); see ../UPSTREAM.md.
+// Local YCA theme adapter for assistant-ui Elements (MIT); see ../LICENSE.assistant-ui and
+// documentation/src/main/minisite/content/features/ui-advanced.adoc for provenance.
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 

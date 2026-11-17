@@ -39,6 +39,12 @@
       <scope>provided</scope>
     </dependency>
     <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>slack-bot</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
       <scope>test</scope>
@@ -124,7 +130,7 @@ if uppercased, dot/hyphens replaced by underscores and leading hyphens/dots remo
             <preAction>
               <type>io.yupiik.ia.agent.documentation.ConfigurationJsonSchemaGenerator</type>
               <configuration>
-                <excludedRoots>io.yupiik.ia.agent.core.cli.CliCommand$CliConf,io.yupiik.ia.agent.core.cli.CodeGraphIndexCommand$CodeGraphIndexConf,io.yupiik.ia.agent.core.cli.RunCommand$RunConf,io.yupiik.ia.agent.tui.TuiCommand$TuiConf,io.yupiik.ia.agent.github.configuration.GithubBotConfiguration,io.yupiik.ia.agent.github.command.PollCommand$Options,io.yupiik.ia.agent.github.command.CacheMaintenanceCommand$Options,io.yupiik.ia.agent.github.command.WorkerCommand$Options,io.yupiik.ia.agent.github.command.ListCommand$Options,io.yupiik.ia.agent.github.command.ShowCommand$Options,io.yupiik.ia.agent.github.command.CreateCommand$Options,io.yupiik.ia.agent.github.command.RetryCommand$Options,io.yupiik.ia.agent.github.command.DeleteCommand$Options,io.yupiik.ia.agent.github.command.PurgeCommand$Options,io.yupiik.ia.agent.github.command.CleanupCommand$Options,io.yupiik.ia.agent.github.configuration.ExecutorConfiguration,io.yupiik.ia.agent.github.configuration.AgentContextConfiguration,io.yupiik.ia.agent.github.configuration.ContextConfiguration,io.yupiik.ia.agent.github.configuration.FixConfiguration,io.yupiik.ia.agent.github.configuration.PromptConfiguration,io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration</excludedRoots>
+                <excludedRoots>io.yupiik.ia.agent.core.cli.CliCommand$CliConf,io.yupiik.ia.agent.core.cli.CodeGraphIndexCommand$CodeGraphIndexConf,io.yupiik.ia.agent.core.cli.RunCommand$RunConf,io.yupiik.ia.agent.tui.TuiCommand$TuiConf,io.yupiik.ia.agent.github.configuration.GithubBotConfiguration,io.yupiik.ia.agent.github.command.PollCommand$Options,io.yupiik.ia.agent.github.command.CacheMaintenanceCommand$Options,io.yupiik.ia.agent.github.command.WorkerCommand$Options,io.yupiik.ia.agent.github.command.ListCommand$Options,io.yupiik.ia.agent.github.command.ShowCommand$Options,io.yupiik.ia.agent.github.command.CreateCommand$Options,io.yupiik.ia.agent.github.command.RetryCommand$Options,io.yupiik.ia.agent.github.command.DeleteCommand$Options,io.yupiik.ia.agent.github.command.PurgeCommand$Options,io.yupiik.ia.agent.github.command.CleanupCommand$Options,io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration,io.yupiik.ia.agent.github.configuration.AgentContextConfiguration,io.yupiik.ia.agent.github.configuration.ContextConfiguration,io.yupiik.ia.agent.github.configuration.FixConfiguration,io.yupiik.ia.agent.github.configuration.PromptConfiguration,io.yupiik.ia.agent.github.configuration.ReviewPresentationConfiguration,io.yupiik.ia.agent.slack.command.TaskOptions,io.yupiik.ia.agent.slack.configuration.SlackExecutorConfiguration,io.yupiik.ia.agent.slack.configuration.SlackProviderConfiguration,io.yupiik.ia.agent.slack.configuration.SlackPrompts</excludedRoots>
               </configuration>
             </preAction>
             <preAction>

@@ -17,16 +17,19 @@ package io.yupiik.ia.agent.slack.service;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /** Slack IDs are protocol literals, never regex source or display names. */
 @ApplicationScoped
 public class SlackMentionParser {
+    private static final Pattern BOT_USER_ID = Pattern.compile("[UW][A-Z0-9]{1,63}");
+
     public Optional<String> parse(final String text, final String botUser, final int maximum) {
         if (text == null
                 || text.length() > maximum
                 || botUser == null
                 || botUser.length() > 64
-                || !botUser.matches("[UW][A-Z0-9]{1,63}")) {
+                || !BOT_USER_ID.matcher(botUser).matches()) {
             return Optional.empty();
         }
         final var marker = "<@" + botUser + ">";

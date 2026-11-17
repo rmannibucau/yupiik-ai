@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
-import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -37,7 +37,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -46,17 +45,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 @Timeout(30)
 class LlmRelayTest {
     private static final String SECRET = "upstream-secret-not-for-clients";
 
-    @Test
-    void replacesCredentialsAndStripsHeadersInBothDirections() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"/chat/completions", "/responses"})
+    void replacesCredentialsAndStripsHeadersInBothDirections(final String route) throws Exception {
         final var received = new AtomicReference<String>();
         try (final var upstream = new Upstream(exchange -> {
-                    assertEquals(
-                            "/v1/chat/completions", exchange.getRequestURI().toString());
+                    assertEquals("/v1" + route, exchange.getRequestURI().toString());
                     assertEquals("POST", exchange.getRequestMethod());
                     assertEquals(
                             List.of("Bearer " + SECRET),
@@ -71,10 +72,14 @@ class LlmRelayTest {
                     exchange.getResponseHeaders().add("X-Secret", SECRET);
                     respond(exchange, 422, "application/json; charset=utf-8", "{\"error\":\"invalid\"}");
                 });
-                final var relay = relay(loopback(), upstream.uri(), SECRET, 2);
+                final var relay = relay(
+                        loopback(),
+                        URI.create(upstream.uri().toString().replace("/chat/completions", route)),
+                        SECRET,
+                        2);
                 final var client = HttpClient.newHttpClient()) {
             final var response = client.send(
-                    request(relay, "/chat/completions")
+                    request(relay, route)
                             .header("Cookie", "untrusted=value")
                             .header("X-Api-Key", "attacker-key")
                             .header("X-Target-Url", "http://example.org/")
@@ -92,6 +97,22 @@ class LlmRelayTest {
             assertTrue(response.headers().firstValue("X-Secret").isEmpty());
             assertFalse(response.body().contains(SECRET));
             assertNotEquals(SECRET, relay.accessToken());
+            for (final var rejected : List.of(
+                    route.equals("/responses") ? "/chat/completions" : "/responses",
+                    route + "/compact",
+                    route + "/id",
+                    route + "?target=other",
+                    route + "/",
+                    "/v1" + route)) {
+                assertEquals(
+                        404,
+                        client.send(
+                                        request(relay, rejected)
+                                                .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                                                .build(),
+                                        HttpResponse.BodyHandlers.discarding())
+                                .statusCode());
+            }
         }
     }
 
@@ -446,7 +467,7 @@ class LlmRelayTest {
                 upstream,
                 secret,
                 concurrency,
-                ProviderRequestBudget.fromConfiguration(Configuration.of(Map.of())));
+                ProviderRequestBudget.fromConfiguration(new ProviderBudgetConfiguration(null, null, null)));
     }
 
     private static InetSocketAddress loopback() {

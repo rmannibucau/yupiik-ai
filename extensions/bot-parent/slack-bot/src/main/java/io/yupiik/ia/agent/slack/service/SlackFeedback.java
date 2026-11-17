@@ -18,9 +18,11 @@ package io.yupiik.ia.agent.slack.service;
 import io.yupiik.ia.agent.bot.feedback.FeedbackMailbox;
 import io.yupiik.ia.agent.slack.configuration.SlackConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
+import io.yupiik.ia.agent.slack.model.SlackJson;
 import io.yupiik.ia.agent.slack.model.SlackQuestion;
 import io.yupiik.ia.agent.slack.model.SlackQuestionRequest;
 import io.yupiik.ia.agent.slack.model.SlackTask;
+import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackStore;
 import io.yupiik.ia.agent.slack.transport.SlackWebApi;
 import java.io.IOException;
@@ -30,9 +32,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.UnaryOperator;
+import java.util.regex.Pattern;
 
 /** Controller-owned interaction authority. No Slack token or publication authority reaches the mailbox. */
 public final class SlackFeedback {
+    private static final Pattern OPTION_ID = Pattern.compile("o[0-9]{1,2}");
+
     private final SlackConfiguration configuration;
     private final SlackPrompts presentation;
     private final SlackStore store;
@@ -77,10 +82,11 @@ public final class SlackFeedback {
             for (int index = 0; index < tasks.size(); index++) {
                 final var current = tasks.get(index);
                 if (current.id().equals(taskId)) {
-                    if (!"running".equals(current.status()) || current.attempt() != task.attempt()) {
+                    if (current.status() != TaskStatus.running || current.attempt() != task.attempt()) {
                         return false;
                     }
-                    tasks.set(index, current.feedback(pending, "waiting_for_user", System.currentTimeMillis()));
+                    tasks.set(
+                            index, current.feedback(pending, TaskStatus.waiting_for_user, System.currentTimeMillis()));
                     return true;
                 }
             }
@@ -90,14 +96,12 @@ public final class SlackFeedback {
             return;
         }
         // Persist intent before sending; an ambiguous remote failure is never retried automatically.
-        final var response = api.postMessage(Map.of(
-                        "channel",
+        final var response = api.postMessage(new SlackJson.PostMessage(
                         task.channel(),
-                        "thread_ts",
                         task.thread(),
-                        "text",
                         presentation.questionTitle(),
-                        "blocks",
+                        null,
+                        null,
                         List.of(
                                 Map.of("type", "section", "text", plain(presentation.questionTitle())),
                                 Map.of(
@@ -109,7 +113,8 @@ public final class SlackFeedback {
                                                 button("cancel", request.nonce(), presentation.cancelLabel()))))))
                 .toCompletableFuture()
                 .join();
-        if (!(response.get("ts") instanceof String ts) || !task.channel().equals(response.get("channel"))) {
+        final var ts = response.ts();
+        if (ts == null || !task.channel().equals(response.channel())) {
             throw new IllegalStateException("Invalid Slack question publication result");
         }
         update(taskId, current -> {
@@ -117,8 +122,8 @@ public final class SlackFeedback {
                     || !current.question().request().nonce().equals(request.nonce())) {
                 return current;
             }
-            final var cancelled = "cancel_requested".equals(current.status());
-            if (!cancelled && !"waiting_for_user".equals(current.status())) {
+            final var cancelled = current.status() == TaskStatus.cancel_requested;
+            if (!cancelled && current.status() != TaskStatus.waiting_for_user) {
                 return current;
             }
             return current.feedback(
@@ -130,31 +135,31 @@ public final class SlackFeedback {
     }
 
     /** Executes only short durable authorization/submission work on the Socket Mode delivery path. */
-    public Optional<Map<String, Object>> interaction(final Map<String, Object> payload) {
-        final var team = object(payload.get("team"));
-        final var actor = object(payload.get("user")).get("id");
-        if (!configuration.workspace().equals(team.get("id"))
-                || !(actor instanceof String user)
-                || !configuration.users().contains(user)) {
+    public Optional<SlackJson.Reply> interaction(final SlackJson.Payload payload) {
+        if (payload == null || payload.team() == null || payload.user() == null) {
             return Optional.empty();
         }
-        if ("block_actions".equals(payload.get("type"))) {
-            final var actions = payload.get("actions");
-            if (!(actions instanceof List<?> list) || list.size() != 1) {
+        final var user = payload.user().id();
+        if (!configuration.workspace().equals(payload.team().id()) || !configuration.allowsRequester(user)) {
+            return Optional.empty();
+        }
+        if ("block_actions".equals(payload.type())) {
+            final var actions = payload.actions();
+            if (actions == null || actions.size() != 1 || actions.getFirst() == null) {
                 return Optional.empty();
             }
-            final var action = object(list.getFirst());
-            final var nonce = action.get("value");
+            final var action = actions.getFirst();
+            final var nonce = action.value();
             final var task = active(nonce, user);
             if (task == null
                     || task.question().messageTs() == null
-                    || !task.channel().equals(object(payload.get("channel")).get("id"))
-                    || !task.question()
-                            .messageTs()
-                            .equals(object(payload.get("message")).get("ts"))) {
+                    || payload.channel() == null
+                    || payload.message() == null
+                    || !task.channel().equals(payload.channel().id())
+                    || !task.question().messageTs().equals(payload.message().ts())) {
                 return Optional.empty();
             }
-            if ("cancel".equals(action.get("action_id"))
+            if ("cancel".equals(action.action_id())
                     && List.of("waiting", "opening", "open")
                             .contains(task.question().state())) {
                 update(
@@ -175,13 +180,14 @@ public final class SlackFeedback {
                                                 current.question().messageTs(),
                                                 current.question().viewId(),
                                                 Map.of()),
-                                        "cancel_requested",
+                                        TaskStatus.cancel_requested,
                                         System.currentTimeMillis())
                                 : current);
-            } else if ("answer".equals(action.get("action_id"))
-                    && payload.get("trigger_id") instanceof String trigger
-                    && trigger.length() < 256) {
-                // Discovery/publication scheduling is independent of this priority call. No synchronous network wait
+            } else if ("answer".equals(action.action_id())
+                    && payload.trigger_id() != null
+                    && payload.trigger_id().length() < 256) {
+                // Discovery/publication scheduling is independent of this priority call. No synchronous
+                // network wait
                 // before ACK.
                 final var claimed = store.transaction(tasks -> {
                     for (int i = 0; i < tasks.size(); i++) {
@@ -197,7 +203,7 @@ public final class SlackFeedback {
                                                     current.question().messageTs(),
                                                     null,
                                                     null),
-                                            "waiting_for_user",
+                                            TaskStatus.waiting_for_user,
                                             System.currentTimeMillis()));
                             return true;
                         }
@@ -205,13 +211,15 @@ public final class SlackFeedback {
                     return false;
                 });
                 if (claimed) {
-                    api.openView(Map.of("trigger_id", trigger, "view", modal(task)))
+                    api.openView(new SlackJson.OpenView(payload.trigger_id(), modal(task)))
                             .whenComplete((result, failure) -> {
                                 if (failure == null
-                                        && object(result.get("view")).get("id") instanceof String viewId) {
+                                        && result.view() != null
+                                        && result.view().id() != null) {
+                                    final var viewId = result.view().id();
                                     update(
                                             task.id(),
-                                            current -> "waiting_for_user".equals(current.status())
+                                            current -> current.status() == TaskStatus.waiting_for_user
                                                             && "opening"
                                                                     .equals(current.question()
                                                                             .state())
@@ -224,7 +232,7 @@ public final class SlackFeedback {
                                                                             .messageTs(),
                                                                     viewId,
                                                                     null),
-                                                            "waiting_for_user",
+                                                            TaskStatus.waiting_for_user,
                                                             System.currentTimeMillis())
                                                     : current);
                                 } else {
@@ -238,29 +246,30 @@ public final class SlackFeedback {
                                                                     .equals(task.question()
                                                                             .request()
                                                                             .nonce())
-                                                            && "waiting_for_user".equals(current.status())
+                                                            && current.status() == TaskStatus.waiting_for_user
                                                             && "opening"
                                                                     .equals(current.question()
                                                                             .state())
-                                                    ? current.transition("recovery_blocked", System.currentTimeMillis())
+                                                    ? current.transition(
+                                                            TaskStatus.recovery_blocked, System.currentTimeMillis())
                                                     : current);
                                 }
                             });
                 }
             }
-        } else if ("view_submission".equals(payload.get("type")) || "view_closed".equals(payload.get("type"))) {
-            final var view = object(payload.get("view"));
-            if (!"yca_feedback".equals(view.get("callback_id"))) {
+        } else if ("view_submission".equals(payload.type()) || "view_closed".equals(payload.type())) {
+            final var view = payload.view();
+            if (view == null || !"yca_feedback".equals(view.callback_id())) {
                 return Optional.empty();
             }
-            final var task = active(view.get("private_metadata"), user);
+            final var task = active(view.private_metadata(), user);
             if (task == null
                     || task.question().viewId() == null
-                    || !task.question().viewId().equals(view.get("id"))) {
-                return Optional.of(Map.of(
-                        "response_action", "errors", "errors", Map.of("q0", "This question is no longer active.")));
+                    || !task.question().viewId().equals(view.id())) {
+                return Optional.of(
+                        new SlackJson.Reply(null, "errors", Map.of("q0", "This question is no longer active.")));
             }
-            if ("view_closed".equals(payload.get("type"))) {
+            if ("view_closed".equals(payload.type())) {
                 update(
                         task.id(),
                         current -> current.question() != null
@@ -279,7 +288,7 @@ public final class SlackFeedback {
                                                 current.question().messageTs(),
                                                 current.question().viewId(),
                                                 Map.of()),
-                                        "cancel_requested",
+                                        TaskStatus.cancel_requested,
                                         System.currentTimeMillis())
                                 : current);
                 return Optional.empty();
@@ -287,7 +296,9 @@ public final class SlackFeedback {
             try {
                 final var answers = answers(
                         task.question().request().mailbox(),
-                        object(object(view.get("state")).get("values")));
+                        view.state() == null || view.state().values() == null
+                                ? Map.of()
+                                : view.state().values());
                 FeedbackMailbox.validateAnswers(task.question().request().mailbox(), answers);
                 update(task.id(), current -> {
                     if ("answered".equals(current.question().state())) {
@@ -303,21 +314,18 @@ public final class SlackFeedback {
                                     current.question().messageTs(),
                                     current.question().viewId(),
                                     answers),
-                            "running",
+                            TaskStatus.running,
                             System.currentTimeMillis());
                 });
             } catch (final IllegalArgumentException | IllegalStateException invalid) {
-                return Optional.of(Map.of(
-                        "response_action",
-                        "errors",
-                        "errors",
-                        Map.of("q0", "Choose valid answers for every question.")));
+                return Optional.of(
+                        new SlackJson.Reply(null, "errors", Map.of("q0", "Choose valid answers for every question.")));
             }
         }
         return Optional.empty();
     }
 
-    private Map<String, Object> modal(final SlackTask task) {
+    private SlackJson.Modal modal(final SlackTask task) {
         final var blocks = new ArrayList<Map<String, Object>>();
         final var questions = task.question().request().questions();
         for (int index = 0; index < questions.size(); index++) {
@@ -350,22 +358,14 @@ public final class SlackFeedback {
                     "element",
                     element));
         }
-        return Map.of(
-                "type",
+        return new SlackJson.Modal(
                 "modal",
-                "notify_on_close",
                 true,
-                "callback_id",
                 "yca_feedback",
-                "private_metadata",
                 task.question().request().nonce(),
-                "title",
                 plain(presentation.questionTitle()),
-                "submit",
                 plain(presentation.answerLabel()),
-                "close",
                 plain(presentation.cancelLabel()),
-                "blocks",
                 blocks);
     }
 
@@ -398,7 +398,7 @@ public final class SlackFeedback {
     }
 
     private String option(final FeedbackMailbox.Item question, final Object value) {
-        if (!(value instanceof String id) || !id.matches("o[0-9]{1,2}")) {
+        if (!(value instanceof String id) || !OPTION_ID.matcher(id).matches()) {
             throw new IllegalArgumentException("Invalid opaque choice");
         }
         final var index = Integer.parseInt(id.substring(1));
@@ -408,10 +408,12 @@ public final class SlackFeedback {
         return question.options().get(index);
     }
 
-    private SlackTask active(final Object nonce, final String actor) {
+    private SlackTask active(final String nonce, final String actor) {
         return store.list().stream()
                 .filter(task -> !task.terminal()
-                        && !"recovery_blocked".equals(task.status())
+                        && configuration.workspace().equals(task.workspace())
+                        && configuration.channels().contains(task.channel())
+                        && task.status() != TaskStatus.recovery_blocked
                         && task.requester().equals(actor)
                         && task.question() != null
                         && List.of("waiting", "opening", "open", "answered")
@@ -445,8 +447,8 @@ public final class SlackFeedback {
         return value instanceof Map<?, ?> map ? map : Map.of();
     }
 
-    private Map<String, Object> plain(final String text) {
-        return Map.of("type", "plain_text", "text", text);
+    private SlackJson.Text plain(final String text) {
+        return new SlackJson.Text("plain_text", text);
     }
 
     private Map<String, Object> button(final String action, final String nonce, final String text) {

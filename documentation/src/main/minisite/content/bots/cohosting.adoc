@@ -5,6 +5,7 @@
 :minisite-breadcrumb: Home[../index.html] > Same-machine bots
 
 This page covers an operator choosing to place the xref:../github-bot/index.adoc[GitHub bot] and xref:../slack-bot/index.adoc[Slack bot] on one machine.
+For the complete Docker procedures, start with the xref:../github-bot/docker.adoc[GitHub example] and xref:../slack-bot/docker.adoc[Slack example], then apply the xref:docker-shared-slots.adoc[shared-slots add-on].
 Sharing implementation code or a provider does not authorize sharing credentials, durable state, attempts, conversation context or daemon authority.
 These are deployment constraints and planning examples, not evidence of a validated combined deployment.
 
@@ -34,6 +35,27 @@ Docker socket access can bypass filesystem permissions and control other contain
 Separate daemons with independently reviewed isolation, separate VMs or separate machines are needed when compromise of one controller must not imply compromise of the other.
 Unit sandboxing and UID separation reduce accidental exposure but do not revoke daemon authority.
 
+== Fail-closed runtime identity cutover
+
+The shared Java packages are `io.yupiik.ia.agent.bot.runtime` (including `configuration`, `execution` and `model`) and `io.yupiik.ia.agent.bot.gateway`.
+The GitHub root binding remains `github.executor`; Slack retains `slack.executor`.
+The shared executor settings are a configuration model, not a standalone root or factory.
+Adapter-supplied execution policy, not a resource-name prefix, selects application identity, gateway entrypoint and capabilities.
+Docker ownership checks require the policy's `app`, `io.yupiik.yca.bot.runtime` and `io.yupiik.yca.bot.component` labels; policy identity also participates in durable recovery fingerprints.
+
+WARNING: Drain existing workloads with the old controller before upgrading controller, gateway and agent artifacts together.
+Stop admissions, confirm termination of every sandbox and gateway, and reconcile retained unknown-termination admission debt using operator evidence before starting the new controller.
+Back up private controller state before installing the new version.
+Update explicit Java entrypoints in operator-maintained images to the neutral packages where applicable.
+The neutral shared agent image default is `yca-agent:latest` and the shared Kubernetes namespace default is `yca`.
+Explicitly set each adapter's `docker.image` or `kubernetes.image` and `kubernetes.namespace` under `github.executor` or `slack.executor` to preserve the intended deployment rather than relying on former adapter-specific defaults.
+There are no old-package aliases, automatic resource renames, prefix-based recovery guesses or legacy-label cleanup fallbacks.
+The native Unix protocol also pins the selected API; upgrade controller and agent artifacts together rather than mixing protocol revisions.
+Foreign, unlabelled and legacy-labelled resources are not automatically cleaned up; operators must reconcile them and the retained admission debt explicitly.
+Do not relabel live resources, fabricate recovery fingerprints or remove stable admission locks/schema to bypass a failed ownership check.
+See <<_durable_unknown_termination_debt>> for the reconciliation procedure.
+Use xref:qualification.adoc[advanced backend qualification] to record deployment evidence independently of unit tests or successful packaging.
+
 == Provider gateways are not a shared private broker
 
 `bot-runtime` contains the extracted sandbox/attempt/feedback mechanics.
@@ -45,7 +67,9 @@ Keep public CONNECT deny-by-default, permit only reviewed hosts and ports, and r
 Do not permit arbitrary private targets or request-time DNS to reach private services.
 Any approved private service boundary must be a fixed numerical TLS proxy with narrowly scoped attempt authority, separate from public CONNECT.
 Do not grant Slack agents a GitHub broker route simply because it can also relay provider calls.
-Slack's Docker/Kubernetes gateways reach one fixed numerical private IPv4 HTTP upstream; only the selected COMPLETIONS provider is staged, with an attempt-scoped token instead of its upstream key.
+Slack's Docker/Kubernetes gateways reach one fixed numerical private IPv4 HTTP upstream; only the selected provider is staged, pinned to `COMPLETIONS` or `RESPONSES`, with an attempt-scoped token instead of its upstream key.
+The selected API suffix is `/chat/completions` or `/responses`, respectively, and the capability route and fixed upstream must agree; each attempt exposes only its pinned API.
+Input `AUTO` defaults to `COMPLETIONS`; explicitly select `RESPONSES` for a Responses deployment.
 Qualified Linux Nono instead uses a private pathname Unix bridge in the controller and a fixed HTTPS upstream with normal TLS validation and no redirects.
 It does not use the Docker control bridge or accept arbitrary destinations from the agent.
 Nono requires exactly 0.81.0, with its documented multithreaded sockaddr TOCTOU limitation; stronger outer isolation is required for hostile workloads.
@@ -119,13 +143,14 @@ The opt-in request ledger is separate from `bot.admission`: host slots cover att
 
 [cols="2,4",options="header"]
 |===
-|Trusted environment variable |Contract
-|`YCA_PROVIDER_BUDGET_ROOT` |Pre-provisioned absolute normalized local filesystem directory, disjoint from controller state, attempts, runtime/socket grants and host admission; no symlink components.
-|`YCA_PROVIDER_BUDGET_ID` |Shared provider/account identity; use 1-64 ASCII letters, digits, underscores or hyphens for the bot forwarding adapter.
-|`YCA_PROVIDER_BUDGET_SLOTS` |Positive decimal request concurrency; use 1-9999 for the bot forwarding adapter, identical across participants.
+|Trusted configuration property (environment variable) |Contract
+|`yca.provider.budget.root` (`YCA_PROVIDER_BUDGET_ROOT`) |Pre-provisioned absolute normalized local filesystem directory, disjoint from controller state, attempts, runtime/socket grants and host admission; no symlink components.
+|`yca.provider.budget.id` (`YCA_PROVIDER_BUDGET_ID`) |Shared provider/account identity; use 1-64 ASCII letters, digits, underscores or hyphens for the bot forwarding adapter.
+|`yca.provider.budget.slots` (`YCA_PROVIDER_BUDGET_SLOTS`) |Positive decimal request concurrency; use 1-9999 for the bot forwarding adapter, identical across participants.
 |===
 
-All three settings are resolved through Fusion `Configuration`, with their environment-variable names retained as the private process handoff keys.
+All three settings are bound to the shared core `ProviderBudgetConfiguration` (`yca.provider.budget`) model, with their environment-variable names retained as the private process handoff keys.
+The JSON model uses `root`, `id` and `slots` string fields; keeping slots textual preserves rejection of blank or noncanonical decimal counts such as `01`.
 Controllers use their injected configuration sources; standalone gateways use Fusion's default configuration implementation, so environment variables are not the only supported source.
 All three variables must be configured together; absent/blank ROOT disables only when ID and SLOTS are absent.
 Partial settings fail closed; Kubernetes requires all three rather than allowing a disabled budget.
@@ -174,5 +199,5 @@ Maintain separate revocation switches for Slack tokens, GitHub credentials and p
 Stop admission before changing network/credential policy; reconcile uncertain remote writes rather than restarting model execution blindly.
 
 No combined server rollout, live Slack acceptance, architecture certification or whole-reactor green result is asserted here.
-The offline server-update plan and updater changes are recorded in `generated/c3p0-bots-update-plan.md` and `generated/update-c3p0-bot.sh`.
-The updater supports offline role inventory but refuses Slack/all execution until deployment facts and a later explicit authorization are provided; no server operation has been performed.
+Maintain server-specific update plans, image inventories and operational records outside the shared project sources.
+Qualify each installation's update and rollback procedures independently; do not assume that two adapters share a deployment layout or a coordinated upgrade transaction.

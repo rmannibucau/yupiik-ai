@@ -19,10 +19,12 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.fusion.framework.api.container.Types;
 import io.yupiik.ia.agent.github.configuration.GithubBotConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.service.GithubServices;
+import io.yupiik.ia.agent.github.support.BotJsonMapper;
 import io.yupiik.ia.agent.github.support.BotTestConfiguration;
+import java.lang.reflect.Type;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -47,6 +49,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class AuthTokenProviderTest {
+    // Arbitrary transport fixtures, not a GitHub domain response schema.
+    private static final Type RESPONSE = new Types.ParameterizedTypeImpl(Map.class, String.class, Object.class);
     // Share only the key material; providers, signatures, clocks, and servers remain test-local.
     private static final KeyPair KEY_PAIR = newKeyPair();
 
@@ -73,14 +77,14 @@ class AuthTokenProviderTest {
             reads.incrementAndGet();
             return Configuration.of(values).get(name);
         };
-        try (final var json = new JsonMapperImpl(List.of(), ignored -> Optional.empty());
+        try (final var json = BotJsonMapper.create(List.of(), ignored -> Optional.empty());
                 final var client = new GithubServices().client(conf, json, BotTestConfiguration.CLOCK, config)) {
             assertEquals(0, reads.get());
             values.put("YCA_CONFIG_PAT", "configured-pat-first");
-            client.get("/probe");
+            client.get("/probe", RESPONSE);
             assertEquals("Bearer configured-pat-first", authorization.get());
             values.put("YCA_CONFIG_PAT", "configured-pat-rotated");
-            client.get("/probe");
+            client.get("/probe", RESPONSE);
             assertEquals("Bearer configured-pat-rotated", authorization.get());
             assertTrue(reads.get() >= 2);
         } finally {
@@ -129,25 +133,16 @@ class AuthTokenProviderTest {
         });
         server.start();
         final var base = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
-        try (final var json = new JsonMapperImpl(
-                        List.of(
-                                new GitHubClient$CommentRequest$FusionJsonCodec(),
-                                new GitHubClient$ForkRequest$FusionJsonCodec(),
-                                new GitHubClient$ReviewRequest$FusionJsonCodec(),
-                                new GitHubClient$ReviewFinding$FusionJsonCodec(),
-                                new AuthTokenProvider$InstallationTokenRequest$FusionJsonCodec(),
-                                new AuthTokenProvider$JwtHeader$FusionJsonCodec(),
-                                new AuthTokenProvider$JwtClaims$FusionJsonCodec()),
-                        key -> Optional.empty());
+        try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty());
                 final var provider = AuthTokenProvider.app(
                         base, json, "app", 42, KEY_PAIR.getPrivate(), BotTestConfiguration.CLOCK);
                 final var client = new GitHubClient(base, json, provider, BotTestConfiguration.CLOCK)) {
-            client.get("/resource");
+            client.get("/resource", RESPONSE);
             assertEquals(2, issued.get());
             assertEquals(2, reads.get());
             assertThrows(
                     GitHubClient.HttpException.class,
-                    () -> client.post("/resource", new GitHubClient.CommentRequest("resource")));
+                    () -> client.post("/resource", new GitHubClient.CommentRequest("resource"), RESPONSE));
             assertEquals(1, writes.get());
             assertEquals(2, issued.get());
         } finally {
@@ -219,16 +214,7 @@ class AuthTokenProviderTest {
             server.start();
             final var base =
                     URI.create("http://127.0.0.1:" + server.getAddress().getPort());
-            try (final var json = new JsonMapperImpl(
-                            List.of(
-                                    new GitHubClient$CommentRequest$FusionJsonCodec(),
-                                    new GitHubClient$ForkRequest$FusionJsonCodec(),
-                                    new GitHubClient$ReviewRequest$FusionJsonCodec(),
-                                    new GitHubClient$ReviewFinding$FusionJsonCodec(),
-                                    new AuthTokenProvider$InstallationTokenRequest$FusionJsonCodec(),
-                                    new AuthTokenProvider$JwtHeader$FusionJsonCodec(),
-                                    new AuthTokenProvider$JwtClaims$FusionJsonCodec()),
-                            key -> Optional.empty());
+            try (final var json = BotJsonMapper.create(List.of(), key -> Optional.empty());
                     final var provider =
                             switch (source) {
                                 case "repository" ->
@@ -296,16 +282,7 @@ class AuthTokenProviderTest {
             exchange.close();
         });
         server.start();
-        try (final var json = new JsonMapperImpl(
-                List.of(
-                        new GitHubClient$CommentRequest$FusionJsonCodec(),
-                        new GitHubClient$ForkRequest$FusionJsonCodec(),
-                        new GitHubClient$ReviewRequest$FusionJsonCodec(),
-                        new GitHubClient$ReviewFinding$FusionJsonCodec(),
-                        new AuthTokenProvider$InstallationTokenRequest$FusionJsonCodec(),
-                        new AuthTokenProvider$JwtHeader$FusionJsonCodec(),
-                        new AuthTokenProvider$JwtClaims$FusionJsonCodec()),
-                name -> Optional.empty())) {
+        try (final var json = BotJsonMapper.create(List.of(), name -> Optional.empty())) {
             final var base =
                     URI.create("http://127.0.0.1:" + server.getAddress().getPort());
             for (final var body : List.of(
@@ -366,16 +343,7 @@ class AuthTokenProviderTest {
             exchange.close();
         });
         server.start();
-        try (final var json = new JsonMapperImpl(
-                List.of(
-                        new GitHubClient$CommentRequest$FusionJsonCodec(),
-                        new GitHubClient$ForkRequest$FusionJsonCodec(),
-                        new GitHubClient$ReviewRequest$FusionJsonCodec(),
-                        new GitHubClient$ReviewFinding$FusionJsonCodec(),
-                        new AuthTokenProvider$InstallationTokenRequest$FusionJsonCodec(),
-                        new AuthTokenProvider$JwtHeader$FusionJsonCodec(),
-                        new AuthTokenProvider$JwtClaims$FusionJsonCodec()),
-                name -> Optional.empty())) {
+        try (final var json = BotJsonMapper.create(List.of(), name -> Optional.empty())) {
             final var values = new HashMap<>(Map.of(
                     "github.auth.type",
                     "app",
@@ -396,7 +364,7 @@ class AuthTokenProviderTest {
                         .get();
                 try (final var runtime =
                         new GithubServices().client(conf, json, clock, name -> Optional.ofNullable(values.get(name)))) {
-                    runtime.get("/probe");
+                    runtime.get("/probe", RESPONSE);
                     assertEquals(selection.get(2), lookup.get());
                 }
             }
@@ -431,7 +399,7 @@ class AuthTokenProviderTest {
                     .get();
             try (final var runtime =
                     new GithubServices().client(explicit, json, clock, name -> Optional.ofNullable(values.get(name)))) {
-                runtime.get("/probe");
+                runtime.get("/probe", RESPONSE);
             }
             assertEquals(2, lookups.get());
             values.put("github.auth.installationId", "-1");

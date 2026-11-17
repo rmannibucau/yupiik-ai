@@ -16,12 +16,12 @@
 package io.yupiik.ia.agent.slack.transport;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.slack.model.SlackJson;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -33,9 +33,23 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.DoubleSupplier;
+import java.util.logging.Logger;
 
-/** Outbound Socket Mode with durable-before-ACK admission delegated to the parent. */
+/**
+ * Outbound Socket Mode with durable-before-ACK admission delegated to the parent through typed envelopes.
+ * The parent constructs this object; mapper, API, HTTP client, scheduler and suppliers are borrowed, never closed.
+ * Close this transport before closing its dependencies. The WebSocket client must be redirect-never,
+ * authenticator-free and cookie-free; each reconnect discovers a fresh URL and attaches no API token to the handshake.
+ * Text messages and ACKs are bounded by {@link Settings#maxMessageBytes()} in UTF-8 bytes.
+ *
+ * <p>Refresh/disconnect, malformed/oversized messages, callback/ACK failures and socket errors reconnect using
+ * the supplied scheduler and bounded exponential jitter (supplier in {@code [0,1)}), without sleeps or a dedicated
+ * executor. Discovery Retry-After is a minimum delay, even above the backoff maximum; {@code hello} resets backoff
+ * and {@code warning} is informational. Disconnect reasons {@code disabled}/{@code link_disabled} and terminal
+ * credential failures enter {@link State#DISABLED} without reconnecting. Recreate after credentials/settings are repaired.
+ */
 public final class SlackSocketMode implements AutoCloseable {
+    private static final Logger LOGGER = Logger.getLogger(SlackSocketMode.class.getName());
     private static final Set<String> TERMINAL_ERRORS = Set.of(
             "invalid_token",
             "invalid_auth",
@@ -106,8 +120,14 @@ public final class SlackSocketMode implements AutoCloseable {
 
     @FunctionalInterface
     public interface EnvelopeHandler {
-        /** Return only after durable admission. Empty means bare ACK; throw to withhold ACK. */
-        Optional<Map<String, Object>> handle(Map<String, Object> envelope) throws Exception;
+        /**
+         * Receives the complete typed envelope, serially on WebSocket delivery. Authorize and durably admit/deduplicate
+         * before returning; return promptly for Slack's three-second ACK deadline, never run the agent here.
+         * Empty means successful admission with a bare ACK, not rejection; throw on failed admission to withhold ACK
+         * and reconnect for redelivery. ACKs always include the envelope ID; a reply is included only when the envelope
+         * accepts response payloads. The parent owns deduplication and interaction logic; transport caches no envelopes.
+         */
+        Optional<SlackJson.Reply> handle(SlackJson.Envelope envelope) throws Exception;
     }
 
     public enum State {
@@ -123,6 +143,7 @@ public final class SlackSocketMode implements AutoCloseable {
         return state;
     }
 
+    /** Idempotently schedules the initial outbound connection; disabled/closed instances cannot restart. */
     public void start() {
         lock.lock();
         try {
@@ -143,6 +164,7 @@ public final class SlackSocketMode implements AutoCloseable {
             reconnect = scheduler.schedule(this::connect, nanos, TimeUnit.NANOSECONDS);
         } catch (final RuntimeException rejected) {
             state = State.DISABLED;
+            LOGGER.warning("Slack Socket Mode disabled: scheduling_unavailable");
         }
     }
 
@@ -228,6 +250,11 @@ public final class SlackSocketMode implements AutoCloseable {
             }
             ++generation; // Invalidate callbacks before cancelling any futures or aborting the socket.
             state = disabled ? State.DISABLED : State.RECONNECTING;
+            if (disabled) {
+                LOGGER.warning("Slack Socket Mode disabled: remote_policy_or_credentials");
+            } else {
+                LOGGER.info("Slack Socket Mode reconnecting");
+            }
             release();
             if (disabled) {
                 return;
@@ -280,6 +307,10 @@ public final class SlackSocketMode implements AutoCloseable {
         }
     }
 
+    /**
+     * Terminal and idempotent: cancels connection/reconnect work and aborts the owned socket without waiting for
+     * a peer close handshake. Does not shut down borrowed dependencies.
+     */
     @Override
     public void close() {
         lock.lock();
@@ -288,6 +319,7 @@ public final class SlackSocketMode implements AutoCloseable {
                 return;
             }
             state = State.CLOSED;
+            LOGGER.info("Slack Socket Mode closed");
             ++generation;
             release();
         } finally {
@@ -300,6 +332,7 @@ public final class SlackSocketMode implements AutoCloseable {
         private final StringBuilder text = new StringBuilder();
         private int bytes;
         private boolean highSurrogate;
+        private boolean helloReceived;
 
         private SocketListener(final long attempt) {
             this.attempt = attempt;
@@ -315,6 +348,7 @@ public final class SlackSocketMode implements AutoCloseable {
                 }
                 socket = webSocket;
                 state = State.CONNECTED;
+                LOGGER.info("Slack Socket Mode connection open");
                 webSocket.request(1);
             } finally {
                 lock.unlock();
@@ -327,7 +361,8 @@ public final class SlackSocketMode implements AutoCloseable {
                 return CompletableFuture.completedFuture(null);
             }
             // Count UTF-8 incrementally, including a surrogate pair split across frames/callbacks.
-            // Unpaired surrogates are conservatively charged three bytes rather than JDK replacement's one.
+            // Unpaired surrogates are conservatively charged three bytes rather than JDK replacement's
+            // one.
             for (int i = 0; i < data.length(); i++) {
                 final var c = data.charAt(i);
                 final var size = Character.isLowSurrogate(c) && highSurrogate ? 1 : c <= 0x7f ? 1 : c <= 0x7ff ? 2 : 3;
@@ -367,33 +402,34 @@ public final class SlackSocketMode implements AutoCloseable {
             }
         }
 
-        @SuppressWarnings("unchecked")
         private CompletionStage<?> dispatch(final WebSocket webSocket, final String message) throws Exception {
-            final var decoded = json.fromString(Object.class, message);
-            if (!(decoded instanceof Map<?, ?> raw)) {
+            final var envelope = json.fromString(SlackJson.Envelope.class, message);
+            if (envelope == null) {
                 throw new IllegalArgumentException("Expected Socket Mode object");
             }
-            final var envelope = (Map<String, Object>) raw;
-            final var type = envelope.get("type");
+            final var type = envelope.type();
             if ("hello".equals(type)) {
                 lock.lock();
                 try {
                     if (active(attempt)) {
                         failures = 0;
+                        if (!helloReceived) {
+                            helloReceived = true;
+                            LOGGER.info("Slack Socket Mode hello received");
+                        }
                     }
                 } finally {
                     lock.unlock();
                 }
             } else if ("disconnect".equals(type)) {
-                final var reason = envelope.get("reason");
+                final var reason = envelope.reason();
                 retire(attempt, "disabled".equals(reason) || "link_disabled".equals(reason), Duration.ZERO);
                 return CompletableFuture.completedFuture(null);
-            } else if (envelope.get("envelope_id") instanceof String id && !id.isBlank()) {
+            } else if (envelope.envelope_id() != null && !envelope.envelope_id().isBlank()) {
                 final var payload = Objects.requireNonNull(handler.handle(envelope));
-                final Map<String, Object> ack =
-                        payload.isPresent() && Boolean.TRUE.equals(envelope.get("accepts_response_payload"))
-                                ? Map.of("envelope_id", id, "payload", payload.orElseThrow())
-                                : Map.of("envelope_id", id);
+                final var ack = new SlackJson.Ack(
+                        envelope.envelope_id(),
+                        Boolean.TRUE.equals(envelope.accepts_response_payload()) ? payload.orElse(null) : null);
                 final var serialized = json.toString(ack);
                 if (serialized.getBytes(StandardCharsets.UTF_8).length > settings.maxMessageBytes()) {
                     throw new IllegalArgumentException("Socket Mode ACK too large");
@@ -401,7 +437,8 @@ public final class SlackSocketMode implements AutoCloseable {
                 if (!current()) {
                     return CompletableFuture.completedFuture(null);
                 }
-                // No next envelope is requested until ACK send completion: bounded queue, no publication replay.
+                // No next envelope is requested until ACK send completion: bounded queue, no publication
+                // replay.
                 return webSocket.sendText(serialized, true).handle((sent, failure) -> {
                     if (failure != null) {
                         retire(attempt, false, Duration.ZERO);

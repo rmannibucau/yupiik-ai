@@ -20,6 +20,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
 import io.yupiik.ia.agent.github.model.TaskDocument;
@@ -42,7 +43,6 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
@@ -143,16 +143,19 @@ public class GithubPrivateContext {
         if (number <= 0) {
             throw new IllegalArgumentException("Expected a positive issue number");
         }
-        final var repository = object(github.get("/repos/" + repo));
-        if (!(repository.get("default_branch") instanceof String branch)
+        final var repository = github.get("/repos/" + repo, RestResponses.Repository.class);
+        final var branch = repository.default_branch();
+        if (branch == null
                 || branch.isBlank()
                 || branch.length() > 255
                 || branch.codePoints().anyMatch(Character::isISOControl)) {
             throw new IllegalArgumentException("Expected a valid upstream default branch");
         }
-        final var commit = object(github.get("/repos/" + repo + "/commits/"
-                + URLEncoder.encode(branch, StandardCharsets.UTF_8).replace("+", "%20")));
-        final var head = sha(commit.get("sha"));
+        final var commit = github.get(
+                "/repos/" + repo + "/commits/"
+                        + URLEncoder.encode(branch, StandardCharsets.UTF_8).replace("+", "%20"),
+                RestResponses.Commit.class);
+        final var head = sha(commit.sha());
         if (((task.strictSolveBaseSha() != null) && !head.equals(task.strictSolveBaseSha()))
                 || ((task.strictSolveBaseBranch() != null) && !branch.equals(task.strictSolveBaseBranch()))) {
             throw new IllegalStateException("Pinned strict solve base changed; operator reconciliation required");
@@ -222,41 +225,40 @@ public class GithubPrivateContext {
         vacant(manifest);
         final var budget = new Budget();
         final var prefix = "/repos/" + repo + "/git/";
-        final var commit = object(budget.read(prefix + "commits/" + head));
-        if (!head.equals(sha(commit.get("sha")))) {
+        final var commit = budget.read(prefix + "commits/" + head, RestResponses.Commit.class);
+        if (!head.equals(sha(commit.sha()))) {
             throw new IllegalStateException("GitHub returned a different commit");
         }
-        final var treeSha = sha(object(commit.get("tree")).get("sha"));
-        final var tree = object(budget.read(prefix + "trees/" + treeSha + "?recursive=1"));
-        if (!treeSha.equals(sha(tree.get("sha")))
-                || !Boolean.FALSE.equals(tree.get("truncated"))
-                || !(tree.get("tree") instanceof List<?> entries)
+        final var treeSha = sha(commit.tree().sha());
+        final var tree = budget.read(prefix + "trees/" + treeSha + "?recursive=1", RestResponses.SourceTree.class);
+        final var entries = tree.tree();
+        if (!treeSha.equals(sha(tree.sha()))
+                || !Boolean.FALSE.equals(tree.truncated())
+                || entries == null
                 || entries.size() > MAX_ENTRIES) {
             throw new IllegalStateException("Incomplete or oversized GitHub source tree");
         }
         final var names = new HashSet<String>();
         final var blobs = new ArrayList<Blob>();
         long bytes = 0;
-        for (final var value : entries) {
-            final var entry = object(value);
-            final var path = safePath(entry.get("path"));
+        for (final var entry : entries) {
+            final var path = safePath(entry.path());
             if (!names.add(path.toLowerCase(Locale.ROOT))) {
                 throw new IllegalStateException("Duplicate GitHub source path");
             }
-            sha(entry.get("sha"));
-            if ("tree".equals(entry.get("type")) && "040000".equals(entry.get("mode"))) {
+            sha(entry.sha());
+            if ("tree".equals(entry.type()) && "040000".equals(entry.mode())) {
                 continue;
             }
-            if (!"blob".equals(entry.get("type"))
-                    || !("100644".equals(entry.get("mode")) || "100755".equals(entry.get("mode")))) {
+            if (!"blob".equals(entry.type()) || !("100644".equals(entry.mode()) || "100755".equals(entry.mode()))) {
                 throw new IllegalStateException("GitHub source symlinks, gitlinks and special files are refused");
             }
-            final long size = integer(entry.get("size"));
+            final long size = integer(entry.size());
             bytes += size;
             if (size < 0 || size > MAX_FILE_BYTES || bytes > MAX_SOURCE_BYTES || blobs.size() >= MAX_FILES) {
                 throw new IllegalStateException("GitHub source exceeds file or byte limit");
             }
-            blobs.add(new Blob(path, sha(entry.get("sha")), size));
+            blobs.add(new Blob(path, sha(entry.sha()), size));
         }
         final var content = new LinkedHashMap<String, byte[]>();
         final var decodedBlobs = new LinkedHashMap<String, byte[]>();
@@ -269,11 +271,12 @@ public class GithubPrivateContext {
                 content.put(blob.path(), cached);
                 continue;
             }
-            final var response = object(budget.read(prefix + "blobs/" + blob.sha()));
-            if (!blob.sha().equals(sha(response.get("sha")))
-                    || integer(response.get("size")) != blob.size()
-                    || !"base64".equals(response.get("encoding"))
-                    || !(response.get("content") instanceof String encoded)
+            final var response = budget.read(prefix + "blobs/" + blob.sha(), RestResponses.Blob.class);
+            final var encoded = response.content();
+            if (!blob.sha().equals(sha(response.sha()))
+                    || integer(response.size()) != blob.size()
+                    || !"base64".equals(response.encoding())
+                    || encoded == null
                     || encoded.length() > 2 * MAX_FILE_BYTES) {
                 throw new IllegalStateException("Invalid GitHub source blob");
             }
@@ -352,13 +355,6 @@ public class GithubPrivateContext {
             }
         }
         return path;
-    }
-
-    private static Map<?, ?> object(final Object value) {
-        if (!(value instanceof Map<?, ?> map)) {
-            throw new IllegalStateException("Expected GitHub source object");
-        }
-        return map;
     }
 
     private static long integer(final Object value) {
@@ -443,17 +439,12 @@ public class GithubPrivateContext {
             @Property(documentation = "Total decoded source bytes.")
             long sourceBytes) {}
 
-    @JsonModel
-    public record SourceResponse(
-            @Property(documentation = "Dynamic response measured against the cumulative encoded response budget.")
-            Object payload) {}
-
     private final class Budget {
         private long bytes;
 
-        private Object read(final String endpoint) {
-            final var page = github.page(endpoint);
-            bytes += json.toString(new SourceResponse(page.body())).getBytes(StandardCharsets.UTF_8).length;
+        private <T> T read(final String endpoint, final Class<T> type) {
+            final var page = github.page(endpoint, type);
+            bytes += page.responseBytes();
             if (page.next() != null || bytes > MAX_RESPONSE_BYTES) {
                 throw new IllegalStateException("GitHub source exceeds response budget or has unexpected pagination");
             }

@@ -19,7 +19,6 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.httpserver.jre.JreHttpServer;
 import io.yupiik.fusion.httpserver.jre.JreHttpServerConfiguration;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.nono.ui.ApprovalHandle;
 import io.yupiik.ia.agent.nono.ui.ApprovalUi;
 import java.net.URI;
@@ -58,7 +57,7 @@ class ApprovalHttpTest {
             prompts.incrementAndGet();
             return handle(CompletableFuture.completedFuture(true));
         };
-        try (final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        try (final var mapper = ApprovalProtocolTest.mapper();
                 final var executor = Executors.newFixedThreadPool(8);
                 final var timer = Executors.newSingleThreadScheduledExecutor();
                 final var client = HttpClient.newHttpClient();
@@ -142,7 +141,7 @@ class ApprovalHttpTest {
         final var root = TestTempDirs.create(Path.of(System.getProperty("user.home")), ".nono-deadline-test-");
         final var answer = new CompletableFuture<Boolean>();
         final var closed = new AtomicInteger();
-        try (final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        try (final var mapper = ApprovalProtocolTest.mapper();
                 final var state = new PrivateState(root.resolve("launch"), mapper)) {
             final ApprovalUi ui = (text, duration) -> new ApprovalHandle() {
                 @Override
@@ -179,7 +178,7 @@ class ApprovalHttpTest {
             entered.countDown();
             return handle(answer);
         };
-        try (final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        try (final var mapper = ApprovalProtocolTest.mapper();
                 final var workers = Executors.newVirtualThreadPerTaskExecutor();
                 final var state = new PrivateState(root.resolve("launch"), mapper)) {
             try (final var coordinator = new ApprovalCoordinator(ui, message -> {}, state, 3)) {
@@ -227,7 +226,7 @@ class ApprovalHttpTest {
                 }
             };
         };
-        try (final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        try (final var mapper = ApprovalProtocolTest.mapper();
                 final var executor = Executors.newVirtualThreadPerTaskExecutor();
                 final var timer = Executors.newSingleThreadScheduledExecutor();
                 final var client = HttpClient.newHttpClient();

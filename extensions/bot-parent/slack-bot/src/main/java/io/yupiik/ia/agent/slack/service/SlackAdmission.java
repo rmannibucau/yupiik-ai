@@ -17,94 +17,150 @@ package io.yupiik.ia.agent.slack.service;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.slack.configuration.SlackConfiguration;
+import io.yupiik.ia.agent.slack.context.SlackActionRegistry;
+import io.yupiik.ia.agent.slack.model.SlackJson;
 import io.yupiik.ia.agent.slack.model.SlackTask;
+import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackStore;
-import java.util.Map;
+import java.time.Clock;
 import java.util.Optional;
+import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /** Authenticated transport is not authorization: exact trusted installation/channel/user policy is mandatory. */
 @ApplicationScoped
 public class SlackAdmission {
+    private static final Logger LOGGER = Logger.getLogger(SlackAdmission.class.getName());
+    private static final Pattern EVENT_ID = Pattern.compile("Ev[A-Za-z0-9]+");
+    private static final Pattern THREAD_TIMESTAMP = Pattern.compile("[0-9]{1,20}\\.[0-9]{1,20}");
+
     private final SlackConfiguration configuration;
     private final SlackMentionParser parser;
     private final SlackStore store;
+    private final SlackActionRegistry actions;
+    private final Clock clock;
 
     public SlackAdmission(
-            final SlackConfiguration configuration, final SlackMentionParser parser, final SlackStore store) {
+            final SlackConfiguration configuration,
+            final SlackMentionParser parser,
+            final SlackStore store,
+            final SlackActionRegistry actions,
+            final Clock clock) {
         this.configuration = configuration;
         this.parser = parser;
         this.store = store;
+        this.actions = actions;
+        this.clock = clock;
     }
 
-    public Optional<String> admit(final Map<String, Object> payload) {
+    public Optional<String> admit(final SlackJson.Payload payload) {
         configuration.validateInstallation();
-        if (!"event_callback".equals(payload.get("type"))
-                || !configuration.workspace().equals(payload.get("team_id"))
-                || !(payload.get("event_id") instanceof String eventId)
+        if (payload == null) {
+            LOGGER.fine("Slack admission ignored: missing_payload");
+            return Optional.empty();
+        }
+        final var eventId = payload.event_id();
+        final var event = payload.event();
+        if (!"event_callback".equals(payload.type())
+                || !configuration.workspace().equals(payload.team_id())) {
+            LOGGER.fine("Slack admission ignored: installation_or_callback");
+            return Optional.empty();
+        }
+        if (eventId == null
                 || eventId.length() > 128
-                || !eventId.matches("Ev[A-Za-z0-9]+")
-                || !(payload.get("event") instanceof Map<?, ?> event)
-                || !"app_mention".equals(event.get("type"))
-                || event.get("bot_id") != null
-                || event.get("subtype") != null
-                || !(event.get("channel") instanceof String channel)
-                || !(event.get("user") instanceof String user)
-                || !(event.get("ts") instanceof String ts)
-                || !configuration.channels().contains(channel)
-                || !configuration.users().contains(user)
-                || configuration.botUser().equals(user)
-                || !configuration.allowSlackConnect()
-                        && (!Boolean.FALSE.equals(payload.get("is_ext_shared_channel"))
-                                || Boolean.TRUE.equals(event.get("is_ext_shared_channel")))) {
+                || !EVENT_ID.matcher(eventId).matches()
+                || event == null
+                || !"app_mention".equals(event.type())
+                || event.bot_id() != null
+                || event.subtype() != null
+                || event.channel() == null
+                || event.user() == null
+                || event.ts() == null) {
+            LOGGER.fine("Slack admission ignored: invalid_event");
             return Optional.empty();
         }
-        final var thread = event.get("thread_ts") instanceof String parent ? parent : ts;
-        if (!thread.matches("[0-9]{1,20}\\.[0-9]{1,20}")) {
+        if (!configuration.channels().contains(event.channel())) {
+            LOGGER.fine("Slack admission denied: channel_not_approved");
             return Optional.empty();
         }
-        final var parsed = parser.parse(
-                event.get("text") instanceof String text ? text : null,
-                configuration.botUser(),
-                configuration.maxInputChars());
+        if (!configuration.allowsRequester(event.user())) {
+            LOGGER.fine("Slack admission denied: requester_not_allowed");
+            return Optional.empty();
+        }
+        if (!configuration.allowSlackConnect()
+                && (!Boolean.FALSE.equals(payload.is_ext_shared_channel())
+                        || Boolean.TRUE.equals(event.is_ext_shared_channel()))) {
+            LOGGER.fine("Slack admission denied: shared_channel_policy");
+            return Optional.empty();
+        }
+        final var channel = event.channel();
+        final var user = event.user();
+        final var thread = event.thread_ts() != null ? event.thread_ts() : event.ts();
+        if (!THREAD_TIMESTAMP.matcher(thread).matches()) {
+            LOGGER.fine("Slack admission ignored: invalid_thread");
+            return Optional.empty();
+        }
+        final var parsed = parser.parse(event.text(), configuration.botUser(), configuration.maxInputChars());
         if (parsed.isEmpty()) {
+            LOGGER.fine("Slack admission ignored: invalid_mention");
             return Optional.empty();
         }
         final var id = SlackStore.identity(configuration.workspace() + ":" + eventId);
         final var conversation =
                 SlackStore.identity(configuration.workspace() + ":" + channel + ":" + thread + ":" + user);
-        return store.transaction(tasks -> {
-            if (tasks.stream().anyMatch(task -> task.id().equals(id))) {
-                return Optional.of(id);
+        final var outcome = actions.admission(() -> {
+            final var now = clock.millis();
+            final var committed = store.transaction(tasks -> {
+                if (tasks.stream().anyMatch(task -> task.id().equals(id))) {
+                    return new Decision("duplicate", null);
+                }
+                if (tasks.size() >= 10000
+                        || tasks.stream().filter(task -> !task.terminal()).count() >= configuration.maxPending()
+                        || tasks.stream()
+                                        .filter(task -> !task.terminal()
+                                                && task.requester().equals(user))
+                                        .count()
+                                >= configuration.maxPendingPerUser()) {
+                    return new Decision("queue_full", null);
+                }
+                final var admitted = new SlackTask(
+                        id,
+                        configuration.workspace(),
+                        channel,
+                        thread,
+                        user,
+                        parsed.orElseThrow(),
+                        conversation,
+                        TaskStatus.queued,
+                        now,
+                        now,
+                        0,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        false,
+                        null);
+                tasks.add(admitted);
+                return new Decision("accepted", admitted);
+            });
+            if ("accepted".equals(committed.status())
+                    && Boolean.FALSE.equals(payload.is_ext_shared_channel())
+                    && !Boolean.TRUE.equals(event.is_ext_shared_channel())) {
+                actions.admitted(committed.task(), event.action_token(), now);
             }
-            if (tasks.size() >= 10000
-                    || tasks.stream().filter(task -> !task.terminal()).count() >= configuration.maxPending()
-                    || tasks.stream()
-                                    .filter(task ->
-                                            !task.terminal() && task.requester().equals(user))
-                                    .count()
-                            >= configuration.maxPendingPerUser()) {
-                return Optional.empty();
-            }
-            final var now = System.currentTimeMillis();
-            tasks.add(new SlackTask(
-                    id,
-                    configuration.workspace(),
-                    channel,
-                    thread,
-                    user,
-                    parsed.orElseThrow(),
-                    conversation,
-                    "queued",
-                    now,
-                    now,
-                    0,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null));
-            return Optional.of(id);
+            return committed.status();
         });
+        // Report acceptance only after the durable transaction has completed successfully.
+        if ("accepted".equals(outcome)) {
+            LOGGER.info("Slack admission accepted task");
+        } else {
+            LOGGER.fine("Slack admission: " + outcome);
+        }
+        return "queue_full".equals(outcome) ? Optional.empty() : Optional.of(id);
     }
+
+    private record Decision(String status, SlackTask task) {}
 }

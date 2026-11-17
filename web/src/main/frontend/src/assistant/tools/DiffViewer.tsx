@@ -1,5 +1,5 @@
 // Adapted from assistant-ui Elements DiffViewerLine (MIT).
-// See PROVENANCE.md and LICENSE.assistant-ui in this directory.
+// See LICENSE.assistant-ui here and documentation/src/main/minisite/content/features/ui-advanced.adoc.
 import type { ComponentPropsWithoutRef } from 'react';
 
 /** Literal patch lines, not a computed or reconstructed diff.

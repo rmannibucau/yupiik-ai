@@ -51,22 +51,26 @@ import javax.net.ssl.SSLSession;
  */
 public final class UnixProviderHttpClient extends DelegatingHttpClient {
     private final Path socket;
+    private final ApiFlavor api;
+    private final URI endpoint;
     private final Set<SocketChannel> active = ConcurrentHashMap.newKeySet();
     private volatile boolean closed;
 
-    public UnixProviderHttpClient(final HttpClient delegate, final Path socket) {
+    public UnixProviderHttpClient(final HttpClient delegate, final Path socket, final ApiFlavor api) {
         super(delegate);
         if (socket == null || !socket.isAbsolute() || !socket.normalize().equals(socket)) {
             throw new IllegalArgumentException("Absolute prepared provider socket required");
         }
         this.socket = socket;
+        this.endpoint = UnixProviderProtocol.endpoint(api);
+        this.api = api;
     }
 
     public static HttpClient fromConfiguration(
             final HttpClient delegate, final NativeProviderConfiguration configuration) {
         return configuration.socket() == null || configuration.socket().isBlank()
                 ? delegate
-                : new UnixProviderHttpClient(delegate, Path.of(configuration.socket()));
+                : new UnixProviderHttpClient(delegate, Path.of(configuration.socket()), configuration.api());
     }
 
     @Override
@@ -90,7 +94,7 @@ public final class UnixProviderHttpClient extends DelegatingHttpClient {
             return delegate.sendAsync(request, handler);
         }
         final var future = new CompletableFuture<HttpResponse<T>>();
-        if (closed || !UnixProviderProtocol.ENDPOINT.equals(request.uri()) || !"POST".equals(request.method())) {
+        if (closed || !endpoint.equals(request.uri()) || !"POST".equals(request.method())) {
             future.completeExceptionally(new IOException("Invalid native provider route"));
             return future;
         }
@@ -143,6 +147,7 @@ public final class UnixProviderHttpClient extends DelegatingHttpClient {
                 }
                 out.writeInt(UnixProviderProtocol.MAGIC);
                 out.writeUTF(authorization.substring(7));
+                out.writeUTF(api.name());
                 out.writeInt(bytes.length);
                 out.write(bytes);
                 final var in = UnixProviderProtocol.input(channel);

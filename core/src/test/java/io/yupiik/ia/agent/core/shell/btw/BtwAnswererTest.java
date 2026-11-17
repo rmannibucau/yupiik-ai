@@ -148,7 +148,7 @@ class BtwAnswererTest {
         final var configuration = TestConfigs.codingAgent(config(extra));
         final var providerManager = new ProviderManager(configuration, mapper);
         final var httpClient =
-                new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null));
+                new HttpClientProducer().httpClient(configuration, new NativeProviderConfiguration(null, null));
         httpClients.add(httpClient);
         final var gates = new ProviderConcurrencyGates(configuration);
         gateRegistries.add(gates);

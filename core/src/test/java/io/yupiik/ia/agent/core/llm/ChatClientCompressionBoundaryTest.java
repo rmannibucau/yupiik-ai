@@ -133,7 +133,7 @@ class ChatClientCompressionBoundaryTest {
         values.put("yca.provider.providers.0.model", "deepseek-v4-flash");
         values.putAll(overrides);
         final var config = TestConfigs.codingAgent(values);
-        final var http = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null));
+        final var http = new HttpClientProducer().httpClient(config, new NativeProviderConfiguration(null, null));
         httpClients.add(http);
         return new ChatClient(config, mapper, new ProviderManager(config, mapper), Clock.systemUTC(), http);
     }

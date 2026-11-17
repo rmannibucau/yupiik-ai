@@ -19,19 +19,21 @@ import static io.yupiik.ia.agent.slack.support.SlackDomainFixture.task;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.fusion.framework.api.configuration.Configuration;
-import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.bot.feedback.FeedbackMailbox;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
 import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
 import io.yupiik.ia.agent.core.question.Question;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.slack.context.SlackContextStorage;
 import io.yupiik.ia.agent.slack.model.SlackQuestion;
 import io.yupiik.ia.agent.slack.model.SlackQuestionItem;
 import io.yupiik.ia.agent.slack.model.SlackQuestionRequest;
 import io.yupiik.ia.agent.slack.model.SlackTask;
+import io.yupiik.ia.agent.slack.model.TaskStatus;
+import io.yupiik.ia.agent.slack.store.SlackStore;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import java.io.IOException;
-import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
@@ -41,6 +43,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -52,7 +56,7 @@ class SlackLifecycleSafetyTest {
     @Test
     void cancellationRetainsAttemptAndHostSlotUntilInterruptedLauncherSettlesAndFinalStopCompletes() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
-            fixture.add(task("task", "U1", "queued", 1));
+            fixture.add(task("task", "U1", TaskStatus.queued, 1));
             final var admission = new HostAdmission(
                     new HostAdmissionConfiguration(root.resolve("host-budget").toString(), 1, ""));
             final var entered = new CountDownLatch(1);
@@ -63,7 +67,11 @@ class SlackLifecycleSafetyTest {
             final List<String> events = new CopyOnWriteArrayList<>();
             final Sandbox sandbox = new Sandbox() {
                 @Override
-                public int execute(final Path directory, final String runtime, final String prompt) {
+                public int execute(
+                        final Path directory,
+                        final String runtime,
+                        final String prompt,
+                        final Path temporaryDirectory) {
                     attempt.complete(directory);
                     entered.countDown();
                     try {
@@ -96,12 +104,14 @@ class SlackLifecycleSafetyTest {
             });
             try {
                 assertTrue(entered.await(150, TimeUnit.MILLISECONDS));
-                change(fixture, current -> current.transition("cancel_requested", System.currentTimeMillis()));
+                change(fixture, current -> current.transition(TaskStatus.cancel_requested, System.currentTimeMillis()));
                 assertTrue(interrupted.await(150, TimeUnit.MILLISECONDS), "Cancellation must interrupt the launcher");
                 assertTrue(firstStop.await(150, TimeUnit.MILLISECONDS));
                 assertFalse(completed.isDone(), "A successful early stop cannot settle a still-running launcher");
                 assertTrue(Files.isDirectory(attempt.join()));
-                assertEquals("cancel_requested", fixture.store.list().getFirst().status());
+                assertEquals(
+                        TaskStatus.cancel_requested,
+                        fixture.store.list().getFirst().status());
                 assertTrue(
                         admission.tryAcquire().isEmpty(),
                         "Host slot must stay reserved while launch can still create a runtime");
@@ -115,7 +125,7 @@ class SlackLifecycleSafetyTest {
             }
             assertTrue(completed.get(150, TimeUnit.MILLISECONDS));
             assertEquals(List.of("stop", "launcher-settled", "stop"), events);
-            assertEquals("cancelled", fixture.store.list().getFirst().status());
+            assertEquals(TaskStatus.cancelled, fixture.store.list().getFirst().status());
             assertFalse(Files.exists(attempt.join()));
             assertTrue(fixture.exchanges.isEmpty());
             try (final var lease = admission.tryAcquire().orElseThrow()) {
@@ -125,13 +135,18 @@ class SlackLifecycleSafetyTest {
     }
 
     @Test
-    void cancellationDuringResultValidationWinsOverFinalAnswerPublication() throws Exception {
+    void cancellationAfterStatusReadWinsOverFinalAnswerPublication() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
-            final var original = task("task", "U1", "queued", 1);
+            final var original = task("task", "U1", TaskStatus.queued, 1);
             fixture.add(original);
+            final var stopped = new AtomicBoolean();
             final Sandbox sandbox = new Sandbox() {
                 @Override
-                public int execute(final Path directory, final String runtime, final String prompt) {
+                public int execute(
+                        final Path directory,
+                        final String runtime,
+                        final String prompt,
+                        final Path temporaryDirectory) {
                     try {
                         Files.writeString(
                                 directory.resolve("output/result.json"),
@@ -143,40 +158,49 @@ class SlackLifecycleSafetyTest {
                 }
 
                 @Override
-                public void stop(final String runtime) {}
+                public void stop(final String runtime) {
+                    stopped.set(true);
+                }
 
                 @Override
                 public void close() {}
             };
-            // Cancel after the worker's first status read, while it validates the result contract.
-            // The publication intent must compare and transition under the store transaction.
-            final var validatingJson = (JsonMapper) Proxy.newProxyInstance(
-                    JsonMapper.class.getClassLoader(),
-                    new Class<?>[] {JsonMapper.class},
-                    (proxy, method, arguments) -> {
-                        final var result = method.invoke(fixture.json, arguments);
-                        if ("fromString".equals(method.getName())
-                                && arguments[0] == Object.class
-                                && arguments[1] instanceof String text
-                                && text.contains("Do not publish")) {
-                            change(
-                                    fixture,
-                                    current -> current.transition("cancel_requested", System.currentTimeMillis()));
-                        }
-                        return result;
-                    });
+            // Return the pre-cancellation snapshot, then persist cancellation before publication.
+            // The publication intent must compare and transition under the store transaction,
+            // independently of which JSON reader validates the result.
+            final var cancellingStore = new SlackStore(fixture.configuration, fixture.json) {
+                @Override
+                public List<SlackTask> list() {
+                    final var snapshot = fixture.store.list();
+                    if (stopped.compareAndSet(true, false)) {
+                        change(
+                                fixture,
+                                current -> current.transition(TaskStatus.cancel_requested, System.currentTimeMillis()));
+                    }
+                    return snapshot;
+                }
+
+                @Override
+                public <T> T transaction(final Function<List<SlackTask>, T> operation) {
+                    return fixture.store.transaction(operation);
+                }
+            };
             final var worker = new SlackWorker(
                     fixture.configuration,
                     fixture.executor(root),
-                    validatingJson,
-                    fixture.store,
+                    fixture.json,
+                    cancellingStore,
                     new SlackPromptRenderer(SlackDomainFixture.prompts(), fixture.json),
                     sandbox,
                     feedback(fixture),
                     fixture.api,
-                    new HostAdmission(new HostAdmissionConfiguration("", 1, "")));
+                    new HostAdmission(new HostAdmissionConfiguration("", 1, "")),
+                    fixture.contextConfiguration,
+                    fixture.actions,
+                    fixture.contextDispatcher,
+                    new SlackContextStorage());
             assertTrue(worker.runOne());
-            assertEquals("cancelled", fixture.store.list().getFirst().status());
+            assertEquals(TaskStatus.cancelled, fixture.store.list().getFirst().status());
             assertTrue(fixture.exchanges.isEmpty());
         }
     }
@@ -184,7 +208,7 @@ class SlackLifecycleSafetyTest {
     @Test
     void pendingQuestionPublicationReceiptCannotEraseCancellation() throws Exception {
         try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
-            final var original = task("task", "U1", "running", 1);
+            final var original = task("task", "U1", TaskStatus.running, 1);
             fixture.add(original);
             final var mailboxRoot = Files.createDirectory(
                     root.resolve("mailbox"),
@@ -197,11 +221,15 @@ class SlackLifecycleSafetyTest {
                     assertEquals(
                             "publishing",
                             fixture.store.list().getFirst().question().state());
-                    change(fixture, current -> current.transition("cancel_requested", System.currentTimeMillis()));
+                    change(
+                            fixture,
+                            current -> current.transition(TaskStatus.cancel_requested, System.currentTimeMillis()));
                     return "{\"ok\":true,\"channel\":\"C1\",\"ts\":\"2.1\"}";
                 };
                 feedback(fixture).poll(original.id(), mailbox);
-                assertEquals("cancel_requested", fixture.store.list().getFirst().status());
+                assertEquals(
+                        TaskStatus.cancel_requested,
+                        fixture.store.list().getFirst().status());
                 assertEquals(1, fixture.exchanges.size());
             }
         }
@@ -215,16 +243,17 @@ class SlackLifecycleSafetyTest {
                     nonce,
                     System.currentTimeMillis() + 30000,
                     List.of(new SlackQuestionItem("question", "Choose", List.of("yes", "no"), false)));
-            fixture.add(task("task", "U1", "running", 1)
-                    .feedback(new SlackQuestion(request, "waiting", "2.1", null, null), "waiting_for_user", 1));
+            fixture.add(task("task", "U1", TaskStatus.running, 1)
+                    .feedback(
+                            new SlackQuestion(request, "waiting", "2.1", null, null), TaskStatus.waiting_for_user, 1));
             fixture.response = exchange -> {
                 assertEquals(
                         "opening", fixture.store.list().getFirst().question().state());
-                change(fixture, current -> current.feedback(null, "cancelled", System.currentTimeMillis()));
+                change(fixture, current -> current.feedback(null, TaskStatus.cancelled, System.currentTimeMillis()));
                 return "{\"ok\":false,\"error\":\"invalid_trigger\"}";
             };
             assertDoesNotThrow(() -> feedback(fixture)
-                    .interaction(Map.of(
+                    .interaction(fixture.payload(Map.of(
                             "type",
                             "block_actions",
                             "team",
@@ -238,8 +267,8 @@ class SlackLifecycleSafetyTest {
                             "trigger_id",
                             "trigger",
                             "actions",
-                            List.of(Map.of("action_id", "answer", "value", nonce)))));
-            assertEquals("cancelled", fixture.store.list().getFirst().status());
+                            List.of(Map.of("action_id", "answer", "value", nonce))))));
+            assertEquals(TaskStatus.cancelled, fixture.store.list().getFirst().status());
             assertNull(fixture.store.list().getFirst().question());
             assertEquals(1, fixture.exchanges.size());
         }
@@ -255,14 +284,19 @@ class SlackLifecycleSafetyTest {
                         60,
                         1,
                         "hidden",
-                        new ExecutorConfiguration.Docker("/must-not-run/docker", "agent", "", null),
+                        new ExecutorConfiguration.Docker("/must-not-run/docker", "agent", "", null, null, false),
                         null,
                         null,
                         null);
                 final var failure = assertThrows(
                         IllegalArgumentException.class,
                         () -> new SlackSandbox(
-                                settings, null, Configuration.of(Map.of()), fixture.json, root.resolve("state")));
+                                settings,
+                                null,
+                                Configuration.of(Map.of()),
+                                fixture.json,
+                                root.resolve("state"),
+                                new ProviderBudgetConfiguration(null, null, null)));
                 assertTrue(failure.getMessage().contains("requires"));
             }
         }
@@ -278,7 +312,11 @@ class SlackLifecycleSafetyTest {
                 sandbox,
                 feedback(fixture),
                 fixture.api,
-                admission);
+                admission,
+                fixture.contextConfiguration,
+                fixture.actions,
+                fixture.contextDispatcher,
+                new SlackContextStorage());
     }
 
     private SlackFeedback feedback(final SlackDomainFixture fixture) {

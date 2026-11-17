@@ -17,13 +17,13 @@ package io.yupiik.ia.agent.slack.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration;
+import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
 
 /** Reuses validated backend value types without changing the existing GitHub configuration contract. */
 @RootConfiguration("slack.executor")
 public record SlackExecutorConfiguration(
         @Property(
-                defaultValue = "io.yupiik.ia.agent.github.configuration.ExecutorConfiguration.Backend.DOCKER",
+                defaultValue = "io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration.Backend.DOCKER",
                 documentation = "Sandbox backend.")
         ExecutorConfiguration.Backend backend,
 

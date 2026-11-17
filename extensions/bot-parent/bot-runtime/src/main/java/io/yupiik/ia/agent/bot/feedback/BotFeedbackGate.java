@@ -15,7 +15,6 @@
  */
 package io.yupiik.ia.agent.bot.feedback;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.order.Order;
 import io.yupiik.fusion.framework.build.api.scanning.Bean;
@@ -33,17 +32,12 @@ public class BotFeedbackGate {
     @Bean
     @DefaultScoped
     @Order(2000)
-    public FeedbackGate gate(final Configuration configuration, final JsonMapper json) {
-        if (!Boolean.parseBoolean(configuration.get("yca.bot.feedback.enabled").orElse("false"))) {
+    public FeedbackGate gate(final BotFeedbackConfiguration configuration, final JsonMapper json) {
+        if (!configuration.enabled()) {
             return questions -> null;
         }
-        final var waitSeconds = Integer.parseInt(
-                configuration.get("yca.bot.feedback.timeoutSeconds").orElse("600"));
-        if (waitSeconds < 1 || waitSeconds > 3600) {
-            throw new IllegalArgumentException("Invalid bot feedback deadline");
-        }
-        final var configuredDirectory =
-                configuration.get("yca.bot.feedback.directory").map(Path::of).orElse(null);
+        final var waitSeconds = configuration.timeoutSeconds();
+        final var configuredDirectory = configuration.directory() == null ? null : Path.of(configuration.directory());
         final var singleQuestion = new Semaphore(1);
         return questions -> {
             if (Thread.currentThread().isInterrupted() || !singleQuestion.tryAcquire()) {

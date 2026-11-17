@@ -1,4 +1,5 @@
-// Adapted from assistant-ui Elements (MIT). See UPSTREAM.md and LICENSE.assistant-ui.
+// Adapted from assistant-ui Elements (MIT). See LICENSE.assistant-ui and
+// documentation/src/main/minisite/content/features/ui-advanced.adoc for provenance.
 "use client";
 
 import { useId, type ComponentProps } from "react";

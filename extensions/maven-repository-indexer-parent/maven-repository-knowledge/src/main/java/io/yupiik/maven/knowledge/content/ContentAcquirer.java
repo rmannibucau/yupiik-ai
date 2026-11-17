@@ -32,6 +32,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -49,6 +50,8 @@ import org.w3c.dom.Document;
  * </ol>
  */
 public class ContentAcquirer {
+    private static final Pattern CONTENT_CLASS = Pattern.compile(".*class\\s*=\\s*\"[^\"]*content[^\"]*\".*");
+    private static final Pattern NAV_CLASS = Pattern.compile(".*class\\s*=\\s*\"[^\"]*nav[^\"]*\".*");
 
     private final LocalRepository repository;
     private final WebFetch webFetch;
@@ -442,7 +445,7 @@ public class ContentAcquirer {
             }
             final var tag = html.substring(open + 1, gt);
             final var lower = tag.toLowerCase(Locale.ROOT);
-            if (lower.matches(".*class\\s*=\\s*\"[^\"]*content[^\"]*\".*")) {
+            if (CONTENT_CLASS.matcher(lower).matches()) {
                 final var closeTag = findBlockEnd(html, open, gt, tag);
                 return closeTag < 0 ? html.substring(open) : html.substring(open, closeTag);
             }
@@ -520,7 +523,7 @@ public class ContentAcquirer {
         }
         return lower.contains("id=\"footer\"")
                 || lower.contains("id=\"header\"")
-                || lower.matches(".*class\\s*=\\s*\"[^\"]*nav[^\"]*\".*");
+                || NAV_CLASS.matcher(lower).matches();
     }
 
     private static boolean isDocHost(final String url) {

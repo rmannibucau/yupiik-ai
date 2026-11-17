@@ -17,11 +17,40 @@ package io.yupiik.ia.agent.slack.configuration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.yupiik.fusion.framework.api.configuration.Configuration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class SlackConfigurationTest {
+    @Test
+    void generatedBindingKeepsChannelMemberAccessOptInAndValidatesRequesters() {
+        final var defaults = new SlackConfiguration$FusionConfigurationFactory(Configuration.of(Map.of())).get();
+        assertFalse(defaults.allowChannelMembers());
+        assertFalse(defaults.allowsRequester("U3"));
+        final var restricted = new SlackConfiguration$FusionConfigurationFactory(
+                        Configuration.of(Map.of("slack.botUser", "UBOT", "slack.users", "U1")))
+                .get();
+        assertTrue(restricted.allowsRequester("U1"));
+        assertFalse(restricted.allowsRequester("U3"));
+        final var members = new SlackConfiguration$FusionConfigurationFactory(
+                        Configuration.of(Map.of("slack.botUser", "UBOT", "slack.allowChannelMembers", "true")))
+                .get();
+        assertTrue(members.allowChannelMembers());
+        assertTrue(members.users().isEmpty());
+        assertTrue(members.allowsRequester("U3"));
+        assertTrue(members.allowsRequester("W3"));
+        assertFalse(members.allowsRequester(null));
+        for (final var user : List.of("", "UBOT", "B1", "U.*", "U", "u3", "U3 ", "U" + "A".repeat(64))) {
+            assertFalse(members.allowsRequester(user), user);
+        }
+        final var disabled = new SlackConfiguration$FusionConfigurationFactory(
+                        Configuration.of(Map.of("slack.allowChannelMembers", "false")))
+                .get();
+        assertFalse(disabled.allowsRequester("U3"));
+    }
+
     @Test
     void missingAllowlistsDenyByDefaultAndConfiguredListsAreImmutable() {
         final var empty = configuration("T1", "UBOT", null, null, 4, 2, 86400);
@@ -85,6 +114,7 @@ class SlackConfigurationTest {
                 bot,
                 channels,
                 users,
+                false,
                 false,
                 "SLACK_APP_TOKEN",
                 "SLACK_BOT_TOKEN",

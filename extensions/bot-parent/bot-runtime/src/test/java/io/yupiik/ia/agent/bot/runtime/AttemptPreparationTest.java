@@ -17,7 +17,7 @@ package io.yupiik.ia.agent.bot.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.ia.agent.github.model.AgentConfigurationDocument;
+import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;

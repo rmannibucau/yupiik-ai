@@ -33,9 +33,12 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /** Attempt-local ownership of private Git storage, authority, credentials and the HTTP listener. */
 public final class BrokerAttempt implements AutoCloseable {
+    private static final Pattern TASK_ID = Pattern.compile("[A-Za-z0-9-]{1,100}");
+
     private final ContextService service;
     private final ContextHttpServer http;
     private final Path directory;
@@ -87,7 +90,7 @@ public final class BrokerAttempt implements AutoCloseable {
                     "Private broker storage requires owner-only permissions and dispatcher ownership");
         }
         if (task.id() == null
-                || !task.id().matches("[A-Za-z0-9-]{1,100}")
+                || !TASK_ID.matcher(task.id()).matches()
                 || task.attempts() < 1
                 || !("yca-" + task.id() + "-" + task.attempts()).equals(task.runtimeId())) {
             throw new IllegalArgumentException("Broker storage requires its exact task, attempt and runtime binding");

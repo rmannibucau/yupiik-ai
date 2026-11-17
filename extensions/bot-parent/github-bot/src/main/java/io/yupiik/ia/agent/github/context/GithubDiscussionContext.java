@@ -15,21 +15,26 @@
  */
 package io.yupiik.ia.agent.github.context;
 
+import io.yupiik.fusion.framework.api.container.Types;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /** Fixed task discussion authority; neither adapters nor callers can supply an endpoint or repository. */
 public final class GithubDiscussionContext {
+    private static final Pattern REPOSITORY_NAME = Pattern.compile("[A-Za-z0-9_-]+/[A-Za-z0-9_-][A-Za-z0-9_.-]*");
+
     private final GitHubClient github;
     private final String repository;
     private final long number;
 
     public GithubDiscussionContext(final GitHubClient github, final String repository, final long number) {
         if (repository == null
-                || !repository.matches("[A-Za-z0-9_-]+/[A-Za-z0-9_-][A-Za-z0-9_.-]*")
+                || !REPOSITORY_NAME.matcher(repository).matches()
                 || repository.endsWith("/.")
                 || repository.endsWith("/..")
                 || number < 1) {
@@ -52,13 +57,20 @@ public final class GithubDiscussionContext {
                 if (page != 1) {
                     throw new IllegalArgumentException("Pull is not paginated");
                 }
-                final var raw = github.get(pull);
-                final var result = select(raw, "id", "node_id", "number", "title", "body", "state");
-                if (!(raw instanceof Map<?, ?> value)) {
-                    throw new IllegalArgumentException("Expected PR object");
-                }
-                result.put("head", select(value.get("head"), "sha"));
-                result.put("base", select(value.get("base"), "sha"));
+                final var raw = github.get(pull, RestResponses.Pull.class);
+                final var result = new LinkedHashMap<String, Object>();
+                result.put("id", raw.id());
+                result.put("node_id", raw.node_id());
+                result.put("number", raw.number());
+                result.put("title", raw.title());
+                result.put("body", raw.body());
+                result.put("state", raw.state());
+                final var head = new LinkedHashMap<String, Object>();
+                head.put("sha", raw.head().sha());
+                result.put("head", head);
+                final var base = new LinkedHashMap<String, Object>();
+                base.put("sha", raw.base().sha());
+                result.put("base", base);
                 return result;
             }
             case "files" -> {
@@ -81,8 +93,11 @@ public final class GithubDiscussionContext {
             }
             default -> throw new IllegalArgumentException("UNKNOWN_CONTEXT_OPERATION");
         }
-        final var response = github.page(endpoint + "?per_page=100&page=" + page);
-        if (!(response.body() instanceof List<?> entries) || entries.size() > 100) {
+        final var response = github.<List<RestResponses.ContextEntry>>page(
+                endpoint + "?per_page=100&page=" + page,
+                new Types.ParameterizedTypeImpl(List.class, RestResponses.ContextEntry.class));
+        final var entries = response.body();
+        if (entries == null || entries.size() > 100) {
             throw new IllegalArgumentException("Expected bounded list");
         }
         final var result = new ArrayList<Map<String, Object>>();
@@ -101,13 +116,32 @@ public final class GithubDiscussionContext {
                 page == 10 && response.next() != null);
     }
 
-    private static Map<String, Object> select(final Object value, final String... fields) {
-        if (!(value instanceof Map<?, ?> source)) {
+    private static Map<String, Object> select(final RestResponses.ContextEntry source, final String... fields) {
+        if (source == null) {
             throw new IllegalArgumentException("Expected object");
         }
         final var result = new LinkedHashMap<String, Object>();
         for (final var field : fields) {
-            final var scalar = source.get(field);
+            final var scalar =
+                    switch (field) {
+                        case "id" -> source.id();
+                        case "node_id" -> source.node_id();
+                        case "sha" -> source.sha();
+                        case "filename" -> source.filename();
+                        case "previous_filename" -> source.previous_filename();
+                        case "status" -> source.status();
+                        case "patch" -> source.patch();
+                        case "body" -> source.body();
+                        case "state" -> source.state();
+                        case "commit_id" -> source.commit_id();
+                        case "submitted_at" -> source.submitted_at();
+                        case "path" -> source.path();
+                        case "line" -> source.line();
+                        case "side" -> source.side();
+                        case "in_reply_to_id" -> source.in_reply_to_id();
+                        case "updated_at" -> source.updated_at();
+                        default -> throw new IllegalArgumentException("Unknown context field");
+                    };
             if (scalar == null || scalar instanceof String || scalar instanceof Number || scalar instanceof Boolean) {
                 result.put(field, scalar);
             }

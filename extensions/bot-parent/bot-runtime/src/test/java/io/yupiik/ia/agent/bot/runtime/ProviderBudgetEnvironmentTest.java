@@ -18,10 +18,12 @@ package io.yupiik.ia.agent.bot.runtime;
 import static io.yupiik.ia.agent.bot.runtime.ProviderBudgetEnvironment.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.ia.agent.core.configuration.ProviderBudgetConfiguration;
+import io.yupiik.ia.agent.core.llm.ProviderRequestBudget;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -29,24 +31,36 @@ class ProviderBudgetEnvironmentTest {
     @TempDir
     Path root;
 
+    private static ProviderBudgetConfiguration budgetConfiguration(final Map<String, String> settings) {
+        return new ProviderBudgetConfiguration(settings.get(ROOT), settings.get(ID), settings.get(SLOTS));
+    }
+
+    @Test
+    void handoffKeysMatchCoreBudgetKeys() {
+        assertEquals(ProviderRequestBudget.ROOT, ROOT);
+        assertEquals(ProviderRequestBudget.ID, ID);
+        assertEquals(ProviderRequestBudget.SLOTS, SLOTS);
+        assertEquals(Set.of(ROOT, ID, SLOTS), KEYS);
+    }
+
     @Test
     void disabledDoesNotChangeLegacyEnvironment() {
-        assertEquals(Map.of(), select(Configuration.of(Map.of("OPENAI_API_KEY", "never-copy"))));
-        assertEquals(Map.of(), select(Configuration.of(Map.of(ROOT, " "))));
+        assertEquals(Map.of(), select(budgetConfiguration(Map.of("OPENAI_API_KEY", "never-copy"))));
+        assertEquals(Map.of(), select(budgetConfiguration(Map.of(ROOT, " "))));
         for (final var orphan : Map.of(ID, "account", SLOTS, "").entrySet()) {
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> select(Configuration.of(Map.of(orphan.getKey(), orphan.getValue()))));
+                    () -> select(budgetConfiguration(Map.of(orphan.getKey(), orphan.getValue()))));
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> select(Configuration.of(Map.of(ROOT, " ", orphan.getKey(), orphan.getValue()))));
+                    () -> select(budgetConfiguration(Map.of(ROOT, " ", orphan.getKey(), orphan.getValue()))));
         }
     }
 
     @Test
     void selectsOnlyTrustedBudgetVariablesAndRejectsAgentMountOverlap() throws Exception {
         final var budget = Files.createDirectory(root.resolve("budget"));
-        final var environment = Configuration.of(
+        final var environment = budgetConfiguration(
                 Map.of(ROOT, budget.toString(), ID, "provider_account", SLOTS, "2", "SECRET", "hidden"));
         assertEquals(
                 Map.of(ROOT, budget.toString(), ID, "provider_account", SLOTS, "2"),
@@ -67,13 +81,13 @@ class ProviderBudgetEnvironmentTest {
         }) {
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> select(Configuration.of(Map.of(ROOT, invalid, ID, "account", SLOTS, "1"))));
+                    () -> select(budgetConfiguration(Map.of(ROOT, invalid, ID, "account", SLOTS, "1"))));
         }
         assertThrows(
                 IllegalArgumentException.class,
-                () -> select(Configuration.of(Map.of(ROOT, budget.toString(), ID, "../account", SLOTS, "1"))));
+                () -> select(budgetConfiguration(Map.of(ROOT, budget.toString(), ID, "../account", SLOTS, "1"))));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> select(Configuration.of(Map.of(ROOT, budget.toString(), ID, "account", SLOTS, "0"))));
+                () -> select(budgetConfiguration(Map.of(ROOT, budget.toString(), ID, "account", SLOTS, "0"))));
     }
 }

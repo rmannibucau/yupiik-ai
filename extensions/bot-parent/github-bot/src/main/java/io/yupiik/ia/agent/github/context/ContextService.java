@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.github.context;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.github.client.GitHubClient;
+import io.yupiik.ia.agent.github.client.RestResponses;
 import io.yupiik.ia.agent.github.configuration.ContextConfiguration;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions;
 import io.yupiik.ia.agent.github.context.git.GitReadPolicy;
@@ -51,12 +52,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Pattern;
 
 /**
  * One fixed task/attempt authority. Adapters never select upstream URLs, credentials or raw API operations.
  * All Git processes target private worker-owned repositories, never the live agent worktree.
  */
 public final class ContextService implements AutoCloseable {
+    private static final Pattern REPOSITORY_NAME = Pattern.compile("[A-Za-z0-9_-]+/[A-Za-z0-9_-][A-Za-z0-9_.-]*");
+    private static final Pattern COMMIT_SHA = Pattern.compile("[0-9a-f]{40}");
+
     private static final Set<String> REQUEST_FIELDS = Set.of(
             "operation",
             "repository",
@@ -134,11 +139,12 @@ public final class ContextService implements AutoCloseable {
             if (task.kind() != TaskKind.fix && !"pull_request".equals(task.reviewTarget())) {
                 throw new IllegalArgumentException("Expected an explicit review target");
             }
-            final var pull = object(github.get("/repos/" + task.repository() + "/pulls/" + number(task.number())));
-            final var base = object(pull.get("base"));
-            final var head = object(pull.get("head"));
-            final var baseRepo = object(base.get("repo"));
-            final var headRepo = object(head.get("repo"));
+            final var pull = github.get(
+                    "/repos/" + task.repository() + "/pulls/" + number(task.number()), RestResponses.Pull.class);
+            final var base = pull.base();
+            final var head = pull.head();
+            final var baseRepo = base.repo();
+            final var headRepo = head.repo();
             if (!id(upstream).equals(id(baseRepo)) || !name(upstream).equalsIgnoreCase(name(baseRepo))) {
                 throw new IllegalArgumentException("PR_REPOSITORY_IDENTITY_CHANGED");
             }
@@ -146,8 +152,8 @@ public final class ContextService implements AutoCloseable {
             if (!id(verifiedHead).equals(id(headRepo))) {
                 throw new IllegalArgumentException("PR_HEAD_REPOSITORY_IDENTITY_CHANGED");
             }
-            final var baseSha = sha(base.get("sha"));
-            final var headSha = sha(head.get("sha"));
+            final var baseSha = sha(base.sha());
+            final var headSha = sha(head.sha());
             if (task.kind() == TaskKind.fix
                     && task.strictSolveBaseSha() != null
                     && !task.strictSolveBaseSha().equals(headSha)) {
@@ -542,10 +548,12 @@ public final class ContextService implements AutoCloseable {
             }
             // Resolve canonical identity and the host-approved default ref once. Caller cannot request arbitrary refs.
             final var metadata = repository(repository);
-            final var branch = text(metadata.get("default_branch"), "default_branch");
-            final var commit = object(github.get("/repos/" + name(metadata) + "/commits/"
-                    + URLEncoder.encode(branch, StandardCharsets.UTF_8).replace("+", "%20")));
-            final var sha = sha(commit.get("sha"));
+            final var branch = text(metadata.default_branch(), "default_branch");
+            final var commit = github.get(
+                    "/repos/" + name(metadata) + "/commits/"
+                            + URLEncoder.encode(branch, StandardCharsets.UTF_8).replace("+", "%20"),
+                    RestResponses.Commit.class);
+            final var sha = sha(commit.sha());
             add(metadata, sha, sha);
             return Map.of(
                     "status", "granted", "repository", name(metadata), "repositoryId", id(metadata), "headSha", sha);
@@ -623,20 +631,23 @@ public final class ContextService implements AutoCloseable {
                 && (repository == null || primary.equalsIgnoreCase(repository));
     }
 
-    private void add(final Map<String, Object> repository, final String sha, final String baseSha) {
+    private void add(final RestResponses.Repository repository, final String sha, final String baseSha) {
         add(repository, sha, baseSha, name(repository));
     }
 
     private void add(
-            final Map<String, Object> repository, final String sha, final String baseSha, final String baseRepository) {
+            final RestResponses.Repository repository,
+            final String sha,
+            final String baseSha,
+            final String baseRepository) {
         final var name = name(repository);
         grants.put(key(name), new Grant(id(repository), name, sha, baseSha, baseRepository));
     }
 
-    private Map<String, Object> repository(final String name) {
+    private RestResponses.Repository repository(final String name) {
         key(name);
-        final var result = object(github.get("/repos/" + name));
-        if (!name(result).equalsIgnoreCase(name) || Boolean.TRUE.equals(result.get("archived"))) {
+        final var result = github.get("/repos/" + name, RestResponses.Repository.class);
+        if (!name(result).equalsIgnoreCase(name) || Boolean.TRUE.equals(result.archived())) {
             throw new IllegalArgumentException("REPOSITORY_IDENTITY_UNAVAILABLE");
         }
         id(result);
@@ -644,24 +655,24 @@ public final class ContextService implements AutoCloseable {
     }
 
     private static String key(final String repository) {
-        if (repository == null || !repository.matches("[A-Za-z0-9_-]+/[A-Za-z0-9_-][A-Za-z0-9_.-]*")) {
+        if (repository == null || !REPOSITORY_NAME.matcher(repository).matches()) {
             throw new IllegalArgumentException("INVALID_REPOSITORY_NAME");
         }
         return repository.toLowerCase(Locale.ROOT);
     }
 
-    private static String id(final Map<String, Object> value) {
-        return Long.toString(number(value.get("id")));
+    private static String id(final RestResponses.Repository value) {
+        return Long.toString(number(value.id()));
     }
 
-    private static String name(final Map<String, Object> value) {
-        final var name = text(value.get("full_name"), "full_name");
+    private static String name(final RestResponses.Repository value) {
+        final var name = text(value.full_name(), "full_name");
         key(name);
         return name;
     }
 
     private static String sha(final Object value) {
-        if (!(value instanceof String sha) || !sha.matches("[0-9a-f]{40}")) {
+        if (!(value instanceof String sha) || !COMMIT_SHA.matcher(sha).matches()) {
             throw new IllegalArgumentException("INVALID_PINNED_SHA");
         }
         return sha;

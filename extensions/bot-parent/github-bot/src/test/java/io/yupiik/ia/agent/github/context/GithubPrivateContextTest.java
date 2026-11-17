@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.github.client.GitHubClient;
-import io.yupiik.ia.agent.github.configuration.ExecutorConfiguration$FusionConfigurationFactory;
+import io.yupiik.ia.agent.github.configuration.GithubExecutorConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.PromptConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.github.configuration.WorkerOptions.SourceMode;
 import io.yupiik.ia.agent.github.execution.AttemptPreparation;
@@ -72,7 +72,9 @@ class GithubPrivateContextTest {
             final var prompt = new AttemptPreparation(
                             json,
                             new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                            new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                            new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                                    .get()
+                                    .shared())
                     .prompt(TaskFixtures.task(TASK), "example-fork", false);
             assertTrue(prompt.contains("github-source.json"));
             assertTrue(prompt.contains("not a Git clone"));
@@ -83,7 +85,9 @@ class GithubPrivateContextTest {
             final var solve = new AttemptPreparation(
                             json,
                             new PromptConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(),
-                            new ExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get())
+                            new GithubExecutorConfiguration$FusionConfigurationFactory(key -> Optional.empty())
+                                    .get()
+                                    .shared())
                     .prompt(TaskFixtures.task(task), "example-fork", false);
             assertTrue(solve.contains("The host alone creates Git objects"));
             assertTrue(solve.contains("github-solve.json"));

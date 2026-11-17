@@ -21,6 +21,7 @@ import dev.tamboui.text.Span;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Unified diff rendering for tool cards, the output overlay, the approval modal
@@ -33,6 +34,7 @@ import java.util.List;
  * Pure and terminal-free so it is unit testable.
  */
 public class DiffRenderer {
+    private static final Pattern HEADER_CHANGE_COUNTS = Pattern.compile("\\s+\\(\\+\\d+ -\\d+\\)$");
 
     /** True when the text plausibly is a unified diff (not a markdown list). */
     public boolean looksLikeDiff(final String text) {
@@ -135,7 +137,7 @@ public class DiffRenderer {
             }
         }
         final var counters = " (+" + add + " -" + del + ")";
-        final var header = lines[index].replaceFirst("\\s+\\(\\+\\d+ -\\d+\\)$", "");
+        final var header = HEADER_CHANGE_COUNTS.matcher(lines[index]).replaceFirst("");
         return header + counters;
     }
 

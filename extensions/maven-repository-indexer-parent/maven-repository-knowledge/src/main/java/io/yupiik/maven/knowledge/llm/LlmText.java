@@ -15,11 +15,14 @@
  */
 package io.yupiik.maven.knowledge.llm;
 
+import java.util.regex.Pattern;
+
 /**
  * Small helpers shared by every {@link KnowledgeLlm} implementation to normalise the raw LLM text
  * (a runtime content blob, or a possibly markdown-fenced answer) before it is parsed.
  */
 public final class LlmText {
+    private static final Pattern TRAILING_CODE_FENCE = Pattern.compile("```\\s*$");
 
     private LlmText() {
         // no-op
@@ -45,7 +48,12 @@ public final class LlmText {
         final var t = text.strip();
         if (t.startsWith("```json")) {
             final var nl = t.indexOf('\n');
-            return nl > 0 ? t.substring(nl + 1).replaceAll("```\\s*$", "").strip() : t;
+            return nl > 0
+                    ? TRAILING_CODE_FENCE
+                            .matcher(t.substring(nl + 1))
+                            .replaceAll("")
+                            .strip()
+                    : t;
         }
         return t;
     }

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.slack.command;
 
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.cli.Command;
+import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackStore;
 
 @DefaultScoped
@@ -38,14 +39,16 @@ public class CancelCommand implements Runnable {
             for (int i = 0; i < tasks.size(); i++) {
                 final var task = tasks.get(i);
                 if (task.id().equals(options.id())) {
-                    if ("recovery_blocked".equals(task.status()) || "publishing".equals(task.status())) {
+                    if (task.status() == TaskStatus.recovery_blocked || task.status() == TaskStatus.publishing) {
                         throw new IllegalStateException("Blocked/publication task requires manual reconciliation");
                     }
                     if (!task.terminal()) {
                         tasks.set(
                                 i,
                                 task.transition(
-                                        "queued".equals(task.status()) ? "cancelled" : "cancel_requested",
+                                        task.status() == TaskStatus.queued
+                                                ? TaskStatus.cancelled
+                                                : TaskStatus.cancel_requested,
                                         System.currentTimeMillis()));
                     }
                     return null;
