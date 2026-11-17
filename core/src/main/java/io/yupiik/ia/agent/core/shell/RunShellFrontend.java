@@ -17,9 +17,11 @@ package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
+import java.time.Instant;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.logging.Level;
+import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
 /**
@@ -94,7 +96,15 @@ public class RunShellFrontend implements ShellFrontend {
     @Override
     public synchronized void onEvent(final AgentEvent event) {
         final var prefix = subagentPrefix(event);
-        if (event instanceof final AgentEvent.TextDelta t) {
+        if (event instanceof AgentEvent.FeedbackStarted started) {
+            if ("text".equals(started.kind()) || showThinking) {
+                ensureStderrNewline();
+                final var record = new LogRecord(Level.INFO, prefix + started.kind() + " response started");
+                record.setInstant(Instant.ofEpochMilli(started.startedAt()));
+                record.setLoggerName(LOGGER.getName());
+                LOGGER.log(record);
+            }
+        } else if (event instanceof final AgentEvent.TextDelta t) {
             System.out.print(prefix + t.delta());
         } else if (event instanceof final AgentEvent.ThinkingDelta t) {
             if (showThinking) {

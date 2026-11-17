@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 
 /**
  * ANSI terminal frontend shared by the {@code cli} command: streams the answer
@@ -56,6 +57,12 @@ public class AnsiShellFrontend implements ShellFrontend {
     private String thinkingPrefix = "";
     private String answerPrefix = "";
     private final TurnStats stats = new TurnStats();
+    private volatile Function<Long, String> feedbackLabel;
+
+    public void feedbackLabel(final Function<Long, String> renderer) {
+        feedbackLabel = renderer;
+    }
+
     private volatile ContextCompression compression = new ContextCompression(null);
 
     private volatile boolean showThinking;
@@ -477,7 +484,20 @@ public class AnsiShellFrontend implements ShellFrontend {
     }
 
     private void renderEvent(final AgentEvent event, final String prefix) {
-        if (event
+        if (event instanceof AgentEvent.FeedbackStarted started) {
+            if (feedbackLabel != null && ("text".equals(started.kind()) || showThinking)) {
+                stopSpinner();
+                print(textBuffer.flush());
+                textBuffer.reset();
+                closeThinkingRound();
+                final var heading = prefix + feedbackLabel.apply(started.startedAt());
+                if ("thinking".equals(started.kind())) {
+                    printlnErr(MarkdownColorizer.thinking(heading));
+                } else {
+                    print("\n" + colorizer.colorizeLine("**" + heading + "**") + "\n");
+                }
+            }
+        } else if (event
                 instanceof
                 AgentEvent.TextDelta(String delta, String sessionId, String subagentId, String subagentName)) {
             stopSpinner();

@@ -54,6 +54,23 @@ import org.junit.jupiter.api.parallel.Resources;
 @ExtendWith(TestJsonMapper.class)
 class AnsiShellFrontendTest {
     @Test
+    void eachResponseStartPrintsOneConfiguredHeaderNotOnePerDelta() {
+        final var frontend = frontend(false, false);
+        frontend.feedbackLabel(at -> "[" + at + "] model");
+        frontend.beginTurn();
+        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 1000, "s1", null, null));
+        frontend.onEvent(new AgentEvent.TextDelta("first", "s1"));
+        frontend.onEvent(new AgentEvent.TextDelta(" tail", "s1"));
+        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 2000, "s1", null, null));
+        frontend.onEvent(new AgentEvent.TextDelta("last", "s1"));
+        frontend.endTurn();
+        final var rendered = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, rendered.split("\\Q[1000] model\\E", -1).length - 1, rendered);
+        assertEquals(1, rendered.split("\\Q[2000] model\\E", -1).length - 1, rendered);
+        assertTrue(rendered.indexOf("first tail") < rendered.indexOf("[2000] model"), rendered);
+    }
+
+    @Test
     void splitThinkingSeamsAreHiddenButMultilineCodeAndProseSurvive() {
         final var frontend = frontend(true, false);
         frontend.beginTurn();

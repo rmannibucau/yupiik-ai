@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.agent.FeedbackTiming;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.context.ContextCompression;
 import io.yupiik.ia.agent.core.context.ContextMeasurement;
@@ -69,13 +70,36 @@ public class ConversationTranscript {
     private final StringBuilder transcript = new StringBuilder();
     private final StringBuilder pending = new StringBuilder();
     private final StringBuilder thinking = new StringBuilder();
-    /**
-     * Whether the {@code **Assistant**} label was already emitted for the current
-     * turn: a turn streams its answer in several chunks (one per reasoning round,
-     * split by tool calls) but is labelled once, so the transcript reads as a
-     * single answer interleaved with its tools and thoughts.
-     */
+    /** Whether the frozen header of the current feedback block was already flushed. */
     private boolean answerHeaderWritten;
+
+    private String feedbackLabel;
+    private String thinkingLabel;
+
+    @FunctionalInterface
+    public interface FeedbackLabelResolver {
+        String label(Message.Identity identity, boolean user, Long startedAt);
+    }
+
+    private volatile FeedbackLabelResolver feedbackLabelResolver;
+
+    public void setFeedbackLabelResolver(final FeedbackLabelResolver resolver) {
+        this.feedbackLabelResolver = resolver;
+    }
+
+    public String feedbackLabel(final Message.Identity identity, final boolean user, final Long at) {
+        final var resolver = feedbackLabelResolver;
+        return resolver == null ? (user ? userLabel : assistantLabel) : resolver.label(identity, user, at);
+    }
+
+    /** Stable heading for the current live reasoning block. */
+    public String thinkingLabel() {
+        return thinkingLabel == null ? "Thinking" : thinkingLabel + " - Thinking";
+    }
+
+    private String feedbackMarker() {
+        return feedbackLabel == null ? assistantMarker() : "**" + feedbackLabel + "**";
+    }
     /**
      * Pending tool executions, one {@link RunningTool} per started-not-finished
      * call. Keyed by tool name with a FIFO per name so parallel read-only tools
@@ -171,6 +195,10 @@ public class ConversationTranscript {
 
     private String markerFor(final Message message, final boolean user) {
         final var identity = Message.identityOf(message);
+        if (feedbackLabelResolver != null) {
+            return "**" + feedbackLabel(identity, user, FeedbackTiming.startedAt(message, user ? "user" : "text"))
+                    + "**";
+        }
         if (identity != null && labelResolver != null) {
             final var label = labelResolver.apply(identity, user);
             if (label != null && !label.isBlank()) {
@@ -367,7 +395,19 @@ public class ConversationTranscript {
             retryableErrorSeen = false;
             status = busy ? "working" : "";
         }
-        if (event
+        if (event instanceof AgentEvent.FeedbackStarted started) {
+            // Flush with the previous frozen labels before opening the next structural block.
+            flushThinking();
+            flushPending();
+            final var label = feedbackLabel(null, false, started.startedAt());
+            if ("thinking".equals(started.kind())) {
+                thinkingLabel = label;
+            } else if ("text".equals(started.kind())) {
+                feedbackLabel = label;
+                answerHeaderWritten = false;
+            }
+            touch();
+        } else if (event
                 instanceof
                 AgentEvent.TextDelta(String delta, String sessionId, String subagentId, String subagentName)) {
             // the answer's first delta usually arrives with no reset: flush the reasoning
@@ -723,7 +763,7 @@ public class ConversationTranscript {
                 pending.setLength(0);
                 if (!answerHeaderWritten) {
                     answerHeaderWritten = true;
-                    transcript.append("\n\n" + assistantMarker() + "\n\n");
+                    transcript.append("\n\n" + feedbackMarker() + "\n\n");
                 } else {
                     transcript.append("\n\n");
                 }
@@ -874,7 +914,9 @@ public class ConversationTranscript {
         transcript
                 .append("\n\n")
                 .append(THOUGHT_BEGIN)
-                .append("\n**Thinking**\n\n")
+                .append("\n**")
+                .append(thinkingLabel())
+                .append("**\n\n")
                 .append(thought)
                 .append('\n')
                 .append(THOUGHT_END)
@@ -897,9 +939,8 @@ public class ConversationTranscript {
      * per delta) nor on {@code TurnDone} / {@code TextReset}, where the pending
      * tail is superseded by the full content the provider sends again.
      * <p>
-     * The {@code **Assistant**} label is written once per turn: a turn streams its
-     * answer in as many chunks as it has reasoning rounds, and they are all part
-     * of the same answer.
+     * A feedback-start event opens a new header; flushing paragraphs within that
+     * feedback block never re-renders its label or changes its captured time.
      */
     public synchronized void flushPending() {
         drainInlineThink();
@@ -931,7 +972,7 @@ public class ConversationTranscript {
         transcript.append("\n\n");
         if (!answerHeaderWritten) {
             answerHeaderWritten = true;
-            transcript.append(assistantMarker() + "\n\n");
+            transcript.append(feedbackMarker() + "\n\n");
         }
         transcript.append(sanitized).append('\n');
         touchTranscript();
@@ -990,8 +1031,8 @@ public class ConversationTranscript {
             // before this chunk was already flushed into the transcript in place.
             sb.append("\n\n");
             if (!answerHeaderWritten) {
-                // same turn-scoped label as flushPending(): a turn streams one answer
-                sb.append(assistantMarker() + "\n\n");
+                // Same frozen feedback-block label as flushPending().
+                sb.append(feedbackMarker() + "\n\n");
             }
             // the pending tail is sanitized BEFORE the running-tool blocks are appended: a
             // half-arrived seam fragment must stay hidden even once UI text follows it
@@ -1207,20 +1248,34 @@ public class ConversationTranscript {
                     // persisted sessions keep the raw <think> content: split it so the
                     // replay renders past reasoning as thought regions too
                     final var parts = thinkTags.split(String.valueOf(message.content()));
-                    if (!parts.thinking().isBlank()) {
-                        transcript
-                                .append("\n\n")
-                                .append(THOUGHT_BEGIN)
-                                .append("\n**Thinking**\n\n")
-                                .append(parts.thinking().strip())
-                                .append('\n')
-                                .append(THOUGHT_END)
-                                .append('\n');
+                    final var storedThinking =
+                            message.others() == null ? null : message.others().get("thinking");
+                    for (final var segment : FeedbackTiming.segments(
+                            message, parts.visible(), storedThinking instanceof String s ? s : parts.thinking())) {
+                        final var label = feedbackLabel(Message.identityOf(message), false, segment.startedAt());
+                        if ("thinking".equals(segment.kind())) {
+                            transcript
+                                    .append("\n\n")
+                                    .append(THOUGHT_BEGIN)
+                                    .append("\n**")
+                                    .append(feedbackLabelResolver == null ? "Thinking" : label + " - Thinking")
+                                    .append("**\n\n")
+                                    .append(segment.text())
+                                    .append('\n')
+                                    .append(THOUGHT_END)
+                                    .append('\n');
+                        } else {
+                            transcript
+                                    .append("\n\n---\n\n")
+                                    .append(
+                                            feedbackLabelResolver == null
+                                                    ? markerFor(message, false)
+                                                    : "**" + label + "**")
+                                    .append("\n\n")
+                                    .append(segment.text())
+                                    .append('\n');
+                        }
                     }
-                    transcript
-                            .append("\n\n---\n\n" + markerFor(message, false) + "\n\n")
-                            .append(parts.visible())
-                            .append('\n');
                 }
                 case "tool" -> {
                     final var name = Message.toolName(message, toolNamesByCallId);
@@ -1249,6 +1304,8 @@ public class ConversationTranscript {
     }
 
     public synchronized void clearConversation() {
+        feedbackLabel = null;
+        thinkingLabel = null;
         transcript.setLength(0);
         thinking.setLength(0);
         touchThinking();
@@ -1260,6 +1317,8 @@ public class ConversationTranscript {
     }
 
     public synchronized void startUserTurn(final String text) {
+        feedbackLabel = null;
+        thinkingLabel = null;
         transcript.append("\n\n---\n\n" + userMarker() + "\n\n").append(text).append('\n');
         pending.setLength(0);
         thinking.setLength(0);
@@ -1276,6 +1335,8 @@ public class ConversationTranscript {
     }
 
     public synchronized void reset() {
+        feedbackLabel = null;
+        thinkingLabel = null;
         transcript.setLength(0);
         pending.setLength(0);
         thinking.setLength(0);

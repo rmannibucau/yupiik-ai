@@ -42,6 +42,7 @@ public record WebEventDto(
 
     private static String typeOf(final AgentEvent event) {
         return switch (event) {
+            case AgentEvent.FeedbackStarted _ -> "feedback-started";
             case AgentEvent.TextDelta _ -> "text-delta";
             case AgentEvent.TextReset _ -> "text-reset";
             case AgentEvent.ThinkingDelta _ -> "thinking-delta";
@@ -69,6 +70,7 @@ public record WebEventDto(
 
     private static String messageOf(final AgentEvent event) {
         return switch (event) {
+            case AgentEvent.FeedbackStarted t -> t.kind();
             case AgentEvent.TextDelta t -> t.delta();
             case AgentEvent.TextReset t -> null;
             case AgentEvent.ThinkingDelta t -> t.delta();
@@ -96,6 +98,7 @@ public record WebEventDto(
 
     private static Map<String, Object> dataOf(final AgentEvent event) {
         return switch (event) {
+            case AgentEvent.FeedbackStarted t -> Map.of("startedAt", t.startedAt(), "kind", t.kind());
             case AgentEvent.Phase t -> Map.of("phase", t.name());
             case AgentEvent.ToolStarted t -> Map.of("args", t.args(), "ordinal", t.ordinal());
             case AgentEvent.ToolStream t ->

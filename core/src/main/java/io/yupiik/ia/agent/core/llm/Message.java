@@ -127,6 +127,9 @@ public record Message(
             return null;
         }
         final var identity = new LinkedHashMap<String, Object>();
+        if (message.others() != null && message.others().get(IDENTITY_KEY) instanceof Map<?, ?> existing) {
+            existing.forEach((k, v) -> identity.put(String.valueOf(k), v));
+        }
         putIfPresent(identity, "provider", provider);
         putIfPresent(identity, "model", model);
         putIfPresent(identity, "agent", agent);

@@ -88,12 +88,14 @@ Configure transcript headers (the `▌` line opening each user or assistant turn
 [source,json]
 ----
 "labels": {
-  "userTemplate": "[{{formatDate \"HH:mm:ss\"}}] {{systemProperty \"user.name\" \"You\"}}",      <1>
-  "assistantTemplate": "[{{formatDate \"HH:mm:ss\"}}] {{model.provider}}::{{model.name}}"  <2>
+  "userTemplate": "{{> logsTemplate}} {{systemProperty \"user.name\" \"You\"}}", <1>
+  "assistantTemplate": "{{> logsTemplate}} {{model.provider}}::{{model.name}}", <2>
+  "logsTemplate": "{{#if timestampKnown}}[{{formatDate \"HH:mm:ss\"}}]{{/if}}" <3>
 }
 ----
 <.> Header template rendered for user turns.
 <.> Header template rendered for assistant turns.
+<.> Shared timestamp prefix, also used for captured logs.
 
 NOTE: shown as a fragment of `yca.labels` - the surrounding `yca` object is omitted.
 
@@ -106,9 +108,20 @@ Available keys are `userName`, `modelName`, `model` (`name`, `provider`), `provi
 `{{systemProperty "user.name" "You"}}` adds a fallback.
 A blank label template result falls back to `You` or `Assistant`.
 
-`{{formatDate}}` renders the injected clock's current time as `HH:mm:ss`.
+In speaker labels, `{{formatDate}}` renders the block's captured first-visible time as `HH:mm:ss` in the JVM default timezone.
 Pass a `java.time` pattern for another format, such as `{{formatDate "yyyy-MM-dd HH:mm:ss"}}`.
-Remove the helper to omit the timestamp.
+Each new structural text or reasoning feedback block receives its own timestamp, including after tool calls, rather than only the first answer in a user turn.
+Streaming tokens, paragraphs, repaints and final-answer reconciliation do not change that timestamp.
+Captured times are persisted under reserved `yca` display metadata and excluded from provider requests and prompt-cache identity.
+Replay uses the captured times; legacy history without this metadata has `timestampKnown=false` and no invented timestamp.
+Outside label rendering, for example in the live prompt, `formatDate` still renders the current clock time.
+
+Both speaker templates can reuse `{{> logsTemplate}}`, sharing the speaker context, captured time and helpers.
+Only `logsTemplate` is exposed as a partial, and it cannot reference any partials, including itself.
+Set `logsTemplate` to an empty string to omit the shared prefix, or remove the partial reference from one speaker template to customize it independently.
+No additional timestamp configuration keys are required.
+The web UI renders the same server-formatted labels as the terminal frontends.
+The `run` command preserves raw answer stdout and logs response-start markers through JUL, using the captured instant as the record time instead of duplicating a date in the message.
 
 [IMPORTANT]
 ====

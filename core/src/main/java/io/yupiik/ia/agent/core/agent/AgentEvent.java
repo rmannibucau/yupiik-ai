@@ -55,6 +55,10 @@ public sealed interface AgentEvent {
         return null;
     }
 
+    /** First visible feedback in a structural block, never a token or repaint timestamp. */
+    record FeedbackStarted(String kind, long startedAt, String sessionId, String subagentId, String subagentName)
+            implements AgentEvent {}
+
     record TextDelta(String delta, String sessionId, String subagentId, String subagentName) implements AgentEvent {
         public TextDelta(String delta, String sessionId) {
             this(delta, sessionId, null, null);

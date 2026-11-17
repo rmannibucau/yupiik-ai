@@ -93,7 +93,7 @@ export function eventKey(ev: WebEvent): string {
  * occurrence must survive the O(1) key dedup: append a monotonic per-connection sequence. Structural
  * events (user, text/tool lifecycle) keep their natural identity and are NOT sequence-scoped.
  */
-export const STATE_CARRYING = new Set(['usage-updated', 'status', 'notice', 'btw', 'settings', 'web-command']);
+export const STATE_CARRYING = new Set(['usage-updated', 'status', 'notice', 'btw', 'settings', 'web-command', 'feedback-started']);
 
 /** The dedup key of {@code ev} in a connection where it is the {@code seq}-th state-carrying occurrence. */
 export function dedupKey(ev: WebEvent, seq: number): string {

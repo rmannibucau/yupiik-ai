@@ -481,7 +481,13 @@ public class AgentTurnExecutor {
                 host.sessionStore.append(
                         sessionId,
                         SessionEntry.of(
-                                host.clock.millis(), "user", userMessage, null, null, null, identityOthers(agentName)));
+                                host.clock.millis(),
+                                "user",
+                                userMessage,
+                                null,
+                                null,
+                                null,
+                                FeedbackTiming.stamp(identityOthers(agentName), "user", host.clock.millis())));
             }
         }
         host.statusReporter.setSink(message -> host.emitter.emit(host.status(message)));
@@ -545,6 +551,7 @@ public class AgentTurnExecutor {
             host.emit(host.error("unexpected failure: " + e));
             return null;
         } finally {
+            host.feedbackTiming.reset();
             if (host.quotaStore != null) {
                 host.quotaStore.activity(host.currentSessionId, false);
             }
@@ -740,7 +747,13 @@ public class AgentTurnExecutor {
         host.sessionStore.append(
                 sessionId,
                 SessionEntry.of(
-                        host.clock.millis(), "user", text, null, null, null, identityOthers(host.currentAgentName)));
+                        host.clock.millis(),
+                        "user",
+                        text,
+                        null,
+                        null,
+                        null,
+                        FeedbackTiming.stamp(identityOthers(host.currentAgentName), "user", host.clock.millis())));
         host.emit(host.promptIntegrated(text));
         return true;
     }
@@ -1185,6 +1198,7 @@ public class AgentTurnExecutor {
                                     new ModelRoundProcessor.Observer() {
                                         @Override
                                         public void begin() {
+                                            host.feedbackTiming.reset();
                                             host.turnState.lastRequestProducedReasoning = false;
                                             host.resetInlineSplitter();
                                         }
@@ -1366,13 +1380,24 @@ public class AgentTurnExecutor {
                 if (identityAndThinking != null) {
                     retained.putAll(identityAndThinking);
                 }
+                // Non-streaming providers must enter the same first-visible capture path.
+                if (!host.feedbackTiming.has("thinking")
+                        && retained.get(AgentLoop.THINKING_KEY) instanceof String thought
+                        && !thought.isBlank()) {
+                    host.emit(thinkingDelta(thought));
+                }
+                if (!host.feedbackTiming.has("text") && assistant.content() instanceof String text && !text.isBlank()) {
+                    host.emit(textDelta(text));
+                }
+                host.feedbackTiming.reconcile(AgentLoop.str(assistant.content()));
+                final var timed = host.feedbackTiming.merge(retained);
                 assistant = new Message(
                         assistant.role(),
                         assistant.content(),
                         assistant.name(),
                         assistant.toolCalls(),
                         assistant.toolCallId(),
-                        retained);
+                        timed);
                 messages.add(assistant);
                 host.sessionStore.append(
                         sessionId,
@@ -1383,7 +1408,7 @@ public class AgentTurnExecutor {
                                 assistant.toolCalls(),
                                 null,
                                 null,
-                                retained));
+                                timed));
                 emitUsage(messages, toolsTokens);
 
                 // When the reply carries tool calls, do NOT absorb a queued prompt here (before the

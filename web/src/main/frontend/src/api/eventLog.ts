@@ -5,7 +5,7 @@ import { eventKey, type WebEvent } from './useSessionStream';
  * produce the same blocks, which is what makes the reducer unit-testable (temporary vitest) and
  * cheap to re-run per render batch (it is O(events), and events arrive rAF-batched).
  */
-export type Block = { id?: string } & (
+export type Block = { id?: string; startedAt?: number; speakerLabel?: string } & (
   | {
       // 'notice' is a standalone server-emitted transcript fragment (e.g. the Codex authorize URL)
       // rendered as its own block; it is never merged with streaming text-delta or overwritten by
@@ -56,7 +56,8 @@ export type Block = { id?: string } & (
 const EMPTY_TOOL_STACK: number[] = [];
 
 /**
- * Display identity only. The DTO has no timestamp, sequence or persisted event ID. Anchor streams
+ * Display identity only. Captured timestamps and server-rendered labels are presentation metadata,
+ * never identity. The DTO has no persisted event ID. Anchor streams
  * to their user event, not their growing text (replay can replace many deltas with one full delta).
  * Count identical user origins from the right so loading older identical prompts does not rename
  * the visible suffix. Within a turn, count each originating block, never delta events or array slots.
@@ -220,6 +221,11 @@ export function eventsToBlocks(events: WebEvent[], idFor?: (event: WebEvent, kin
   const blocks: Block[] = [];
   idFor ??= blockIds(events);
   const runningTools = new Map<string, number[]>();
+  let feedback: { startedAt?: number; speakerLabel?: string } | undefined;
+  const feedbackOf = (event: WebEvent) => ({
+    ...(typeof event.data?.startedAt === 'number' ? { startedAt: event.data.startedAt } : {}),
+    ...(typeof event.data?.speakerLabel === 'string' ? { speakerLabel: event.data.speakerLabel } : {}),
+  });
   // Any event that is not a streaming delta marks the end of the current stream burst, so the trailing
   // text/thought block(s) are no longer "writing" and renderers may debounce-flush them.
   const settle = () => {
@@ -248,11 +254,18 @@ export function eventsToBlocks(events: WebEvent[], idFor?: (event: WebEvent, kin
   };
   for (const ev of events) {
     const last = blocks[blocks.length - 1];
+    if (ev.type === 'feedback-started') {
+      settle();
+      feedback = feedbackOf(ev);
+      continue;
+    }
+    const fresh = feedback !== undefined || ev.data?.feedbackStart === true;
+    const timing = feedback ?? feedbackOf(ev);
     if (ev.type === 'text-delta') {
       if (last?.kind === 'thought') {
         last.writing = false;
       }
-      if (last?.kind === 'text') {
+      if (last?.kind === 'text' && !fresh) {
         last.content += ev.message ?? '';
         last.writing = true;
       } else {
@@ -261,20 +274,20 @@ export function eventsToBlocks(events: WebEvent[], idFor?: (event: WebEvent, kin
         // same-turn text block, with the replayed tool card(s) re-created between them. Collapse instead of
         // duplicating: heal the earlier streamed block with the complete text and drop the replayed cards.
         const msg = ev.message ?? '';
-        const collapsed = collapseReplayDuplicate(blocks, runningTools, msg);
+        const collapsed = !fresh && collapseReplayDuplicate(blocks, runningTools, msg);
         if (!collapsed) {
-          blocks.push({ id: idFor(ev, 'text'), kind: 'text', content: msg, writing: true });
+          blocks.push({ id: idFor(ev, 'text'), kind: 'text', content: msg, writing: true, ...timing });
         }
       }
     } else if (ev.type === 'thinking-delta') {
       if (last?.kind === 'text') {
         last.writing = false;
       }
-      if (last?.kind === 'thought') {
+      if (last?.kind === 'thought' && !fresh) {
         last.content += ev.message ?? '';
         last.writing = true;
       } else {
-        blocks.push({ id: idFor(ev, 'thought'), kind: 'thought', content: ev.message ?? '', writing: true });
+        blocks.push({ id: idFor(ev, 'thought'), kind: 'thought', content: ev.message ?? '', writing: true, ...timing });
       }
     } else if (ev.type === 'tool-started') {
       settle();
@@ -374,7 +387,7 @@ export function eventsToBlocks(events: WebEvent[], idFor?: (event: WebEvent, kin
       }
     } else if (ev.type === 'user') {
       settle();
-      blocks.push({ id: idFor(ev, 'user'), kind: 'user', content: ev.message ?? '' });
+      blocks.push({ id: idFor(ev, 'user'), kind: 'user', content: ev.message ?? '', ...timing });
     } else if (ev.type === 'transcript') {
       // A server-emitted standalone fragment (e.g. the Codex authorize URL pushed through
       // WebShellFrontend.transcript during login). It becomes its own 'notice' block so it is never
@@ -417,7 +430,7 @@ export function eventsToBlocks(events: WebEvent[], idFor?: (event: WebEvent, kin
           }
           // else cur.startsWith(ev.message): streamed is fuller (clipped reply) -> keep it
         } else {
-          blocks.push({ id: idFor(ev, 'text'), kind: 'text', content: ev.message ?? '' });
+          blocks.push({ id: idFor(ev, 'text'), kind: 'text', content: ev.message ?? '', ...timing });
         }
       }
     } else if (ev.type === 'turn-cancelled') {
@@ -431,6 +444,10 @@ export function eventsToBlocks(events: WebEvent[], idFor?: (event: WebEvent, kin
         if (b.kind === 'text' || b.kind === 'thought') blocks.pop();
         else break;
       }
+    }
+    if (ev.type === 'text-delta' || ev.type === 'thinking-delta' || ev.type === 'text-reset'
+      || ev.type === 'turn-done' || ev.type === 'turn-cancelled' || ev.type === 'user') {
+      feedback = undefined;
     }
   }
   return blocks;

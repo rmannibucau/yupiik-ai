@@ -139,6 +139,28 @@ import org.junit.jupiter.params.provider.CsvSource;
 @ResourceLock("io.yupiik-jul-handler")
 @ExtendWith(TestJsonMapper.class)
 class TuiCommandRenderTest {
+    @Test
+    @SuppressWarnings("unchecked")
+    void capturedThoughtHeadingIsIdenticalInLiveAndFlushedLayouts() throws Exception {
+        final var command = command(null, null);
+        final var thought = TuiCommand.class.getDeclaredMethod("thoughtLines", String.class, int.class);
+        thought.setAccessible(true);
+        final var live = TuiCommand.class.getDeclaredMethod("liveThoughtLines", String.class, int.class);
+        live.setAccessible(true);
+        final var source = "**[10:11:12] test-model - Thinking**\n\nA captured thought\nwith a second line";
+        final var flushed = (List<Line>) thought.invoke(command, source, 80);
+        final var streaming = (List<Line>) live.invoke(command, source, 80);
+        final var flushedText = flushed.stream()
+                .map(line -> line.spans().stream().map(span -> span.content()).collect(Collectors.joining()))
+                .collect(Collectors.joining("\n"));
+        final var streamingText = streaming.stream()
+                .map(line -> line.spans().stream().map(span -> span.content()).collect(Collectors.joining()))
+                .collect(Collectors.joining("\n"));
+        assertTrue(flushedText.contains("[10:11:12] test-model - Thinking"), flushedText);
+        assertTrue(streamingText.contains("[10:11:12] test-model - Thinking"), streamingText);
+        assertTrue(flushedText.contains("A captured thought"), flushedText);
+        assertTrue(streamingText.contains("A captured thought"), streamingText);
+    }
 
     private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
     private static final Duration TICK_RATE = Duration.ofMillis(2);

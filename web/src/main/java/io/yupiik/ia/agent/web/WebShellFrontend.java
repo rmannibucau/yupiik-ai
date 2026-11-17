@@ -50,7 +50,24 @@ public class WebShellFrontend implements ShellFrontend {
     @Override
     public void onEvent(final AgentEvent event) {
         transcript.onEvent(event);
-        broker.pushAgentEvent(sessionId, event);
+        if (event instanceof AgentEvent.FeedbackStarted started) {
+            final var data =
+                    new LinkedHashMap<String, Object>(WebEventDto.of(event).data());
+            data.put("speakerLabel", transcript.feedbackLabel(null, false, started.startedAt()));
+            broker.broadcast(
+                    sessionId,
+                    AGENT_EVENT
+                            + json(new WebEventDto(
+                                    "feedback-started",
+                                    sessionId,
+                                    event.subagentId(),
+                                    event.subagentName(),
+                                    started.kind(),
+                                    data))
+                            + AGENT_END);
+        } else {
+            broker.pushAgentEvent(sessionId, event);
+        }
     }
 
     private static final String AGENT_EVENT = "event: agent\ndata: ";

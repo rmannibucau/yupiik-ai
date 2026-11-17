@@ -31,6 +31,21 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class SpeakerLabelsPartialsTest {
+    @Test
+    void capturedAndUnknownTimesDoNotChangeTheLiveHelperOrLeakBetweenRenders() {
+        final var labels =
+                labels(Map.of("yca.labels.logsTemplate", "{{#if timestampKnown}}[{{formatDate \"yyyy\"}}]{{/if}}"));
+        assertEquals(
+                "[2000] provider::model",
+                labels.assistantLabel(
+                        CTX.at(Instant.parse("2000-01-01T00:00:00Z").toEpochMilli())));
+        assertEquals("provider::model", labels.assistantLabel(CTX.at(null)));
+        assertEquals("[2031] provider::model", labels.assistantLabel(CTX));
+        final var inline = labels(Map.of("yca.labels.assistantTemplate", "{{formatDate \"yyyy\"}} Assistant"));
+        assertEquals("Assistant", inline.assistantLabel(CTX.at(null)));
+        assertEquals("2031 Assistant", inline.assistantLabel(CTX));
+    }
+
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2031-04-05T06:07:08Z"), ZoneId.systemDefault());
     private static final SpeakerLabels.Ctx CTX =
             new SpeakerLabels.Ctx("model", "provider", "agent", "plan", "s1", null);

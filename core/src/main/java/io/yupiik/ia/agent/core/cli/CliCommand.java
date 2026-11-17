@@ -922,6 +922,14 @@ public class CliCommand implements Runnable {
                 session.sessionId(),
                 null);
         coordinator.transcript().setLabels(speakerLabels.userLabel(ctx), speakerLabels.assistantLabel(ctx));
+        coordinator.transcript().setFeedbackLabelResolver((identity, user, at) -> {
+            final var captured = identity == null
+                    ? ctx.at(at)
+                    : new SpeakerLabels.Ctx(identity.model(), identity.provider(), identity.agent(), null, null, null)
+                            .at(at);
+            return user ? speakerLabels.userLabel(captured) : speakerLabels.assistantLabel(captured);
+        });
+        frontend.feedbackLabel(at -> speakerLabels.assistantLabel(ctx.at(at)));
         coordinator.transcript().setLabelResolver((identity, user) -> {
             final var ictx =
                     new SpeakerLabels.Ctx(identity.model(), identity.provider(), identity.agent(), null, null, null);

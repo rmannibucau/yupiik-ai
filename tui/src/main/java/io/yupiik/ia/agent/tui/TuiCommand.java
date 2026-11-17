@@ -1065,7 +1065,12 @@ public class TuiCommand implements Runnable {
                         return;
                     }
                     target.dirty = true;
-                    appendLogRegion(target, level, record.getLoggerName(), message);
+                    appendLogRegion(
+                            target,
+                            level,
+                            record.getLoggerName(),
+                            message,
+                            record.getInstant().toEpochMilli());
                     if (level.intValue() >= Level.WARNING.intValue()) {
                         TuiCommand.notify(target, message);
                         if (level.intValue() >= Level.SEVERE.intValue()) {
@@ -1130,7 +1135,7 @@ public class TuiCommand implements Runnable {
      * transcript content.
      */
     private void appendLogRegion(
-            final UiState target, final Level level, final String loggerName, final String message) {
+            final UiState target, final Level level, final String loggerName, final String message, final long at) {
         final var settings = target.session.chatSettings();
         final var mode = target.session.runtime() == null
                 ? null
@@ -1143,7 +1148,7 @@ public class TuiCommand implements Runnable {
                 target.sessionId,
                 null);
         target.model.appendTranscript(ConversationTranscript.LOG_BEGIN + "\n"
-                + speakerLabels.logsLabel(ctx) + "\n"
+                + speakerLabels.logsLabel(ctx.at(at)) + "\n"
                 + level.getName() + " " + shortLoggerName(loggerName) + "\n"
                 + message + "\n"
                 + ConversationTranscript.LOG_END);
@@ -2765,6 +2770,13 @@ public class TuiCommand implements Runnable {
                 state.sessionId,
                 null);
         state.model.setLabels(speakerLabels.userLabel(ctx), speakerLabels.assistantLabel(ctx));
+        state.model.setFeedbackLabelResolver((identity, user, at) -> {
+            final var captured = identity == null
+                    ? ctx.at(at)
+                    : new SpeakerLabels.Ctx(identity.model(), identity.provider(), identity.agent(), null, null, null)
+                            .at(at);
+            return user ? speakerLabels.userLabel(captured) : speakerLabels.assistantLabel(captured);
+        });
         state.model.setLabelResolver((identity, user) -> {
             final var ictx =
                     new SpeakerLabels.Ctx(identity.model(), identity.provider(), identity.agent(), null, null, null);
@@ -5016,7 +5028,8 @@ public class TuiCommand implements Runnable {
         // Live thought content is not spinner-sensitive: only the indicator below is.
         // Keep its compact layout independently so a stalled large thought is cheap too.
         if (state.showThinking && state.model.thinkingLength() > 0) {
-            final var live = state.model.thinkingText().stripLeading();
+            final var body = state.model.thinkingText().stripLeading();
+            final var live = body.isEmpty() ? "" : "**" + state.model.thinkingLabel() + "**\n\n" + body;
             if (!live.isEmpty()) {
                 final var key = new LiveThoughtKey(live, contentWidth, thoughtStyle, palette);
                 final var layout = state.contentLayout;
@@ -5212,11 +5225,19 @@ public class TuiCommand implements Runnable {
      */
     private List<Line> thoughtLines(final String text, final int width) {
         var source = text.stripLeading();
+        var heading = "thinking";
         if (source.startsWith("**Thinking**")) {
             source = source.substring("**Thinking**".length()).stripLeading();
+        } else if (source.startsWith("**")) {
+            final var end = source.indexOf("**\n", 2);
+            if (end > 2 && source.substring(2, end).endsWith(" - Thinking")) {
+                heading = source.substring(2, end);
+                source = source.substring(end + 2).stripLeading();
+            }
         }
         final var lines = new ArrayList<Line>();
-        lines.add(Line.from(thoughtBar(), Span.styled("thinking", thoughtStyle)));
+        lines.addAll(
+                withBar(transcriptRenderer.renderRegion(heading, width, thoughtStyle, markdownStyles), thoughtBar()));
         appendThoughtBody(lines, source, width);
         return lines;
     }

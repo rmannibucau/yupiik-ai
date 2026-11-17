@@ -37,12 +37,13 @@ public record LabelsConfiguration(
                                 + "Context keys: userName (System.getProperty(\"user.name\"), missing values are skipped), modelName, "
                                 + "model (name, provider), provider, agent, mode (plan/build), sessionId and configuration (the whole "
                                 + "yca configuration as a map). The systemProperty helper reads a system property with an optional "
-                                + "default: {{systemProperty \"user.name\" \"You\"}}. The formatDate helper renders the current "
+                                + "default: {{systemProperty \"user.name\" \"You\"}}. The formatDate helper renders the captured block "
                                 + "date/time in the JVM default timezone (end-user local time, independent of the internal UTC "
                                 + "clock): {{formatDate}} uses HH:mm:ss and "
                                 + "{{formatDate \"yyyy-MM-dd HH:mm:ss\"}} accepts any java.time pattern. "
                                 + "The logsTemplate configuration is usable as a Handlebars partial with {{> logsTemplate}}, "
-                                + "sharing this label's rendering context and helpers; the default uses it for the timestamp. "
+                                + "sharing this label's rendering context, captured time and helpers; the default uses it for the timestamp. "
+                                + "timestampKnown is false for legacy history without captured timing; formatDate then renders empty. "
                                 + "Customize logsTemplate to change the shared prefix, set it to an empty string to omit it, "
                                 + "or remove the partial reference to disable the prefix for this label only.")
         String userTemplate,
@@ -61,13 +62,15 @@ public record LabelsConfiguration(
                                 + "available exactly like in the user label (JVM default timezone): {{formatDate}} (HH:mm:ss) or "
                                 + "{{formatDate \"pattern\"}} with any java.time pattern. "
                                 + "The logsTemplate configuration is usable as a Handlebars partial with {{> logsTemplate}}, "
-                                + "sharing this label's rendering context and helpers; the default uses it for the timestamp. "
+                                + "sharing this label's rendering context, captured time and helpers; the default uses it for the timestamp. "
+                                + "Each new text/reasoning feedback block keeps its first-visible time, including during replay. "
+                                + "timestampKnown is false for legacy history without captured timing; formatDate then renders empty. "
                                 + "Customize logsTemplate to change the shared prefix, set it to an empty string to omit it, "
                                 + "or remove the partial reference to disable the prefix for this label only.")
         String assistantTemplate,
 
         @Property(
-                defaultValue = "\"[{{formatDate \\\"HH:mm:ss\\\"}}]\"",
+                defaultValue = "\"{{#if timestampKnown}}[{{formatDate \\\"HH:mm:ss\\\"}}]{{/if}}\"",
                 documentation =
                         "Handlebars template rendering the label of the captured log blocks shown in the TUI transcript "
                                 + "content view. UI only: the LLM conversation is never affected. "
@@ -75,7 +78,8 @@ public record LabelsConfiguration(
                                 + "sessionId and configuration (the whole yca configuration as a map). "
                                 + "The formatDate helper is available exactly like in the user/assistant labels (JVM default "
                                 + "timezone): {{formatDate}} (HH:mm:ss) or {{formatDate \"pattern\"}} with any java.time pattern; "
-                                + "remove it to disable the timestamp. "
+                                + "remove it to disable the timestamp. timestampKnown indicates whether a captured timestamp is known; "
+                                + "the default guards the bracketed prefix with {{#if timestampKnown}} so legacy history has no timestamp. "
                                 + "Also available as {{> logsTemplate}} in userTemplate and assistantTemplate, including their "
                                 + "defaults. This template cannot reference any partials (including itself), preventing cycles. "
                                 + "An empty string removes the shared prefix; a standalone blank log label falls back to Logs.")

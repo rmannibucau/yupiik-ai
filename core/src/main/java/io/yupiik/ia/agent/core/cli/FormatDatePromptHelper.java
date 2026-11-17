@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.cli;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
 import java.time.Clock;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.ConcurrentHashMap;
@@ -64,6 +65,11 @@ public class FormatDatePromptHelper implements PromptHandlebarsHelper {
 
     @Override
     public Object apply(final HelperContext context) {
+        return applyAt(context, clock.millis());
+    }
+
+    /** Label rendering uses a captured instant; null deliberately means unknown legacy time. */
+    public Object applyAt(final HelperContext context, final Long timestamp) {
         if (context.args().size() > 1) {
             throw new IllegalArgumentException("formatDate expects 0 or 1 argument (a pattern), got "
                     + context.args().size());
@@ -73,9 +79,12 @@ public class FormatDatePromptHelper implements PromptHandlebarsHelper {
         final var arg = context.args().isEmpty() ? null : context.args().get(0);
         final var pattern = arg instanceof String s ? s : DEFAULT_PATTERN;
         final var effective = pattern == null || pattern.isBlank() ? DEFAULT_PATTERN : pattern;
+        if (timestamp == null) {
+            return "";
+        }
         return formatters
                 .computeIfAbsent(effective, DateTimeFormatter::ofPattern)
                 .withZone(clock.getZone())
-                .format(clock.instant());
+                .format(Instant.ofEpochMilli(timestamp));
     }
 }

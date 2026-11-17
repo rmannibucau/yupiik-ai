@@ -207,7 +207,7 @@ public class WebJsonRpc {
         if (cached != null && cached.count() == current) {
             return cached.events();
         }
-        final var events = WebReplay.replay(sessionId, sessionStore.load(sessionId));
+        final var events = sessions.replay(sessionId, sessionStore.load(sessionId));
         // bound the cache: a session dropped from the map is simply rebuilt on its next pagination click
         if (replayCache.size() > 64) {
             replayCache.clear();

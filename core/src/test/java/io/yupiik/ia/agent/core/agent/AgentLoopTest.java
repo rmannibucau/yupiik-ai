@@ -1995,6 +1995,17 @@ class AgentLoopTest {
         final var persistedThinking =
                 assistant.others() == null ? null : assistant.others().get("thinking");
         assertEquals("let me reason carefully", persistedThinking, "thinking must be persisted for replay");
+        final var feedback = events.stream()
+                .filter(AgentEvent.FeedbackStarted.class::isInstance)
+                .map(AgentEvent.FeedbackStarted.class::cast)
+                .toList();
+        assertEquals(
+                List.of("text", "thinking", "text"),
+                feedback.stream().map(AgentEvent.FeedbackStarted::kind).toList());
+        final var persistedMessage =
+                new Message("assistant", assistant.content(), null, null, null, assistant.others());
+        assertEquals(feedback.getLast().startedAt(), FeedbackTiming.startedAt(persistedMessage, "text"));
+        assertEquals(feedback.get(1).startedAt(), FeedbackTiming.startedAt(persistedMessage, "thinking"));
         assertFalse(
                 String.valueOf(assistant.content()).contains("think"),
                 "the persisted content must not contain the thinking tags");

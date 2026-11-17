@@ -15,11 +15,14 @@
  */
 package io.yupiik.ia.agent.web;
 
+import io.yupiik.ia.agent.core.agent.FeedbackTiming;
 import io.yupiik.ia.agent.core.context.CompactionCoordinator;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.SubagentDeliveryView;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -43,6 +46,10 @@ final class WebReplay {
      * @return replayed {@link WebEventDto}s the browser can render
      */
     static List<WebEventDto> replay(final String sessionId, final List<Message> messages) {
+        return replay(sessionId, messages, null);
+    }
+
+    static List<WebEventDto> replay(final String sessionId, final List<Message> messages, final SpeakerLabels labels) {
         final var out = new ArrayList<WebEventDto>();
         if (messages == null || messages.isEmpty()) {
             return out;
@@ -103,7 +110,13 @@ final class WebReplay {
                                     "cancelled",
                                     "cancelled".equals(state))));
                 } else {
-                    out.add(new WebEventDto("user", sessionId, null, null, text, Map.of()));
+                    out.add(new WebEventDto(
+                            "user",
+                            sessionId,
+                            null,
+                            null,
+                            text,
+                            feedbackData(message, "user", FeedbackTiming.startedAt(message, "user"), labels)));
                 }
                 continue;
             }
@@ -114,11 +127,14 @@ final class WebReplay {
                 // block above the answer - otherwise past thoughts vanish on reload (TUI keeps them in
                 // its transcript, the web rebuilds from persisted messages only).
                 final var thinking = thinkingOf(message);
-                if (thinking != null && !thinking.isBlank()) {
-                    out.add(new WebEventDto("thinking-delta", sessionId, null, null, thinking, Map.of()));
-                }
-                if (text != null && !text.isBlank()) {
-                    out.add(new WebEventDto("text-delta", sessionId, null, null, text, Map.of()));
+                for (final var segment : FeedbackTiming.segments(message, text, thinking)) {
+                    out.add(new WebEventDto(
+                            "thinking".equals(segment.kind()) ? "thinking-delta" : "text-delta",
+                            sessionId,
+                            null,
+                            null,
+                            segment.text(),
+                            feedbackData(message, segment.kind(), segment.startedAt(), labels)));
                 }
                 if (message.toolCalls() != null) {
                     for (final var call : message.toolCalls()) {
@@ -179,6 +195,28 @@ final class WebReplay {
             }
         }
         return out;
+    }
+
+    private static Map<String, Object> feedbackData(
+            final Message message, final String kind, final Long at, final SpeakerLabels labels) {
+        final var data = new LinkedHashMap<String, Object>();
+        if (at != null) {
+            data.put("startedAt", at);
+            data.put("feedbackStart", true);
+        }
+        if (labels != null) {
+            final var identity = Message.identityOf(message);
+            final var ctx = new SpeakerLabels.Ctx(
+                            identity == null ? null : identity.model(),
+                            identity == null ? null : identity.provider(),
+                            identity == null ? null : identity.agent(),
+                            null,
+                            null,
+                            null)
+                    .at(at);
+            data.put("speakerLabel", "user".equals(kind) ? labels.userLabel(ctx) : labels.assistantLabel(ctx));
+        }
+        return data;
     }
 
     private static String str(final Object value) {

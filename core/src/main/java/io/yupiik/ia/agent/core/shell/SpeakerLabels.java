@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
 import io.yupiik.fusion.framework.handlebars.spi.Template;
+import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
 import io.yupiik.ia.agent.core.cli.PromptHandlebarsHelper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.LabelsConfiguration;
@@ -49,6 +50,9 @@ public class SpeakerLabels {
     private final Template assistantTemplate;
     private final Template logsTemplate;
     private final ChatClient chatClient;
+    // Compiled helpers have no root-context accessor in Fusion 1.2.0. Scope the
+    // captured instant to this render, never to the application-wide date helper.
+    private final ThreadLocal<Ctx> rendering = new ThreadLocal<>();
 
     /** Bean proxy constructor: leaves the real fields unset, the active instance is created by the injection point. */
     protected SpeakerLabels() {
@@ -74,7 +78,16 @@ public class SpeakerLabels {
         final var functions = new LinkedHashMap<String, Function<HelperContext, Object>>();
         functions.put("systemProperty", PromptHandlebarsHelper.systemProperty());
         for (final var helper : helpers) {
-            functions.put(helper.name(), helper::apply);
+            functions.put(
+                    helper.name(),
+                    helper instanceof FormatDatePromptHelper date
+                            ? context -> {
+                                final var ctx = rendering.get();
+                                return ctx != null && !ctx.currentTime()
+                                        ? date.applyAt(context, ctx.timestamp())
+                                        : date.apply(context);
+                            }
+                            : helper::apply);
         }
         final var compiler = new HandlebarsCompiler();
         final var logsSource = logs == null ? "" : logs;
@@ -117,7 +130,24 @@ public class SpeakerLabels {
             String agent,
             String mode,
             String sessionId,
-            Map<String, Object> configuration) {}
+            Map<String, Object> configuration,
+            Long timestamp,
+            boolean currentTime) {
+        public Ctx(
+                final String modelName,
+                final String provider,
+                final String agent,
+                final String mode,
+                final String sessionId,
+                final Map<String, Object> configuration) {
+            this(modelName, provider, agent, mode, sessionId, configuration, null, true);
+        }
+
+        /** Captured feedback time, or null for a legacy block whose time is unknown. */
+        public Ctx at(final Long at) {
+            return new Ctx(modelName, provider, agent, mode, sessionId, configuration, at, false);
+        }
+    }
 
     /** The rendered user label; blank renders fall back to {@link LabelsConfiguration#defaultUserLabel()}. */
     public String userLabel(final Ctx ctx) {
@@ -135,8 +165,18 @@ public class SpeakerLabels {
     }
 
     private String render(final Template template, final Ctx ctx, final String fallback) {
-        final var rendered = template.render(context(ctx)).strip();
-        return rendered.isBlank() ? fallback : rendered;
+        final var previous = rendering.get();
+        rendering.set(ctx);
+        try {
+            final var rendered = template.render(context(ctx)).strip();
+            return rendered.isBlank() ? fallback : rendered;
+        } finally {
+            if (previous == null) {
+                rendering.remove();
+            } else {
+                rendering.set(previous);
+            }
+        }
     }
 
     /**
@@ -145,6 +185,7 @@ public class SpeakerLabels {
      */
     private Map<String, Object> context(final Ctx ctx) {
         final var data = new LinkedHashMap<String, Object>();
+        data.put("timestampKnown", ctx.currentTime() || ctx.timestamp() != null);
         put(data, "modelName", ctx.modelName());
         put(data, "provider", ctx.provider());
         put(data, "agent", ctx.agent());

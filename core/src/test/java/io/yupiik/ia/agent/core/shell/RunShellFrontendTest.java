@@ -45,12 +45,27 @@ import org.junit.jupiter.api.parallel.Resources;
 @ResourceLock(Resources.SYSTEM_ERR)
 @ResourceLock("java.util.logging")
 class RunShellFrontendTest {
+    @Test
+    void responseMarkersUseCapturedJulTimeWithoutChangingTheStdoutProduct() {
+        final var frontend = new RunShellFrontend(false, ToolOutputVisibility.HIDDEN, presenter);
+        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 1000, "s1", null, null));
+        frontend.onEvent(new AgentEvent.TextDelta("exact", "s1"));
+        frontend.onEvent(new AgentEvent.TextDelta("\nproduct", "s1"));
+        frontend.onEvent(new AgentEvent.FeedbackStarted("thinking", 2000, "s1", null, null));
+        frontend.onEvent(new AgentEvent.FeedbackStarted("text", 3000, "s1", null, null));
+        frontend.onEvent(new AgentEvent.TextDelta("!", "s1"));
+        assertEquals("exact\nproduct!", out.toString(StandardCharsets.UTF_8));
+        assertEquals(List.of("INFO text response started", "INFO text response started"), logs);
+        assertEquals(List.of(1000L, 3000L), logTimes);
+    }
+
     private ToolPresenter presenter;
     private PrintStream originalOut;
     private PrintStream originalErr;
     private final ByteArrayOutputStream out = new ByteArrayOutputStream();
     private final ByteArrayOutputStream err = new ByteArrayOutputStream();
     private final List<String> logs = new ArrayList<>();
+    private final List<Long> logTimes = new ArrayList<>();
     private Handler handler;
     private Level previousLevel;
     private boolean previousUseParentHandlers;
@@ -66,6 +81,7 @@ class RunShellFrontendTest {
             @Override
             public void publish(final LogRecord record) {
                 logs.add(record.getLevel() + " " + record.getMessage());
+                logTimes.add(record.getInstant().toEpochMilli());
             }
 
             @Override

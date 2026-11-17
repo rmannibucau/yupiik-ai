@@ -7,6 +7,41 @@ function ev(partial: Partial<WebEvent> & { type: string; sessionId: string }): W
 }
 
 describe('eventsToBlocks', () => {
+  it('freezes captured feedback labels across deltas and final reconciliation without using them as identity', () => {
+    const start = ev({ type: 'feedback-started', sessionId: 's1', message: 'text', data: { startedAt: 1000, speakerLabel: '[one] model' } });
+    const text = ev({ type: 'text-delta', sessionId: 's1', message: 'answer' });
+    const done = ev({ type: 'turn-done', sessionId: 's1', message: 'answer complete' });
+    const blocks = eventsToBlocks([start, text, done]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ startedAt: 1000, speakerLabel: '[one] model', content: 'answer complete', writing: false });
+    expect(eventsToBlocks([{ ...start, data: { startedAt: 9000, speakerLabel: '[changed] model' } }, text, done])[0].id).toBe(blocks[0].id);
+    expect(eventsToBlocks([text, done])[0]).not.toHaveProperty('startedAt');
+  });
+
+  it('starts a fresh block even for same-kind feedback and keeps replay boundaries and first times', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'text-delta', sessionId: 's1', message: 'first', data: { feedbackStart: true, startedAt: 1000, speakerLabel: '[first] model' } }),
+      ev({ type: 'feedback-started', sessionId: 's1', message: 'text', data: { startedAt: 2000, speakerLabel: '[second] model' } }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'second' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: ' tail' }),
+    ]);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toMatchObject({ startedAt: 1000, content: 'first', writing: false });
+    expect(blocks[1]).toMatchObject({ startedAt: 2000, content: 'second tail', writing: true });
+  });
+
+  it('retry reset discards failed timing with its partial content', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'feedback-started', sessionId: 's1', message: 'text', data: { startedAt: 1000 } }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'failed' }),
+      ev({ type: 'text-reset', sessionId: 's1' }),
+      ev({ type: 'feedback-started', sessionId: 's1', message: 'text', data: { startedAt: 2000 } }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'retry' }),
+    ]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ content: 'retry', startedAt: 2000 });
+  });
+
   it('keeps default IDs deterministic across reconstruction and coalesced replay', () => {
     const events = [
       ev({ type: 'user', sessionId: 's1', message: 'dummy prompt' }),

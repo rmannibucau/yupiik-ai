@@ -1811,9 +1811,12 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
   }
   if (block.kind === 'thought') {
     return (
-      <Reasoning streaming={block.writing === true} manualOpen={userOverride === null ? !thoughtsCollapsed : userOverride === 'expanded'} onManualOpenChange={changeOverride}>
-        <Markdown content={block.content} writing={block.writing} variant="thought" />
-      </Reasoning>
+      <div>
+        {block.speakerLabel && <div className="mb-1 text-xs opacity-60">{block.speakerLabel}</div>}
+        <Reasoning streaming={block.writing === true} manualOpen={userOverride === null ? !thoughtsCollapsed : userOverride === 'expanded'} onManualOpenChange={changeOverride}>
+          <Markdown content={block.content} writing={block.writing} variant="thought" />
+        </Reasoning>
+      </div>
     );
   }
   if (block.kind === 'user') {
@@ -1822,7 +1825,7 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
         className="yca-turn yca-turn-user px-3 py-1.5 text-[15px]"
       >
         <span className="mb-0.5 block text-xs font-bold uppercase tracking-wide" style={{ color: 'var(--yca-primary)' }}>
-          You
+          {block.speakerLabel ?? 'You'}
         </span>
         <Markdown content={block.content} writing={block.writing} variant="user" />
       </div>
@@ -1852,6 +1855,7 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
     <div
       className="yca-turn yca-turn-assistant px-4 py-2.5 text-[15px]"
     >
+      {block.speakerLabel && <div className="mb-1 text-xs opacity-60">{block.speakerLabel}</div>}
       <Markdown content={block.content} writing={block.writing} />
     </div>
   );

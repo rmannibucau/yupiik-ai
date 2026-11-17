@@ -18,15 +18,47 @@ package io.yupiik.ia.agent.web;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.agent.FeedbackTiming;
 import io.yupiik.ia.agent.core.agent.SubagentDeliveryBus;
+import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.shell.SpeakerLabels;
+import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 /** Replaying a persisted session must restore thought blocks, not only the visible answer. */
 class WebReplayTest {
+    @Test
+    void feedbackReplayCarriesCapturedTimeAndTheExistingServerSideSpeakerTemplate() {
+        final var overrides = Map.of(
+                "yca.labels.logsTemplate", "{{#if timestampKnown}}[{{formatDate \"yyyy\"}}]{{/if}}",
+                "yca.labels.assistantTemplate", "{{> logsTemplate}} {{model.name}}");
+        final var configuration = new CodingAgentConfiguration$FusionConfigurationFactory(
+                        key -> Optional.ofNullable(overrides.get(key)))
+                .get();
+        final var labels =
+                new SpeakerLabels(List.of(new FormatDatePromptHelper(Clock.systemUTC())), configuration, null);
+        final var at = Instant.parse("2000-01-01T12:00:00Z").toEpochMilli();
+        final var timed = new Message(
+                "assistant",
+                "answer",
+                null,
+                null,
+                null,
+                FeedbackTiming.stamp(Map.of("yca", Map.of("model", "test-model")), "text", at));
+        final var events = WebReplay.replay("s", List.of(timed, Message.assistant("old", null)), labels);
+        assertEquals(2, events.size());
+        assertEquals(
+                Map.of("startedAt", at, "feedbackStart", true, "speakerLabel", "[2000] test-model"),
+                events.getFirst().data());
+        assertEquals(Map.of("speakerLabel", "Assistant"), events.getLast().data());
+    }
 
     @Test
     void compactionDigestsAreNotReplayedAsUserTurnsOrRemovedFromHistory() {

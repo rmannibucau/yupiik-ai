@@ -52,6 +52,30 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
 describe('mounted external-store chat integration', () => {
+  it('renders captured server speaker labels once per feedback and keeps them through completion and replay', async () => {
+    const user = event('user', 'question');
+    state.events = [user,
+      event('feedback-started', 'thinking', { startedAt: 1000, speakerLabel: '[10:00:01] model' }),
+      event('thinking-delta', 'reason'),
+      event('feedback-started', 'text', { startedAt: 2000, speakerLabel: '[10:00:02] model' }),
+      event('text-delta', 'answer')];
+    render(); await settle();
+    const heading = [...host.querySelectorAll('div')].find(entry => entry.textContent === '[10:00:02] model')!;
+    expect(heading).toBeDefined();
+    expect(heading.classList.contains('opacity-60')).toBe(true);
+    expect(host.textContent).toContain('[10:00:01] model');
+    state.events = [...state.events, event('text-delta', ' complete'), event('turn-done', 'answer complete')];
+    render(); await settle();
+    expect([...host.querySelectorAll('div')].find(entry => entry.textContent === '[10:00:02] model')).toBe(heading);
+    expect(host.textContent?.match(/\[10:00:02\] model/g)).toHaveLength(1);
+    state.events = [user,
+      event('thinking-delta', 'reason', { feedbackStart: true, startedAt: 1000, speakerLabel: '[10:00:01] model' }),
+      event('text-delta', 'answer complete', { feedbackStart: true, startedAt: 2000, speakerLabel: '[10:00:02] model' })];
+    render(); await settle();
+    expect(host.textContent?.match(/\[10:00:02\] model/g)).toHaveLength(1);
+    expect(host.textContent).toContain('[10:00:01] model');
+  });
+
   it.each([
     { promptTokens: 100, contextInputTokens: 500, cacheReadTokens: 400, percent: 80 },
     { promptTokens: 0, contextInputTokens: 500, cacheReadTokens: 500, percent: 100 },

@@ -75,6 +75,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -1032,8 +1033,17 @@ public class AgentLoop {
         return null;
     }
 
+    final FeedbackTiming feedbackTiming = new FeedbackTiming();
+    private final ReentrantLock feedbackLock = new ReentrantLock();
+
     void emit(final AgentEvent event) {
-        emitter.emit(event);
+        feedbackLock.lock();
+        try {
+            feedbackTiming.accept(event, clock, emitter::emit);
+            emitter.emit(event);
+        } finally {
+            feedbackLock.unlock();
+        }
     }
 
     /** Emits a task-solving phase marker for the benchmark timeline. */

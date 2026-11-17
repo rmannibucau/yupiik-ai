@@ -18,6 +18,8 @@ package io.yupiik.ia.agent.web;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
@@ -31,6 +33,7 @@ import io.yupiik.ia.agent.core.shell.ShellIO;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.ShellSession;
+import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import java.util.ArrayDeque;
@@ -89,6 +92,8 @@ public class WebSessionManager implements AutoCloseable {
     private final JsonMapper mapper;
     private final SessionLifecycle sessionLifecycle;
     private final BtwAnswerer btwAnswerer;
+    private final SpeakerLabels speakerLabels;
+    private final ChatClient chatClient;
 
     private final ConcurrentHashMap<String, WebSession> sessions = new ConcurrentHashMap<>();
     private final AtomicLong rpcId = new AtomicLong();
@@ -103,6 +108,32 @@ public class WebSessionManager implements AutoCloseable {
             final SseBroker broker,
             final JsonMapper mapper,
             final BtwAnswerer btwAnswerer) {
+        this(
+                sessionRuntimeFactory,
+                shellRegistry,
+                slashRegistry,
+                turnRunner,
+                sessionStore,
+                sessionLifecycle,
+                broker,
+                mapper,
+                btwAnswerer,
+                null,
+                null);
+    }
+
+    public WebSessionManager(
+            final SessionRuntimeFactory sessionRuntimeFactory,
+            final ShellRegistry shellRegistry,
+            final WebSlashCommands slashRegistry,
+            final TurnRunner turnRunner,
+            final SessionStore sessionStore,
+            final SessionLifecycle sessionLifecycle,
+            final SseBroker broker,
+            final JsonMapper mapper,
+            final BtwAnswerer btwAnswerer,
+            final SpeakerLabels speakerLabels,
+            final ChatClient chatClient) {
         this.sessionRuntimeFactory = sessionRuntimeFactory;
         this.shellRegistry = shellRegistry;
         this.slashRegistry = slashRegistry;
@@ -112,6 +143,8 @@ public class WebSessionManager implements AutoCloseable {
         this.broker = broker;
         this.mapper = mapper;
         this.btwAnswerer = btwAnswerer;
+        this.speakerLabels = speakerLabels;
+        this.chatClient = chatClient;
     }
 
     /** Whether a session is currently driven by the web server. */
@@ -148,6 +181,23 @@ public class WebSessionManager implements AutoCloseable {
         final var transcript = new ConversationTranscript();
         final var frontend = new WebShellFrontend(sessionId, broker, transcript, mapper);
         final var session = new ShellSession().sessionId(sessionId).runtime(runtime);
+        if (speakerLabels != null) {
+            transcript.setFeedbackLabelResolver((identity, user, at) -> {
+                final var settings = session.chatSettings();
+                final var ctx = new SpeakerLabels.Ctx(
+                                identity == null ? chatClient.model(settings) : identity.model(),
+                                identity == null ? chatClient.providerId(settings) : identity.provider(),
+                                identity == null ? session.activeAgent() : identity.agent(),
+                                session.runtime() == null
+                                        ? null
+                                        : String.valueOf(
+                                                session.runtime().permissions().mode()),
+                                sessionId,
+                                null)
+                        .at(at);
+                return user ? speakerLabels.userLabel(ctx) : speakerLabels.assistantLabel(ctx);
+            });
+        }
         final var io = new WebShellIO(session);
         final var env = new ShellEnv(frontend, io, session, transcript);
         sessionLifecycle.installGates(io.approvalGate(), io.feedbackGate(), runtime);
@@ -493,9 +543,13 @@ public class WebSessionManager implements AutoCloseable {
      * @param sessionId the session whose persisted messages to replay
      * @return the replayed {@link WebEventDto}s in conversation order
      */
+    public List<WebEventDto> replay(final String sessionId, final List<Message> messages) {
+        return WebReplay.replay(sessionId, messages, speakerLabels);
+    }
+
     public List<WebEventDto> snapshotFor(final String sessionId) {
         final var messages = sessionStore.load(sessionId);
-        final var replay = WebReplay.replay(sessionId, messages);
+        final var replay = replay(sessionId, messages);
         // a tab that connects mid-turn must learn the session is already busy (the persistable history
         // carries no live busy state): prepend a synthetic status frame the frontend's foldStatus folds
         // in, so the status bar shows "working" and the Stop button appears without re-running the turn.
