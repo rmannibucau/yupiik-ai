@@ -296,7 +296,8 @@ class SlackLifecycleSafetyTest {
                                 Configuration.of(Map.of()),
                                 fixture.json,
                                 root.resolve("state"),
-                                new ProviderBudgetConfiguration(null, null, null)));
+                                new ProviderBudgetConfiguration(null, null, null),
+                                false));
                 assertTrue(failure.getMessage().contains("requires"));
             }
         }

@@ -1,7 +1,7 @@
 = Slack admission and configuration
 :minisite-breadcrumb: Home[../index.html] > Slack bot[index.html] > Configuration
 
-The source of truth is `SlackConfiguration`, `SlackExecutorConfiguration`, `SlackProviderConfiguration` and `SlackPrompts` in `extensions/bot-parent/slack-bot/src/main/java/io/yupiik/ia/agent/slack/configuration`.
+The source of truth is `SlackConfiguration`, `SlackExecutorConfiguration`, `SlackProviderConfiguration`, `SlackContextConfiguration`, nested `SlackThreadConfiguration` and `SlackPrompts` in `extensions/bot-parent/slack-bot/src/main/java/io/yupiik/ia/agent/slack/configuration`.
 These are trusted controller settings, never options accepted from Slack messages.
 Environment names follow the configuration loader's uppercase/dot-to-underscore mapping; for example `slack.botUser` is `SLACK_BOTUSER`, not `SLACK_BOT_USER`.
 The deployment environment sample uses that mapping.
@@ -49,8 +49,10 @@ An empty log from a controller version without these lifecycle diagnostics is no
 == Optional public GitHub URLs
 
 Docker restricted-services dependency egress can allow unauthenticated HTTPS to public GitHub resources without enabling GitHub context/Git RPC or passing GitHub credentials into Slack attempts.
-For example, an operator may add the exact hosts `github.com`, `api.github.com` and `raw.githubusercontent.com` to `slack.executor.docker.services.dependencyEgress.allowedHosts`, preserving any separately reviewed MCP hosts.
+Separately reviewed deployments may already include exact hosts such as `github.com`, `api.github.com` and `raw.githubusercontent.com` in `slack.executor.docker.services.dependencyEgress.allowedHosts`, alongside approved MCP hosts.
+Context enablement preserves that explicit operator policy; it does not enable egress or add any hosts.
 This grants destination-based CONNECT access, not read-only HTTP methods or individual URL paths.
+Allowed destinations can receive context-derived data; this is not download-only access or an exfiltration-prevention boundary.
 Private repositories remain inaccessible without separately authorized credentials, and unauthenticated GitHub API rate limits apply.
 Redirects to other hosts, including archive or attachment hosts, remain blocked unless explicitly reviewed and allowed.
 
@@ -58,7 +60,7 @@ Redirects to other hosts, including archive or attachment hosts, remain blocked 
 
 The core `websearch` tool defaults to the Exa, Parallel, Firecrawl and TinyFish MCP providers, in that fallback order.
 An enabled tool is not proof of network reachability: restricted-services attempts also need their destinations in `slack.executor.docker.services.dependencyEgress.allowedHosts`.
-Preserve the existing list and add only the reviewed provider hosts: `mcp.exa.ai`, `search.parallel.ai`, `mcp.firecrawl.dev` and `agent.tinyfish.ai`.
+Preserve the existing explicit operator list; provider destinations may include separately approved `mcp.exa.ai`, `search.parallel.ai`, `mcp.firecrawl.dev` and `agent.tinyfish.ai`, but context enablement adds none of them.
 See xref:../github-bot/egress.adoc#web-search-egress[the provider endpoint and access checklist], which applies to both Docker adapters.
 No search API key is required by the local default configuration; anonymous availability, authentication requirements and quotas remain provider-controlled.
 Adding a destination does not provision credentials or guarantee successful search calls.
@@ -66,13 +68,17 @@ Adding a destination does not provision credentials or guarantee successful sear
 Search results and page fetching are separate capabilities.
 The `webfetch` tool still cannot fetch a result on an unapproved host, and redirects to unapproved destinations remain blocked.
 Do not enable arbitrary internet access or wildcard provider domains just to follow search results.
-Trusted preparation currently does not copy the agent document's `tools` block into attempts, so do not assume custom `tools.websearch` provider lists, URLs or inline keys reach the sandbox.
-Qualify configuration handoff separately before relying on custom search settings or credentials.
+Trusted preparation preserves explicit operator-owned `tools` and MCP configuration, including reviewed search settings and credentials/capabilities; Slack input cannot supply or override them.
+Accept disclosure of search terms (including resolved names) and context-derived data to the approved services, and review remote MCP/search retention separately from transient local storage.
 
 == Bounded work
 
 See xref:context.adoc[opt-in approved Slack context] for the separate `slack.context` root, default-disabled tool, source/member grants, opt-in manifest and privacy/retention acceptance requirements.
 Enabling it does not alter admission or agent network egress.
+The nested `slack.context.thread` settings are `enabled=false`, `channels=[]`, `initialMessages=20`, `maxMessages=100`, `maxBytes=65536`, `maxRequests=3` and `lookbackHours=24`.
+The initial snapshot and explicit opaque-token tool pages share the thread totals, while calls/bytes also consume the overall `slack.context.maxRequests=12` and `maxResponseBytes=131072` budgets and `actionRetentionSeconds=600` absolute deadline.
+`searchEnabled=false` remains independent; search is originating-channel-only and other-thread messages are usable only as validated search-result evidence, not expanded thread-read authority.
+Public-thread rollout additionally requires explicit `channels:history` approval and successful API qualification with the existing bot token; no user-token or private-scope fallback is supplied.
 
 [cols="2,1,4",options="header"]
 |===
@@ -163,7 +169,24 @@ Docker socket access is privileged controller authority and must never be passed
 `slack.prompts.policy`, `main` and `output` are operator-owned templates, each nonblank and at most 32000 characters.
 The main Handlebars template uses `{{{policy}}}`, `{{{output}}}`, `{{{request}}}` and `{{{context}}}`; request/context are JSON data, not template source.
 The default policy forbids implicit history, repository, file and URL retrieval.
-When trusted host configuration explicitly enables Slack context, the renderer also appends non-template-overridable xref:context.adoc#_agent_handoff_and_trusted_guidance[context guidance]; when disabled, rendering is unchanged and no context tool is advertised by the host.
+When trusted host configuration explicitly enables Slack context, the renderer also appends operator-configurable xref:context.adoc#_agent_handoff_and_trusted_guidance[context guidance]; when disabled, rendering is unchanged and no context tool is advertised by the host.
+`slack.prompts.contextGuidance` replaces the entire default guidance with literal text, independently of `main`; it is not evaluated as Handlebars.
+Its maximum length is 32000 characters, and an empty string disables the guidance without removing the thread snapshot, granting tool access or bypassing host validation.
+The environment equivalent is `SLACK_PROMPTS_CONTEXTGUIDANCE`.
+
+[source,json]
+----
+{
+  "slack": {
+    "prompts": {
+      "contextGuidance": "Resolve relevant Slack mentions, distinguish profile facts from public claims, and verify disputed claims against relevant sources."
+    }
+  }
+}
+----
+
+Use `"contextGuidance": ""` to omit guidance entirely, or omit the property to retain the default.
+The current signature is `SlackPromptRenderer.render(task, history, slackContextEnabled, initialSlackContext)`; the fourth argument is the host-fetched transient thread snapshot, including eligible earlier bot replies, not restored authority or template-controlled input.
 The renderer appends a mandatory `/attempt/output/result.json` contract with exactly `taskId` and `summary`; the worker validates the exact task identity and a nonblank summary bounded by `maxAnswerChars`.
 The default `output` instruction uses the same `taskId` and `summary` contract; custom instructions cannot replace the mandatory contract with an `answer` field.
 A prompt instruction alone does not establish result validity or successful publication.
@@ -177,7 +200,7 @@ Treat those as acceptance requirements for the integrated controller, not someth
 
 The shared preparer reads a regular non-symlink trusted JSON file and creates a private attempt directory.
 It supplies fresh `storage`, `workspace` and `output` directories plus a sanitized configuration, with `home` and `storageHome` set to `/attempt/storage` and `workingDir` to `/attempt/workspace`.
-It does not clone a repository or import Slack history.
+It does not clone a repository or import Slack history on its own; approved transient thread context is supplied separately by the controller.
 `permissions.mode=YOLO` is internal to the sandbox: filesystem and network containment must therefore be real.
 
 Explicitly disable memory, skills, subagents, MCP and notifications in the trusted agent document unless separately reviewed.
@@ -194,7 +217,7 @@ Other provider APIs, dynamic provider selection and GitHub broker capabilities a
 
 == Context-bearing execution override
 
-The optional GitHub URL, MCP and web-search examples above apply only to context-disabled tasks.
+Context-bearing tasks retain only the existing explicit operator-approved egress policy and trusted MCP/web-search configuration; enabling context neither enables networking nor adds hosts or credentials.
 Context-enabled execution is Linux Docker only and must refuse Nono/Kubernetes until equivalent transient controls are implemented.
 See xref:context.adoc#_linux_docker_transient_execution_only[transient execution and separate deployment samples] before enabling even member-only context.
 
@@ -204,11 +227,12 @@ See xref:context.adoc#_linux_docker_transient_execution_only[transient execution
 |`slack.executor.attemptRoot=/run/yca-slack-context-attempts` |Dedicated tmpfs with `noswap,nodev,nosuid,noexec,mode=0700,uid=10002,gid=10002,size=512m`, visible at the identical host/controller path; each agent sees only its own attempt.
 |`slack.executor.docker.disableContainerLogs=true` |Neutral shared Docker flag, default false elsewhere; environment binding is `SLACK_EXECUTOR_DOCKER_DISABLECONTAINERLOGS=true`, launching the agent with `--log-driver=none`.
 |`slack.executor.showToolOutput=hidden` |Forced hidden tool output, with request/body tracing prohibited and payload-free host diagnostics.
-|`slack.executor.docker.services.dependencyEgress.enabled=false` |No MCP/web search/dependency downloads or ancillary integration egress; only the fixed inference route and controller-only Slack calls remain.
+|`slack.executor.docker.services.dependencyEgress` |Preserve existing explicit `enabled` and `allowedHosts` policy; no implicit enablement or new hosts. CONNECT permits data delivery to approved destinations, not download-only access.
 |===
 
 Active dependency-cache restore/publication is forbidden, and the entire attempt, including configuration/session/log/result artifacts, stays on tmpfs without failure copies or backups.
-Context preparation overrides memory, skills, subagents, MCP, notifications and hooks to disabled; the trusted-value preservation described for ordinary preparation below does not apply to context-bearing attempts.
+Context preparation overrides memory, skills, subagents, notifications and hooks to disabled, while preserving explicit trusted MCP and search settings/credentials; untrusted Slack text cannot configure them.
+Provider and remote-tool retention is not zero merely because the local attempt is transient; accept those disclosures separately, including any explicitly accepted swap-backed-tmpfs risk.
 No context-derived local answer, prior-answer history or uncertain-publication replay body is retained; see xref:context.adoc#_answers_publication_and_recovery[publication and recovery].
 The separate `controller-context.env.example` leaves context/search disabled and does not change request-admission lists.
 The existing base launcher does not consume it or mount the new root: a reviewed separate launcher and matched UID/GID 10002 images/accounts are required, not just changing one environment variable.

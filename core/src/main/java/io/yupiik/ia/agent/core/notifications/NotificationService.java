@@ -19,6 +19,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.NotificationsOnConfiguration;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -33,7 +34,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Fires an OS notification when a turn ends, opt-in via {@code yca.notifications.enabled} (disabled by
+ * Fires an OS notification when a turn ends or needs input, opt-in via {@code yca.notifications.enabled} (disabled by
  * default). A custom {@code yca.notifications.command} replaces the built-in OS integration and receives the
  * payload as environment variables; otherwise a best-effort default sink per OS is used. Every path is async
  * (run on the shared executor) and swallows failures so a notification can never fail or slow a turn.
@@ -63,8 +64,12 @@ public class NotificationService {
     public static final String ENV_PROVIDER = "YCA_NOTIFICATION_PROVIDER";
     public static final String ENV_SUCCESS = "YCA_NOTIFICATION_SUCCESS";
     public static final String ENV_BODY = "YCA_NOTIFICATION_BODY";
+    public static final String ENV_TYPE = "YCA_NOTIFICATION_TYPE";
+    public static final String ENV_TOOL = "YCA_NOTIFICATION_TOOL";
+    public static final String ENV_SOURCE = "YCA_NOTIFICATION_SOURCE";
 
     private final boolean enabled;
+    private final NotificationsOnConfiguration on;
     private final boolean custom;
     private final String[] sink;
     /** True when the resolved default sink is the Linux notify-send tool (only it gets the -h hint and -n). */
@@ -99,6 +104,7 @@ public class NotificationService {
         final var notifications =
                 configuration == null || configuration.notifications() == null ? null : configuration.notifications();
         this.enabled = notifications != null && notifications.enabled();
+        this.on = notifications == null ? new NotificationsOnConfiguration(null, null) : notifications.on();
         final var cfgCommand =
                 notifications == null || notifications.command() == null ? null : notifications.command();
         this.custom = cfgCommand != null && !cfgCommand.isEmpty();
@@ -120,10 +126,117 @@ public class NotificationService {
             final String provider,
             final boolean success,
             final String body) {
-        if (!enabled || sink == null) {
+        if (!enabled || !on.event().turnEnd()) {
             return;
         }
-        final var env = env(sessionId, title, model, provider, success, body);
+        deliver(
+                sessionId,
+                title,
+                body,
+                success ? "emblem-default" : "dialog-error",
+                env(sessionId, title, model, provider, success, body));
+    }
+
+    /** Pending input: only counts and session labels, never question text or choices. */
+    public void onInputRequired(
+            final String sessionId, final String sessionTitle, final int questionCount, final String source) {
+        if (!enabled || !("btw".equals(source) ? on.tools().btw() : on.tools().ask_user())) {
+            return;
+        }
+        final var count = Math.max(1, questionCount);
+        interaction(
+                sessionId,
+                sessionTitle,
+                "input_required",
+                "",
+                source,
+                "Input required: " + count + (count == 1 ? " question waiting." : " questions waiting.")
+                        + "\nReturn to YCA to answer.");
+    }
+
+    /** Pending approval: only the tool label, never its arguments or permission details. */
+    public void onApprovalRequired(
+            final String sessionId, final String sessionTitle, final String tool, final String source) {
+        if (!enabled || !on.event().approval()) {
+            return;
+        }
+        final var label = label(tool, 64);
+        interaction(
+                sessionId,
+                sessionTitle,
+                "approval_required",
+                label,
+                source,
+                "Approval required" + (label.isEmpty() ? "" : " for " + label) + ".\nReturn to YCA to review.");
+    }
+
+    private void interaction(
+            final String sessionId,
+            final String sessionTitle,
+            final String type,
+            final String tool,
+            final String source,
+            final String message) {
+        final var title = label(sessionId, 64)
+                + (sessionTitle == null || sessionTitle.isBlank() ? "" : " - " + label(sessionTitle, 120));
+        final var body = ("btw".equals(source) ? "/btw: " : "") + message;
+        final var env = Map.of(
+                ENV_SESSION,
+                nullToEmpty(sessionId),
+                ENV_TITLE,
+                title,
+                ENV_MODEL,
+                "",
+                ENV_PROVIDER,
+                "",
+                ENV_SUCCESS,
+                "",
+                ENV_BODY,
+                body,
+                ENV_TYPE,
+                type,
+                ENV_TOOL,
+                tool,
+                ENV_SOURCE,
+                "btw".equals(source) ? "btw" : "main");
+        deliver(sessionId, title, body, "dialog-warning", env);
+    }
+
+    private static String label(final String value, final int limit) {
+        if (value == null) {
+            return "";
+        }
+        final var normalized = value.replaceAll("[\\p{Cntrl}\\s]+", " ").strip();
+        return normalized.substring(0, Math.min(limit, normalized.length()));
+    }
+
+    private static String escapeMarkup(final String value) {
+        return nullToEmpty(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    private void deliver(
+            final String sessionId,
+            final String title,
+            final String body,
+            final String icon,
+            final Map<String, String> env) {
+        try {
+            if (executor == null) {
+                runAndSwallow(() -> deliverNow(sessionId, title, body, icon, env));
+            } else {
+                executor.execute(() -> runAndSwallow(() -> deliverNow(sessionId, title, body, icon, env)));
+            }
+        } catch (final Throwable e) {
+            LOGGER.log(Level.FINE, "notification could not be scheduled", e);
+        }
+    }
+
+    private void deliverNow(
+            final String sessionId,
+            final String title,
+            final String body,
+            final String icon,
+            final Map<String, String> env) {
         final List<String> argv;
         if (custom) {
             // the custom command receives the payload via env only, its argv stays as configured.
@@ -140,17 +253,16 @@ public class NotificationService {
             args.add("-h");
             args.add("string:x-canonical-private-synchronous:" + replaceId(sessionId));
             args.add("-i");
-            args.add(success ? "emblem-default" : "dialog-error");
+            args.add(icon);
             if (appIcon.length > 0) {
                 args.add("-n");
                 args.add(appIcon[1]);
             }
-            args.add(title == null ? "" : title);
-            args.add(body == null ? "" : body);
+            args.add(escapeMarkup(title));
+            args.add(escapeMarkup(body));
             argv = List.copyOf(args);
         } else {
             // other OS default sinks keep their existing <-i <icon>> <title> <body> shape untouched.
-            final var icon = success ? "emblem-default" : "dialog-error";
             final var args = new String[sink.length + 4]; // sink + (-i icon) + title + body
             System.arraycopy(sink, 0, args, 0, sink.length);
             args[sink.length] = "-i";
@@ -159,15 +271,7 @@ public class NotificationService {
             args[sink.length + 3] = body == null ? "" : body;
             argv = List.of(args);
         }
-        try {
-            if (executor == null) {
-                runAndSwallow(() -> run(argv, env));
-            } else {
-                executor.execute(() -> runAndSwallow(() -> run(argv, env)));
-            }
-        } catch (final Throwable e) {
-            LOGGER.log(Level.FINE, "notification could not be scheduled", e);
-        }
+        run(argv, env);
     }
 
     private static String replaceId(final String sessionId) {
@@ -231,7 +335,7 @@ public class NotificationService {
                     if (!process.waitFor(30, TimeUnit.SECONDS)) {
                         process.destroy();
                     } else if (process.exitValue() != 0) {
-                        LOGGER.warning(() -> "Failed to notify turn end: exit-code=" + process.exitValue() + "\n"
+                        LOGGER.warning(() -> "Failed to deliver notification: exit-code=" + process.exitValue() + "\n"
                                 + tryReadError(process));
                     }
                 } catch (final InterruptedException e) {
@@ -295,7 +399,8 @@ public class NotificationService {
                 ENV_MODEL, nullToEmpty(model),
                 ENV_PROVIDER, nullToEmpty(provider),
                 ENV_SUCCESS, Boolean.toString(success),
-                ENV_BODY, nullToEmpty(body));
+                ENV_BODY, nullToEmpty(body),
+                ENV_TYPE, "turn_end");
     }
 
     private static String nullToEmpty(final String value) {

@@ -20,12 +20,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.condition.OS.LINUX;
 
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -34,6 +42,136 @@ import org.junit.jupiter.api.io.TempDir;
 
 @Timeout(30)
 class NotificationServiceTest {
+
+    @Test
+    void eventSwitchesAreIndependentAndMasterSwitchWins() {
+        for (int mask = 0; mask < 32; mask++) {
+            final var deliveries = new ArrayList<Delivery>();
+            final var enabled = (mask & 16) != 0;
+            final var config = TestConfigs.codingAgent(Map.of(
+                    "yca.notifications.enabled", Boolean.toString(enabled),
+                    "yca.notifications.on.event.turnEnd", Boolean.toString((mask & 8) != 0),
+                    "yca.notifications.on.event.approval", Boolean.toString((mask & 4) != 0),
+                    "yca.notifications.on.tools.ask_user", Boolean.toString((mask & 2) != 0),
+                    "yca.notifications.on.tools.btw", Boolean.toString((mask & 1) != 0),
+                    "yca.notifications.command", "custom"));
+            final var service = new NotificationService(config, executor(), (argv, env) -> {
+                deliveries.add(new Delivery(argv, env));
+                return new FakeProcess();
+            });
+            service.onTurnEnd("s", "title", "model", "provider", true, "reply");
+            service.onInputRequired("s", "title", 2, "main");
+            service.onInputRequired("s", "title", 1, "btw");
+            service.onApprovalRequired("s", "title", "bash", "main");
+            service.onApprovalRequired("s", "title", "bash", "btw");
+            assertEquals(
+                    enabled ? Integer.bitCount(mask & 15) + ((mask & 4) != 0 ? 1 : 0) : 0,
+                    deliveries.size(),
+                    "mask=" + mask);
+            final var events = deliveries.stream()
+                    .map(d -> d.env().get(NotificationService.ENV_TYPE) + ":"
+                            + d.env().getOrDefault(NotificationService.ENV_SOURCE, ""))
+                    .toList();
+            assertEquals(enabled && (mask & 8) != 0, events.contains("turn_end:"), "turn end mask=" + mask);
+            assertEquals(enabled && (mask & 2) != 0, events.contains("input_required:main"), "main input mask=" + mask);
+            assertEquals(enabled && (mask & 1) != 0, events.contains("input_required:btw"), "btw input mask=" + mask);
+            assertEquals(
+                    enabled && (mask & 4) != 0,
+                    events.contains("approval_required:main"),
+                    "main approval mask=" + mask);
+            assertEquals(
+                    enabled && (mask & 4) != 0, events.contains("approval_required:btw"), "btw approval mask=" + mask);
+        }
+    }
+
+    @Test
+    void interactionsHaveCompactPrivatePayloadsAndNoOutcome() {
+        final var deliveries = new ArrayList<Delivery>();
+        final var service = new NotificationService(
+                TestConfigs.codingAgent(
+                        Map.of("yca.notifications.enabled", "true", "yca.notifications.command", "custom,--flag")),
+                executor(),
+                (argv, env) -> {
+                    deliveries.add(new Delivery(argv, env));
+                    return new FakeProcess();
+                });
+        service.onInputRequired("s1", "  My\n title\t ", 2, "main");
+        service.onApprovalRequired("s2", "Review", "bash", "btw");
+        assertEquals(List.of("custom", "--flag"), deliveries.getFirst().argv());
+        final var input = deliveries.getFirst().env();
+        assertEquals("s1 - My title", input.get(NotificationService.ENV_TITLE));
+        assertEquals(
+                "Input required: 2 questions waiting.\nReturn to YCA to answer.",
+                input.get(NotificationService.ENV_BODY));
+        assertEquals("input_required", input.get(NotificationService.ENV_TYPE));
+        assertEquals("main", input.get(NotificationService.ENV_SOURCE));
+        assertEquals("", input.get(NotificationService.ENV_TOOL));
+        for (final var delivery : deliveries) {
+            assertEquals("", delivery.env().get(NotificationService.ENV_SUCCESS));
+            assertEquals("", delivery.env().get(NotificationService.ENV_MODEL));
+            assertEquals("", delivery.env().get(NotificationService.ENV_PROVIDER));
+        }
+        final var approval = deliveries.getLast().env();
+        assertEquals(
+                "/btw: Approval required for bash.\nReturn to YCA to review.",
+                approval.get(NotificationService.ENV_BODY));
+        assertEquals("bash", approval.get(NotificationService.ENV_TOOL));
+        assertEquals("btw", approval.get(NotificationService.ENV_SOURCE));
+    }
+
+    @Test
+    @EnabledOnOs(LINUX)
+    void interactionLabelsAreBoundedAndDesktopMarkupEscaped(@TempDir final Path tempDir) {
+        final var ref = new AtomicReference<Delivery>();
+        final var service = new NotificationService(
+                TestConfigs.codingAgent(Map.of("yca.notifications.enabled", "true")),
+                executor(),
+                (argv, env) -> {
+                    ref.set(new Delivery(argv, env));
+                    return new FakeProcess();
+                },
+                tempDir);
+        service.onApprovalRequired("s", "<b>&\n" + "x".repeat(200), "<tool>&", "btw");
+        final var delivery = ref.get();
+        assertTrue(delivery.argv().contains("dialog-warning"));
+        assertTrue(delivery.argv().get(delivery.argv().size() - 2).startsWith("s - &lt;b&gt;&amp; "));
+        assertTrue(delivery.argv().getLast().contains("&lt;tool&gt;&amp;"));
+        assertTrue(delivery.env().get(NotificationService.ENV_TITLE).length() <= 124);
+    }
+
+    @Test
+    void deliveryIsAsynchronousAndFailuresDoNotReachCaller() throws Exception {
+        final var release = new CountDownLatch(1);
+        final var delivered = new CountDownLatch(1);
+        try (final var worker = Executors.newSingleThreadExecutor()) {
+            worker.execute(() -> {
+                try {
+                    release.await();
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            final var service = new NotificationService(
+                    TestConfigs.codingAgent(Map.of("yca.notifications.enabled", "true")), worker, (argv, env) -> {
+                        delivered.countDown();
+                        throw new IllegalStateException("unavailable desktop");
+                    });
+            try {
+                service.onInputRequired("s", "title", 1, "main");
+                assertEquals(1, delivered.getCount(), "delivery must be queued, not run on the caller");
+            } finally {
+                release.countDown();
+            }
+            assertTrue(delivered.await(5, TimeUnit.SECONDS));
+        }
+        final var stopped = Executors.newSingleThreadExecutor();
+        stopped.shutdown();
+        final var service = new NotificationService(
+                TestConfigs.codingAgent(Map.of("yca.notifications.enabled", "true")), stopped, (argv, env) -> {
+                    throw new AssertionError("must not execute");
+                });
+        service.onApprovalRequired("s", "title", "bash", "main");
+    }
 
     /** A synchronous executor: execute() runs the task inline so deliveries are observable immediately. */
     private static ExecutorService executor() {
@@ -47,8 +185,8 @@ class NotificationServiceTest {
             public void shutdown() {}
 
             @Override
-            public java.util.List<Runnable> shutdownNow() {
-                return java.util.List.of();
+            public List<Runnable> shutdownNow() {
+                return List.of();
             }
 
             @Override
@@ -62,49 +200,44 @@ class NotificationServiceTest {
             }
 
             @Override
-            public boolean awaitTermination(final long timeout, final java.util.concurrent.TimeUnit unit) {
+            public boolean awaitTermination(final long timeout, final TimeUnit unit) {
                 return true;
             }
 
             @Override
-            public <T> java.util.concurrent.Future<T> submit(final java.util.concurrent.Callable<T> task) {
+            public <T> Future<T> submit(final Callable<T> task) {
                 throw new UnsupportedOperationException();
             }
 
             @Override
-            public <T> java.util.concurrent.Future<T> submit(final Runnable task, final T result) {
+            public <T> Future<T> submit(final Runnable task, final T result) {
                 throw new UnsupportedOperationException();
             }
 
             @Override
-            public java.util.concurrent.Future<?> submit(final Runnable task) {
+            public Future<?> submit(final Runnable task) {
                 throw new UnsupportedOperationException();
             }
 
             @Override
-            public <T> java.util.List<java.util.concurrent.Future<T>> invokeAll(
-                    final java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks) {
+            public <T> List<Future<T>> invokeAll(final Collection<? extends Callable<T>> tasks) {
                 throw new UnsupportedOperationException();
             }
 
             @Override
-            public <T> java.util.List<java.util.concurrent.Future<T>> invokeAll(
-                    final java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks,
-                    final long timeout,
-                    final java.util.concurrent.TimeUnit unit) {
+            public <T> List<Future<T>> invokeAll(
+                    final Collection<? extends Callable<T>> tasks, final long timeout, final TimeUnit unit) {
                 throw new UnsupportedOperationException();
             }
 
             @Override
-            public <T> T invokeAny(final java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks) {
+            public <T> T invokeAny(final Collection<? extends Callable<T>> tasks) {
                 throw new UnsupportedOperationException();
             }
 
             @Override
             public <T> T invokeAny(
-                    final java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks,
-                    final long timeout,
-                    final java.util.concurrent.TimeUnit unit) {
+                    final Collection<? extends Callable<T>> tasks, final long timeout, final TimeUnit unit) {
                 throw new UnsupportedOperationException();
             }
         };
@@ -116,18 +249,18 @@ class NotificationServiceTest {
     /** A fake process whose waitFor returns immediately. */
     private static final class FakeProcess extends Process {
         @Override
-        public java.io.OutputStream getOutputStream() {
-            return java.io.OutputStream.nullOutputStream();
+        public OutputStream getOutputStream() {
+            return OutputStream.nullOutputStream();
         }
 
         @Override
-        public java.io.InputStream getInputStream() {
-            return java.io.InputStream.nullInputStream();
+        public InputStream getInputStream() {
+            return InputStream.nullInputStream();
         }
 
         @Override
-        public java.io.InputStream getErrorStream() {
-            return java.io.InputStream.nullInputStream();
+        public InputStream getErrorStream() {
+            return InputStream.nullInputStream();
         }
 
         @Override

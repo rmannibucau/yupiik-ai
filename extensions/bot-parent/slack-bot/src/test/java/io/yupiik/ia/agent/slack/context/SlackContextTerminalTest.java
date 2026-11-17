@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.yupiik.ia.agent.bot.runtime.AttemptPreparation;
 import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import java.nio.file.Files;
@@ -39,14 +40,27 @@ class SlackContextTerminalTest {
 
     @Test
     void revokedAttemptsServeOnlyTerminalStatusesWithoutFurtherUpstreamCalls() throws Exception {
-        final var configuration =
-                new SlackContextConfiguration(true, true, true, List.of("C1"), 30, 8, 4, 5, 32768, 20, 1, 600);
+        final var configuration = new SlackContextConfiguration(
+                true,
+                true,
+                true,
+                List.of("C1"),
+                30,
+                8,
+                4,
+                5,
+                32768,
+                20,
+                1,
+                600,
+                false,
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
                 final var dispatcher = new SlackContextAttempt.Dispatcher(configuration)) {
             for (final var reason : SlackActionRegistry.Terminal.values()) {
                 try (final var actions = new SlackActionRegistry(configuration, Clock.systemUTC())) {
                     final var queued = task("terminal-" + reason, "U1", TaskStatus.queued, System.currentTimeMillis());
-                    actions.admitted(queued, "action-terminal-secret", System.currentTimeMillis());
+                    actions.admitted(queued, "action-terminal-secret", queued.thread(), System.currentTimeMillis());
                     final var grant =
                             actions.claim(queued, 0, System.currentTimeMillis()).orElseThrow();
                     final var directory = new AttemptPreparation(fixture.json)

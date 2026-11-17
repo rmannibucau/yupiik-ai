@@ -47,10 +47,14 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.UnaryOperator;
+import java.util.regex.Pattern;
 
 /** Domain worker. Every runtime intent precedes launch; termination confirmation precedes results or cleanup. */
 public final class SlackWorker {
+    private static final Pattern USER_MENTION = Pattern.compile("<@([UW][A-Z0-9]{1,63})>");
     private final SlackConfiguration configuration;
     private final ExecutorConfiguration executor;
     private final JsonMapper json;
@@ -188,7 +192,7 @@ public final class SlackWorker {
                         .orElse(null);
             }
             if (grant != null) {
-                contextStorage.validate(executor);
+                contextStorage.validate(executor, contextConfiguration.allowSwapBackedTmpfs());
             }
             final var root = Path.of(executor.attemptRoot()).toAbsolutePath().normalize();
             directory = new AttemptPreparation(json)
@@ -208,7 +212,12 @@ public final class SlackWorker {
                 context = new SlackContextAttempt(
                         directory, json, contextConfiguration, api, grant, Clock.systemUTC(), contextDispatcher);
             }
-            final var prompt = prompts.render(claimed, store.list(), context != null);
+            final var initialContext = context == null
+                    ? Map.<String, Object>of()
+                    : context.initialContext(() -> find(claimed.id()).status() != TaskStatus.preparing);
+            requireContext(context);
+            final var prompt = prompts.render(claimed, store.list(), context != null, initialContext);
+            requireContext(context);
             runtime = "yca-slack-" + claimed.id().substring(0, 32) + "-" + (claimed.attempt() + 1);
             final var durable = claimed.running(
                     directory.toString(), runtime, fingerprint, context != null, System.currentTimeMillis());
@@ -226,10 +235,16 @@ public final class SlackWorker {
                     : Files.createDirectory(
                             directory.resolve("tmp"),
                             PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+            requireContext(context);
+            final var attemptContext = context;
             // A borrowed worker slot is retained while the agent synchronously waits for ask_user.
             lease.markUncertain();
             executionThread = Thread.ofVirtual().name(identity).start(() -> {
                 try {
+                    requireContext(attemptContext);
+                    if (find(claimed.id()).status() != TaskStatus.running) {
+                        throw new IllegalStateException("Task no longer owns launch");
+                    }
                     completion.complete(sandbox.execute(attempt, identity, prompt, temporaryDirectory));
                 } catch (final Throwable failure) {
                     completion.completeExceptionally(failure);
@@ -238,6 +253,7 @@ public final class SlackWorker {
             try (final var mailbox =
                     context == null ? new FeedbackMailbox(directory.resolve("feedback"), json) : null) {
                 while (!completion.isDone()) {
+                    requireContext(context);
                     final var current = find(claimed.id());
                     if (current.status() == TaskStatus.cancel_requested
                             || current.status() == TaskStatus.recovery_blocked) {
@@ -270,11 +286,10 @@ public final class SlackWorker {
                     throw new IllegalStateException("Sandbox execution did not succeed");
                 }
             }
-            if (context != null) {
-                context.close();
-            }
+            requireContext(context);
             sandbox.stop(runtime);
             terminated = true;
+            requireContext(context);
             final var current = find(claimed.id());
             if (current.status() == TaskStatus.cancel_requested) {
                 update(claimed.id(), task -> task.feedback(null, TaskStatus.cancelled, System.currentTimeMillis()));
@@ -294,7 +309,7 @@ public final class SlackWorker {
                     || answer.length() > configuration.maxAnswerChars()) {
                 throw new IllegalStateException("Invalid bounded Slack result contract");
             }
-            final var publish = store.transaction(tasks -> {
+            final BooleanSupplier selectPublication = () -> store.transaction(tasks -> {
                 for (int index = 0; index < tasks.size(); index++) {
                     final var task = tasks.get(index);
                     if (task.id().equals(claimed.id())) {
@@ -315,19 +330,30 @@ public final class SlackWorker {
                 }
                 throw new IllegalStateException("Unknown Slack task");
             });
+            final boolean publish;
+            if (grant == null) {
+                publish = selectPublication.getAsBoolean();
+            } else {
+                // Only the durable publishing selection is under the grant lock. Revocation
+                // callbacks and Slack HTTP must stay outside it. Keep the grant alive until here.
+                final var selected = new AtomicBoolean();
+                grant.whileActive(() -> selected.set(selectPublication.getAsBoolean()));
+                publish = selected.get();
+                if (!publish) {
+                    requireContext(context);
+                }
+            }
             if (!publish) {
                 return;
             }
+            // Publishing is the cancellation point of no return. Still check authority immediately
+            // before sending; expiry during the HTTP call cannot retract an accepted message.
+            final var message = new SlackJson.PostMessage(
+                    claimed.channel(), claimed.thread(), "Assistant response", false, false, answerBlocks(answer));
+            requireContext(context);
             try {
-                final var response = api.postMessage(new SlackJson.PostMessage(
-                                claimed.channel(),
-                                claimed.thread(),
-                                "Assistant response",
-                                false,
-                                false,
-                                answerBlocks(answer)))
-                        .toCompletableFuture()
-                        .join();
+                final var response =
+                        api.postMessage(message).toCompletableFuture().join();
                 final var ts = response.ts();
                 if (ts == null || !claimed.channel().equals(response.channel())) {
                     throw new IllegalStateException("Invalid Slack publication receipt");
@@ -345,7 +371,15 @@ public final class SlackWorker {
             }
             restoreInterrupt |= Thread.interrupted();
             if (runtime == null) {
-                update(claimed.id(), task -> task.transition(TaskStatus.failed, System.currentTimeMillis()));
+                update(
+                        claimed.id(),
+                        task -> task.transition(
+                                task.status() == TaskStatus.recovery_blocked
+                                        ? TaskStatus.recovery_blocked
+                                        : task.status() == TaskStatus.cancel_requested
+                                                ? TaskStatus.cancelled
+                                                : TaskStatus.failed,
+                                System.currentTimeMillis()));
             } else {
                 try {
                     quiesce(runtime, executionThread, completion);
@@ -353,11 +387,18 @@ public final class SlackWorker {
                     terminated = true;
                     update(
                             claimed.id(),
-                            task -> task.question() != null
-                                            && Set.of("publishing", "opening")
-                                                    .contains(task.question().state())
+                            task -> task.status() == TaskStatus.recovery_blocked
+                                            || task.question() != null
+                                                    && Set.of("publishing", "opening")
+                                                            .contains(task.question()
+                                                                    .state())
                                     ? task.transition(TaskStatus.recovery_blocked, System.currentTimeMillis())
-                                    : task.feedback(null, TaskStatus.failed, System.currentTimeMillis()));
+                                    : task.feedback(
+                                            null,
+                                            task.status() == TaskStatus.cancel_requested
+                                                    ? TaskStatus.cancelled
+                                                    : TaskStatus.failed,
+                                            System.currentTimeMillis()));
                 } catch (final RuntimeException unknown) {
                     restoreInterrupt |= Thread.interrupted();
                     update(
@@ -397,6 +438,14 @@ public final class SlackWorker {
     @JsonModel
     public record Result(String taskId, String summary) {}
 
+    private void requireContext(final SlackContextAttempt context) {
+        if (context != null && !context.authorized()) {
+            // Revoke/cancel controller work before the catch path quiesces the runtime.
+            context.close();
+            throw new IllegalStateException("Slack context authorization ended");
+        }
+    }
+
     private void quiesce(final String runtime, final Thread thread, final CompletableFuture<Integer> completion) {
         if (thread == null) {
             sandbox.stop(runtime);
@@ -431,13 +480,51 @@ public final class SlackWorker {
 
     private List<Map<String, Object>> answerBlocks(final String answer) {
         final var blocks = new ArrayList<Map<String, Object>>();
+        // Only exact user mentions become structured elements. All other markup stays literal.
+        final var mentions = USER_MENTION.matcher(answer);
+        boolean hasNextMention = mentions.find();
         for (int index = 0; index < answer.length(); ) {
+            if (blocks.size() == 50) {
+                throw new IllegalArgumentException("Answer exceeds Slack's 50-block limit");
+            }
+            final int start = index;
             int end = Math.min(index + 2900, answer.length());
             if (end < answer.length() && Character.isHighSurrogate(answer.charAt(end - 1))) {
                 end--;
             }
-            blocks.add(Map.of(
-                    "type", "section", "text", Map.of("type", "plain_text", "text", answer.substring(index, end))));
+            final var elements = new ArrayList<Map<String, Object>>();
+            boolean hasUser = false;
+            while (hasNextMention && mentions.start() < end) {
+                if (mentions.end() > end) {
+                    end = mentions.start(); // Never split a user token across blocks.
+                    break;
+                }
+                if (index < mentions.start()) {
+                    elements.add(Map.of("type", "text", "text", answer.substring(index, mentions.start())));
+                }
+                elements.add(Map.of("type", "user", "user_id", mentions.group(1)));
+                hasUser = true;
+                index = mentions.end();
+                hasNextMention = mentions.find();
+                // Conservatively bound each section to at most 100 inline elements.
+                if (elements.size() >= 98) {
+                    end = index;
+                    break;
+                }
+            }
+            if (hasUser) {
+                if (index < end) {
+                    elements.add(Map.of("type", "text", "text", answer.substring(index, end)));
+                }
+                blocks.add(Map.of(
+                        "type",
+                        "rich_text",
+                        "elements",
+                        List.of(Map.of("type", "rich_text_section", "elements", elements))));
+            } else {
+                blocks.add(Map.of(
+                        "type", "section", "text", Map.of("type", "plain_text", "text", answer.substring(start, end))));
+            }
             index = end;
         }
         return blocks;

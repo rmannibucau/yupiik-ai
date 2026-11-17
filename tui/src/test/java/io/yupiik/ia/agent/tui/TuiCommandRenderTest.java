@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.tui;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -60,7 +61,10 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.mcp.McpManager;
+import io.yupiik.ia.agent.core.notifications.NotificationService;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -100,12 +104,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -185,6 +192,19 @@ class TuiCommandRenderTest {
     private final AtomicReference<TuiRunner> tuiRef = new AtomicReference<>();
     private Thread uiThread;
     private Duration tickRate = TICK_RATE;
+    private final BlockingQueue<String> interactionAlerts = new LinkedBlockingQueue<>();
+    private final NotificationService notifications = new NotificationService(null, null) {
+        @Override
+        public void onInputRequired(final String session, final String title, final int count, final String source) {
+            interactionAlerts.add(session + ":input:" + count + ":" + source);
+        }
+
+        @Override
+        public void onApprovalRequired(
+                final String session, final String title, final String tool, final String source) {
+            interactionAlerts.add(session + ":approval:" + tool + ":" + source);
+        }
+    };
 
     private JsonMapper formatMapper;
     /** The configuration wired into the {@link TuiCommand} under test; a test may override it to e.g. configure multi-provider scenarios. */
@@ -3806,7 +3826,8 @@ class TuiCommandRenderTest {
                 subagentRegistry,
                 new ScrollService(tuiConfiguration),
                 null,
-                formatMapper);
+                formatMapper,
+                notifications);
     }
 
     @Test
@@ -6448,6 +6469,94 @@ class TuiCommandRenderTest {
                 Thread.getAllStackTraces().keySet().stream()
                         .noneMatch(t -> t.getName().equals("yca-tui-mouse-restore")),
                 "mouse-restore shutdown hook must be removed on clean exit");
+    }
+
+    @Test
+    void interactionNotificationsQueueFeedbackAndCancelOnlyBtwOwner() throws Exception {
+        final var registry = testRegistry();
+        final var command = command(registry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-notifications-ownership");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        final var tabsField = TuiCommand.class.getDeclaredField("tabManager");
+        tabsField.setAccessible(true);
+        final var state = ((TabManager) tabsField.get(command)).active();
+        final var ready = new CompletableFuture<Void>();
+        tuiRef.get().runLater(() -> {
+            state.btw = new UiState.BtwOverlay(42, "side", "", null, true, false, 0, new AtomicBoolean());
+            ready.complete(null);
+        });
+        ready.get(5, TimeUnit.SECONDS);
+        final var gateMethod =
+                TuiCommand.class.getDeclaredMethod("feedbackGate", TuiRunner.class, UiState.class, long.class);
+        gateMethod.setAccessible(true);
+        final var sideGate = (FeedbackGate) gateMethod.invoke(command, tuiRef.get(), state, 42L);
+        try (final var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var main = workers.submit(() -> state.session
+                    .runtime()
+                    .feedback()
+                    .ask(List.of(new Question("m", "Main question", List.of(), false))));
+            assertEquals(state.sessionId + ":input:1:main", interactionAlerts.poll(5, TimeUnit.SECONDS));
+            final var side =
+                    workers.submit(() -> sideGate.ask(List.of(new Question("b", "Side question", List.of(), false))));
+            assertEquals(state.sessionId + ":input:1:btw", interactionAlerts.poll(5, TimeUnit.SECONDS));
+            final var approvalMethod =
+                    TuiCommand.class.getDeclaredMethod("btwGate", TuiRunner.class, UiState.class, long.class);
+            approvalMethod.setAccessible(true);
+            final var approvalGate = (ApprovalGate) approvalMethod.invoke(command, tuiRef.get(), state, 42L);
+            final var approval =
+                    workers.submit(() -> approvalGate.approve("Private title", "Private arguments", "bash", Map.of()));
+            assertEquals(state.sessionId + ":approval:bash:btw", interactionAlerts.poll(5, TimeUnit.SECONDS));
+            awaitText("Main question");
+            assertTrue(interactionAlerts.isEmpty(), "rendering must not emit duplicate alerts");
+            final var closed = new CompletableFuture<Void>();
+            final var close = TuiCommand.class.getDeclaredMethod("closeBtw", UiState.class);
+            close.setAccessible(true);
+            tuiRef.get().runLater(() -> {
+                try {
+                    close.invoke(command, state);
+                    closed.complete(null);
+                } catch (final ReflectiveOperationException e) {
+                    closed.completeExceptionally(e);
+                }
+            });
+            closed.get(5, TimeUnit.SECONDS);
+            assertNull(side.get(5, TimeUnit.SECONDS));
+            assertEquals(ApprovalGate.Result.DENY, approval.get(5, TimeUnit.SECONDS));
+            assertFalse(main.isDone(), "closing side question must retain main feedback");
+            awaitText("Main question");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+            assertNull(main.get(5, TimeUnit.SECONDS));
+            assertTrue(interactionAlerts.isEmpty());
+        }
+        quit();
+    }
+
+    @Test
+    void backgroundInteractionAlertsUseRequesterAndCancelledPublicationIsSilent() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-notifications-background");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        final var requester = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        requester.sessionId = "background-session";
+        requester.title = "Background";
+        final var method = TuiCommand.class.getDeclaredMethod("feedbackGate", TuiRunner.class, UiState.class);
+        method.setAccessible(true);
+        final var gate = (FeedbackGate) method.invoke(command, tuiRef.get(), requester);
+        try (final var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            final var input = workers.submit(() -> gate.ask(List.of(new Question("q", "Hidden", List.of(), false))));
+            assertEquals("background-session:input:1:main", interactionAlerts.poll(5, TimeUnit.SECONDS));
+            requester.interrupted = true;
+            assertNull(input.get(5, TimeUnit.SECONDS));
+            assertNull(gate.ask(List.of(new Question("stale", "Stale", List.of(), false))));
+            assertTrue(interactionAlerts.isEmpty());
+        }
+        quit();
     }
 
     private static Class<?> nestedClass(final String simpleName) throws ClassNotFoundException {

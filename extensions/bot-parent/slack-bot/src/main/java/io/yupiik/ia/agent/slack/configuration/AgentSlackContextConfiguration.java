@@ -17,9 +17,11 @@ package io.yupiik.ia.agent.slack.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
 /** Worker-sanitized, credential-free configuration for the attempt's Slack context mailbox. */
 @RootConfiguration("slackContext")
+@JsonModel
 public record AgentSlackContextConfiguration(
         @Property(defaultValue = "false", documentation = "Enable the attempt-scoped Slack context tool.")
         boolean enabled,

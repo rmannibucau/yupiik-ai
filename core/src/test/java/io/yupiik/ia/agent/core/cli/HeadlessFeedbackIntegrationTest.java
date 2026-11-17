@@ -82,6 +82,7 @@ import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -96,8 +97,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSession;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Isolated;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Real headless command, loop, tool dispatch and ChatClient; only the model's HTTP transport is scripted.
@@ -108,9 +110,10 @@ import org.junit.jupiter.api.parallel.Isolated;
  */
 @Isolated // RunCommand installs a process-wide SIGINT handler and writes to the CLI streams.
 class HeadlessFeedbackIntegrationTest {
-    @Test
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     @SuppressWarnings("try") // The resource restores the process-wide SIGINT handler after RunCommand.
-    void answerReachesNextModelRequestAndFinalStoredResult() throws Exception {
+    void answerReachesNextModelRequestAndFinalStoredResult(final boolean fromFile) throws Exception {
         final var home = Files.createTempDirectory("headless-feedback-");
         try (final var signal = preserveInterruptHandler();
                 final var mapper = mapper();
@@ -237,9 +240,17 @@ class HeadlessFeedbackIntegrationTest {
                         }
                     };
                     final var answered = new AtomicInteger();
+                    final var taskPrompt = "Ask which choice to use, then finish.";
+                    final var promptFile = home.resolve("prompt.txt");
+                    if (fromFile) {
+                        Files.createFile(
+                                promptFile,
+                                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+                        Files.writeString(promptFile, taskPrompt);
+                    }
                     new RunCommand(
                                     new RunCommand.RunConf(
-                                            "Ask which choice to use, then finish.",
+                                            fromFile ? "" : taskPrompt,
                                             sessionId,
                                             "",
                                             false,
@@ -250,7 +261,8 @@ class HeadlessFeedbackIntegrationTest {
                                             "",
                                             "",
                                             1000000,
-                                            ""),
+                                            "",
+                                            fromFile ? promptFile.toString() : null),
                                     registry,
                                     factory,
                                     store,
@@ -268,6 +280,11 @@ class HeadlessFeedbackIntegrationTest {
                     assertEquals(1, answered.get());
                     assertEquals(2, transport.requests.size(), "one ask_user round and one final answer");
                     final var first = transport.requests.getFirst();
+                    assertTrue(
+                            objects(first.get("messages")).stream()
+                                    .anyMatch(message -> "user".equals(message.get("role"))
+                                            && taskPrompt.equals(message.get("content"))),
+                            "the file prompt must reach the real model wire request unchanged");
                     assertTrue(objects(first.get("tools")).stream()
                             .anyMatch(tool -> "ask_user".equals(((Map<?, ?>) tool.get("function")).get("name"))));
                     final var messages = objects(transport.requests.getLast().get("messages"));

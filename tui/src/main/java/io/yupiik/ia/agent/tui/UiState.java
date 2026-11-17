@@ -128,6 +128,7 @@ final class UiState {
     final Deque<TuiCommand.Approval> approvals = new ConcurrentLinkedDeque<>();
 
     volatile TuiCommand.FeedbackPrompt feedbackPrompt;
+    final Deque<TuiCommand.FeedbackPrompt> feedbackQueue = new ArrayDeque<>();
     volatile TuiCommand.PickerPrompt picker;
     volatile TuiCommand.PendingEditPlan editPlan;
     volatile CompletionEngine.Suggestion completion;

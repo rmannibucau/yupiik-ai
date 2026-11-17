@@ -88,19 +88,47 @@ Hover over a tab to show its full title below the tab strip.
 The tooltip disappears when the pointer leaves, or on click or scroll.
 It requires mouse-motion tracking (`?1003h`); terminals without that support do not show it.
 
-== Turn-end notifications
+== Desktop notifications
 
-Set `yca.notifications.enabled=true` to receive an OS notification when a top-level turn stops.
+Set `yca.notifications.enabled=true` to receive an OS notification when a top-level turn stops or an interactive session needs input.
 The default is `false`.
 
 [source,properties]
 ----
 yca.notifications.enabled=true
+yca.notifications.on.event.turnEnd=true
+yca.notifications.on.event.approval=true
+yca.notifications.on.tools.ask_user=true
+yca.notifications.on.tools.btw=true
 ----
+
+The nested `on.event` and `on.tools` switches all default to `true`, but the master `enabled` switch defaults to `false`.
+Omitting `on` or either group, setting them to `null` or `{}`, or specifying only some switches preserves the defaults of the others; explicit `false` disables that notification.
+For example, JSON configuration can enable only interaction alerts:
+
+[source,json]
+----
+{"yca":{"notifications":{"enabled":true,"on":{"event":{"turnEnd":false,"approval":true},"tools":{"ask_user":true,"btw":true}}}}}
+----
+
+Each notification consults exactly one switch in addition to `enabled`; there are no combined filters or overrides.
+`on.event.turnEnd` controls main-turn completion alerts.
+`on.event.approval` controls all tool permission prompts, including `/btw`, independently of the `tools` switches.
+`on.tools.ask_user` controls main-session structured feedback and confirmations sharing its gate.
+`on.tools.btw` controls feedback from tools-enabled `/btw` side questions independently of `ask_user`; it neither controls approvals nor adds answer-ready alerts.
+TUI manually opened pickers and line-entry dialogs are not interaction alerts; web `session.ask`, `session.approval` and `session.question` requests are covered.
+Alerts are emitted once when a new prompt is published, not on redraw, tab switch, wait-loop iteration or web reconnect/replay.
+Headless rejection, automatic permission decisions, hook-denied calls and already cancelled prompts do not produce interaction alerts.
+
+Interaction titles identify the requesting session (`session-id - session title`), even when a different tab is focused.
+Bodies contain only a question count or tool label and an instruction to return to YCA, for example `Input required: 2 questions waiting.` or `Approval required for bash.`.
+Side-question alerts have a `/btw:` prefix.
+Raw questions, choices, tool arguments, paths and provider/model information are not included in interaction bodies; session titles and tool labels can still disclose information in notification history.
+Labels are normalized and bounded, and desktop markup is escaped.
 
 Notifications run asynchronously and are best-effort: delivery errors neither fail nor delay the turn.
 Subagents are covered by the parent notification rather than notifying separately.
-The notification includes the session title, provider/model, success or failure, and a shortened excerpt of the last assistant reply.
+Turn-end notifications include the session title, provider/model, success or failure, and a shortened excerpt of the last assistant reply.
 Success means the turn ended with a real reply, not that the work was independently verified.
 
 The default integration uses `notify-send` on Linux, `osascript display notification` on macOS, or `powershell.exe` on Windows.
@@ -117,8 +145,17 @@ The payload is passed only through environment variables, for both built-in and 
 * `YCA_NOTIFICATION_TITLE`
 * `YCA_NOTIFICATION_MODEL`
 * `YCA_NOTIFICATION_PROVIDER`
-* `YCA_NOTIFICATION_SUCCESS` (`true` or `false`)
+* `YCA_NOTIFICATION_SUCCESS` (`true` or `false` for turn end; empty for pending interactions, which have no outcome yet)
 * `YCA_NOTIFICATION_BODY`
+* `YCA_NOTIFICATION_TYPE` (`turn_end`, `input_required` or `approval_required`)
+* `YCA_NOTIFICATION_TOOL` (interaction tool label for approvals, empty for feedback; absent for turn end)
+* `YCA_NOTIFICATION_SOURCE` (`main` or `btw` for interactions; absent for turn end)
+
+Interaction model and provider environment variables are empty; turn-end payloads retain their existing values.
+For the web UI these are OS notifications on the *server host*, not browser push notifications.
+Delivery depends on an available desktop notification service (often absent on SSH/headless hosts), and the desktop can suppress or shorten alerts.
+Notifications neither focus a window nor answer a prompt, and resolving a prompt does not retract an already delivered alert.
+Same-session alerts keep the existing Linux replacement hint; custom commands remain responsible for their own delivery and replacement behavior.
 
 == Memory across sessions
 

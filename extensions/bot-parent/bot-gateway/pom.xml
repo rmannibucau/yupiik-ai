@@ -54,7 +54,7 @@
               </to>
               <container>
                 <mainClass>io.yupiik.ia.agent.bot.gateway.ProviderServicesGateway</mainClass>
-                <jvmFlags>
+                <jvmFlags combine.children="append">
                   <jvmFlag>-Xmx128m</jvmFlag>
                 </jvmFlags>
               </container>

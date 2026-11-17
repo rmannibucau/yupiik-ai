@@ -28,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.logging.Logger;
 
 /** Startup-only storage checks and ancillary-integration isolation for context-bearing attempts. */
 public class SlackContextStorage {
@@ -36,7 +37,7 @@ public class SlackContextStorage {
      * Call only for context-enabled startup, before opening Socket Mode.
      * State/admission disjointness remains the responsibility of the existing caller checks.
      */
-    public Path validate(final ExecutorConfiguration executor) throws IOException {
+    public Path validate(final ExecutorConfiguration executor, final boolean allowSwapBackedTmpfs) throws IOException {
         if (!"Linux".equals(operatingSystem()) || executor.backend() != ExecutorConfiguration.Backend.DOCKER) {
             throw new IllegalArgumentException("Slack context requires Linux Docker execution");
         }
@@ -44,12 +45,9 @@ public class SlackContextStorage {
         if (!"hidden".equals(executor.showToolOutput())
                 || docker == null
                 || !docker.disableContainerLogs()
-                || docker.services() == null
-                || (docker.services().dependencyEgress() != null
-                        && docker.services().dependencyEgress().enabled()
-                        && !docker.services().dependencyEgress().allowedHosts().isEmpty())) {
+                || docker.services() == null) {
             throw new IllegalArgumentException(
-                    "Slack context requires hidden tool output, disabled Docker logs and provider-only services without dependency egress");
+                    "Slack context requires hidden tool output, disabled Docker logs and attempt services");
         }
         if (executor.attemptRoot() == null || executor.attemptRoot().isBlank()) {
             throw new IllegalArgumentException("Slack context requires an explicit attempt root");
@@ -72,7 +70,7 @@ public class SlackContextStorage {
                         .equals(Files.getAttribute(Path.of("/proc/self"), "unix:uid"))) {
             throw new IOException("Slack context attempt root must be an existing private owned directory");
         }
-        validateMount(root, mountInfo());
+        validateMount(root, mountInfo(), allowSwapBackedTmpfs);
         return root;
     }
 
@@ -85,7 +83,8 @@ public class SlackContextStorage {
         return System.getProperty("os.name");
     }
 
-    private void validateMount(final Path root, final List<String> lines) throws IOException {
+    private void validateMount(final Path root, final List<String> lines, final boolean allowSwapBackedTmpfs)
+            throws IOException {
         final var mounts = new ArrayList<Mount>();
         try {
             for (final var line : lines) {
@@ -129,9 +128,17 @@ public class SlackContextStorage {
         // not merely a different mount of the same tmpfs (a bind can override these flags).
         if (selected == null
                 || !"tmpfs".equals(selected.type())
-                || !selected.options().containsAll(Set.of("rw", "nodev", "nosuid", "noexec"))
-                || !selected.superOptions().contains("noswap")) {
-            throw new IOException("Slack context requires a noswap,nodev,nosuid,noexec tmpfs attempt root");
+                || !selected.options().containsAll(Set.of("rw", "nodev", "nosuid", "noexec"))) {
+            throw new IOException("Slack context requires a nodev,nosuid,noexec tmpfs attempt root");
+        }
+        if (!selected.superOptions().contains("noswap")) {
+            if (!allowSwapBackedTmpfs) {
+                throw new IOException(
+                        "Slack context requires noswap tmpfs unless slack.context.allowSwapBackedTmpfs explicitly accepts host swap retention");
+            }
+            Logger.getLogger(SlackContextStorage.class.getName())
+                    .warning(
+                            "Slack context swap-backed tmpfs explicitly accepted: context data may persist in host swap; noswap protection is unavailable");
         }
     }
 
@@ -170,16 +177,12 @@ public class SlackContextStorage {
         for (final var key : List.of("memory", "skills", "subagents", "notifications")) {
             settings.put(key, Map.of("enabled", false));
         }
-        settings.put("mcp", Map.of("enabled", false, "servers", List.of()));
+        settings.putIfAbsent("mcp", Map.of("enabled", false, "servers", List.of()));
         settings.put("hooks", Map.of());
         settings.put("bot", Map.of("feedback", Map.of("enabled", false)));
         settings.put("httpClient", Map.of("debug", false));
-        final var tools = new LinkedHashMap<String, Object>();
-        if (settings.get("tools") instanceof Map<?, ?> existing) {
-            existing.forEach((key, value) -> tools.put((String) key, value));
-        }
-        tools.put("websearch", Map.of("providers", List.of()));
-        settings.put("tools", tools);
+        // Keep the operator's effective MCP/web-search policy, including ordinary tool defaults.
+        // Network access still requires the unchanged, explicitly approved destination policy.
         Files.writeString(
                 configuration, json.toString(new AgentConfigurationDocument(settings, document.completionSettings())));
     }

@@ -39,6 +39,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ProviderConcurrencyGates;
 import io.yupiik.ia.agent.core.llm.ToolCallArgumentsRepairer;
 import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
+import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.session.TestSessionStores;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
@@ -46,6 +47,7 @@ import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.core.tools.builtin.AskUserTool;
 import io.yupiik.ia.agent.core.tools.builtin.BashTool;
 import io.yupiik.ia.agent.core.wiring.HttpClientProducer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -68,6 +70,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -187,7 +190,8 @@ class BtwAnswererTest {
      * and the real bash tool whose plan-mode rules gate which commands may actually run.
      */
     private ToolRegistry registry() {
-        final var tools = List.of(readFileTool(), writeFileTool(), new BashTool(NOOP, new ProcessService()));
+        final var tools = List.of(
+                readFileTool(), writeFileTool(), new BashTool(NOOP, new ProcessService()), new AskUserTool(mapper));
         return new ToolRegistry(null) {
             @Override
             public List<EmbeddedTool> tools() {
@@ -265,6 +269,13 @@ class BtwAnswererTest {
      * the following ones, mirroring a real model answering with tools.
      */
     private String response(final String body, final int request) {
+        if (body.contains("ASK FEEDBACK")) {
+            return request == 1
+                    ? toolResponse(
+                            "ask_user",
+                            "{\"questions\":[{\"id\":\"q\",\"prompt\":\"Which?\",\"options\":[\"one\",\"two\"],\"multiple\":false}]}")
+                    : textResponse("feedback done");
+        }
         if (body.contains("NATIVE READ")) {
             return request == 1
                     ? toolResponse("read", "{\"path\":\"src/App.java\"}")
@@ -304,6 +315,39 @@ class BtwAnswererTest {
             return textResponse("");
         }
         return textResponse("hello there");
+    }
+
+    @Test
+    void toolsEnabledFeedbackUsesOwningService() throws Exception {
+        final var feedback = new UserFeedbackService();
+        final var asked = new AtomicInteger();
+        feedback.setGate(questions -> {
+            asked.incrementAndGet();
+            assertEquals("q", questions.getFirst().id());
+            return Map.of("q", "two");
+        });
+        final var tooled = answerer(Map.of("yca.slashcommands.btw.tools", "true"));
+        final var answer = tooled.ask("ASK FEEDBACK", "s", usageTracker, () -> false, null, null, null, feedback)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertEquals("feedback done", answer.text());
+        assertEquals(1, asked.get());
+        assertTrue(bodies.getLast().contains("two"), bodies.getLast());
+        assertTrue(bodies.getFirst().contains("ask_user"));
+        assertFalse(bodies.getFirst().contains("\"name\":\"write_file\""));
+    }
+
+    @Test
+    void toolLessFeedbackAttemptNeverUsesGate() throws Exception {
+        final var feedback = new UserFeedbackService();
+        feedback.setGate(questions -> {
+            throw new AssertionError("tool-less side question must never ask");
+        });
+        final var answer = answerer.ask("ASK FEEDBACK", "s", usageTracker, () -> false, null, null, null, feedback)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertFalse(answer.text().isBlank());
+        assertTrue(bodies.stream().noneMatch(body -> body.contains("\"role\":\"tool\"")));
     }
 
     private String catPath() {

@@ -75,7 +75,8 @@ public final class AttemptPreparation {
                     sanitized.put(key, trusted.get(key));
                 }
             }
-            for (final var key : List.of("memory", "skills", "subagents", "mcp", "notifications")) {
+            // Only the trusted operator document is read here, never workspace/project configuration.
+            for (final var key : List.of("memory", "skills", "subagents", "mcp", "notifications", "tools")) {
                 if (trusted.get(key) != null) {
                     sanitized.put(key, trusted.get(key));
                 }

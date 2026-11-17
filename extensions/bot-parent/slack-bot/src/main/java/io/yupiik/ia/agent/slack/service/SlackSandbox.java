@@ -61,6 +61,7 @@ public final class SlackSandbox implements Sandbox {
     private final SlackProviderConfiguration provider;
     private final Configuration sources;
     private final ProviderBudgetConfiguration budgetConfiguration;
+    private final boolean allowSwapBackedTmpfs;
     private final KubernetesProviderServices kubeServices;
     private final HttpClient nativeHttp;
     private final ConcurrentMap<String, NativeProviderServices> nativeServices = new ConcurrentHashMap<>();
@@ -72,13 +73,15 @@ public final class SlackSandbox implements Sandbox {
             final Configuration sources,
             final JsonMapper json,
             final Path stateRoot,
-            final ProviderBudgetConfiguration budgetConfiguration) {
+            final ProviderBudgetConfiguration budgetConfiguration,
+            final boolean allowSwapBackedTmpfs) {
         this.settings = settings;
         this.json = json;
         this.stateRoot = stateRoot;
         this.provider = provider;
         this.sources = sources;
         this.budgetConfiguration = budgetConfiguration;
+        this.allowSwapBackedTmpfs = allowSwapBackedTmpfs;
         if (settings.backend() == ExecutorConfiguration.Backend.DOCKER
                 && (settings.docker() == null || settings.docker().services() == null)) {
             throw new IllegalArgumentException(
@@ -276,7 +279,7 @@ public final class SlackSandbox implements Sandbox {
         validateIdentity(id);
         if (temporaryDirectory != null) {
             try {
-                new SlackContextStorage().validate(settings);
+                new SlackContextStorage().validate(settings, allowSwapBackedTmpfs);
             } catch (final IOException invalid) {
                 throw new IllegalArgumentException("Slack context transient storage is unavailable");
             }

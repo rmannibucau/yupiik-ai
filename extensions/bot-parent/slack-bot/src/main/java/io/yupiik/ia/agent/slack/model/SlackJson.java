@@ -93,6 +93,55 @@ public final class SlackJson {
     @JsonModel
     public record Profile(String display_name, String real_name) {}
 
+    /** Single thread page; timestamps remain exact Slack strings and null options are omitted on the wire. */
+    @JsonModel
+    public record ThreadRequest(
+            String channel, String ts, String oldest, String latest, Boolean inclusive, Integer limit, String cursor) {
+        @Override
+        public String toString() {
+            return "ThreadRequest[redacted]";
+        }
+    }
+
+    /** Channel/team metadata is optional in Slack replies; consumers validate it only when provided. */
+    @JsonModel
+    public record ThreadResponse(
+            Boolean ok,
+            String error,
+            String channel,
+            String team,
+            List<ThreadMessage> messages,
+            Boolean has_more,
+            ResponseMetadata response_metadata)
+            implements Result {
+        @Override
+        public String toString() {
+            return "ThreadResponse[redacted]";
+        }
+    }
+
+    @JsonModel
+    public record ThreadMessage(
+            String type,
+            String ts,
+            String thread_ts,
+            String user,
+            String bot_id,
+            String text,
+            String subtype,
+            String channel,
+            String team,
+            ThreadEdited edited,
+            Boolean hidden) {
+        @Override
+        public String toString() {
+            return "ThreadMessage[redacted]";
+        }
+    }
+
+    @JsonModel
+    public record ThreadEdited(String user, String ts) {}
+
     @JsonModel
     public record SearchRequest(
             String query,

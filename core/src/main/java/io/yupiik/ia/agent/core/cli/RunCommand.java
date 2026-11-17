@@ -38,10 +38,13 @@ import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Locale;
@@ -57,6 +60,7 @@ import java.util.logging.Logger;
 @Command(name = "run", description = "Run a single headless prompt and print the answer on stdout.")
 public class RunCommand implements Runnable {
     private static final Logger LOGGER = Logger.getLogger(RunCommand.class.getName());
+    private static final int MAX_PROMPT_FILE_BYTES = 8 * 1024 * 1024;
 
     private final RunConf conf;
     private final ShellRegistry shellRegistry;
@@ -89,7 +93,7 @@ public class RunCommand implements Runnable {
 
     @RootConfiguration("run")
     public record RunConf(
-            @Property(required = true, documentation = "Prompt to send to the agent.")
+            @Property(defaultValue = "\"\"", documentation = "Prompt to send to the agent; exclusive with prompt-file.")
             String prompt,
 
             @Property(
@@ -174,10 +178,58 @@ public class RunCommand implements Runnable {
                             "Fusion Handlebars template for the single result artifact correction attempt. "
                                     + "Variables: validationError (diagnostic), file (absolute artifact path), maxBytes (size limit), "
                                     + "requiredFields (formatted list of required field alternatives). No environment or other helpers are available.")
-            String resultCorrectionPrompt) {}
+            String resultCorrectionPrompt,
+
+            @Property(
+                    value = "prompt-file",
+                    defaultValue = "\"\"",
+                    documentation =
+                            "Private regular UTF-8 prompt file (maximum 8 MiB, no symlinks); exclusive with prompt.")
+            String promptFile) {}
+
+    private String readPrompt() {
+        final var inline = conf.prompt() != null && !conf.prompt().isBlank();
+        final var fromFile = conf.promptFile() != null && !conf.promptFile().isBlank();
+        if (inline == fromFile) {
+            throw new IllegalArgumentException("Exactly one of prompt and prompt-file is required");
+        }
+        if (inline) {
+            return conf.prompt();
+        }
+        try {
+            final var file = Paths.get(conf.promptFile()).toAbsolutePath().normalize();
+            if (!file.toRealPath().equals(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IllegalArgumentException("Prompt file must be regular and must not contain symlinks");
+            }
+            final var permissions = Files.getPosixFilePermissions(file, LinkOption.NOFOLLOW_LINKS);
+            if (!permissions.equals(PosixFilePermissions.fromString("rw-------"))
+                    && !permissions.equals(PosixFilePermissions.fromString("r--------"))) {
+                throw new IllegalArgumentException("Prompt file must be private (0600 or 0400)");
+            }
+            final byte[] bytes;
+            try (final var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+                bytes = input.readNBytes(MAX_PROMPT_FILE_BYTES + 1);
+            }
+            if (bytes.length > MAX_PROMPT_FILE_BYTES) {
+                throw new IllegalArgumentException("Prompt file exceeds 8 MiB");
+            }
+            final var prompt = StandardCharsets.UTF_8
+                    .newDecoder()
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
+            if (prompt.isBlank()) {
+                throw new IllegalArgumentException("Prompt file must not be blank");
+            }
+            return prompt;
+        } catch (final IOException | UnsupportedOperationException e) {
+            // Do not include file contents or provider-specific diagnostics in startup errors.
+            throw new IllegalArgumentException("Cannot read private UTF-8 prompt file");
+        }
+    }
 
     @Override
     public void run() {
+        final var prompt = readPrompt();
         final var resultContract =
                 conf.resultFile() == null || conf.resultFile().isBlank()
                         ? null
@@ -261,7 +313,7 @@ public class RunCommand implements Runnable {
         Runtime.getRuntime().addShutdownHook(memoryShutdownHook);
         try {
             final var cancelled = installCancelHandler(userCancelled);
-            runtime.loop().run(conf.prompt(), agentName, sessionId, null, cancelled);
+            runtime.loop().run(prompt, agentName, sessionId, null, cancelled);
             if (resultContract != null && !failed.get() && !cancelled.getAsBoolean()) {
                 final var validationError = resultContract.validationError();
                 if (validationError != null) {

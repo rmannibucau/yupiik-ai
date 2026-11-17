@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.cli.CliAwaiter;
 import io.yupiik.fusion.framework.api.ConfiguringContainer;
 import io.yupiik.fusion.framework.api.RuntimeContainer;
 import io.yupiik.fusion.framework.api.configuration.Configuration;
@@ -29,6 +30,7 @@ import io.yupiik.fusion.framework.api.container.FusionListener;
 import io.yupiik.fusion.framework.api.container.FusionModule;
 import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.fusion.framework.api.main.Args;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -66,6 +68,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -191,8 +194,15 @@ class RunCommandTest {
         assertTrue(logs().contains(needle), "expected a '" + needle + "' log record, got: [" + logs() + "]");
     }
 
-    @Test
-    void happyPathPrintsDeltas() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void happyPathPrintsDeltas(final boolean fromFile) throws IOException {
+        final var prompt = "say hi\nUnicode: \u00e9; literal $(do-not-execute)";
+        final var file = temp.resolve("prompt.txt");
+        if (fromFile) {
+            Files.createFile(file, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+            Files.writeString(file, prompt);
+        }
         final var shellRegistry = testRegistry();
         final var calls = new ArrayList<String[]>();
         final var agentLoop = new AgentLoop() {
@@ -214,7 +224,19 @@ class RunCommandTest {
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf(
-                        "say hi", "", "", false, "", "collapsed", "", "", "", "", 1000000, defaultCorrectionPrompt()),
+                        fromFile ? "" : prompt,
+                        "",
+                        "",
+                        false,
+                        "",
+                        "collapsed",
+                        "",
+                        "",
+                        "",
+                        "",
+                        1000000,
+                        defaultCorrectionPrompt(),
+                        fromFile ? file.toString() : null),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -227,10 +249,94 @@ class RunCommandTest {
         command.run();
 
         assertEquals(1, calls.size());
-        assertEquals("say hi", calls.get(0)[0]);
+        assertEquals(prompt, calls.get(0)[0]);
         assertNull(calls.get(0)[1]);
         assertEquals("s-run", calls.get(0)[2]);
         assertTrue(out.toString(StandardCharsets.UTF_8).contains("hello"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "both",
+                "neither",
+                "blank",
+                "directory",
+                "link",
+                "parent-link",
+                "public",
+                "oversize",
+                "utf8",
+                "missing"
+            })
+    void rejectsInvalidPromptBeforeStartingRuntime(final String invalid) throws IOException {
+        final var file = Files.createFile(
+                temp.resolve("prompt.txt"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        Files.writeString(file, "private canary");
+        var supplied = file;
+        switch (invalid) {
+            case "blank" -> Files.writeString(file, " \n");
+            case "directory" -> supplied = temp;
+            case "link" -> supplied = Files.createSymbolicLink(temp.resolve("link"), file);
+            case "parent-link" ->
+                supplied = Files.createSymbolicLink(temp.resolve("parent-link"), temp)
+                        .resolve("prompt.txt");
+            case "public" -> Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r-----"));
+            case "oversize" -> Files.write(file, new byte[8 * 1024 * 1024 + 1]);
+            case "utf8" -> Files.write(file, new byte[] {(byte) 0xc3, (byte) 0x28});
+            case "missing" -> Files.delete(file);
+            default -> {
+                /* exclusivity cases need no file change */
+            }
+        }
+        final var conf = new RunCommand$RunConf$FusionConfigurationFactory(Configuration.of(Map.of(
+                        "run.prompt", "both".equals(invalid) ? "inline canary" : "",
+                        "run.prompt-file", "neither".equals(invalid) ? "" : supplied.toString())))
+                .get();
+        final var failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> new RunCommand(conf, null, null, null, null, mcpManager(), mapper, null).run());
+        assertFalse(mcpStarted.get());
+        assertFalse(failure.toString().contains("canary"));
+    }
+
+    @Test
+    void acceptsPromptFileAtExactByteLimit() throws IOException {
+        final var file = Files.createFile(
+                temp.resolve("prompt.txt"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("r--------")));
+        Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------"));
+        final var prompt = "x".repeat(8 * 1024 * 1024);
+        Files.writeString(file, prompt);
+        Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("r--------"));
+        final var conf = new RunCommand$RunConf$FusionConfigurationFactory(
+                        Configuration.of(Map.of("run.prompt-file", file.toString())))
+                .get();
+        final var received = new AtomicReference<String>();
+        final var loop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String value,
+                    final String agent,
+                    final String session,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                received.set(value);
+                return "ok";
+            }
+        };
+        new RunCommand(
+                        conf,
+                        testRegistry(),
+                        runtimeFactory(loop, new PermissionService(null)),
+                        sessionStore(),
+                        null,
+                        mcpManager(),
+                        mapper,
+                        new FeedbackGateProducer().feedbackGate())
+                .run();
+        assertEquals(prompt, received.get());
     }
 
     @Test
@@ -298,7 +404,8 @@ class RunCommandTest {
                                 result.toString(),
                                 "summary|failure",
                                 1000000,
-                                defaultCorrectionPrompt()),
+                                defaultCorrectionPrompt(),
+                                null),
                         testRegistry(),
                         runtimeFactory(loop, new PermissionService(null)),
                         store,
@@ -346,7 +453,8 @@ class RunCommandTest {
                                         "run.prompt", "task",
                                         "run.result-correction-prompt", "custom correction: {{{validationError}}}")))
                                 .get()
-                                .resultCorrectionPrompt()),
+                                .resultCorrectionPrompt(),
+                        null),
                 testRegistry(),
                 runtimeFactory(loop, new PermissionService(null)),
                 sessionStore(),
@@ -390,7 +498,8 @@ class RunCommandTest {
                                 result.toString(),
                                 "summary|failure",
                                 1000000,
-                                defaultCorrectionPrompt()),
+                                defaultCorrectionPrompt(),
+                                null),
                         testRegistry(),
                         runtimeFactory(loop, new PermissionService(null)),
                         sessionStore(),
@@ -432,7 +541,8 @@ class RunCommandTest {
                         temp.resolve("missing.json").toString(),
                         "summary|failure",
                         1000000,
-                        defaultCorrectionPrompt()),
+                        defaultCorrectionPrompt(),
+                        null),
                 registry,
                 runtimeFactory(loop, new PermissionService(null)),
                 sessionStore(),
@@ -475,7 +585,8 @@ class RunCommandTest {
                         "",
                         "",
                         1000000,
-                        defaultCorrectionPrompt()),
+                        defaultCorrectionPrompt(),
+                        null),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -532,7 +643,8 @@ class RunCommandTest {
                         "",
                         "",
                         1000000,
-                        defaultCorrectionPrompt()),
+                        defaultCorrectionPrompt(),
+                        null),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -578,7 +690,19 @@ class RunCommandTest {
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf(
-                        "say hi", "", "", false, "", "collapsed", "", "", "", "", 1000000, defaultCorrectionPrompt()),
+                        "say hi",
+                        "",
+                        "",
+                        false,
+                        "",
+                        "collapsed",
+                        "",
+                        "",
+                        "",
+                        "",
+                        1000000,
+                        defaultCorrectionPrompt(),
+                        null),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -626,7 +750,8 @@ class RunCommandTest {
                         "",
                         "",
                         1000000,
-                        defaultCorrectionPrompt()),
+                        defaultCorrectionPrompt(),
+                        null),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -680,7 +805,8 @@ class RunCommandTest {
                         "",
                         "",
                         1000000,
-                        defaultCorrectionPrompt()),
+                        defaultCorrectionPrompt(),
+                        null),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -718,7 +844,7 @@ class RunCommandTest {
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf(
-                        "say hi", "", "", false, "", "shown", "", "", "", "", 1000000, defaultCorrectionPrompt()),
+                        "say hi", "", "", false, "", "shown", "", "", "", "", 1000000, defaultCorrectionPrompt(), null),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -753,7 +879,7 @@ class RunCommandTest {
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf(
-                        "say hi", "", "", false, "", "shown", "", "", "", "", 1000000, defaultCorrectionPrompt()),
+                        "say hi", "", "", false, "", "shown", "", "", "", "", 1000000, defaultCorrectionPrompt(), null),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -789,7 +915,8 @@ class RunCommandTest {
                         "",
                         "",
                         1000000,
-                        defaultCorrectionPrompt()),
+                        defaultCorrectionPrompt(),
+                        null),
                 shellRegistry,
                 runtimeFactory(stubAgentLoop(), new PermissionService(null)),
                 sessionStore(),
@@ -827,15 +954,24 @@ class RunCommandTest {
 
     @Test
     void fusionDefaultFeedbackCancelsWithoutChangingOtherSessions() {
-        verifyFusionFeedback(false);
+        verifyFusionFeedback(false, false);
     }
 
     @Test
     void fusionExactContractOverrideAnswersWithoutApprovingToolsOrChangingOtherSessions() {
-        verifyFusionFeedback(true);
+        verifyFusionFeedback(true, false);
     }
 
-    private void verifyFusionFeedback(final boolean override) {
+    @Test
+    void shortPromptFileCliOptionRunsWithFusionBindings() throws IOException {
+        final var file = Files.createFile(
+                temp.resolve("prompt.txt"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        Files.writeString(file, "task");
+        verifyFusionFeedback(false, true);
+    }
+
+    private void verifyFusionFeedback(final boolean override, final boolean fromFile) {
         final var configuration = CodingAgentConfigurations.builder()
                 .storageHome(temp.toString())
                 .permissions(new PermissionsConfiguration(
@@ -949,7 +1085,18 @@ class RunCommandTest {
             assertEquals(
                     override ? 2 : 1,
                     container.getBeans().getBeans().get(FeedbackGate.class).size());
-            command.instance().run();
+            if (fromFile) {
+                new CliAwaiter(
+                                new Args(List.of(
+                                        "run",
+                                        "--prompt-file",
+                                        temp.resolve("prompt.txt").toString())),
+                                Configuration.of(Map.of()),
+                                List.of(new RunCommand$FusionCliCommand(container)))
+                        .await();
+            } else {
+                command.instance().run();
+            }
             assertEquals(1, turns.get());
             assertEquals(override ? 1 : 0, overrideCalls.get());
             // Changing the other session's gate must not change the run's feedback service either.
@@ -1031,7 +1178,8 @@ class RunCommandTest {
                         "",
                         "",
                         1000000,
-                        defaultCorrectionPrompt()),
+                        defaultCorrectionPrompt(),
+                        null),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -1084,7 +1232,8 @@ class RunCommandTest {
                         "",
                         "",
                         1000000,
-                        defaultCorrectionPrompt()),
+                        defaultCorrectionPrompt(),
+                        null),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -1143,7 +1292,8 @@ class RunCommandTest {
                         "",
                         "",
                         1000000,
-                        defaultCorrectionPrompt()),
+                        defaultCorrectionPrompt(),
+                        null),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),

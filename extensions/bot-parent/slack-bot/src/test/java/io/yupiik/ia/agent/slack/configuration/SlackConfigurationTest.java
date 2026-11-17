@@ -92,13 +92,36 @@ class SlackConfigurationTest {
     void trustedPromptAndPresentationBoundsAreCheckedBeforeCompilation() {
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new SlackPrompts("", "{{request}}", "output", "Answer", "Cancel", "Question"));
+                () -> new SlackPrompts("", "{{request}}", "output", "Answer", "Cancel", "Question", ""));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new SlackPrompts("policy", "x".repeat(32001), "output", "Answer", "Cancel", "Question"));
+                () -> new SlackPrompts("policy", "x".repeat(32001), "output", "Answer", "Cancel", "Question", ""));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new SlackPrompts("policy", "{{request}}", "output", "x".repeat(25), "Cancel", "Question"));
+                () -> new SlackPrompts("policy", "{{request}}", "output", "x".repeat(25), "Cancel", "Question", ""));
+    }
+
+    @Test
+    void contextGuidanceBindingSupportsReplacementAndBlankWithoutChangingOtherPrompts() {
+        final var defaults = new SlackPrompts$FusionConfigurationFactory(Configuration.of(Map.of())).get();
+        assertTrue(defaults.contextGuidance().contains("slack_context tool exists"));
+        for (final var guidance : List.of("Only use cited evidence. {{request}}", "", " ", "x".repeat(32000))) {
+            final var configured = new SlackPrompts$FusionConfigurationFactory(
+                            Configuration.of(Map.of("slack.prompts.contextGuidance", guidance)))
+                    .get();
+            assertEquals(guidance, configured.contextGuidance());
+            assertEquals(defaults.policy(), configured.policy());
+            assertEquals(defaults.main(), configured.main());
+            assertEquals(defaults.output(), configured.output());
+        }
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new SlackPrompts$FusionConfigurationFactory(
+                                Configuration.of(Map.of("slack.prompts.contextGuidance", "x".repeat(32001))))
+                        .get());
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new SlackPrompts("policy", "{{request}}", "output", "Answer", "Cancel", "Question", null));
     }
 
     private SlackConfiguration configuration(

@@ -19,6 +19,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.slack.model.SlackJson;
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
@@ -40,7 +41,8 @@ import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
- * Bounded, same-origin Slack JSON POST transport with typed {@link SlackJson} requests/responses and no retries.
+ * Bounded, same-origin Slack POST transport with typed {@link SlackJson} responses and no retries.
+ * Most methods use JSON; users.info and conversations.replies use form-encoded arguments.
  * The parent constructs this object and owns the mapper, HTTP client and token suppliers; close Socket Mode
  * before closing borrowed dependencies. The client must be redirect-never, authenticator-free and cookie-free;
  * listeners must neither log authorization/bodies nor replay POSTs. HTTPS is required except numeric loopback fixtures.
@@ -126,7 +128,7 @@ public final class SlackWebApi {
 
     public CompletionStage<URI> openConnection() {
         final var source =
-                post("apps.connections.open", Map.of(), appToken, "xapp-", SlackJson.ConnectionResponse.class);
+                post("apps.connections.open", Map.of(), appToken, "xapp-", SlackJson.ConnectionResponse.class, false);
         final var result = source.thenApply(body -> {
             try {
                 if (body.url() == null) {
@@ -156,19 +158,52 @@ public final class SlackWebApi {
     }
 
     public CompletionStage<SlackJson.ApiResponse> postMessage(final SlackJson.PostMessage payload) {
-        return post("chat.postMessage", payload, botToken, "xoxb-", SlackJson.ApiResponse.class);
+        return post("chat.postMessage", payload, botToken, "xoxb-", SlackJson.ApiResponse.class, false);
     }
 
     public CompletionStage<SlackJson.ApiResponse> openView(final SlackJson.OpenView payload) {
-        return post("views.open", payload, botToken, "xoxb-", SlackJson.ApiResponse.class);
+        return post("views.open", payload, botToken, "xoxb-", SlackJson.ApiResponse.class, false);
     }
 
     public CompletionStage<SlackJson.UserInfoResponse> memberInfo(final String userId) {
-        return post("users.info", Map.of("user", userId), botToken, "xoxb-", SlackJson.UserInfoResponse.class);
+        return post(
+                "users.info",
+                "user=" + URLEncoder.encode(userId, StandardCharsets.UTF_8),
+                botToken,
+                "xoxb-",
+                SlackJson.UserInfoResponse.class,
+                true);
     }
 
     public CompletionStage<SlackJson.SearchResponse> searchContext(final SlackJson.SearchRequest payload) {
-        return post("assistant.search.context", payload, botToken, "xoxb-", SlackJson.SearchResponse.class);
+        return post("assistant.search.context", payload, botToken, "xoxb-", SlackJson.SearchResponse.class, false);
+    }
+
+    /** Fetches one page only; the controller owns thread authorization, pagination and rate-limit scheduling. */
+    public CompletionStage<SlackJson.ThreadResponse> threadReplies(final SlackJson.ThreadRequest payload) {
+        try {
+            final var form = new StringBuilder();
+            appendThreadArgument(form, "channel", Objects.requireNonNull(payload.channel()));
+            appendThreadArgument(form, "ts", Objects.requireNonNull(payload.ts()));
+            appendThreadArgument(form, "oldest", payload.oldest());
+            appendThreadArgument(form, "latest", payload.latest());
+            appendThreadArgument(form, "inclusive", payload.inclusive());
+            appendThreadArgument(form, "limit", payload.limit());
+            appendThreadArgument(form, "cursor", payload.cursor());
+            return post(
+                    "conversations.replies", form.toString(), botToken, "xoxb-", SlackJson.ThreadResponse.class, true);
+        } catch (final RuntimeException unsafe) {
+            return CompletableFuture.failedFuture(failure(0, "request_error", Optional.empty()));
+        }
+    }
+
+    private void appendThreadArgument(final StringBuilder form, final String name, final Object value) {
+        if (value != null) {
+            if (!form.isEmpty()) {
+                form.append('&');
+            }
+            form.append(name).append('=').append(URLEncoder.encode(value.toString(), StandardCharsets.UTF_8));
+        }
     }
 
     private <T extends SlackJson.Result> CompletableFuture<T> post(
@@ -176,7 +211,8 @@ public final class SlackWebApi {
             final Object payload,
             final Supplier<String> tokenSupplier,
             final String prefix,
-            final Class<T> responseType) {
+            final Class<T> responseType,
+            final boolean formEncoded) {
         try {
             final var token = tokenSupplier.get();
             if (token == null
@@ -184,7 +220,10 @@ public final class SlackWebApi {
                     || !TOKEN_CHARACTERS.matcher(token).matches()) {
                 return CompletableFuture.failedFuture(failure(0, "invalid_token", Optional.empty()));
             }
-            final var body = json.toString(Objects.requireNonNull(payload)).getBytes(StandardCharsets.UTF_8);
+            final var body = (formEncoded
+                            ? (String) Objects.requireNonNull(payload)
+                            : json.toString(Objects.requireNonNull(payload)))
+                    .getBytes(StandardCharsets.UTF_8);
             if (body.length > settings.maxRequestBytes()) {
                 return CompletableFuture.failedFuture(failure(0, "request_too_large", Optional.empty()));
             }
@@ -193,7 +232,11 @@ public final class SlackWebApi {
             final var request = HttpRequest.newBuilder(settings.base().resolve(method))
                     .timeout(settings.requestTimeout())
                     .header("Authorization", "Bearer " + token)
-                    .header("Content-Type", "application/json; charset=utf-8")
+                    .header(
+                            "Content-Type",
+                            formEncoded
+                                    ? "application/x-www-form-urlencoded; charset=utf-8"
+                                    : "application/json; charset=utf-8")
                     .header("Accept", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                     .build();

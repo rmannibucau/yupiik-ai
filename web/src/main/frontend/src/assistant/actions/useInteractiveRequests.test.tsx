@@ -47,6 +47,21 @@ afterEach(() => {
 });
 
 describe('useInteractiveRequests with the real RPC dispatcher', () => {
+  it('removes only a cancelled side request and suppresses its stale replay without answering it', () => {
+    render('a');
+    emit(1, 'session.ask', { questions: [{ id: 'main', prompt: 'Main', options: [], multiple: false }] });
+    emit(2);
+    emit(3);
+    emit(2, 'session.requestCancelled', {});
+    expect(current.pending?.id).toBe(1);
+    expect(current.pendingCount).toBe(2);
+    emit(2);
+    expect(current.pendingCount).toBe(2);
+    emit(1, 'session.requestCancelled', {});
+    expect(current.pending?.id).toBe(3);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('ignores late frames from the source stream of another session', () => {
     render('b');
     act(() => dispatchServerRequest(3, 'session.approval', { title: 'From a' }, 'a'));

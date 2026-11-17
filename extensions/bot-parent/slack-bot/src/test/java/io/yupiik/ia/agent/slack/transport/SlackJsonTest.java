@@ -25,6 +25,73 @@ import org.junit.jupiter.api.Test;
 
 class SlackJsonTest {
     @Test
+    void decodesThreadRootRepliesEditsAndPaginationWithoutRequiringChannelOrTeam() {
+        try (final var json = SlackJsonMapper.create()) {
+            final var response = json.fromString(SlackJson.ThreadResponse.class, """
+                    {"ok":true,"has_more":true,"response_metadata":{"next_cursor":"next+/="},
+                     "messages":[
+                       {"type":"message","ts":"120.000001","user":"U1","text":"root","reply_count":2},
+                       {"type":"message","ts":"121.000002","thread_ts":"120.000001","bot_id":"B1",
+                        "text":"edited reply","subtype":"bot_message","channel":"C1","team":"T1",
+                        "edited":{"user":"U2","ts":"122.000003"},"hidden":false}]}
+                    """);
+            assertEquals(Boolean.TRUE, response.ok());
+            assertNull(response.error());
+            assertNull(response.channel());
+            assertNull(response.team());
+            assertEquals(Boolean.TRUE, response.has_more());
+            assertEquals("next+/=", response.response_metadata().next_cursor());
+            final var root = response.messages().getFirst();
+            assertEquals("message", root.type());
+            assertEquals("120.000001", root.ts());
+            assertNull(root.thread_ts());
+            assertEquals("U1", root.user());
+            assertEquals("root", root.text());
+            assertNull(root.bot_id());
+            assertNull(root.edited());
+            assertNull(root.hidden());
+            assertNull(root.channel());
+            assertNull(root.team());
+            final var reply = response.messages().get(1);
+            assertEquals("121.000002", reply.ts());
+            assertEquals("120.000001", reply.thread_ts());
+            assertEquals("B1", reply.bot_id());
+            assertNull(reply.user());
+            assertEquals("edited reply", reply.text());
+            assertEquals("bot_message", reply.subtype());
+            assertEquals("C1", reply.channel());
+            assertEquals("T1", reply.team());
+            assertEquals(new SlackJson.ThreadEdited("U2", "122.000003"), reply.edited());
+            assertEquals(Boolean.FALSE, reply.hidden());
+            assertEquals("ThreadMessage[redacted]", reply.toString());
+            assertEquals("ThreadResponse[redacted]", response.toString());
+        }
+    }
+
+    @Test
+    void preservesThreadOptionalMetadataAndMissingSuccessForConsumerValidation() {
+        try (final var json = SlackJsonMapper.create()) {
+            final var missing = json.fromString(SlackJson.ThreadResponse.class, "{}");
+            assertNull(missing.ok());
+            assertNull(missing.messages());
+            assertNull(missing.has_more());
+            assertNull(missing.response_metadata());
+            final var response = json.fromString(SlackJson.ThreadResponse.class, """
+                    {"ok":true,"channel":"C1","team":"T1","has_more":false,"messages":[],
+                     "response_metadata":{"next_cursor":""}}
+                    """);
+            assertEquals("C1", response.channel());
+            assertEquals("T1", response.team());
+            assertEquals(List.of(), response.messages());
+            assertEquals(Boolean.FALSE, response.has_more());
+            assertEquals("", response.response_metadata().next_cursor());
+            assertEquals(
+                    "ThreadRequest[redacted]",
+                    new SlackJson.ThreadRequest("C1", "120.000001", null, null, null, null, "secret").toString());
+        }
+    }
+
+    @Test
     void decodesEventsApiEnvelopeWithoutLosingAuthorizationOrThreadFields() {
         try (final var json = SlackJsonMapper.create()) {
             final var envelope = json.fromString(SlackJson.Envelope.class, """

@@ -19,6 +19,8 @@ import static io.yupiik.ia.agent.slack.support.SlackDomainFixture.task;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
+import io.yupiik.ia.agent.slack.model.SlackTask;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
 import java.time.Clock;
 import java.time.Instant;
@@ -36,6 +38,66 @@ class SlackActionRegistryTest {
     private static final Clock CLOCK = Clock.fixed(Instant.ofEpochMilli(NOW), ZoneOffset.UTC);
 
     @Test
+    void exactThreadCutoffIsAnImmutableAdmissionSnapshot() {
+        final var queued = task("thread", "U1", TaskStatus.queued, NOW);
+        final var cutoff = "1.10000000000000000001";
+        try (final var actions = new SlackActionRegistry(configuration(true, true), CLOCK)) {
+            actions.admitted(queued, "first", cutoff, NOW);
+            actions.admitted(queued, "replacement", "2.0", NOW + 300_000);
+            try (final var grant = actions.claim(queued, 0, NOW + 599_999).orElseThrow()) {
+                assertEquals(queued.thread(), grant.threadRoot());
+                assertEquals(cutoff, grant.triggerTs());
+                assertEquals("first", grant.get());
+                assertEquals(NOW + 600_000, grant.deadline());
+                assertFalse(grant.active(NOW + 600_000));
+            }
+        }
+    }
+
+    @Test
+    void malformedOrEarlierCutoffsCannotCreateAuthority() {
+        final var queued = task("invalid-cutoff", "U1", TaskStatus.queued, NOW);
+        for (final var cutoff : new String[] {null, "", "1", "1e1", "NaN", " 2.0", "1.09999999999999999999"}) {
+            try (final var actions = new SlackActionRegistry(configuration(true, true), CLOCK)) {
+                actions.admitted(queued, "secret", cutoff, NOW);
+                assertTrue(actions.claim(queued, 0, NOW).isEmpty(), cutoff);
+            }
+        }
+    }
+
+    @Test
+    void changedThreadOrRequestConsumesButCannotClaimAuthority() {
+        final var queued = task("changed-identity", "U1", TaskStatus.queued, NOW);
+        for (final var changeThread : List.of(false, true)) {
+            final var changed = new SlackTask(
+                    queued.id(),
+                    queued.workspace(),
+                    queued.channel(),
+                    changeThread ? "2.0" : queued.thread(),
+                    queued.requester(),
+                    changeThread ? queued.request() : "Changed request",
+                    queued.conversation(),
+                    queued.status(),
+                    queued.created(),
+                    queued.updated(),
+                    queued.attempt(),
+                    queued.attemptPath(),
+                    queued.runtimeId(),
+                    queued.fingerprint(),
+                    queued.answer(),
+                    queued.messageTs(),
+                    queued.question(),
+                    queued.contextBearing(),
+                    queued.publicationId());
+            try (final var actions = new SlackActionRegistry(configuration(true, true), CLOCK)) {
+                actions.admitted(queued, "secret", "3.0", NOW);
+                assertTrue(actions.claim(changed, 0, NOW).isEmpty());
+                assertTrue(actions.claim(queued, 0, NOW).isEmpty());
+            }
+        }
+    }
+
+    @Test
     void maintenanceSnapshotsAdmissionStateAndInvokesCancellationOutsideItsLock() throws Exception {
         final var queued = task("snapshot", "U1", TaskStatus.queued, NOW);
         try (final var actions = new SlackActionRegistry(configuration(true, true), CLOCK);
@@ -43,7 +105,7 @@ class SlackActionRegistryTest {
             final var current = new AtomicReference<Set<String>>(Set.of());
             actions.admission(() -> {
                 current.set(Set.of(queued.id())); // Represents the durable commit before registration.
-                actions.admitted(queued, "secret", NOW);
+                actions.admitted(queued, "secret", queued.thread(), NOW);
                 return null;
             });
             actions.expire(NOW, current::get);
@@ -71,7 +133,7 @@ class SlackActionRegistryTest {
         for (final var search : List.of(false, true)) {
             for (final var token : new String[] {null, "", "invalid token", "valid-secret"}) {
                 try (final var actions = new SlackActionRegistry(configuration(true, search), CLOCK)) {
-                    actions.admitted(queued, token, NOW);
+                    actions.admitted(queued, token, queued.thread(), NOW);
                     try (final var grant = actions.claim(queued, 0, NOW).orElseThrow()) {
                         assertTrue(grant.active(NOW));
                         assertEquals("T1", grant.workspace());
@@ -87,7 +149,7 @@ class SlackActionRegistryTest {
             }
         }
         try (final var actions = new SlackActionRegistry(configuration(false, true), CLOCK)) {
-            actions.admitted(queued, "secret", NOW);
+            actions.admitted(queued, "secret", queued.thread(), NOW);
             assertTrue(actions.claim(queued, 0, NOW).isEmpty());
         }
     }
@@ -96,15 +158,15 @@ class SlackActionRegistryTest {
     void duplicateCannotReplaceRenewOrReplenishAClaimedGrant() {
         final var queued = task("first", "U1", TaskStatus.queued, NOW);
         try (final var actions = new SlackActionRegistry(configuration(true, true), CLOCK)) {
-            actions.admitted(queued, "first-secret", NOW);
-            actions.admitted(queued, "replacement-secret", NOW + 300_000);
+            actions.admitted(queued, "first-secret", queued.thread(), NOW);
+            actions.admitted(queued, "replacement-secret", queued.thread(), NOW + 300_000);
             try (final var grant = actions.claim(queued, 0, NOW + 300_000).orElseThrow()) {
                 assertEquals("first-secret", grant.get());
                 assertEquals(NOW + 600_000, grant.deadline());
-                actions.admitted(queued, "replacement-secret", NOW + 400_000);
+                actions.admitted(queued, "replacement-secret", queued.thread(), NOW + 400_000);
                 assertTrue(actions.claim(queued, 0, NOW + 400_000).isEmpty());
                 grant.close();
-                actions.admitted(queued, "replacement-secret", NOW + 500_000);
+                actions.admitted(queued, "replacement-secret", queued.thread(), NOW + 500_000);
                 assertTrue(actions.claim(queued, 0, NOW + 500_000).isEmpty());
             }
         }
@@ -115,14 +177,14 @@ class SlackActionRegistryTest {
         final var queued = task("first", "U1", TaskStatus.queued, NOW);
         try (final var actions = new SlackActionRegistry(configuration(true, true), CLOCK)) {
             assertTrue(actions.claim(queued, 0, NOW).isEmpty(), "Recovered work has no in-memory authority");
-            actions.admitted(queued, "secret", NOW);
+            actions.admitted(queued, "secret", queued.thread(), NOW);
             assertTrue(actions.claim(queued, 1, NOW).isEmpty());
             assertTrue(actions.claim(queued, 0, NOW).isEmpty(), "Rejected retries consume the original grant");
             final var delayed = task("delayed", "U1", TaskStatus.queued, NOW);
-            actions.admitted(delayed, "secret", NOW);
+            actions.admitted(delayed, "secret", delayed.thread(), NOW);
             assertTrue(actions.claim(delayed, 0, NOW + 600_000).isEmpty());
             final var mismatched = task("mismatch", "U1", TaskStatus.queued, NOW);
-            actions.admitted(mismatched, "secret", NOW);
+            actions.admitted(mismatched, "secret", mismatched.thread(), NOW);
             assertTrue(actions.claim(task("mismatch", "U2", TaskStatus.queued, NOW), 0, NOW)
                     .isEmpty());
             assertTrue(actions.claim(mismatched, 0, NOW).isEmpty());
@@ -137,7 +199,7 @@ class SlackActionRegistryTest {
         final var queued = task("active", "U1", TaskStatus.queued, NOW);
         final var callbacks = new AtomicInteger();
         try (final var actions = new SlackActionRegistry(configuration(true, true), CLOCK)) {
-            actions.admitted(queued, "secret", NOW);
+            actions.admitted(queued, "secret", queued.thread(), NOW);
             final var grant = actions.claim(queued, 0, NOW).orElseThrow();
             grant.onRevoke(callbacks::incrementAndGet);
             actions.expire(NOW + 599_999, () -> Set.of(queued.id()));
@@ -163,8 +225,8 @@ class SlackActionRegistryTest {
         final var queued = task("queued", "U1", TaskStatus.queued, NOW);
         final var callbacks = new AtomicInteger();
         try (final var actions = new SlackActionRegistry(configuration(true, true), CLOCK)) {
-            actions.admitted(running, "secret", NOW);
-            actions.admitted(queued, "secret", NOW);
+            actions.admitted(running, "secret", running.thread(), NOW);
+            actions.admitted(queued, "secret", queued.thread(), NOW);
             final var grant = actions.claim(running, 0, NOW).orElseThrow();
             grant.onRevoke(callbacks::incrementAndGet);
             actions.expire(NOW, () -> Set.of(queued.id()));
@@ -181,6 +243,20 @@ class SlackActionRegistryTest {
     }
 
     private static SlackContextConfiguration configuration(final boolean enabled, final boolean search) {
-        return new SlackContextConfiguration(enabled, true, search, List.of("C1"), 30, 32, 12, 20, 131072, 20, 2, 600);
+        return new SlackContextConfiguration(
+                enabled,
+                true,
+                search,
+                List.of("C1"),
+                30,
+                32,
+                12,
+                20,
+                131072,
+                20,
+                2,
+                600,
+                false,
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
     }
 }

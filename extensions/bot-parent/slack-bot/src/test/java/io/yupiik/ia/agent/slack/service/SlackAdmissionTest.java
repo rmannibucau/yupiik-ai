@@ -305,7 +305,7 @@ class SlackAdmissionTest {
                         "channel",
                         channel,
                         "ts",
-                        "9.1",
+                        thread,
                         "thread_ts",
                         thread,
                         "text",

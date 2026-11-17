@@ -67,7 +67,9 @@ public class BtwSlashCommands implements SlashCommandSet {
                         runtime == null ? null : runtime.usage(),
                         () -> false,
                         gate,
-                        runtime == null ? null : runtime.chatSettings())
+                        runtime == null ? null : runtime.chatSettings(),
+                        runtime == null ? null : runtime.systemPromptBuilder(),
+                        runtime == null ? null : runtime.feedback())
                 .thenApply(answer -> ShellOutcome.transcript(rendered(question, answer.text())))
                 .exceptionally(e -> ShellOutcome.error("btw failed: " + message(e)));
     }

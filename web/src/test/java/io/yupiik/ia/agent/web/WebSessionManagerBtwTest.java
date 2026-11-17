@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
+import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -420,7 +421,8 @@ class WebSessionManagerBtwTest {
                 final BooleanSupplier cancelled,
                 final ApprovalGate sessionGate,
                 final ChatSettings sessionSettings,
-                final SystemPromptBuilder systemPromptBuilder) {
+                final SystemPromptBuilder systemPromptBuilder,
+                final UserFeedbackService feedback) {
             return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings);
         }
 

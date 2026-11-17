@@ -34,6 +34,30 @@ class MinisiteContentTest {
     private final Path content = Path.of("src/main/minisite/content");
 
     @Test
+    void notificationsDocumentEventSwitchesAndDeliveryScope() throws Exception {
+        final var sessions = Files.readString(content.resolve("features/sessions.adoc"));
+        for (final var token : List.of(
+                "notifications.on.event.turnEnd",
+                "notifications.on.event.approval",
+                "notifications.on.tools.ask_user",
+                "notifications.on.tools.btw",
+                "exactly one switch",
+                "neither controls approvals nor adds answer-ready alerts",
+                "YCA_NOTIFICATION_TYPE",
+                "input_required",
+                "approval_required",
+                "YCA_NOTIFICATION_SOURCE",
+                "YCA_NOTIFICATION_TOOL",
+                "server host",
+                "empty for pending interactions",
+                "reconnect/replay")) {
+            assertTrue(sessions.contains(token), token);
+        }
+        final var ui = Files.readString(content.resolve("features/ui.adoc"));
+        assertTrue(ui.contains("closing `/btw` cancels only its own feedback and approvals"));
+    }
+
+    @Test
     void testJvmUsesConfiguredLoggingAndDefaults() {
         assertEquals(
                 "io.yupiik.logging.jul.YupiikLogManager",

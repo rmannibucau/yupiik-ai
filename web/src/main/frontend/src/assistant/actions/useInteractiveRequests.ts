@@ -28,11 +28,17 @@ export function useInteractiveRequests(sessionId: string | undefined) {
       if (request.sessionId && request.sessionId !== sessionId) {
         return;
       }
+      const key = `${sessionId}:${request.id}`;
+      if (request.method === 'session.requestCancelled') {
+        completed.current.add(key);
+        queues.current.set(sessionId, (queues.current.get(sessionId) ?? []).filter((item) => item.id !== request.id));
+        refresh();
+        return;
+      }
       if (!['session.approval', 'session.ask', 'session.question'].includes(request.method)) {
         respond(null);
         return;
       }
-      const key = `${sessionId}:${request.id}`;
       const queue = queues.current.get(sessionId) ?? [];
       if (completed.current.has(key) || queue.some((item) => item.id === request.id)) {
         return;

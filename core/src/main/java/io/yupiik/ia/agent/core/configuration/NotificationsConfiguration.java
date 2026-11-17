@@ -20,15 +20,15 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import java.util.List;
 
 /**
- * Root {@code yca.notifications} settings: opt-in OS notifications fired when an agent turn ends for a
- * session. This is a direct configuration root (not a hook): it controls an in-process desktop
+ * Root {@code yca.notifications} settings: opt-in OS notifications for turn end and pending interactions.
+ * This is a direct configuration root (not a hook): it controls an in-process desktop
  * notification rather than an external-program callback.
  */
 @JsonModel
 public record NotificationsConfiguration(
         @Property(
                 defaultValue = "false",
-                documentation = "Send an OS notification when an agent turn ends for a session (success or failure)."
+                documentation = "Send OS notifications for enabled events (turn end, input and approval requests)."
                         + " Disabled by default; when enabled the notification is best-effort and never"
                         + " fails or slows the turn.")
         boolean enabled,
@@ -38,6 +38,17 @@ public record NotificationsConfiguration(
                         + " argument (command and its args). The program receives the notification data as"
                         + " environment variables: YCA_NOTIFICATION_SESSION, YCA_NOTIFICATION_TITLE,"
                         + " YCA_NOTIFICATION_MODEL, YCA_NOTIFICATION_PROVIDER, YCA_NOTIFICATION_SUCCESS and"
-                        + " YCA_NOTIFICATION_BODY. When set and non-empty it is used instead of the default"
+                        + " YCA_NOTIFICATION_BODY and YCA_NOTIFICATION_TYPE (turn_end, input_required or approval_required)."
+                        + " Interactions also set YCA_NOTIFICATION_TOOL and YCA_NOTIFICATION_SOURCE (main or btw),"
+                        + " with empty SUCCESS/MODEL/PROVIDER while awaiting input. When non-empty it replaces the default"
                         + " OS integration.")
-        List<String> command) {}
+        List<String> command,
+
+        @Property(
+                documentation =
+                        "Independent switches grouped under event (turnEnd, approval) and tools (ask_user, btw), all true by default. Only the enabled master switch applies globally.")
+        NotificationsOnConfiguration on) {
+    public NotificationsConfiguration {
+        on = on == null ? new NotificationsOnConfiguration(null, null) : on;
+    }
+}

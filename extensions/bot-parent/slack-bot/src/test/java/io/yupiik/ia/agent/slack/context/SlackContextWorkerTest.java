@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.bot.runtime.configuration.ExecutorConfiguration;
 import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
 import io.yupiik.ia.agent.slack.configuration.AgentSlackContextConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
 import io.yupiik.ia.agent.slack.context.agent.SlackContextClient;
 import io.yupiik.ia.agent.slack.context.agent.SlackContextTool;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
@@ -40,6 +41,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -47,6 +49,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class SlackContextWorkerTest {
@@ -66,12 +69,13 @@ class SlackContextWorkerTest {
                 final var sandbox = new ContextModel(fixture, false, true)) {
             final var queued = task("context-answer", "U1", TaskStatus.queued, System.currentTimeMillis());
             fixture.add(queued);
-            actions.admitted(queued, ACTION_TOKEN, System.currentTimeMillis());
+            actions.admitted(
+                    queued, ACTION_TOKEN, (Instant.now().getEpochSecond() - 1) + ".000001", System.currentTimeMillis());
             final var timestamp = (Instant.now().getEpochSecond() - 10) + ".000001";
             final var permalink = "https://example.slack.com/archives/C1/p" + timestamp.replace(".", "");
             fixture.response = exchange -> switch (exchange.request().uri().getPath()) {
                 case "/api/users.info" -> {
-                    assertEquals(Map.of("user", "U1"), fixture.json.fromString(Object.class, exchange.body()));
+                    assertEquals("user=U1", exchange.body());
                     yield memberResponse();
                 }
                 case "/api/assistant.search.context" -> {
@@ -112,6 +116,18 @@ class SlackContextWorkerTest {
                             Map.of("type", "plain_text", "text", "Ada: " + EVIDENCE + " " + permalink),
                             section.get("text"));
                     assertNoSecrets(exchange.body());
+                    // Once HTTP has begun, revocation cannot retract it. A separate thread must
+                    // nevertheless revoke promptly: publication must not hold the grant over HTTP.
+                    final var revoked = new CompletableFuture<Void>();
+                    Thread.ofVirtual().start(() -> {
+                        try {
+                            actions.expire(Long.MAX_VALUE, () -> Set.of(queued.id()));
+                            revoked.complete(null);
+                        } catch (final Throwable failure) {
+                            revoked.completeExceptionally(failure);
+                        }
+                    });
+                    assertDoesNotThrow(() -> revoked.get(2, TimeUnit.SECONDS));
                     if (ambiguous) {
                         yield "{\"ok\":true,\"channel\":\"C1\"}";
                     }
@@ -150,7 +166,8 @@ class SlackContextWorkerTest {
                 final var sandbox = new ContextModel(fixture, true, true)) {
             final var queued = task("blocked-context", "U1", TaskStatus.queued, System.currentTimeMillis());
             fixture.add(queued);
-            actions.admitted(queued, null, System.currentTimeMillis());
+            actions.admitted(
+                    queued, null, (Instant.now().getEpochSecond() - 1) + ".000001", System.currentTimeMillis());
             fixture.response = exchange -> {
                 assertEquals("/api/users.info", exchange.request().uri().getPath());
                 upstreamEntered.countDown();
@@ -210,7 +227,8 @@ class SlackContextWorkerTest {
                 final var sandbox = new ContextModel(fixture, false, false)) {
             final var queued = task("unknown-stop-context", "U1", TaskStatus.queued, System.currentTimeMillis());
             fixture.add(queued);
-            actions.admitted(queued, ACTION_TOKEN, System.currentTimeMillis());
+            actions.admitted(
+                    queued, ACTION_TOKEN, (Instant.now().getEpochSecond() - 1) + ".000001", System.currentTimeMillis());
             fixture.response = exchange -> switch (exchange.request().uri().getPath()) {
                 case "/api/users.info" -> memberResponse();
                 case "/api/assistant.search.context" ->
@@ -250,6 +268,202 @@ class SlackContextWorkerTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void initialPrefetchCancellationOrRevocationInterruptsSynchronousTransportWithoutLaunching(final boolean revoke)
+            throws Exception {
+        final var config = threadConfiguration(600);
+        final var entered = new CountDownLatch(1);
+        final var interrupted = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        final var launched = new AtomicBoolean();
+        try (final var fixture = new SlackDomainFixture(root, 4, 2);
+                final var actions = new SlackActionRegistry(config, Clock.systemUTC());
+                final var dispatcher = new SlackContextAttempt.Dispatcher(config)) {
+            final var queued = task("initial-cancel", "U1", TaskStatus.queued, System.currentTimeMillis());
+            fixture.add(queued);
+            actions.admitted(
+                    queued, ACTION_TOKEN, (Instant.now().getEpochSecond() - 1) + ".000001", System.currentTimeMillis());
+            fixture.response = exchange -> {
+                assertEquals(
+                        "/api/conversations.replies", exchange.request().uri().getPath());
+                entered.countDown();
+                try {
+                    assertTrue(release.await(10, TimeUnit.SECONDS));
+                } catch (final InterruptedException cancelled) {
+                    interrupted.countDown();
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Controlled transport interrupted");
+                }
+                return threadResponse();
+            };
+            final var sandbox = new Sandbox() {
+                @Override
+                public int execute(
+                        final Path attempt, final String runtime, final String prompt, final Path temporary) {
+                    launched.set(true);
+                    return 0;
+                }
+
+                @Override
+                public void stop(final String runtime) {}
+
+                @Override
+                public void close() {}
+            };
+            final var worker = worker(fixture, sandbox, config, actions, dispatcher);
+            final var finished = new CompletableFuture<Boolean>();
+            final var thread = Thread.ofVirtual().start(() -> {
+                try {
+                    finished.complete(worker.runOne());
+                } catch (final Throwable failure) {
+                    finished.completeExceptionally(failure);
+                }
+            });
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                if (revoke) {
+                    actions.expire(Long.MAX_VALUE, () -> Set.of(queued.id()));
+                } else {
+                    fixture.store.transaction(tasks -> {
+                        tasks.set(
+                                0,
+                                tasks.getFirst().transition(TaskStatus.cancel_requested, System.currentTimeMillis()));
+                        return null;
+                    });
+                }
+                assertTrue(interrupted.await(2, TimeUnit.SECONDS), "Owner must interrupt initial dispatch promptly");
+                assertTrue(finished.get(2, TimeUnit.SECONDS));
+                assertFalse(launched.get());
+                assertEquals(
+                        revoke ? TaskStatus.failed : TaskStatus.cancelled,
+                        fixture.store.list().getFirst().status());
+                assertEquals(1, fixture.exchanges.size());
+                try (final var attempts = Files.list(root.resolve("attempts"))) {
+                    assertEquals(0, attempts.count());
+                }
+            } finally {
+                release.countDown();
+                thread.interrupt();
+                thread.join(5000);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"expiry,true", "expiry,false", "rejection,true", "postcompletion,true"})
+    void deliveredSnapshotLosesWholeAttemptAuthority(final String loss, final boolean confirmedStop) throws Exception {
+        final var config = threadConfiguration("expiry".equals(loss) ? 1 : 600);
+        final var delivered = new CountDownLatch(1);
+        final var stopped = new AtomicBoolean();
+        final var model = new CompletableFuture<Void>();
+        try (final var fixture = new SlackDomainFixture(root, 4, 2);
+                final var actions = new SlackActionRegistry(config, Clock.systemUTC());
+                final var dispatcher = new SlackContextAttempt.Dispatcher(config)) {
+            final var queued = task("delivered-expiry", "U1", TaskStatus.queued, System.currentTimeMillis());
+            fixture.add(queued);
+            actions.admitted(
+                    queued, ACTION_TOKEN, (Instant.now().getEpochSecond() - 1) + ".000001", System.currentTimeMillis());
+            fixture.response = exchange -> switch (exchange.request().uri().getPath()) {
+                case "/api/conversations.replies" -> threadResponse();
+                case "/api/assistant.search.context" -> "{\"ok\":false,\"error\":\"invalid_action_token\"}";
+                default -> throw new AssertionError("Revoked context must never publish");
+            };
+            final var sandbox = new Sandbox() {
+                @Override
+                public int execute(
+                        final Path attempt, final String runtime, final String prompt, final Path temporary) {
+                    try {
+                        assertTrue(prompt.contains(EVIDENCE), "Snapshot must already be delivered to the model");
+                        delivered.countDown();
+                        if ("rejection".equals(loss)) {
+                            final var document = fixture.json.fromString(
+                                    AgentConfigurationDocument.class,
+                                    Files.readString(attempt.resolve("configuration.json")));
+                            final var binding =
+                                    (Map<?, ?>) document.configuration().get("slackContext");
+                            final var tool = new SlackContextTool(new SlackContextClient(
+                                    new AgentSlackContextConfiguration(
+                                            true,
+                                            attempt.resolve("storage/slack-context")
+                                                    .toString(),
+                                            (String) binding.get("channel"),
+                                            5),
+                                    fixture.json));
+                            tool.execute(Map.of("operation", "search", "terms", List.of("release")));
+                        }
+                        if (!"postcompletion".equals(loss)) {
+                            try {
+                                new CountDownLatch(1).await(5, TimeUnit.SECONDS);
+                            } catch (final InterruptedException expectedStop) {
+                                // A model can still produce a late answer while stopping. It grants no publication.
+                            }
+                        }
+                        Files.writeString(
+                                attempt.resolve("output/result.json"),
+                                fixture.json.toString(Map.of("taskId", queued.id(), "summary", EVIDENCE)));
+                        model.complete(null);
+                        return 0;
+                    } catch (final Throwable failure) {
+                        model.completeExceptionally(failure);
+                        throw new IllegalStateException(failure);
+                    }
+                }
+
+                @Override
+                public void stop(final String runtime) {
+                    stopped.set(true);
+                    if ("postcompletion".equals(loss)) {
+                        // Authorization can end after a successful result and before publication selection.
+                        actions.expire(Long.MAX_VALUE, () -> Set.of(queued.id()));
+                    }
+                    if (!confirmedStop) {
+                        throw new IllegalStateException("Controlled uncertain stop");
+                    }
+                }
+
+                @Override
+                public void close() {}
+            };
+            assertTrue(worker(fixture, sandbox, config, actions, dispatcher).runOne());
+            assertEquals(0, delivered.getCount());
+            model.get(2, TimeUnit.SECONDS);
+            assertTrue(stopped.get());
+            final var saved = fixture.store.list().getFirst();
+            assertTransientState(
+                    fixture,
+                    confirmedStop ? TaskStatus.failed : TaskStatus.recovery_blocked,
+                    "https://example.slack.com/archives/C1/p11",
+                    false);
+            assertEquals(!confirmedStop, Files.exists(Path.of(saved.attemptPath())));
+            assertTrue(fixture.exchanges.stream()
+                    .noneMatch(exchange -> exchange.request().uri().getPath().equals("/api/chat.postMessage")));
+        }
+    }
+
+    private static SlackContextConfiguration threadConfiguration(final int retention) {
+        return new SlackContextConfiguration(
+                true,
+                true,
+                true,
+                List.of("C1"),
+                30,
+                32,
+                12,
+                20,
+                131072,
+                20,
+                2,
+                retention,
+                false,
+                new SlackThreadConfiguration(true, List.of("C1"), 20, 100, 65536, 3, 24));
+    }
+
+    private static String threadResponse() {
+        return "{\"ok\":true,\"messages\":[{\"type\":\"message\",\"ts\":\"1.1\",\"user\":\"U1\",\"text\":\"" + EVIDENCE
+                + "\"}],\"has_more\":false}";
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void queuedWithoutLiveGrantDoesNotAdvertiseOrInjectContext(final boolean restarted) throws Exception {
         final var config = configuration();
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
@@ -259,7 +473,11 @@ class SlackContextWorkerTest {
             fixture.add(queued);
             if (restarted) {
                 try (final var previousProcess = new SlackActionRegistry(config, Clock.systemUTC())) {
-                    previousProcess.admitted(queued, ACTION_TOKEN, System.currentTimeMillis());
+                    previousProcess.admitted(
+                            queued,
+                            ACTION_TOKEN,
+                            (Instant.now().getEpochSecond() - 1) + ".000001",
+                            System.currentTimeMillis());
                 }
             }
             final var executed = new CompletableFuture<Void>();
@@ -390,7 +608,21 @@ class SlackContextWorkerTest {
     }
 
     private static SlackContextConfiguration configuration() {
-        return new SlackContextConfiguration(true, true, true, List.of("C1"), 30, 32, 12, 20, 131072, 20, 2, 600);
+        return new SlackContextConfiguration(
+                true,
+                true,
+                true,
+                List.of("C1"),
+                30,
+                32,
+                12,
+                20,
+                131072,
+                20,
+                2,
+                600,
+                false,
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
     }
 
     private static String memberResponse() {

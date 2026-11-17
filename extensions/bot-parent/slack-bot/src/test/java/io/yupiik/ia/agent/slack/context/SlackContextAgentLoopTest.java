@@ -50,6 +50,7 @@ import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.slack.configuration.AgentSlackContextConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
 import io.yupiik.ia.agent.slack.context.agent.SlackContextClient;
 import io.yupiik.ia.agent.slack.context.agent.SlackContextTool;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
@@ -117,8 +118,21 @@ class SlackContextAgentLoopTest {
     @ValueSource(booleans = {false, true})
     void inferenceChoosesContextAndReceivesRealToolResultsBeforeWorkerPublication(final boolean ambiguous)
             throws Exception {
-        final var config =
-                new SlackContextConfiguration(true, true, true, List.of("C1"), 30, 32, 12, 20, 131072, 20, 2, 600);
+        final var config = new SlackContextConfiguration(
+                true,
+                true,
+                true,
+                List.of("C1"),
+                30,
+                32,
+                12,
+                20,
+                131072,
+                20,
+                2,
+                600,
+                false,
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
                 final var actions = new SlackActionRegistry(config, Clock.systemUTC());
                 final var dispatcher = new SlackContextAttempt.Dispatcher(config);
@@ -139,6 +153,8 @@ class SlackContextAgentLoopTest {
                                     "user",
                                     "U1",
                                     "ts",
+                                    Instant.now().getEpochSecond() + ".000100",
+                                    "thread_ts",
                                     "1.1",
                                     "text",
                                     "<@UBOT> Find the release evidence from <@U1>.",
@@ -151,7 +167,7 @@ class SlackContextAgentLoopTest {
             sandbox.permalink = permalink;
             fixture.response = exchange -> switch (exchange.request().uri().getPath()) {
                 case "/api/users.info" -> {
-                    assertEquals(Map.of("user", "U1"), fixture.json.fromString(Object.class, exchange.body()));
+                    assertEquals("user=U1", exchange.body());
                     yield fixture.json.toString(Map.of(
                             "ok",
                             true,
@@ -244,7 +260,8 @@ class SlackContextAgentLoopTest {
                     .render(
                             SlackDomainFixture.task("next", "U1", TaskStatus.queued, System.currentTimeMillis()),
                             fixture.store.list(),
-                            false);
+                            false,
+                            Map.of());
             assertExcluded(nextPrompt, permalink);
         }
     }

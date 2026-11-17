@@ -14,7 +14,7 @@ From the repository root, run these existing checkers with Java 25 or later and 
 
 [source,bash]
 ----
-java documentation/src/test/ValidateBotSamples.java
+java documentation/src/test/java/io/yupiik/ia/agent/documentation/ValidateBotSamples.java
 sh -n extensions/bot-parent/slack-bot/src/main/docker/controller.sh.example
 python3 -B documentation/src/test/validate_slack_image_profile.py
 ----

@@ -32,14 +32,19 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 /** Host-only attempt owner. Polling never waits for HTTP; revocation precedes runtime cleanup. */
@@ -51,6 +56,7 @@ public final class SlackContextAttempt implements AutoCloseable {
     private final Clock clock;
     private final ReentrantLock state = new ReentrantLock();
     private final int maxCalls;
+    private final SlackContextConfiguration configuration;
     private int calls;
     private boolean closed;
     private String terminalStatus;
@@ -58,6 +64,8 @@ public final class SlackContextAttempt implements AutoCloseable {
     private Map<String, Object> last;
     private CompletableFuture<Map<String, Object>> pending;
     private Future<?> work;
+    private CompletableFuture<Map<String, Object>> initialResult;
+    private Future<?> initialWork;
     private final Set<String> seen = new HashSet<>();
 
     public SlackContextAttempt(
@@ -72,6 +80,7 @@ public final class SlackContextAttempt implements AutoCloseable {
         this.dispatcher = dispatcher;
         this.clock = clock;
         this.grant = grant;
+        this.configuration = configuration;
         if (!grant.active(clock.millis())) {
             grant.close();
             throw new IllegalStateException("Slack context authorization is unavailable");
@@ -118,6 +127,109 @@ public final class SlackContextAttempt implements AutoCloseable {
             throw error;
         }
         grant.onRevoke(this::revoke);
+    }
+
+    /** Initial transient snapshot uses the same dispatcher, authority and budgets as tool calls. */
+    public Map<String, Object> initialContext(final BooleanSupplier cancelled) {
+        requireInitialOwnership(cancelled);
+        if (!configuration.thread().enabled()) {
+            return initialScope(status("disabled"));
+        }
+        final var result = new CompletableFuture<Map<String, Object>>();
+        state.lock();
+        try {
+            if (closed || terminalStatus != null || initialResult != null) {
+                throw new IllegalStateException("Slack context preparation is unavailable");
+            }
+            initialResult = result;
+            initialWork = dispatcher.submit(() -> service.call(Map.of("operation", "thread")), result);
+            if (initialWork == null) {
+                result.complete(status(dispatcher.coolingDown() ? "rate_limited" : "busy"));
+            }
+        } finally {
+            state.unlock();
+        }
+        try {
+            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(configuration.timeoutSeconds() + 1L);
+            Map<String, Object> snapshot;
+            while (true) {
+                requireInitialOwnership(cancelled);
+                try {
+                    snapshot = result.get(25, TimeUnit.MILLISECONDS);
+                    break;
+                } catch (final TimeoutException waiting) {
+                    if (System.nanoTime() >= deadline) {
+                        snapshot = status("unavailable");
+                        break;
+                    }
+                }
+            }
+            requireInitialOwnership(cancelled);
+            state.lock();
+            try {
+                if (closed || terminalStatus != null || initialResult != result) {
+                    throw new IllegalStateException("Slack context preparation lost ownership");
+                }
+                // The handoff and revocation are serialized; no network work runs here.
+                final var handoff = new AtomicReference<Map<String, Object>>();
+                final var body = snapshot;
+                grant.whileActive(() -> handoff.set(initialScope(body)));
+                if (handoff.get() == null) {
+                    throw new IllegalStateException("Slack context authorization is unavailable");
+                }
+                return handoff.get();
+            } finally {
+                state.unlock();
+            }
+        } catch (final InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            close();
+            throw new IllegalStateException("Slack context preparation interrupted");
+        } catch (final ExecutionException | CancellationException unavailable) {
+            close();
+            throw new IllegalStateException("Slack context preparation is unavailable");
+        } finally {
+            state.lock();
+            try {
+                if (initialResult == result) {
+                    if (initialWork != null) {
+                        initialWork.cancel(true);
+                    }
+                    initialResult = null;
+                    initialWork = null;
+                }
+            } finally {
+                state.unlock();
+            }
+        }
+    }
+
+    private void requireInitialOwnership(final BooleanSupplier cancelled) {
+        if (cancelled.getAsBoolean() || !authorized()) {
+            close();
+            throw new IllegalStateException("Slack context preparation cancelled or unauthorized");
+        }
+    }
+
+    /** Expiry is a whole-attempt terminal condition, not just a denial of further reads. */
+    public boolean authorized() {
+        if (clock.millis() >= grant.deadline()) {
+            grant.revoke(SlackActionRegistry.Terminal.EXPIRED);
+        }
+        state.lock();
+        try {
+            return !closed && terminalStatus == null && grant.active(clock.millis());
+        } finally {
+            state.unlock();
+        }
+    }
+
+    private Map<String, Object> initialScope(final Map<String, Object> snapshot) {
+        final var scoped = new LinkedHashMap<String, Object>(snapshot);
+        scoped.put("channelId", grant.channel());
+        scoped.put("threadTs", grant.threadRoot());
+        scoped.put("cutoffTs", grant.triggerTs());
+        return Map.copyOf(scoped);
     }
 
     public void poll() throws IOException {
@@ -274,6 +386,14 @@ public final class SlackContextAttempt implements AutoCloseable {
     }
 
     private void cancelWork() {
+        if (initialWork != null) {
+            initialWork.cancel(true);
+        }
+        if (initialResult != null) {
+            initialResult.cancel(true);
+        }
+        initialWork = null;
+        initialResult = null;
         if (work != null) {
             work.cancel(true);
         }

@@ -238,7 +238,7 @@ class SlackWiringTest {
             final var current = task("current", "U1", TaskStatus.queued, 100);
             final var previous =
                     task("previous", "U1", TaskStatus.done, 1).publication("{{untrusted}}", "2.1", TaskStatus.done, 2);
-            final var rendered = renderer.instance().render(current, List.of(previous), false);
+            final var rendered = renderer.instance().render(current, List.of(previous), false, Map.of());
             final var lines = rendered.split("\n");
             assertEquals("trusted-policy", lines[0]);
             assertEquals("trusted-output", lines[1]);

@@ -72,6 +72,24 @@ Do not stage a permanent upstream key in agent configuration or enable direct ag
 Keep dependency egress explicitly disabled for an inference-only deployment.
 Disable unused memory, MCP, skills, subagents and notifications in the trusted agent configuration rather than inheriting another deployment's integrations.
 
+=== Optional approved public-thread context
+
+Keep the minimal manifest and context disabled unless this separate feature is approved.
+Review `src/main/deployment/slack-app-public-thread-manifest.yaml` as an additive scope sample: preserve the existing bot scopes and add only `channels:history`, with no user token, private/DM scopes or channel-history event subscriptions.
+The existing minimal-installation bot token lacks this scope; obtain operator approval, reinstall only if needed, and qualify public `conversations.replies` using the existing bot token before rollout.
+An unsupported token or missing scope leaves thread reads unavailable and never authorizes automatic credential substitution or app changes.
+
+Use the separate `controller-context.env.example` overlay only with the reviewed transient Linux Docker launcher and storage/log controls in xref:context.adoc[approved context].
+Both `slack.context.enabled` and `slack.context.thread.enabled` default false; set only approved exact public/unshared origin IDs in `slack.context.thread.channels`, without changing admission lists.
+The automatic transient snapshot includes earlier replies, including bots, before the admitted trigger cutoff in the bound thread; explicit tool pages use opaque tokens under the same grant.
+The default initial 20 messages are not the total 100-message limit; thread totals are 65536 bytes and three calls within the overall 12 calls, 131072 bytes and absolute 600-second deadline.
+Search remains separately disabled and originating-channel-only; other-thread messages are only validated search-result evidence, never arbitrary thread-read grants.
+Restart/recovery cannot restore thread roots, cutoff authority or page grants from durable history.
+
+Preserve existing explicit operator egress enablement/host policy and trusted MCP/search configuration and credentials; context adds no hosts, networking or untrusted credentials.
+CONNECT destinations can receive context-derived data and are not download-only; approve provider and remote MCP/search disclosure and retention separately.
+Transient local storage is not zero remote retention, and the optional swap-backed-tmpfs exception remains a separate explicit risk acceptance, not an exemption from other controls.
+
 The current Docker wrapper always mounts host admission, even standalone; provision its separate setgid root and trusted host group during bootstrap, and bake the matching group name/GID into the controller base before generating its digest and building images, as described in xref:docker.adoc#_provision_host_admission_including_standalone_installs[Docker admission preparation].
 For co-hosting, provision compatible shared admission and optional provider ledgers only after reviewing every participating controller's identity, permissions and recovery behavior.
 A single controller's `--parallelism 1` or per-attempt provider limit is not a whole-host cap.
@@ -137,7 +155,7 @@ From the repository root:
 
 [source,sh]
 ----
-java documentation/src/test/ValidateBotSamples.java
+java documentation/src/test/java/io/yupiik/ia/agent/documentation/ValidateBotSamples.java
 sh -n extensions/bot-parent/slack-bot/src/main/docker/controller.sh.example
 sh -n extensions/bot-parent/slack-bot/src/main/deployment/uninstall.sh.example
 xmllint --noout extensions/bot-parent/pom.xml extensions/bot-parent/slack-bot/pom.xml

@@ -18,18 +18,22 @@ package io.yupiik.ia.agent.slack.context;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
 import io.yupiik.ia.agent.slack.model.SlackTask;
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /** Controller-only, bounded ephemeral authority. Never persisted or renewed by duplicate delivery/retry. */
 @ApplicationScoped
 public class SlackActionRegistry implements AutoCloseable {
+    private static final Pattern TIMESTAMP = Pattern.compile("[0-9]{1,20}\\.[0-9]{1,20}");
     private final SlackContextConfiguration configuration;
     private final Clock clock;
     private final ReentrantLock lock = new ReentrantLock();
@@ -77,8 +81,13 @@ public class SlackActionRegistry implements AutoCloseable {
     }
 
     /** Called only after a newly accepted task has been durably committed. Snapshots admission identity. */
-    public void admitted(final SlackTask task, final String actionToken, final long now) {
-        if (!configuration.enabled()) {
+    public void admitted(final SlackTask task, final String actionToken, final String triggerTs, final long now) {
+        if (!configuration.enabled()
+                || task.thread() == null
+                || triggerTs == null
+                || !TIMESTAMP.matcher(task.thread()).matches()
+                || !TIMESTAMP.matcher(triggerTs).matches()
+                || new BigDecimal(triggerTs).compareTo(new BigDecimal(task.thread())) < 0) {
             return;
         }
         final var token = configuration.searchEnabled()
@@ -101,6 +110,7 @@ public class SlackActionRegistry implements AutoCloseable {
                     new Grant(
                             task,
                             token,
+                            triggerTs,
                             now,
                             now + Math.min(600, configuration.actionRetentionSeconds()) * 1000L,
                             clock));
@@ -157,6 +167,8 @@ public class SlackActionRegistry implements AutoCloseable {
         private final String channel;
         private final String requester;
         private final String request;
+        private final String threadRoot;
+        private final String triggerTs;
         private final long admittedAt;
         private final long deadline;
         private final Clock clock;
@@ -168,6 +180,7 @@ public class SlackActionRegistry implements AutoCloseable {
         private Grant(
                 final SlackTask task,
                 final String token,
+                final String triggerTs,
                 final long admittedAt,
                 final long deadline,
                 final Clock clock) {
@@ -176,6 +189,8 @@ public class SlackActionRegistry implements AutoCloseable {
             channel = task.channel();
             requester = task.requester();
             request = task.request();
+            threadRoot = task.thread();
+            this.triggerTs = triggerTs;
             this.token = token;
             this.admittedAt = admittedAt;
             this.deadline = deadline;
@@ -186,7 +201,17 @@ public class SlackActionRegistry implements AutoCloseable {
             return taskId.equals(task.id())
                     && workspace.equals(task.workspace())
                     && channel.equals(task.channel())
-                    && requester.equals(task.requester());
+                    && requester.equals(task.requester())
+                    && threadRoot.equals(task.thread())
+                    && Objects.equals(request, task.request());
+        }
+
+        public String threadRoot() {
+            return threadRoot;
+        }
+
+        public String triggerTs() {
+            return triggerTs;
         }
 
         public String workspace() {

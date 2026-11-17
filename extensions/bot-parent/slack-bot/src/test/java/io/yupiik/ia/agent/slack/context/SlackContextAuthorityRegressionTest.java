@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.support.ControlledHttpClient;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
@@ -60,7 +61,7 @@ class SlackContextAuthorityRegressionTest {
                 final var actions = new SlackActionRegistry(config, clock);
                 final var dispatcher = new SlackContextAttempt.Dispatcher(config)) {
             final var queued = task("active-expiry", "U1", TaskStatus.queued, clock.millis());
-            actions.admitted(queued, TOKEN, clock.millis());
+            actions.admitted(queued, TOKEN, queued.thread(), clock.millis());
             final var grant = actions.claim(queued, 0, clock.millis()).orElseThrow();
             final var path = prepare(fixture, "active-expiry");
             final var api = new SlackWebApi(
@@ -105,8 +106,8 @@ class SlackContextAuthorityRegressionTest {
                 final var secondTask = task(error + "-second", "U1", TaskStatus.queued, System.currentTimeMillis());
                 try (final var actions = new SlackActionRegistry(config, Clock.systemUTC());
                         final var dispatcher = new SlackContextAttempt.Dispatcher(config)) {
-                    actions.admitted(firstTask, TOKEN, System.currentTimeMillis());
-                    actions.admitted(secondTask, TOKEN, System.currentTimeMillis());
+                    actions.admitted(firstTask, TOKEN, firstTask.thread(), System.currentTimeMillis());
+                    actions.admitted(secondTask, TOKEN, secondTask.thread(), System.currentTimeMillis());
                     try (final var first = new SlackContextAttempt(
                                     firstPath,
                                     fixture.json,
@@ -175,8 +176,8 @@ class SlackContextAuthorityRegressionTest {
             final var secondPath = prepare(fixture, "blocked-second");
             final var firstTask = task("blocked-first", "U1", TaskStatus.queued, System.currentTimeMillis());
             final var secondTask = task("blocked-second", "U1", TaskStatus.queued, System.currentTimeMillis());
-            actions.admitted(firstTask, TOKEN, System.currentTimeMillis());
-            actions.admitted(secondTask, TOKEN, System.currentTimeMillis());
+            actions.admitted(firstTask, TOKEN, firstTask.thread(), System.currentTimeMillis());
+            actions.admitted(secondTask, TOKEN, secondTask.thread(), System.currentTimeMillis());
             try (final var first = new SlackContextAttempt(
                             firstPath,
                             fixture.json,
@@ -231,7 +232,7 @@ class SlackContextAuthorityRegressionTest {
                 final var dispatcher = new SlackContextAttempt.Dispatcher(config)) {
             final var path = prepare(fixture, "nonconsecutive-replay");
             final var queued = task("nonconsecutive-replay", "U1", TaskStatus.queued, System.currentTimeMillis());
-            actions.admitted(queued, TOKEN, System.currentTimeMillis());
+            actions.admitted(queued, TOKEN, queued.thread(), System.currentTimeMillis());
             fixture.response = ignored -> """
                     {"ok":true,"user":{"id":"U1","team_id":"T1","deleted":false,"is_bot":false,
                     "profile":{"display_name":"Ada","real_name":"Ada Lovelace"}}}
@@ -331,6 +332,19 @@ class SlackContextAuthorityRegressionTest {
 
     private static SlackContextConfiguration configuration(final int maxConcurrent) {
         return new SlackContextConfiguration(
-                true, true, true, List.of("C1"), 30, 32, 12, 20, 131072, 20, maxConcurrent, 600);
+                true,
+                true,
+                true,
+                List.of("C1"),
+                30,
+                32,
+                12,
+                20,
+                131072,
+                20,
+                maxConcurrent,
+                600,
+                false,
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
     }
 }

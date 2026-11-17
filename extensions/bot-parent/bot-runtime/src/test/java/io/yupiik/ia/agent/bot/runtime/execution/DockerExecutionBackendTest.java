@@ -798,22 +798,25 @@ class DockerExecutionBackendTest {
     @ParameterizedTest
     @ValueSource(strings = {"default", "explicit-null", "bound"})
     void temporaryMountIsExplicitAndDefaultsStayUnchanged(final String mode) throws Exception {
+        final var prompt = "B1-private-prompt-canary\n$(not-shell-expanded) ' \"";
         final var directory = attempt();
         assumeNonRoot(directory);
         // Neither a context-shaped identity nor the presence of this directory selects a mount policy.
         final var temporary = Files.createDirectory(
                 directory.resolve("arbitrary-name"),
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
-        final var executable = script("printf '%s\\n' \"$@\" > \"$0.args\"\n");
+        final var executable =
+                script(("bound".equals(mode) ? "test -f '" + directory.resolve("prompt.txt") + "' || exit 9\n" : "")
+                        + "printf '%s\\n' \"$@\" > \"$0.args\"\n");
         final var backend = backend(executable);
         assertEquals(
                 0,
                 "default".equals(mode)
-                        ? backend.execute(directory, "yca-slack-context", "review", Map.of(), Map.of())
+                        ? backend.execute(directory, "yca-slack-context", prompt, Map.of(), Map.of())
                         : backend.execute(
                                 directory,
                                 "yca-slack-context",
-                                "review",
+                                prompt,
                                 Map.of(),
                                 Map.of(),
                                 null,
@@ -822,17 +825,62 @@ class DockerExecutionBackendTest {
         final var args = Files.readAllLines(Path.of(executable + ".args"));
         final var bind = "type=bind,src=" + temporary + ",dst=/tmp";
         if ("bound".equals(mode)) {
+            assertFalse(String.join("\n", args).contains("B1-private-prompt-canary"));
+            assertFalse(args.contains("--prompt"));
+            assertEquals("/attempt/prompt.txt", args.get(args.indexOf("--prompt-file") + 1));
+            assertTrue(args.contains(
+                    "type=bind,src=" + directory.resolve("prompt.txt") + ",dst=/attempt/prompt.txt,readonly"));
+            assertEquals(prompt, Files.readString(directory.resolve("prompt.txt")));
+            assertEquals(
+                    PosixFilePermissions.fromString("rw-------"),
+                    Files.getPosixFilePermissions(directory.resolve("prompt.txt")));
             assertTrue(args.contains("type=bind,src=" + temporary + ",dst=/dev/shm"));
             assertFalse(args.contains("--tmpfs"));
             assertFalse(args.contains("/tmp:rw,nosuid,nodev,size=1g"));
             assertEquals(1, args.stream().filter(bind::equals).count());
             assertEquals("--mount", args.get(args.indexOf(bind) - 1));
         } else {
+            assertTrue(String.join("\n", args).contains(prompt));
+            assertTrue(args.contains("--prompt"));
+            assertFalse(args.contains("--prompt-file"));
+            assertFalse(Files.exists(directory.resolve("prompt.txt")));
             assertEquals(1, args.stream().filter("--tmpfs"::equals).count());
             assertEquals("/tmp:rw,nosuid,nodev,size=1g", args.get(args.indexOf("--tmpfs") + 1));
             assertFalse(args.contains(bind));
         }
         assertTrue(args.containsAll(List.of("--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void contextPromptMustBeFreshBeforeLaunch(final boolean symlink) throws Exception {
+        final var directory = attempt();
+        assumeNonRoot(directory);
+        final var temporary = Files.createDirectory(
+                directory.resolve("temporary"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        final var existing = Files.writeString(directory.resolve("existing"), "unchanged");
+        if (symlink) {
+            Files.createSymbolicLink(directory.resolve("prompt.txt"), existing);
+        } else {
+            Files.writeString(directory.resolve("prompt.txt"), "unchanged");
+        }
+        final var executable = script("touch \"$0.called\"\n");
+        assertThrows(
+                IllegalStateException.class,
+                () -> backend(executable)
+                        .execute(
+                                directory,
+                                "yca-private-prompt",
+                                "new private body",
+                                Map.of(),
+                                Map.of(),
+                                null,
+                                Map.of(),
+                                temporary));
+        assertFalse(Files.exists(Path.of(executable + ".called")));
+        assertEquals("unchanged", Files.readString(existing));
+        assertEquals("unchanged", Files.readString(directory.resolve("prompt.txt")));
     }
 
     @ParameterizedTest

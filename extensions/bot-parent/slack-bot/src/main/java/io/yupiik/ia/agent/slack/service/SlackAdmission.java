@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.slack.model.SlackJson;
 import io.yupiik.ia.agent.slack.model.SlackTask;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.store.SlackStore;
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.util.Optional;
 import java.util.logging.Logger;
@@ -96,7 +97,9 @@ public class SlackAdmission {
         final var channel = event.channel();
         final var user = event.user();
         final var thread = event.thread_ts() != null ? event.thread_ts() : event.ts();
-        if (!THREAD_TIMESTAMP.matcher(thread).matches()) {
+        if (!THREAD_TIMESTAMP.matcher(thread).matches()
+                || !THREAD_TIMESTAMP.matcher(event.ts()).matches()
+                || new BigDecimal(event.ts()).compareTo(new BigDecimal(thread)) < 0) {
             LOGGER.fine("Slack admission ignored: invalid_thread");
             return Optional.empty();
         }
@@ -149,7 +152,7 @@ public class SlackAdmission {
             if ("accepted".equals(committed.status())
                     && Boolean.FALSE.equals(payload.is_ext_shared_channel())
                     && !Boolean.TRUE.equals(event.is_ext_shared_channel())) {
-                actions.admitted(committed.task(), event.action_token(), now);
+                actions.admitted(committed.task(), event.action_token(), event.ts(), now);
             }
             return committed.status();
         });

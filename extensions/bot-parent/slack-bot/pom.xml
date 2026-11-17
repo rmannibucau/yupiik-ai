@@ -167,7 +167,7 @@
                     <image>${slack-bot.controller.image}</image>
                   </to>
                   <container>
-                    <jvmFlags>
+                    <jvmFlags combine.children="append">
                       <jvmFlag>-Xmx512m</jvmFlag>
                     </jvmFlags>
                     <environment>
@@ -224,7 +224,7 @@
                   <container>
                     <mainClass>io.yupiik.ia.agent.bot.gateway.ProviderServicesGateway</mainClass>
                     <user>10001:10001</user>
-                    <jvmFlags>
+                    <jvmFlags combine.children="append">
                       <jvmFlag>-Xmx128m</jvmFlag>
                     </jvmFlags>
                   </container>
@@ -251,7 +251,7 @@
                   <container>
                     <mainClass>io.yupiik.ia.agent.bot.gateway.EgressGateway</mainClass>
                     <user>65532:65532</user>
-                    <jvmFlags>
+                    <jvmFlags combine.children="append">
                       <jvmFlag>-Xmx128m</jvmFlag>
                     </jvmFlags>
                   </container>
@@ -308,7 +308,7 @@
                 <image>${slack-bot.controller.image}</image>
               </to>
               <container>
-                <jvmFlags>
+                <jvmFlags combine.children="append">
                   <jvmFlag>-Xmx512m</jvmFlag>
                 </jvmFlags>
                 <environment>

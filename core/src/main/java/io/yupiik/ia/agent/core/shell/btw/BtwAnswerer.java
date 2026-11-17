@@ -42,7 +42,9 @@ import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCallPairingRepair;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
@@ -119,7 +121,7 @@ public class BtwAnswerer {
                     + "You cannot modify anything: write/edit tools are never available and shell commands are restricted to "
                     + "the plan-mode read-only allow-list - a refused or failed tool call just means it is not allowed, so "
                     + "fall back to what you can read or to your own knowledge. Answer concisely and in markdown, and never "
-                    + "claim to have executed anything you did not.";
+                    + "claim to have executed anything you did not. You may use ask_user when you need clarification.";
 
     private final ChatClient chatClient;
     private final ExtendedHttpClient httpClient;
@@ -227,11 +229,24 @@ public class BtwAnswerer {
             final ApprovalGate sessionGate,
             final ChatSettings sessionSettings,
             final SystemPromptBuilder systemPrompt) {
+        return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, systemPrompt, null);
+    }
+
+    /** Answers with a feedback service scoped to the owning side question. */
+    public CompletionStage<BtwAnswer> ask(
+            final String question,
+            final String sessionId,
+            final UsageTracker usage,
+            final BooleanSupplier cancelled,
+            final ApprovalGate sessionGate,
+            final ChatSettings sessionSettings,
+            final SystemPromptBuilder systemPrompt,
+            final UserFeedbackService feedback) {
         final var future = new CompletableFuture<BtwAnswer>();
         executor.execute(() -> {
             try {
-                final var answer =
-                        doAsk(question, sessionId, usage, cancelled, sessionGate, sessionSettings, systemPrompt);
+                final var answer = doAsk(
+                        question, sessionId, usage, cancelled, sessionGate, sessionSettings, systemPrompt, feedback);
                 future.complete(answer);
             } catch (final IOException e) {
                 future.completeExceptionally(e);
@@ -254,6 +269,19 @@ public class BtwAnswerer {
             final ChatSettings sessionSettings,
             final SystemPromptBuilder systemPrompt)
             throws IOException, InterruptedException {
+        return doAsk(question, sessionId, usage, cancelled, sessionGate, sessionSettings, systemPrompt, null);
+    }
+
+    private BtwAnswer doAsk(
+            final String question,
+            final String sessionId,
+            final UsageTracker usage,
+            final BooleanSupplier cancelled,
+            final ApprovalGate sessionGate,
+            final ChatSettings sessionSettings,
+            final SystemPromptBuilder systemPrompt,
+            final UserFeedbackService feedback)
+            throws IOException, InterruptedException {
         final var conf = configuration();
         final var bounded = tail(sessionStore.load(sessionId), conf.maxHistoryMessages());
         // The persisted session has the agent loop's pairing repair applied per resume, but a /btw slice
@@ -264,7 +292,9 @@ public class BtwAnswerer {
         final var repairedTail =
                 pairingRepair != null ? pairingRepair.repair(bounded).messages() : bounded;
         final var messages = new ArrayList<Message>(repairedTail.size() + 2);
-        final var systemText = systemPrompt != null ? systemPrompt.build(null, null) : TOOL_LESS_SYSTEM_PROMPT;
+        final var systemText = systemPrompt != null
+                ? systemPrompt.build(null, null)
+                : conf.tools() ? TOOLED_SYSTEM_PROMPT : TOOL_LESS_SYSTEM_PROMPT;
         messages.add(Message.system(systemText));
         messages.addAll(repairedTail);
         final var usingSessionPrompt = systemPrompt != null;
@@ -364,9 +394,7 @@ public class BtwAnswerer {
         permissions.setMode(AgentMode.PLAN);
         permissions.setPermissionMode(PermissionMode.ASK);
         permissions.setGate(sessionGate);
-        final var tools = toolRegistry == null
-                ? List.<Tool>of()
-                : toolRegistry.toWireTools(t -> t.category() == ToolCategory.READ || t.category() == ToolCategory.BASH);
+        final var tools = toolRegistry == null ? List.<Tool>of() : toolRegistry.toWireTools(BtwAnswerer::allowedTool);
         var retried = false;
         var pairRetried = false;
         String raw = "";
@@ -441,7 +469,7 @@ public class BtwAnswerer {
                 if (call != null && call.function() != null && call.function().name() != null) {
                     attemptedTools.add(call.function().name());
                 }
-                final var outcome = runTool(target, call, sessionId, usage, cancelled, permissions);
+                final var outcome = runTool(target, call, sessionId, usage, cancelled, permissions, feedback);
                 messages.add(Message.tool(call.id(), outcome.output(), !outcome.success()));
             }
         }
@@ -456,13 +484,20 @@ public class BtwAnswerer {
             final String sessionId,
             final UsageTracker usage,
             final BooleanSupplier cancelled,
-            final PermissionService permissions) {
+            final PermissionService permissions,
+            final UserFeedbackService feedback) {
         final var function = call.function();
         final var name = function == null || function.name() == null ? "" : function.name();
         final var argsJson = function == null || function.arguments() == null ? "{}" : function.arguments();
         final var tool = toolRegistry.tool(name);
         if (tool == null) {
             return new ToolOutcome(call.id(), "unknown tool", false);
+        }
+        if (!allowedTool(tool)) {
+            return new ToolOutcome(call.id(), "Permission denied by user: tool not available in /btw", false);
+        }
+        if (cancelled.getAsBoolean()) {
+            return new ToolOutcome(call.id(), "cancelled", false);
         }
         final Map<String, Object> args;
         try {
@@ -500,7 +535,7 @@ public class BtwAnswerer {
                 null,
                 null,
                 permissions,
-                null,
+                feedback,
                 null,
                 null,
                 usage,
@@ -515,6 +550,12 @@ public class BtwAnswerer {
     }
 
     private record ToolOutcome(String callId, String output, boolean success) {}
+
+    private static boolean allowedTool(final EmbeddedTool tool) {
+        return tool.category() == ToolCategory.READ
+                || tool.category() == ToolCategory.BASH
+                || "ask_user".equals(tool.name());
+    }
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> castArgs(final Map<?, ?> map) {
@@ -594,7 +635,7 @@ public class BtwAnswerer {
         if (usingSessionPrompt) {
             // the request reuses the session system prompt for the cache prefix, so the /btw "answer
             // directly, never act" rule lives here, in the changing tail where the cache already breaks.
-            sb.append(USER_DIRECTION).append("\n\n");
+            sb.append(conf.tools() ? TOOLED_SYSTEM_PROMPT : USER_DIRECTION).append("\n\n");
         }
         final List<BtwExchange> recent = recent(conf.recall());
         if (!recent.isEmpty()) {

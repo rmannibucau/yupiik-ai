@@ -28,6 +28,7 @@ class SlackContextConfigurationTest {
     void generatedDefaultsAreDenyByDefaultAndBounded() {
         final var config = new SlackContextConfiguration$FusionConfigurationFactory(Configuration.of(Map.of())).get();
         assertFalse(config.enabled());
+        assertFalse(config.allowSwapBackedTmpfs());
         assertTrue(config.resolveMentions());
         assertFalse(config.searchEnabled());
         assertEquals(List.of(), config.sourceChannels());
@@ -51,7 +52,7 @@ class SlackContextConfigurationTest {
                         "maxRequests",
                         "0",
                         "maxResults",
-                        "21",
+                        "1001",
                         "maxResponseBytes",
                         "100",
                         "timeoutSeconds",
@@ -72,14 +73,41 @@ class SlackContextConfigurationTest {
             assertThrows(
                     IllegalArgumentException.class,
                     () -> new SlackContextConfiguration(
-                            false, true, false, List.of(channel), 30, 32, 12, 20, 131072, 20, 2, 600));
+                            false,
+                            true,
+                            false,
+                            List.of(channel),
+                            30,
+                            32,
+                            12,
+                            20,
+                            131072,
+                            20,
+                            2,
+                            600,
+                            false,
+                            new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24)));
         }
     }
 
     @Test
     void sourceAllowlistIsAnImmutableSnapshotAndNullDeniesAll() {
         final var sources = new ArrayList<>(List.of("C1"));
-        final var config = new SlackContextConfiguration(true, true, true, sources, 30, 32, 12, 20, 131072, 20, 2, 600);
+        final var config = new SlackContextConfiguration(
+                true,
+                true,
+                true,
+                sources,
+                30,
+                32,
+                12,
+                20,
+                131072,
+                20,
+                2,
+                600,
+                false,
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
         sources.clear();
         assertEquals(List.of("C1"), config.sourceChannels());
         assertThrows(
@@ -87,7 +115,31 @@ class SlackContextConfigurationTest {
                 () -> config.sourceChannels().clear());
         assertEquals(
                 List.of(),
-                new SlackContextConfiguration(false, true, false, null, 30, 32, 12, 20, 131072, 20, 2, 600)
+                new SlackContextConfiguration(
+                                false,
+                                true,
+                                false,
+                                null,
+                                30,
+                                32,
+                                12,
+                                20,
+                                131072,
+                                20,
+                                2,
+                                600,
+                                false,
+                                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24))
                         .sourceChannels());
+    }
+
+    @Test
+    void swapBackedTmpfsRequiresExplicitOperatorConfiguration() {
+        final var config = new SlackContextConfiguration$FusionConfigurationFactory(
+                        Configuration.of(Map.of("slack.context.allowSwapBackedTmpfs", "true")))
+                .get();
+        assertTrue(config.allowSwapBackedTmpfs());
+        assertFalse(config.enabled());
+        assertFalse(config.searchEnabled());
     }
 }

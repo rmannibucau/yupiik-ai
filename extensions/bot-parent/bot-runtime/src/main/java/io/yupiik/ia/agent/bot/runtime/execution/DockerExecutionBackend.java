@@ -242,6 +242,19 @@ public final class DockerExecutionBackend {
             if (uid == 0) {
                 throw new IllegalStateException("Run the dispatcher as a dedicated non-root user");
             }
+            final var promptFile = temporary == null ? null : directory.resolve("prompt.txt");
+            if (promptFile != null) {
+                // CREATE_NEW refuses stale files and symlinks; permissions are private from creation.
+                try (final var output = Files.newByteChannel(
+                        promptFile,
+                        Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE),
+                        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))) {
+                    final var bytes = StandardCharsets.UTF_8.encode(prompt);
+                    while (bytes.hasRemaining()) {
+                        output.write(bytes);
+                    }
+                }
+            }
             if (services != null) {
                 final var settings = serviceSettings.toRealPath();
                 final var keyStore = servicesKeyStore.toRealPath();
@@ -297,6 +310,9 @@ public final class DockerExecutionBackend {
                 command.add("--log-driver=none");
             }
             mount(command, directory.resolve("configuration.json"), "/attempt/configuration.json", true);
+            if (promptFile != null) {
+                mount(command, promptFile, "/attempt/prompt.txt", true);
+            }
             if (!network.isEmpty()) {
                 command.addAll(List.of("--network", network));
             }
@@ -341,9 +357,9 @@ public final class DockerExecutionBackend {
                     "--result-required-fields",
                     "taskId,summary|failure",
                     "--result-max-bytes",
-                    "6291456",
-                    "--prompt",
-                    prompt));
+                    "6291456"));
+            command.addAll(
+                    promptFile == null ? List.of("--prompt", prompt) : List.of("--prompt-file", "/attempt/prompt.txt"));
             if (feedbackTimeout > 0) {
                 command.addAll(List.of(
                         "--yca-bot-feedback-enabled",

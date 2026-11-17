@@ -29,6 +29,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.BiPredicate;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -71,6 +72,15 @@ class ConfigurationJsonSchemaGeneratorTest {
                 final var mapper = container.lookup(JsonMapper.class)) {
             final var schema = mapper.instance().fromString(Map.class, Files.readString(temp.resolve("schema.json")));
             final var defs = map(schema.get("$defs"));
+            final var slackContext =
+                    resolve(defs, map(map(schema.get("properties")).get("slackContext")));
+            final var slackContextProperties = map(slackContext.get("properties"));
+            assertEquals("boolean", map(slackContextProperties.get("enabled")).get("type"));
+            assertEquals(false, map(slackContextProperties.get("enabled")).get("default"));
+            assertEquals("string", map(slackContextProperties.get("directory")).get("type"));
+            assertEquals("string", map(slackContextProperties.get("channel")).get("type"));
+            assertEquals(
+                    "integer", map(slackContextProperties.get("timeoutSeconds")).get("type"));
             final var slack = resolve(defs, map(map(schema.get("properties")).get("slack")));
             final var channelMembers = map(map(slack.get("properties")).get("allowChannelMembers"));
             assertEquals("boolean", channelMembers.get("type"));
@@ -84,6 +94,30 @@ class ConfigurationJsonSchemaGeneratorTest {
                             || key.toString().contains("github.configuration.PromptConfiguration")
                             || key.toString().contains("ReviewPresentationConfiguration")));
             final var yca = map(map(map(schema.get("properties")).get("yca")).get("properties"));
+            final var notifications = resolve(defs, map(yca.get("notifications")));
+            final var notificationProperties = map(notifications.get("properties"));
+            assertEquals("boolean", map(notificationProperties.get("enabled")).get("type"));
+            assertEquals(false, map(notificationProperties.get("enabled")).get("default"));
+            assertEquals("array", map(notificationProperties.get("command")).get("type"));
+            assertEquals(
+                    "string",
+                    map(map(notificationProperties.get("command")).get("items")).get("type"));
+            final var on = resolve(defs, map(notificationProperties.get("on")));
+            assertEquals("object", on.get("type"));
+            final var onProperties = map(on.get("properties"));
+            assertEquals(Set.of("event", "tools"), onProperties.keySet());
+            for (final var group : Map.of("event", Set.of("turnEnd", "approval"), "tools", Set.of("ask_user", "btw"))
+                    .entrySet()) {
+                final var groupSchema = resolve(defs, map(onProperties.get(group.getKey())));
+                assertEquals("object", groupSchema.get("type"));
+                final var switches = map(groupSchema.get("properties"));
+                assertEquals(group.getValue(), switches.keySet());
+                for (final var setting : switches.values()) {
+                    assertEquals("boolean", map(setting).get("type"));
+                    assertEquals(true, map(setting).get("default"));
+                }
+            }
+            assertFalse(notificationProperties.containsKey("onInteraction"));
             final var ycaBot = map(map(yca.get("bot")).get("properties"));
             assertFalse(ycaBot.containsKey("admission"), "Host admission is not a yca.* configuration root");
             final var feedback = resolve(defs, map(ycaBot.get("feedback")));

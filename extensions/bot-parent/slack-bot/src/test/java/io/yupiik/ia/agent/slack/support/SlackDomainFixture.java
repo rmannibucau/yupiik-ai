@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.slack.support;
 
+import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
@@ -26,6 +27,8 @@ import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument$FusionJso
 import io.yupiik.ia.agent.slack.configuration.SlackConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackPrompts;
+import io.yupiik.ia.agent.slack.configuration.SlackPrompts$FusionConfigurationFactory;
+import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
 import io.yupiik.ia.agent.slack.context.SlackActionRegistry;
 import io.yupiik.ia.agent.slack.context.SlackContextAttempt;
 import io.yupiik.ia.agent.slack.context.SlackContextMailbox$Request$FusionJsonCodec;
@@ -81,8 +84,21 @@ public final class SlackDomainFixture implements AutoCloseable {
             new SlackContextMailbox$Request$FusionJsonCodec(),
             new SlackContextMailbox$Response$FusionJsonCodec(),
             new AgentConfigurationDocument$FusionJsonCodec());
-    public final SlackContextConfiguration contextConfiguration =
-            new SlackContextConfiguration(false, true, false, List.of(), 30, 32, 12, 20, 131072, 20, 2, 600);
+    public final SlackContextConfiguration contextConfiguration = new SlackContextConfiguration(
+            false,
+            true,
+            false,
+            List.of(),
+            30,
+            32,
+            12,
+            20,
+            131072,
+            20,
+            2,
+            600,
+            false,
+            new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
     public final SlackActionRegistry actions = new SlackActionRegistry(contextConfiguration, Clock.systemUTC());
     public final SlackContextAttempt.Dispatcher contextDispatcher =
             new SlackContextAttempt.Dispatcher(contextConfiguration);
@@ -143,13 +159,12 @@ public final class SlackDomainFixture implements AutoCloseable {
     }
 
     public static SlackPrompts prompts() {
-        return new SlackPrompts(
-                "trusted-policy",
-                "{{policy}}\n{{output}}\n{{request}}\n{{context}}",
-                "trusted-output",
-                "Answer",
-                "Cancel",
-                "Question");
+        return new SlackPrompts$FusionConfigurationFactory(Configuration.of(Map.of(
+                        "slack.prompts.policy", "trusted-policy",
+                        "slack.prompts.main", "{{policy}}\n{{output}}\n{{request}}\n{{context}}",
+                        "slack.prompts.output", "trusted-output",
+                        "slack.prompts.questionTitle", "Question")))
+                .get();
     }
 
     public ExecutorConfiguration executor(final Path root) {

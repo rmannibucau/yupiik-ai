@@ -74,6 +74,74 @@ class AttemptPreparationTest {
     }
 
     @Test
+    void preservesOnlyTrustedOperatorToolsAndMcpInSerializedHandoff() throws IOException {
+        try (final var json = RuntimeJsonMapper.create(List.of(), key -> Optional.empty())) {
+            final var tools = Map.of(
+                    "websearch",
+                    Map.of("providers", List.of(Map.of("provider", "EXA", "apiKey", "search-key"))),
+                    "parallelReadonly",
+                    false);
+            final var mcp = Map.of(
+                    "enabled",
+                    true,
+                    "servers",
+                    List.of(Map.of("url", "https://docs.example/mcp", "headers", Map.of("Authorization", "mcp-key"))));
+            final var trusted = Files.writeString(
+                    home.resolve("operator.json"),
+                    json.toString(new AgentConfigurationDocument(
+                            Map.of(
+                                    "tools",
+                                    tools,
+                                    "mcp",
+                                    mcp,
+                                    "slack",
+                                    Map.of("token", "slack-canary"),
+                                    "enterprise",
+                                    Map.of("token", "enterprise-canary"),
+                                    "project",
+                                    Map.of("enabled", true)),
+                            Map.of("tools", Map.of("shell", "repository-canary")))));
+            final var directory = new AttemptPreparation(json).prepare(trusted, home.resolve("attempts"), "yca-test-");
+            try {
+                Files.writeString(
+                        directory.resolve("workspace/.yca.json"), "{\"tools\":{\"shell\":\"repository-canary\"}}");
+                final var output = Files.readString(directory.resolve("configuration.json"));
+                final var configuration = json.fromString(AgentConfigurationDocument.class, output)
+                        .configuration();
+                assertEquals(tools, configuration.get("tools"));
+                assertEquals(mcp, configuration.get("mcp"));
+                for (final var canary : List.of("slack-canary", "enterprise-canary", "repository-canary")) {
+                    assertFalse(output.contains(canary));
+                }
+                assertFalse(configuration.containsKey("project"));
+            } finally {
+                AttemptPreparation.delete(directory);
+            }
+        }
+    }
+
+    @Test
+    void doesNotInventToolsOrEnableMcpWhenAbsentOrNull() throws IOException {
+        try (final var json = RuntimeJsonMapper.create(List.of(), key -> Optional.empty())) {
+            for (final var source : List.of("{}", "{\"tools\":null,\"mcp\":null}")) {
+                final var trusted = Files.writeString(home.resolve("operator.json"), source);
+                final var directory =
+                        new AttemptPreparation(json).prepare(trusted, home.resolve("attempts"), "yca-test-");
+                try {
+                    final var configuration = json.fromString(
+                                    AgentConfigurationDocument.class,
+                                    Files.readString(directory.resolve("configuration.json")))
+                            .configuration();
+                    assertFalse(configuration.containsKey("tools"));
+                    assertEquals(Map.of("enabled", false, "servers", List.of()), configuration.get("mcp"));
+                } finally {
+                    AttemptPreparation.delete(directory);
+                }
+            }
+        }
+    }
+
+    @Test
     void rejectsSymlinksAndCleansUpInvalidConfiguration() throws IOException {
         final var trusted = Files.writeString(home.resolve("trusted.json"), "{}");
         final var linked = Files.createSymbolicLink(home.resolve("linked.json"), trusted);

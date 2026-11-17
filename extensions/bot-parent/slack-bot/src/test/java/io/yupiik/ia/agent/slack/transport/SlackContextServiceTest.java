@@ -114,7 +114,7 @@ class SlackContextServiceTest {
                     final var actions = new SlackActionRegistry(configuration, clock);
                     final var http = upstream) {
                 final var task = task("controlled-expiry", "U1", TaskStatus.running, clock.millis());
-                actions.admitted(task, "action-secret", clock.millis());
+                actions.admitted(task, "action-secret", task.thread(), clock.millis());
                 final var grant = actions.claim(task, 0, clock.millis()).orElseThrow();
                 final var api = new SlackWebApi(
                         json,
@@ -164,7 +164,8 @@ class SlackContextServiceTest {
                     Map.of("userId", "U2", "displayName", "Display", "realName", "Real", "untrusted", true), resolved);
             final var request = fixture.http.take(fixture.http.requests);
             assertEquals("/api/users.info", request.path());
-            assertEquals(Map.of("user", "U2"), fixture.json.fromString(Object.class, request.body()));
+            assertEquals("user=U2", request.body());
+            assertTrue(request.headers().get("content-type").startsWith("application/x-www-form-urlencoded"));
             assertEquals(resolved, fixture.resolve("U2"));
             assertTrue(fixture.http.requests.isEmpty());
             assertFalse(resolved.toString().contains("private@example.invalid"));
@@ -582,11 +583,11 @@ class SlackContextServiceTest {
                     () -> "xapp-secret",
                     () -> "xoxb-secret");
             final var task = json.fromString(SlackTask.class, """
-                    {"id":"task", "workspace":"T1", "channel":"C1", "requester":"U1",
+                    {"id":"task", "workspace":"T1", "channel":"C1", "thread":"1.000001", "requester":"U1",
                      "request":"Ask <@U2>, <@W3|Name>, <@U4>. Not U9 or <@bad>.", "status":"running"}
                     """);
             actions = new SlackActionRegistry(configuration, clock);
-            actions.admitted(task, token, clock.millis());
+            actions.admitted(task, token, NOW + ".000100", clock.millis());
             grant = actions.claim(task, 0, clock.millis()).orElseThrow();
             service = new SlackContextService(configuration, api, grant, clock);
         }

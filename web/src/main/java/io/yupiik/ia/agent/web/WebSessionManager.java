@@ -21,8 +21,10 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
+import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
@@ -53,6 +55,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -94,6 +97,7 @@ public class WebSessionManager implements AutoCloseable {
     private final BtwAnswerer btwAnswerer;
     private final SpeakerLabels speakerLabels;
     private final ChatClient chatClient;
+    private final NotificationService notifications;
 
     private final ConcurrentHashMap<String, WebSession> sessions = new ConcurrentHashMap<>();
     private final AtomicLong rpcId = new AtomicLong();
@@ -134,6 +138,35 @@ public class WebSessionManager implements AutoCloseable {
             final BtwAnswerer btwAnswerer,
             final SpeakerLabels speakerLabels,
             final ChatClient chatClient) {
+        this(
+                sessionRuntimeFactory,
+                shellRegistry,
+                slashRegistry,
+                turnRunner,
+                sessionStore,
+                sessionLifecycle,
+                broker,
+                mapper,
+                btwAnswerer,
+                speakerLabels,
+                chatClient,
+                null);
+    }
+
+    public WebSessionManager(
+            final SessionRuntimeFactory sessionRuntimeFactory,
+            final ShellRegistry shellRegistry,
+            final WebSlashCommands slashRegistry,
+            final TurnRunner turnRunner,
+            final SessionStore sessionStore,
+            final SessionLifecycle sessionLifecycle,
+            final SseBroker broker,
+            final JsonMapper mapper,
+            final BtwAnswerer btwAnswerer,
+            final SpeakerLabels speakerLabels,
+            final ChatClient chatClient,
+            final NotificationService notifications) {
+        this.notifications = notifications;
         this.sessionRuntimeFactory = sessionRuntimeFactory;
         this.shellRegistry = shellRegistry;
         this.slashRegistry = slashRegistry;
@@ -329,6 +362,7 @@ public class WebSessionManager implements AutoCloseable {
         final var previous = session.btw;
         if (previous != null) {
             previous.cancelled().set(true);
+            session.io.cancelPending(previous.id());
         }
         final var state = new BtwState(id, question, true, null, null, false, cancelled);
         synchronized (session) {
@@ -341,9 +375,10 @@ public class WebSessionManager implements AutoCloseable {
                         session.sessionId(),
                         runtime == null ? null : runtime.usage(),
                         cancelled::get,
-                        runtime == null ? null : runtime.permissions().gate(),
+                        session.io.approvalGate(id, cancelled::get),
                         runtime == null ? null : runtime.chatSettings(),
-                        runtime == null ? null : runtime.systemPromptBuilder())
+                        runtime == null ? null : runtime.systemPromptBuilder(),
+                        session.io.feedback(id, cancelled::get))
                 .whenComplete((answer, error) -> onBtwAnswer(session, state, answer, error));
         return CompletableFuture.completedFuture(true);
     }
@@ -392,6 +427,7 @@ public class WebSessionManager implements AutoCloseable {
         }
         // tell other tabs (and a snapshot-replay) that the pill/modal should disappear
         if (cleared != null) {
+            session.io.cancelPending(cleared.id());
             final var data = new LinkedHashMap<String, Object>();
             data.put("id", cleared.id());
             data.put("cleared", true);
@@ -786,7 +822,7 @@ public class WebSessionManager implements AutoCloseable {
         private final ReentrantLock pendingLock = new ReentrantLock();
         private final Map<String, PendingRequest> pendingRequests = new LinkedHashMap<>();
 
-        private record PendingRequest(Map<String, Object> payload, CompletableFuture<Object> future) {}
+        private record PendingRequest(Map<String, Object> payload, CompletableFuture<Object> future, long owner) {}
 
         private WebShellIO(final ShellSession session) {
             this.session = session;
@@ -823,16 +859,23 @@ public class WebSessionManager implements AutoCloseable {
 
         @Override
         public ApprovalGate approvalGate() {
+            return approvalGate(0, () -> false);
+        }
+
+        private ApprovalGate approvalGate(final long owner, final BooleanSupplier cancelled) {
             return (title, detail, toolName, args) -> {
-                final var result = awaitRpc(Map.of(
-                        "method",
-                        "session.approval",
-                        "params",
+                final var result = awaitRpc(
                         Map.of(
-                                "tool", toolName == null ? "" : toolName,
-                                "args", args == null ? Map.of() : args,
-                                "title", title == null ? "" : title,
-                                "detail", detail == null ? "" : detail)));
+                                "method",
+                                "session.approval",
+                                "params",
+                                Map.of(
+                                        "tool", toolName == null ? "" : toolName,
+                                        "args", args == null ? Map.of() : args,
+                                        "title", title == null ? "" : title,
+                                        "detail", detail == null ? "" : detail)),
+                        owner,
+                        cancelled);
                 if (result instanceof String s) {
                     return switch (s.toLowerCase(Locale.ROOT)) {
                         case "allow_once" -> ApprovalGate.Result.ALLOW_ONCE;
@@ -846,6 +889,16 @@ public class WebSessionManager implements AutoCloseable {
 
         @Override
         public FeedbackGate feedbackGate() {
+            return feedbackGate(0, () -> false);
+        }
+
+        private UserFeedbackService feedback(final long owner, final BooleanSupplier cancelled) {
+            final var service = new UserFeedbackService();
+            service.setGate(feedbackGate(owner, cancelled));
+            return service;
+        }
+
+        private FeedbackGate feedbackGate(final long owner, final BooleanSupplier cancelled) {
             return questions -> {
                 final var serialized = questions.stream()
                         .map(q -> Map.of(
@@ -854,7 +907,8 @@ public class WebSessionManager implements AutoCloseable {
                                 "options", q.options() == null ? List.of() : q.options(),
                                 "multiple", q.multiple()))
                         .collect(Collectors.toList());
-                final var result = awaitRpc(Map.of("method", "session.ask", "params", Map.of("questions", serialized)));
+                final var result = awaitRpc(
+                        Map.of("method", "session.ask", "params", Map.of("questions", serialized)), owner, cancelled);
                 if (result == null) {
                     // the user rejected/cancelled the ask (modal Cancel or Stop): report a clean
                     // "cancelled" answer so the tool round is a success the model can act on
@@ -869,7 +923,7 @@ public class WebSessionManager implements AutoCloseable {
             };
         }
 
-        private Object awaitRpc(final Map<String, Object> request) {
+        private Object awaitRpc(final Map<String, Object> request, final long owner, final BooleanSupplier cancelled) {
             final var id = rpcId.incrementAndGet();
             final var future = registerRpc(
                     String.valueOf(id),
@@ -881,7 +935,9 @@ public class WebSessionManager implements AutoCloseable {
                             "method",
                             request.get("method"),
                             "params",
-                            request.get("params")));
+                            request.get("params")),
+                    owner,
+                    cancelled);
             try {
                 return future.get(RPC_TIMEOUT_MINUTES, TimeUnit.MINUTES);
             } catch (final InterruptedException e) {
@@ -901,15 +957,23 @@ public class WebSessionManager implements AutoCloseable {
             final var id = rpcId.incrementAndGet();
             final var future = registerRpc(
                     String.valueOf(id),
-                    Map.of("jsonrpc", "2.0", "id", id, "method", "session.question", "params", params));
+                    Map.of("jsonrpc", "2.0", "id", id, "method", "session.question", "params", params),
+                    0,
+                    () -> false);
             return future;
         }
 
-        private CompletableFuture<Object> registerRpc(final String id, final Map<String, Object> payload) {
+        private CompletableFuture<Object> registerRpc(
+                final String id, final Map<String, Object> payload, final long owner, final BooleanSupplier cancelled) {
             final var future = new CompletableFuture<Object>();
             pendingLock.lock();
             try {
-                pendingRequests.put(id, new PendingRequest(payload, future));
+                final var attached = sessions.get(session.sessionId());
+                if (cancelled.getAsBoolean() || (attached != null && attached.closed)) {
+                    future.complete(null);
+                    return future;
+                }
+                pendingRequests.put(id, new PendingRequest(payload, future, owner));
                 future.whenComplete((_, _) -> {
                     pendingLock.lock();
                     try {
@@ -919,10 +983,46 @@ public class WebSessionManager implements AutoCloseable {
                     }
                 });
                 broker.pushRpc(session.sessionId(), payload);
-                return future;
             } finally {
                 pendingLock.unlock();
             }
+            if (notifications != null && !future.isDone() && !cancelled.getAsBoolean()) {
+                final var title = sessionStore == null ? "" : sessionStore.summary(session.sessionId());
+                final var source = owner == 0 ? "main" : "btw";
+                final var params = (Map<?, ?>) payload.get("params");
+                if ("session.approval".equals(payload.get("method"))) {
+                    notifications.onApprovalRequired(session.sessionId(), title, (String) params.get("tool"), source);
+                } else {
+                    final var questions = params.get("questions");
+                    notifications.onInputRequired(
+                            session.sessionId(), title, questions instanceof List<?> list ? list.size() : 1, source);
+                }
+            }
+            return future;
+        }
+
+        private void cancelPending(final long owner) {
+            final var cancelled = new ArrayList<Map<String, Object>>();
+            pendingLock.lock();
+            try {
+                for (final var pending : List.copyOf(pendingRequests.values())) {
+                    if (pending.owner() == owner) {
+                        pending.future().complete(null);
+                        cancelled.add(Map.of(
+                                "jsonrpc",
+                                "2.0",
+                                "id",
+                                pending.payload().get("id"),
+                                "method",
+                                "session.requestCancelled",
+                                "params",
+                                Map.of()));
+                    }
+                }
+            } finally {
+                pendingLock.unlock();
+            }
+            cancelled.forEach(payload -> broker.pushRpc(session.sessionId(), payload));
         }
 
         private boolean resolve(final String id, final Object result) {

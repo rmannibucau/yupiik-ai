@@ -11,7 +11,10 @@ For an ordered procedure covering all four images, standalone admission, CA prov
 
 Use `extensions/bot-parent/slack-bot/src/main/resources/slack-app-manifest.json` as the minimal app manifest.
 It enables Socket Mode, subscribes to `app_mention`, enables interactions and requests only bot scopes `app_mentions:read` and `chat:write`.
-There is no public request URL, slash command, history scope, file scope, user token or `chat:write.public` grant.
+This minimal manifest has no public request URL, slash command, history scope, file scope, user token or `chat:write.public` grant.
+Optional public-thread context has a separate additive `src/main/deployment/slack-app-public-thread-manifest.yaml` sample adding only `channels:history` to those bot scopes, without history event subscriptions.
+The existing minimal token lacks that scope; require operator scope approval, reinstall only when necessary, and qualify public `conversations.replies` with the existing bot token before enabling thread context.
+Do not introduce a user token or private/DM scopes when the API rejects that installation; neither the sample nor controller modifies the installed app automatically.
 Create an app-level `xapp-` token with `connections:write` separately; this app-token scope is not a bot OAuth scope in the manifest.
 Install the app into exactly the approved workspace, obtain its `xoxb-` bot token, record the actual bot user ID and explicitly invite it into approved channels.
 App installation and token creation are operator actions; keep both credentials outside source control and out of agent configuration.
@@ -19,7 +22,7 @@ App installation and token creation are operator actions; keep both credentials 
 The manifest deliberately does not enable token rotation.
 Define a manual rotation/revocation procedure before deployment and verify the controller reconnect behavior when credentials change; do not assume automatic refresh exists.
 Slack may require app reinstall after a scope change.
-Do not add history or file scopes merely to make natural-language requests appear more capable.
+Do not add history or file scopes merely to make natural-language requests appear more capable; `channels:history` is only for the explicitly approved public-thread feature described in xref:context.adoc[approved context].
 
 == Operator-vetted images
 
@@ -279,21 +282,24 @@ Context-bearing execution requires a separately reviewed Linux Docker transient 
 See xref:context.adoc#_separate_deployment_overlay[the exact tmpfs unit, context environment overlay and launcher mount fragments] before installing any overlay.
 Additional samples, relative to `extensions/bot-parent/slack-bot/src/main/deployment`, are:
 
-* `controller-context.env.example` - second Docker environment file with context/search initially off, `/run/yca-slack-context-attempts`, hidden tool output, disabled dependency egress and `SLACK_EXECUTOR_DOCKER_DISABLECONTAINERLOGS=true`.
+* `controller-context.env.example` - second Docker environment file with context/thread/search initially off, `/run/yca-slack-context-attempts`, hidden tool output, preserved explicit operator egress policy and `SLACK_EXECUTOR_DOCKER_DISABLECONTAINERLOGS=true`.
+* `slack-app-public-thread-manifest.yaml` - optional additive public-thread bot scope sample; merge administratively without changing existing events, interactivity or app-token scopes.
 * `run-yca\x2dslack\x2dcontext\x2dattempts.mount.example` - dedicated Linux tmpfs, `noswap,nodev,nosuid,noexec,mode=0700,uid=10002,gid=10002,size=512m`.
 * `yca-slack-controller-context.conf.example` - systemd dependency/lifetime and writable-path drop-in, not a replacement Docker launcher.
 * `check-context-docker.sh` - offline-default fixture validator and explicitly gated disposable Docker infrastructure canary; see xref:context.adoc#_offline_and_opt_in_docker_canary[coverage, limits and operator-only invocation].
 
 Do not activate the drop-in with the unchanged base launcher: it lacks the overlay environment file, same-absolute-path tmpfs bind and context identity changes.
 Review host/image account ownership and use matching UID/GID 10002 for this mode; preserve trusted admission-group membership, CA trust, owned graceful stop and durable admission/provider-budget roots.
-The actual agent uses `--log-driver=none`, mounts only its own transient attempt at `/attempt`, and must have no MCP/search/dependency-download egress or active dependency cache.
+The actual agent uses `--log-driver=none`, mounts only its own transient attempt at `/attempt`, and must have no active dependency cache.
+Preserve existing explicit operator dependency-egress enablement/hosts and trusted MCP/search configuration and credentials, without adding hosts or enabling egress for context.
+Opaque CONNECT is destination control, not download-only access: accept context-derived disclosure to those destinations and their remote retention, independently of provider retention and the narrowly scoped swap exception.
 All attempt files, sessions, logs and results remain transient; context-derived answers and uncertain-publication replay bodies must not enter durable state/history.
 Inspect controller and inference/gateway logging independently; the agent log flag does not suppress every service's logs.
 Source acceptance is separate from xref:context.adoc#_separately_authorized_rollout[operator-authorized rollout], with disabled-mode smoke checks first and no automatic server activation.
 
 == Offline source validation
 
-From the repository root, `java documentation/src/test/ValidateBotSamples.java` checks these pages' local cross-references, section anchors, breadcrumbs, sample presence and restricted-services credential/configuration wiring without network access or a site/image build.
+From the repository root, `java documentation/src/test/java/io/yupiik/ia/agent/documentation/ValidateBotSamples.java` checks these pages' local cross-references, section anchors, breadcrumbs, sample presence and restricted-services credential/configuration wiring without network access or a site/image build.
 The root landing page is generated by the minisite; this source check does not validate rendered HTML, remote links, JSON binding or runtime deployment acceptance.
 
 == Acceptance before startup

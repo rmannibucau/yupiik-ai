@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.yupiik.ia.agent.slack.configuration.SlackConfiguration;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
 import io.yupiik.ia.agent.slack.context.SlackActionRegistry;
 import io.yupiik.ia.agent.slack.model.SlackTask;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
@@ -31,6 +32,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -51,6 +53,67 @@ class SlackAdmissionAuthorityRegressionTest {
 
     @TempDir
     Path root;
+
+    @Test
+    void triggeringEventTimestampIsSeparateFromRootAndRemainsEphemeral() throws Exception {
+        final var now = 1_800_000_000_000L;
+        final var clock = Clock.fixed(Instant.ofEpochMilli(now), ZoneOffset.UTC);
+        final var cutoff = "9.10000000000000000001";
+        try (final var fixture = new SlackDomainFixture(root, 4, 4);
+                final var actions = new SlackActionRegistry(contextConfiguration(), clock)) {
+            final var admission =
+                    new SlackAdmission(fixture.configuration, new SlackMentionParser(), fixture.store, actions, clock);
+            final var payload = new HashMap<>(event("EvThreadCutoff", TOKEN, false, false));
+            final var message = new HashMap<String, Object>();
+            ((Map<?, ?>) payload.get("event")).forEach((key, value) -> message.put(key.toString(), value));
+            message.put("thread_ts", "9.1");
+            message.put("ts", cutoff);
+            payload.put("event", message);
+            final var id = admission.admit(fixture.payload(payload)).orElseThrow();
+            final var task = fixture.store.list().getFirst();
+            assertEquals("9.1", task.thread());
+            assertFalse(fixture.json.toString(task).contains(cutoff));
+            message.put("ts", "10.0");
+            assertEquals(id, admission.admit(fixture.payload(payload)).orElseThrow());
+            try (final var grant = actions.claim(task, 0, now).orElseThrow()) {
+                assertEquals("9.1", grant.threadRoot());
+                assertEquals(cutoff, grant.triggerTs(), "Duplicate events cannot move the cutoff");
+                assertEquals(now + 600_000, grant.deadline());
+            }
+            try (final var restarted = new SlackActionRegistry(contextConfiguration(), clock)) {
+                assertEquals(
+                        id,
+                        new SlackAdmission(
+                                        fixture.configuration,
+                                        new SlackMentionParser(),
+                                        fixture.store,
+                                        restarted,
+                                        clock)
+                                .admit(fixture.payload(payload))
+                                .orElseThrow());
+                assertTrue(restarted.claim(task, 0, now).isEmpty());
+            }
+        }
+    }
+
+    @Test
+    void malformedOrPreciselyEarlierEventTimestampRejectsAdmissionEvenWithValidRoot() throws Exception {
+        try (final var fixture = new SlackDomainFixture(root, 4, 4);
+                final var actions = new SlackActionRegistry(contextConfiguration(), Clock.systemUTC())) {
+            final var admission = new SlackAdmission(
+                    fixture.configuration, new SlackMentionParser(), fixture.store, actions, Clock.systemUTC());
+            for (final var timestamp : List.of("bad", "9", "9e1", "9.09999999999999999999")) {
+                final var payload = new HashMap<>(event("EvInvalidCutoff", TOKEN, false, false));
+                final var message = new HashMap<String, Object>();
+                ((Map<?, ?>) payload.get("event")).forEach((key, value) -> message.put(key.toString(), value));
+                message.put("thread_ts", "9.1");
+                message.put("ts", timestamp);
+                payload.put("event", message);
+                assertTrue(admission.admit(fixture.payload(payload)).isEmpty(), timestamp);
+                assertTrue(fixture.store.list().isEmpty());
+            }
+        }
+    }
 
     @Test
     @ResourceLock(value = "slack-admission-logger", mode = ResourceAccessMode.READ_WRITE)
@@ -150,7 +213,7 @@ class SlackAdmissionAuthorityRegressionTest {
             final var renderer = new SlackPromptRenderer(SlackDomainFixture.prompts(), fixture.json);
             for (final var task : reopened.list()) {
                 assertRedacted(fixture.json.toString(task));
-                assertRedacted(renderer.render(task, reopened.list(), true));
+                assertRedacted(renderer.render(task, reopened.list(), true, Map.of()));
             }
             try (final var files = Files.walk(fixture.configuration.stateRoot())) {
                 for (final var file : files.filter(Files::isRegularFile).toList()) {
@@ -176,7 +239,20 @@ class SlackAdmissionAuthorityRegressionTest {
         try (final var fixture = new SlackDomainFixture(root, 4, 4)) {
             for (final var search : List.of(false, true)) {
                 final var context = new SlackContextConfiguration(
-                        true, true, search, List.of("C1"), 30, 32, 12, 20, 131072, 20, 2, 600);
+                        true,
+                        true,
+                        search,
+                        List.of("C1"),
+                        30,
+                        32,
+                        12,
+                        20,
+                        131072,
+                        20,
+                        2,
+                        600,
+                        false,
+                        new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
                 try (final var actions = new SlackActionRegistry(context, clock)) {
                     final var admission = new SlackAdmission(
                             fixture.configuration, new SlackMentionParser(), fixture.store, actions, clock);
@@ -268,7 +344,21 @@ class SlackAdmissionAuthorityRegressionTest {
     }
 
     private static SlackContextConfiguration contextConfiguration() {
-        return new SlackContextConfiguration(true, true, true, List.of("C1"), 30, 32, 12, 20, 131072, 20, 2, 600);
+        return new SlackContextConfiguration(
+                true,
+                true,
+                true,
+                List.of("C1"),
+                30,
+                32,
+                12,
+                20,
+                131072,
+                20,
+                2,
+                600,
+                false,
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
     }
 
     private static Map<String, Object> event(

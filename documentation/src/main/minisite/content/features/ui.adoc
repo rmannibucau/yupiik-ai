@@ -221,6 +221,10 @@ It reuses the session's system-prompt prefix and tool schema for cache compatibi
 Native or in-band tool attempts are not executed; they produce a retryable note rather than a silently truncated answer.
 
 Enable `yca.slashcommands.btw.tools` for a bounded read-only tool loop.
+In this mode `/btw` can also use `ask_user` for structured feedback through its own session-scoped gate.
+Concurrent main-turn and side-question feedback is queued rather than overwritten; closing `/btw` cancels only its own feedback and approvals.
+Mutating and agent tools remain unavailable, even if the model attempts an unadvertised call.
+Desktop interaction alerts follow `yca.notifications.on.tools.btw` for side-question feedback and `yca.notifications.on.event.approval` for approvals independently; the tool-less default still never executes tools.
 It can read, search and use the plan-mode bash rules, but is not granted write tools or permissions-all mode.
 Commands outside the read-only rules reach the normal approval gate; a refusal means the command is not allowed.
 This option does not create a separate OS sandbox.

@@ -22,6 +22,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument;
 import io.yupiik.ia.agent.bot.runtime.model.AgentConfigurationDocument$FusionJsonCodec;
 import io.yupiik.ia.agent.slack.configuration.SlackContextConfiguration;
+import io.yupiik.ia.agent.slack.configuration.SlackThreadConfiguration;
 import io.yupiik.ia.agent.slack.model.TaskStatus;
 import io.yupiik.ia.agent.slack.support.SlackDomainFixture;
 import io.yupiik.ia.agent.slack.support.SlackJsonMapper;
@@ -55,7 +56,7 @@ class SlackContextAttemptTest {
                 final var dispatcher = new SlackContextAttempt.Dispatcher(config)) {
             final var path = prepare(json);
             final var queued = task("no-search-token", "U1", TaskStatus.queued, System.currentTimeMillis());
-            actions.admitted(queued, null, System.currentTimeMillis());
+            actions.admitted(queued, null, queued.thread(), System.currentTimeMillis());
             try (final var attempt = new SlackContextAttempt(
                     path,
                     json,
@@ -102,7 +103,7 @@ class SlackContextAttemptTest {
                 final var dispatcher = new SlackContextAttempt.Dispatcher(config)) {
             final var path = prepare(json);
             final var queued = task("replay", "U1", TaskStatus.queued, System.currentTimeMillis());
-            actions.admitted(queued, TOKEN, System.currentTimeMillis());
+            actions.admitted(queued, TOKEN, queued.thread(), System.currentTimeMillis());
             fixture.response = exchange -> {
                 assertEquals("/api/users.info", exchange.request().uri().getPath());
                 return """
@@ -190,7 +191,21 @@ class SlackContextAttemptTest {
     }
 
     private static SlackContextConfiguration configuration() {
-        return new SlackContextConfiguration(true, true, true, List.of("C1"), 30, 32, 12, 20, 131072, 20, 2, 600);
+        return new SlackContextConfiguration(
+                true,
+                true,
+                true,
+                List.of("C1"),
+                30,
+                32,
+                12,
+                20,
+                131072,
+                20,
+                2,
+                600,
+                false,
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
     }
 
     private static void assertRedacted(final String value) {

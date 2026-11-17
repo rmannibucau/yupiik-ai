@@ -28,6 +28,9 @@
               </platforms>
             </from>
             <container>
+              <jvmFlags>
+                <jvmFlag>-Djava.util.logging.manager=io.yupiik.logging.jul.YupiikLogManager</jvmFlag>
+              </jvmFlags>
               <mainClass>io.yupiik.fusion.framework.api.main.CliLauncher</mainClass>
               <user>10001:10001</user>
             </container>

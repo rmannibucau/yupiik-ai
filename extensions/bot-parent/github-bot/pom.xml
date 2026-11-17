@@ -225,7 +225,7 @@
                   <container>
                     <mainClass>io.yupiik.ia.agent.bot.gateway.EgressGateway</mainClass>
                     <user>65532:65532</user>
-                    <jvmFlags>
+                    <jvmFlags combine.children="append">
                       <jvmFlag>-Xmx128m</jvmFlag>
                     </jvmFlags>
                   </container>
@@ -312,7 +312,7 @@
               <container>
                 <mainClass>io.yupiik.ia.agent.bot.gateway.EgressGateway</mainClass>
                 <user>65532:65532</user>
-                <jvmFlags>
+                <jvmFlags combine.children="append">
                   <jvmFlag>-Xmx128m</jvmFlag>
                 </jvmFlags>
               </container>

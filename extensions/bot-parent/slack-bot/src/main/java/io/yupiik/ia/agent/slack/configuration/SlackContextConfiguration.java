@@ -66,11 +66,21 @@ public record SlackContextConfiguration(
                 defaultValue = "600",
                 documentation =
                         "Maximum ephemeral action authority retention and attempt context lifetime in seconds; Slack may expire authority earlier.")
-        int actionRetentionSeconds) {
+        int actionRetentionSeconds,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Explicitly accept swap-backed tmpfs for Slack context when noswap is unavailable; context data may persist in host swap. All other transient-storage checks remain mandatory.")
+        boolean allowSwapBackedTmpfs,
+
+        @Property(documentation = "Deny-by-default bounded public-channel thread context.")
+        SlackThreadConfiguration thread) {
     private static final Pattern PUBLIC_CHANNEL = Pattern.compile("C[A-Z0-9]{1,63}");
 
     public SlackContextConfiguration {
         sourceChannels = sourceChannels == null ? List.of() : List.copyOf(sourceChannels);
+        thread = thread == null ? new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24) : thread;
         if (lookbackDays < 1
                 || lookbackDays > 365
                 || maxMembers < 1
@@ -78,7 +88,7 @@ public record SlackContextConfiguration(
                 || maxRequests < 1
                 || maxRequests > 1000
                 || maxResults < 1
-                || maxResults > 20
+                || maxResults > 1000
                 || maxResponseBytes < 1024
                 || maxResponseBytes > 16 * 1024 * 1024
                 || timeoutSeconds < 1

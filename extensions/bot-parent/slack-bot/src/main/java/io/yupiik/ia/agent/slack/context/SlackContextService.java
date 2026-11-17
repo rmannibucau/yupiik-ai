@@ -20,6 +20,7 @@ import io.yupiik.ia.agent.slack.model.SlackJson;
 import io.yupiik.ia.agent.slack.transport.SlackWebApi;
 import java.math.BigDecimal;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -49,14 +50,15 @@ import java.util.regex.Pattern;
 /**
  * Attempt-local controller capability, not an injectable singleton. The parent owns shared dispatch/rate limits,
  * supplies the current action token, and MUST close this service when the attempt loses ownership.
- * Calls use an "operation" discriminator: summary, resolve_user (userId), or search
+ * Calls use an "operation" discriminator: summary, resolve_user (userId), thread (limit, pageToken), or search
  * (authorUserId, mentionedUserId, terms: list of literal phrases, after/before: epoch seconds,
  * limit, pageToken). Only those fields are accepted. Page tokens are opaque, single-use, and bound to
  * the exact original arguments (including omitted defaults). Results and minimal names are untrusted data.
  *
  * <p>Transport integration contract: SlackWebApi.memberInfo(String) returns
  * CompletionStage&lt;SlackJson.UserInfoResponse&gt;; searchContext(SlackJson.SearchRequest) returns
- * CompletionStage&lt;SlackJson.SearchResponse&gt;. These are the only upstream methods used here.
+ * CompletionStage&lt;SlackJson.SearchResponse&gt;; threadReplies(SlackJson.ThreadRequest) returns
+ * CompletionStage&lt;SlackJson.ThreadResponse&gt;.
  * SearchRequest field order is query, action_token, channel_types, content_types, context_channel_id,
  * include_context_messages, include_message_blocks, include_bots, limit, cursor, after, before, sort,
  * sort_dir, disable_semantic_search. The parent owns those wire records and their generated codecs.
@@ -69,6 +71,8 @@ public final class SlackContextService implements AutoCloseable {
     private static final Pattern TERM = Pattern.compile("[\\p{L}\\p{N} ]{1,128}");
     private static final Pattern OPERATOR = Pattern.compile("(?i)(?:^| )(?:OR|AND|NOT)(?: |$)");
     private static final Pattern TIMESTAMP = Pattern.compile("[0-9]{1,12}\\.[0-9]{1,6}");
+    private static final Pattern THREAD_TIMESTAMP = Pattern.compile("[0-9]{1,20}\\.[0-9]{1,20}");
+    private static final Pattern BOT = Pattern.compile("B[A-Z0-9]{1,63}");
     private static final Set<String> SEARCH_FIELDS =
             Set.of("operation", "authorUserId", "mentionedUserId", "terms", "after", "before", "limit", "pageToken");
     private final SlackContextConfiguration configuration;
@@ -84,6 +88,12 @@ public final class SlackContextService implements AutoCloseable {
     private final Set<String> grants = new LinkedHashSet<>();
     private final Map<String, Map<String, Object>> names = new HashMap<>();
     private final Map<String, Page> pages = new HashMap<>();
+    private final Map<String, ThreadPage> threadPages = new HashMap<>();
+    private final Set<String> searchRoots = new LinkedHashSet<>();
+    private final Map<String, ThreadProgress> threads = new HashMap<>();
+    private int threadRequests;
+    private int threadMessages;
+    private long threadBytes;
     private int requests;
     private int results;
     private long responseBytes;
@@ -133,7 +143,7 @@ public final class SlackContextService implements AutoCloseable {
                     state.lock();
                     try {
                         checkActive();
-                        answer = boundedAnswer(Map.of(
+                        final var summary = new LinkedHashMap<String, Object>(Map.of(
                                 "workspace",
                                 grant.workspace(),
                                 "channel",
@@ -152,6 +162,26 @@ public final class SlackContextService implements AutoCloseable {
                                 configuration.maxResults() - results,
                                 "expiresAt",
                                 expires.getEpochSecond()));
+                        summary.put("threadEnabled", canThread());
+                        if (grant.threadRoot() != null) {
+                            summary.put("threadRoot", grant.threadRoot());
+                        }
+                        if (grant.triggerTs() != null) {
+                            summary.put("triggerTs", grant.triggerTs());
+                        }
+                        summary.put(
+                                "thread",
+                                Map.of(
+                                        "initialMessages",
+                                                configuration.thread().initialMessages(),
+                                        "maxMessages", configuration.thread().maxMessages(),
+                                        "maxBytes", configuration.thread().maxBytes(),
+                                        "maxRequests", configuration.thread().maxRequests(),
+                                        "lookbackHours", configuration.thread().lookbackHours(),
+                                        "requests", threadRequests,
+                                        "messages", threadMessages,
+                                        "bytes", threadBytes));
+                        answer = boundedAnswer(Map.copyOf(summary));
                     } finally {
                         state.unlock();
                     }
@@ -163,6 +193,10 @@ public final class SlackContextService implements AutoCloseable {
                 case "search" -> {
                     fields(arguments, SEARCH_FIELDS);
                     answer = search(arguments);
+                }
+                case "thread" -> {
+                    fields(arguments, Set.of("operation", "threadTs", "limit", "pageToken"));
+                    answer = thread(arguments);
                 }
                 default -> throw invalid();
             }
@@ -220,6 +254,242 @@ public final class SlackContextService implements AutoCloseable {
         }
     }
 
+    private boolean canThread() {
+        return configuration.thread().enabled()
+                && configuration.thread().channels().contains(grant.channel())
+                && timestamp(grant.threadRoot())
+                && timestamp(grant.triggerTs())
+                && new BigDecimal(grant.threadRoot()).compareTo(new BigDecimal(grant.triggerTs())) < 0;
+    }
+
+    private Map<String, Object> thread(final Map<String, Object> arguments) {
+        final var spec = new ThreadSpec(optionalString(arguments, "threadTs"), integer(arguments, "limit", null));
+        final var requested =
+                spec.limit() == null ? Math.min(20, configuration.thread().initialMessages()) : spec.limit();
+        if (requested < 1 || requested > 20) {
+            throw invalid();
+        }
+        final var root = spec.root() == null ? grant.threadRoot() : spec.root();
+        final ThreadProgress progress;
+        final ThreadPage page;
+        final int limit;
+        state.lock();
+        try {
+            checkActive();
+            if (!canThread()) {
+                throw new IllegalStateException("Slack thread context is disabled for this source");
+            }
+            if (!Objects.equals(root, grant.threadRoot()) && !searchRoots.contains(root)) {
+                throw invalid();
+            }
+            progress = threads.computeIfAbsent(root, ignored -> new ThreadProgress());
+            if (progress.busy) {
+                throw new IllegalStateException("Slack thread page already in flight");
+            }
+            if (threadRequests >= configuration.thread().maxRequests()
+                    || threadMessages >= configuration.thread().maxMessages()
+                    || threadBytes >= configuration.thread().maxBytes()) {
+                throw new IllegalStateException("Slack thread budget exhausted");
+            }
+            final var token = optionalString(arguments, "pageToken");
+            if (token == null) {
+                if (progress.started) {
+                    throw new IllegalArgumentException("Slack thread requires its next page token");
+                }
+                page = new ThreadPage(spec, null);
+            } else {
+                final var saved = threadPages.get(token);
+                if (saved == null || !saved.spec().equals(spec)) {
+                    throw new IllegalArgumentException("Invalid scoped Slack thread page token");
+                }
+                page = saved;
+            }
+            reserveRequest();
+            if (token != null) {
+                threadPages.remove(token);
+            }
+            threadRequests++;
+            progress.busy = true;
+            limit = (int) Math.min(requested, configuration.thread().maxMessages() - threadMessages);
+        } finally {
+            state.unlock();
+        }
+        try {
+            // Start at the root, not at a moving wall-clock boundary. Old replies are filtered below;
+            // the upstream scan itself is bounded by the page limit and the independent call budget.
+            final var response = await(() -> api.threadReplies(new SlackJson.ThreadRequest(
+                    grant.channel(), root, root, grant.triggerTs(), true, limit, page.cursor())));
+            state.lock();
+            try {
+                checkActive();
+                if (response == null
+                        || !Boolean.TRUE.equals(response.ok())
+                        || response.messages() == null
+                        || (response.channel() != null && !grant.channel().equals(response.channel()))
+                        || (response.team() != null && !grant.workspace().equals(response.team()))
+                        || response.messages().size() > limit) {
+                    throw unavailable();
+                }
+                final var cursor = response.response_metadata() == null
+                        ? null
+                        : response.response_metadata().next_cursor();
+                final var hasCursor = cursor != null && !cursor.isBlank();
+                if (hasCursor && (cursor.length() > 4096 || progress.cursors.contains(cursor))) {
+                    throw unavailable();
+                }
+                final var more = hasCursor || Boolean.TRUE.equals(response.has_more());
+                final var next = hasCursor
+                                && threadRequests < configuration.thread().maxRequests()
+                                && requests < configuration.maxRequests()
+                        ? UUID.randomUUID().toString()
+                        : null;
+                final var answer = new LinkedHashMap<String, Object>();
+                answer.put("channelId", grant.channel());
+                answer.put("threadTs", root);
+                answer.put("cutoffTs", grant.triggerTs());
+                answer.put("order", "earliest_first");
+                answer.put("untrusted", true);
+                answer.put("truncated", more);
+                if (next != null) {
+                    answer.put("pageToken", next);
+                }
+                final var accepted = new ArrayList<Map<String, Object>>();
+                answer.put("messages", accepted);
+                var previous = progress.last;
+                var omitted = false;
+                var byteLimit = false;
+                final var cutoff = new BigDecimal(grant.triggerTs());
+                final var earliest = cutoff.subtract(BigDecimal.valueOf(
+                        Duration.ofHours(configuration.thread().lookbackHours()).toSeconds()));
+                for (final var message : response.messages()) {
+                    if (message == null || !timestamp(message.ts())) {
+                        throw unavailable();
+                    }
+                    final var ts = new BigDecimal(message.ts());
+                    if (previous != null && ts.compareTo(previous) <= 0) {
+                        throw unavailable(); // No unordered pages, duplicates, or overlapping pagination.
+                    }
+                    previous = ts;
+                    if (threadMessages + accepted.size()
+                            >= configuration.thread().maxMessages()) {
+                        omitted = true;
+                        continue;
+                    }
+                    if (byteLimit) {
+                        continue;
+                    }
+                    if (!validThreadMessage(message, root, ts, cutoff, earliest)) {
+                        omitted = true;
+                        continue;
+                    }
+                    final var item = new LinkedHashMap<String, Object>();
+                    item.put("messageTs", message.ts());
+                    item.put("content", message.text());
+                    item.put("untrusted", true);
+                    if (message.user() != null && USER.matcher(message.user()).matches()) {
+                        item.put("authorUserId", message.user());
+                    }
+                    if (message.bot_id() != null) {
+                        item.put("botId", message.bot_id());
+                    }
+                    accepted.add(Map.copyOf(item));
+                    final var size = jsonUpperBound(answer) + 256;
+                    if (threadBytes + size > configuration.thread().maxBytes()
+                            || responseBytes + size > configuration.maxResponseBytes()
+                            || size > 128 * 1024) {
+                        accepted.removeLast();
+                        byteLimit = true;
+                        omitted = true;
+                        // Still validate the rest of the page's ordering, but never skip ahead over lost text.
+                        continue;
+                    }
+                }
+                // Do not offer continuation when this page lost text to a byte cap or total message cap.
+                if (byteLimit
+                        || threadMessages + accepted.size()
+                                >= configuration.thread().maxMessages()) {
+                    answer.remove("pageToken");
+                }
+                answer.put("truncated", more || omitted);
+                answer.put("messages", List.copyOf(accepted));
+                final var size = jsonUpperBound(answer) + 256;
+                if (threadBytes + size > configuration.thread().maxBytes()) {
+                    throw new IllegalStateException("Slack thread response budget exhausted");
+                }
+                final var bounded = boundedAnswer(Map.copyOf(answer));
+                progress.started = true;
+                progress.last = previous;
+                threadMessages += accepted.size();
+                threadBytes += size;
+                if (hasCursor) {
+                    progress.cursors.add(cursor);
+                }
+                if (answer.containsKey("pageToken")) {
+                    threadPages.put(next, new ThreadPage(spec, cursor));
+                }
+                for (final var item : accepted) {
+                    grant((String) item.get("authorUserId"));
+                    final var mentions = MENTION.matcher((String) item.get("content"));
+                    while (mentions.find()) {
+                        grant(mentions.group(1));
+                    }
+                }
+                return bounded;
+            } finally {
+                state.unlock();
+            }
+        } finally {
+            state.lock();
+            try {
+                progress.busy = false;
+            } finally {
+                state.unlock();
+            }
+        }
+    }
+
+    private boolean validThreadMessage(
+            final SlackJson.ThreadMessage message,
+            final String threadRoot,
+            final BigDecimal ts,
+            final BigDecimal cutoff,
+            final BigDecimal earliest) {
+        final var root = new BigDecimal(threadRoot);
+        if (ts.compareTo(root) < 0
+                || ts.compareTo(cutoff) >= 0
+                || (ts.compareTo(root) != 0 && ts.compareTo(earliest) < 0)
+                || (message.thread_ts() != null && !threadRoot.equals(message.thread_ts()))
+                || (ts.compareTo(root) != 0 && message.thread_ts() == null)
+                || (message.channel() != null && !grant.channel().equals(message.channel()))
+                || (message.team() != null && !grant.workspace().equals(message.team()))
+                || !"message".equals(message.type())
+                || Boolean.TRUE.equals(message.hidden())
+                || (message.subtype() != null && !"bot_message".equals(message.subtype()))
+                || message.text() == null
+                || message.text().length() > configuration.thread().maxBytes()
+                || message.text().getBytes(StandardCharsets.UTF_8).length
+                        > configuration.thread().maxBytes()
+                || (message.user() != null && !USER.matcher(message.user()).matches())
+                || (message.bot_id() != null && !BOT.matcher(message.bot_id()).matches())
+                || (message.user() == null && message.bot_id() == null)) {
+            return false;
+        }
+        if (message.edited() != null) {
+            if (!timestamp(message.edited().ts())) {
+                return false;
+            }
+            final var edited = new BigDecimal(message.edited().ts());
+            if (edited.compareTo(ts) < 0 || edited.compareTo(cutoff) >= 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean timestamp(final String value) {
+        return value != null && THREAD_TIMESTAMP.matcher(value).matches();
+    }
+
     private Map<String, Object> search(final Map<String, Object> arguments) {
         final var spec = spec(arguments);
         final Page page;
@@ -238,18 +508,10 @@ public final class SlackContextService implements AutoCloseable {
                 if (saved == null || !saved.spec().equals(spec)) {
                     throw new IllegalArgumentException("Invalid scoped Slack page token");
                 }
-                page = new Page(
-                        saved.spec(),
-                        Math.max(
-                                saved.after(),
-                                clock.instant().getEpochSecond()
-                                        - Duration.ofDays(configuration.lookbackDays())
-                                                .toSeconds()),
-                        saved.before(),
-                        saved.cursor());
+                page = saved;
                 pages.remove(token);
             } else {
-                final var now = clock.instant().getEpochSecond();
+                final var now = new BigDecimal(grant.triggerTs()).longValue();
                 final var earliest =
                         now - Duration.ofDays(configuration.lookbackDays()).toSeconds();
                 final var after = spec.after() == null ? earliest : spec.after();
@@ -365,6 +627,9 @@ public final class SlackContextService implements AutoCloseable {
             }
             // Only authors of actually returned, scope-validated messages can expand grants.
             authors.forEach(this::grant);
+            // Only returned, fully validated origin-channel hits confer root candidates.
+            // Search has no root field; Slack rejects candidates that are not thread roots.
+            accepted.forEach(item -> searchRoots.add((String) item.get("messageTs")));
             results += accepted.size();
             return bounded;
         } finally {
@@ -429,7 +694,8 @@ public final class SlackContextService implements AutoCloseable {
         }
         final var timestamp = new BigDecimal(message.message_ts());
         if (timestamp.compareTo(BigDecimal.valueOf(page.after())) <= 0
-                || timestamp.compareTo(BigDecimal.valueOf(page.before())) >= 0) {
+                || timestamp.compareTo(BigDecimal.valueOf(page.before())) >= 0
+                || timestamp.compareTo(new BigDecimal(grant.triggerTs())) >= 0) {
             return false;
         }
         if (page.spec().mentioned() != null) {
@@ -584,6 +850,12 @@ public final class SlackContextService implements AutoCloseable {
             pending.forEach(future -> future.cancel(true));
             pending.clear();
             pages.clear();
+            threadPages.clear();
+            threads.clear();
+            searchRoots.clear();
+            threadRequests = 0;
+            threadMessages = 0;
+            threadBytes = 0;
             names.clear();
             grants.clear();
         } finally {
@@ -695,4 +967,15 @@ public final class SlackContextService implements AutoCloseable {
             String author, String mentioned, List<String> terms, Long after, Long before, int limit) {}
 
     private record Page(SearchSpec spec, long after, long before, String cursor) {}
+
+    private record ThreadSpec(String root, Long limit) {}
+
+    private record ThreadPage(ThreadSpec spec, String cursor) {}
+
+    private static final class ThreadProgress {
+        private final Set<String> cursors = new LinkedHashSet<>();
+        private BigDecimal last;
+        private boolean started;
+        private boolean busy;
+    }
 }

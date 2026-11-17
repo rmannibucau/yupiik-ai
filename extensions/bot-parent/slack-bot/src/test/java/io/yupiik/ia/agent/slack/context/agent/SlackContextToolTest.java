@@ -92,10 +92,27 @@ class SlackContextToolTest {
             assertEquals(8, ((Map<?, ?>) properties.get("terms")).get("maxItems"));
             assertEquals(20, ((Map<?, ?>) properties.get("limit")).get("maximum"));
             assertEquals(128, ((Map<?, ?>) properties.get("pageToken")).get("maxLength"));
+            assertTrue(((List<?>) ((Map<?, ?>) properties.get("operation")).get("enum")).contains("thread"));
+            assertTrue(properties.containsKey("threadTs"));
+            for (final var arguments : List.<Map<String, Object>>of(
+                    Map.of("operation", "thread", "channel", "C2"),
+                    Map.of("operation", "thread", "cursor", "raw-slack-cursor"),
+                    Map.of("operation", "thread", "threadTs", "https://slack.com/"),
+                    Map.of("operation", "thread", "limit", 21),
+                    Map.of("operation", "thread", "limit", 1.5),
+                    Map.of("operation", "thread", "pageToken", ""))) {
+                assertEquals(
+                        "Invalid Slack context arguments.",
+                        tool.execute(arguments).output());
+            }
             final var denied = context(() -> false, () -> false, Set.of("other_tool"));
             assertEquals(
                     "Slack context tool is not allowed.",
                     tool.execute(Map.of("operation", "summary"), denied).output());
+            assertEquals(
+                    "Slack context tool is not allowed.",
+                    tool.execute(Map.of("operation", "thread", "limit", 20, "pageToken", "opaque"), denied)
+                            .output());
             assertEquals(
                     "Slack context request cancelled.",
                     tool.execute(Map.of("operation", "summary"), context(() -> true, () -> false, null))

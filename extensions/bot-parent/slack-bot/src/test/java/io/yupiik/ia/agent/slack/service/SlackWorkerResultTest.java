@@ -27,7 +27,10 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -79,6 +82,88 @@ class SlackWorkerResultTest {
                 "{\"taskId\":\"TASK\",\"summary\":\"\"}",
                 "{\"taskId\":\"TASK\",\"summary\":\" \"}",
                 "{\"taskId\":\"TASK\",\"summary\":\"" + "a".repeat(12001) + "\"}");
+    }
+
+    @Test
+    void rendersOnlyExactUserMentionsAndPreservesUntrustedTextAndCitations() throws Exception {
+        final var literal = " Name <!here> <!channel> <!everyone> <@U3|name> <@u3> <@B3> *bold* "
+                + "<https://evil.invalid|click> [1](https://example.org/source?q=a&b=c) https://example.org/real";
+        try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
+            final var answer = "<@U3>" + literal + "<@W123ABC>";
+            final var id = task("result", "U1", TaskStatus.queued, 1).id();
+            run(fixture, "{\"summary\":" + fixture.json.toString(answer) + ",\"taskId\":\"" + id + "\"}");
+            assertEquals(TaskStatus.done, fixture.store.list().getFirst().status());
+            final var body = fixture.json.fromString(
+                    Map.class, fixture.exchanges.getFirst().body());
+            assertFalse(body.containsKey("link_names"));
+            assertFalse(body.containsKey("parse"));
+            final var block = (Map<?, ?>) ((List<?>) body.get("blocks")).getFirst();
+            assertEquals(
+                    Map.of(
+                            "type",
+                            "rich_text",
+                            "elements",
+                            List.of(Map.of(
+                                    "type",
+                                    "rich_text_section",
+                                    "elements",
+                                    List.of(
+                                            Map.of("type", "user", "user_id", "U3"),
+                                            Map.of("type", "text", "text", literal),
+                                            Map.of("type", "user", "user_id", "W123ABC"))))),
+                    block);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PLAIN", "BOUNDARY", "DENSE", "INVALID"})
+    void preservesContentAcrossBoundedBlocks(final String kind) throws Exception {
+        final var answer =
+                switch (kind) {
+                    case "BOUNDARY" -> "a".repeat(2898) + "<@U3>" + "\ud83d\ude00" + "b".repeat(2900);
+                    case "DENSE" -> "<@U3> <@W123> ".repeat(300);
+                    case "INVALID" -> "<!here> <@U3|name> <@u3> <@U" + "A".repeat(65) + "> https://example.org";
+                    default -> "a".repeat(2899) + "\ud83d\ude00" + "b".repeat(3000);
+                };
+        try (final var fixture = new SlackDomainFixture(root, 4, 2)) {
+            final var id = task("result", "U1", TaskStatus.queued, 1).id();
+            run(fixture, "{\"summary\":" + fixture.json.toString(answer) + ",\"taskId\":\"" + id + "\"}");
+            assertEquals(TaskStatus.done, fixture.store.list().getFirst().status());
+            final var body = fixture.json.fromString(
+                    Map.class, fixture.exchanges.getFirst().body());
+            final var blocks = (List<?>) body.get("blocks");
+            assertTrue(blocks.size() <= 50);
+            final var restored = new StringBuilder();
+            for (final var item : blocks) {
+                final var block = (Map<?, ?>) item;
+                if ("section".equals(block.get("type"))) {
+                    final var text = (Map<?, ?>) block.get("text");
+                    assertEquals("plain_text", text.get("type"));
+                    final var value = (String) text.get("text");
+                    assertTrue(value.length() <= 2900);
+                    assertFalse(Character.isHighSurrogate(value.charAt(value.length() - 1)));
+                    assertFalse(Character.isLowSurrogate(value.charAt(0)));
+                    restored.append(value);
+                } else {
+                    final var section = (Map<?, ?>) ((List<?>) block.get("elements")).getFirst();
+                    final var elements = (List<?>) section.get("elements");
+                    assertTrue(elements.size() <= 100);
+                    for (final var entry : elements) {
+                        final var element = (Map<?, ?>) entry;
+                        if ("user".equals(element.get("type"))) {
+                            restored.append("<@").append(element.get("user_id")).append('>');
+                        } else {
+                            assertEquals("text", element.get("type"));
+                            restored.append(element.get("text"));
+                        }
+                    }
+                }
+            }
+            assertEquals(answer, restored.toString());
+            if ("PLAIN".equals(kind) || "INVALID".equals(kind)) {
+                assertTrue(blocks.stream().allMatch(block -> "section".equals(((Map<?, ?>) block).get("type"))));
+            }
+        }
     }
 
     private void run(final SlackDomainFixture fixture, final String source) {

@@ -75,9 +75,11 @@ import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.mcp.McpManager;
+import io.yupiik.ia.agent.core.notifications.NotificationService;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.Question;
+import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.BusyLabels;
@@ -287,6 +289,7 @@ public class TuiCommand implements Runnable {
     private final ToolArgsPreview toolArgsPreview;
     private final ToolOutputFormat toolOutputFormat;
     private final BtwAnswerer btwAnswerer;
+    private final NotificationService notifications;
     private final boolean formatToolOutput;
     private volatile CodeTheme codeTheme = CodeTheme.ONE_DARK;
 
@@ -338,6 +341,73 @@ public class TuiCommand implements Runnable {
             final ScrollService scrollService,
             final ScheduledExecutorService scheduler,
             final JsonMapper mapper) {
+        this(
+                conf,
+                tuiConfiguration,
+                configuration,
+                shellRegistry,
+                sessionRuntimeFactory,
+                sessionStore,
+                sessionLifecycle,
+                chatClient,
+                modelStyleService,
+                speakerLabels,
+                autoLogConfigurer,
+                mcpManager,
+                executor,
+                providerManager,
+                agentProvider,
+                agentSessionService,
+                turnRunner,
+                thinkTags,
+                tuiRunnerFactory,
+                slashCommands,
+                slashRegistry,
+                clock,
+                askUserCardRenderer,
+                toolOutputFormat,
+                btwAnswerer,
+                tabManager,
+                subagentRegistry,
+                scrollService,
+                scheduler,
+                mapper,
+                null);
+    }
+
+    public TuiCommand(
+            final TuiConf conf,
+            final TuiConfiguration tuiConfiguration,
+            final CodingAgentConfiguration configuration,
+            final ShellRegistry shellRegistry,
+            final SessionRuntimeFactory sessionRuntimeFactory,
+            final SessionStore sessionStore,
+            final SessionLifecycle sessionLifecycle,
+            final ChatClient chatClient,
+            final ModelStyleService modelStyleService,
+            final SpeakerLabels speakerLabels,
+            final AutoLogConfigurer autoLogConfigurer,
+            final McpManager mcpManager,
+            final ExecutorService executor,
+            final ProviderManager providerManager,
+            final AgentProvider agentProvider,
+            final AgentSessionService agentSessionService,
+            final TurnRunner turnRunner,
+            final ThinkTagSplitter thinkTags,
+            final TuiRunnerFactory tuiRunnerFactory,
+            final TuiSlashCommands slashCommands,
+            final SlashRegistry slashRegistry,
+            final Clock clock,
+            final AskUserCardRenderer askUserCardRenderer,
+            final ToolOutputFormat toolOutputFormat,
+            final BtwAnswerer btwAnswerer,
+            final TabManager tabManager,
+            final SubagentRegistry subagentRegistry,
+            final ScrollService scrollService,
+            final ScheduledExecutorService scheduler,
+            final JsonMapper mapper,
+            final NotificationService notifications) {
+        this.notifications = notifications;
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
         this.configuration = configuration;
@@ -1155,26 +1225,40 @@ public class TuiCommand implements Runnable {
     }
 
     private ApprovalGate gate(final TuiRunner tui, final UiState state) {
+        return gate(tui, state, 0);
+    }
+
+    private ApprovalGate gate(final TuiRunner tui, final UiState state, final long btwOrdinal) {
         return (title, detail, toolName, args) -> {
             final var latch = new CountDownLatch(1);
             final var outcome = new AtomicReference<ApprovalGate.Result>();
             tui.runLater(() -> {
+                if (state.interrupted || !btwActive(state, btwOrdinal) || latch.getCount() == 0) {
+                    latch.countDown();
+                    return;
+                }
                 state.dirty = true;
-                state.approvals.add(new Approval(title, detail, latch, outcome));
+                state.approvals.add(new Approval(title, detail, latch, outcome, btwOrdinal));
+                if (notifications != null) {
+                    notifications.onApprovalRequired(
+                            state.sessionId, state.title, toolName, btwOrdinal == 0 ? "main" : "btw");
+                }
             });
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
-                    if (state.interrupted) {
-                        tui.runLater(() -> {
-                            state.dirty = true;
-                            state.approvals.removeIf(a -> a.latch() == latch);
-                        });
+                    if (state.interrupted || !btwActive(state, btwOrdinal)) {
                         return ApprovalGate.Result.DENY;
                     }
                 }
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return ApprovalGate.Result.DENY;
+            } finally {
+                latch.countDown();
+                tui.runLater(() -> {
+                    state.approvals.removeIf(a -> a.latch() == latch);
+                    state.dirty = true;
+                });
             }
             final var r = outcome.get();
             return r == null ? ApprovalGate.Result.DENY : r;
@@ -1187,61 +1271,64 @@ public class TuiCommand implements Runnable {
      * approval requested by the main turn.
      */
     private ApprovalGate btwGate(final TuiRunner tui, final UiState state, final long btwOrdinal) {
-        return (title, detail, toolName, args) -> {
-            final var latch = new CountDownLatch(1);
-            final var outcome = new AtomicReference<ApprovalGate.Result>();
-            tui.runLater(() -> {
-                state.dirty = true;
-                state.approvals.add(new Approval(title, detail, latch, outcome, btwOrdinal));
-            });
-            try {
-                while (!latch.await(200, TimeUnit.MILLISECONDS)) {
-                    if (state.interrupted) {
-                        tui.runLater(() -> {
-                            state.dirty = true;
-                            state.approvals.removeIf(a -> a.latch() == latch);
-                        });
-                        return ApprovalGate.Result.DENY;
-                    }
-                }
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return ApprovalGate.Result.DENY;
-            }
-            final var r = outcome.get();
-            return r == null ? ApprovalGate.Result.DENY : r;
-        };
+        return gate(tui, state, btwOrdinal);
+    }
+
+    private static boolean btwActive(final UiState state, final long ordinal) {
+        return ordinal == 0
+                || (state.btw != null
+                        && state.btw.ordinal() == ordinal
+                        && !state.btw.cancelled().get());
     }
 
     private FeedbackGate feedbackGate(final TuiRunner tui, final UiState state) {
+        return feedbackGate(tui, state, 0);
+    }
+
+    private FeedbackGate feedbackGate(final TuiRunner tui, final UiState state, final long btwOrdinal) {
         return questions -> {
             final var latch = new CountDownLatch(1);
             final var answers = new ConcurrentHashMap<String, Object>();
-            final var answered = new AtomicBoolean(); // true => answered, false => canceled
+            final var answered = new AtomicBoolean();
             tui.runLater(() -> {
+                if (state.interrupted || !btwActive(state, btwOrdinal) || latch.getCount() == 0) {
+                    latch.countDown();
+                    return;
+                }
                 state.dirty = true;
-                state.feedbackPrompt = new FeedbackPrompt(questions, latch, answers, answered);
+                final var prompt = new FeedbackPrompt(questions, latch, answers, answered);
+                prompt.btwOrdinal = btwOrdinal;
+                if (state.feedbackPrompt == null) {
+                    state.feedbackPrompt = prompt;
+                } else {
+                    state.feedbackQueue.addLast(prompt);
+                }
+                if (notifications != null) {
+                    notifications.onInputRequired(
+                            state.sessionId, state.title, questions.size(), btwOrdinal == 0 ? "main" : "btw");
+                }
             });
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
-                    // a background tab is legitimately unpainted (its lastRenderTick goes stale as
-                    // long as the user is on another tab), so only treat a stale tick as a render
-                    // stall when this tab is the one on screen: an ask_user raised by a background
-                    // turn must pause (keep the latch held) and surface once the tab is active again,
-                    // not fail-closed as "headless". Interrupting the turn still cancels it below.
-                    if (state.interrupted || (tabManager.active() == state && renderStalled(state))) {
-                        tui.runLater(() -> {
-                            state.dirty = true;
-                            if (state.feedbackPrompt != null && state.feedbackPrompt.latch() == latch) {
-                                state.feedbackPrompt = null;
-                            }
-                        });
+                    // Unpainted background tabs legitimately have stale render ticks.
+                    if (state.interrupted
+                            || !btwActive(state, btwOrdinal)
+                            || (tabManager.active() == state && renderStalled(state))) {
                         return null;
                     }
                 }
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return null;
+            } finally {
+                latch.countDown();
+                tui.runLater(() -> {
+                    state.dirty = true;
+                    if (state.feedbackPrompt != null && state.feedbackPrompt.latch() == latch) {
+                        state.feedbackPrompt = state.feedbackQueue.pollFirst();
+                    }
+                    state.feedbackQueue.removeIf(p -> p.latch() == latch);
+                });
             }
             return answered.get() ? answers : null;
         };
@@ -1418,7 +1505,7 @@ public class TuiCommand implements Runnable {
         if (prompt != null) {
             prompt.answered().set(false);
             prompt.latch.countDown();
-            state.feedbackPrompt = null;
+            state.feedbackPrompt = state.feedbackQueue.pollFirst();
         }
     }
 
@@ -1482,7 +1569,7 @@ public class TuiCommand implements Runnable {
         }
         prompt.answered().set(true);
         prompt.latch.countDown();
-        state.feedbackPrompt = null;
+        state.feedbackPrompt = state.feedbackQueue.pollFirst();
     }
 
     private void onEvent(final AgentEvent event, final UiState state) {
@@ -2582,7 +2669,8 @@ public class TuiCommand implements Runnable {
                         state.session == null ? null : state.session.chatSettings(),
                         state.session.runtime() != null
                                 ? state.session.runtime().systemPromptBuilder()
-                                : null)
+                                : null,
+                        btwFeedback(runner, state, ordinal))
                 .whenComplete((answer, error) ->
                         runLater(state, () -> onBtwAnswer(state, ordinal, answer, error, cancelled)));
     }
@@ -2618,6 +2706,16 @@ public class TuiCommand implements Runnable {
         state.btw = null;
         if (btw != null) {
             btw.cancelled().set(true);
+            state.feedbackQueue.removeIf(prompt -> {
+                if (prompt.btwOrdinal == btw.ordinal()) {
+                    prompt.latch.countDown();
+                    return true;
+                }
+                return false;
+            });
+            if (state.feedbackPrompt != null && state.feedbackPrompt.btwOrdinal == btw.ordinal()) {
+                cancelFeedback(state);
+            }
             // deny any approval the btw loop is still waiting on so its virtual thread
             // wakes up instead of blocking forever; approvals from the main turn are kept.
             final var it = state.approvals.iterator();
@@ -2629,6 +2727,12 @@ public class TuiCommand implements Runnable {
                 }
             }
         }
+    }
+
+    private UserFeedbackService btwFeedback(final TuiRunner runner, final UiState state, final long ordinal) {
+        final var service = new UserFeedbackService();
+        service.setGate(feedbackGate(runner, state, ordinal));
+        return service;
     }
 
     private boolean onBtwKey(final KeyEvent key, final TuiRunner runner, final UiState state) {
@@ -4121,7 +4225,7 @@ public class TuiCommand implements Runnable {
         }
         // /btw is hidden while an approval is pending: the approval must stay on top and keep
         // its sole focus, and the overlay state survives so it reappears once resolved.
-        if (state.approvals.isEmpty() && state.btw != null) {
+        if (state.approvals.isEmpty() && state.feedbackPrompt == null && state.btw != null) {
             renderBtw(frame, state);
         }
         if (state.executingTools != null) {
@@ -6759,10 +6863,17 @@ public class TuiCommand implements Runnable {
                                 + "  ",
                         muted));
             } else if (mode == MetricsDisplayMode.FULL) {
+                final var turnThroughput = state.model.turnThroughput();
+                final var reasoning = turnThroughput != null && turnThroughput.reasoningTokensPerSecond() > 0
+                        ? String.format(
+                                Locale.ROOT,
+                                " · reasoning/request %.1f tok/s",
+                                turnThroughput.reasoningTokensPerSecond())
+                        : "";
                 parts.add(Span.styled(
                         " · " + state.model.turnLlmCalls() + " LLM ("
                                 + DurationFormat.humanize(state.model.turnThinkingMs()) + " think)"
-                                + throughput + " · " + state.model.turnToolsRun() + " tools ("
+                                + throughput + reasoning + " · " + state.model.turnToolsRun() + " tools ("
                                 + DurationFormat.humanize(state.model.turnToolSumMs()) + " sum/"
                                 + DurationFormat.humanize(state.model.turnToolWallMs())
                                 + " wall) · " + duration + "  ",
@@ -9738,6 +9849,7 @@ public class TuiCommand implements Runnable {
     }
 
     static final class FeedbackPrompt {
+        long btwOrdinal;
         final List<FeedbackQuestion> questions;
         final CountDownLatch latch;
         final Map<String, Object> answers;

@@ -28,7 +28,9 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SlackContextTool implements EmbeddedTool {
-    private static final List<String> OPERATIONS = List.of("summary", "resolve_user", "search");
+    private static final List<String> OPERATIONS = List.of("summary", "resolve_user", "thread", "search");
+    private static final Set<String> THREAD_FIELDS = Set.of("operation", "limit", "pageToken", "threadTs");
+    private static final Pattern TIMESTAMP = Pattern.compile("[0-9]{1,20}\\.[0-9]{1,20}");
     private static final Set<String> SEARCH_FIELDS =
             Set.of("operation", "authorUserId", "mentionedUserId", "terms", "after", "before", "limit", "pageToken");
     private static final Pattern USER_ID = Pattern.compile("[UW][A-Z0-9]{1,63}");
@@ -45,7 +47,10 @@ public class SlackContextTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Read bounded Slack context in the task's trusted channel: summary returns channel context; "
+        return "Read bounded Slack context in the task's trusted originating channel: summary returns channel, thread and limits; "
+                + "thread reads the current thread, including prior bot replies, with limit (1-20) and opaque pageToken. "
+                + "Continue beyond the initial snapshot with pageToken until the host budget ends. Optional threadTs must be "
+                + "a same-channel thread previously authorized by returned search evidence. "
                 + "resolve_user looks up a raw userId; search finds messages using up to 8 literal terms and optional "
                 + "authorUserId/mentionedUserId, after/before epoch seconds, limit (1-20) and opaque pageToken. "
                 + "Extract USER_ID from <@USER_ID> mentions; pass the raw ID, not the mention, to resolve_user or "
@@ -87,8 +92,16 @@ public class SlackContextTool implements EmbeddedTool {
                                         OPERATIONS,
                                         "description",
                                         "summary: channel context, no other arguments; "
-                                                + "resolve_user: requires userId only; search: literal terms and "
+                                                + "resolve_user: requires userId only; thread: limit, pageToken and optional threadTs; search: literal terms and "
                                                 + "optional user/time filters with bounded pagination."),
+                        "threadTs",
+                                Map.of(
+                                        "type",
+                                        "string",
+                                        "pattern",
+                                        TIMESTAMP.pattern(),
+                                        "description",
+                                        "thread only: omit for the current thread; another root requires host-validated same-channel search evidence."),
                         "userId", userIdSchema("resolve_user only: raw ID extracted from <@USER_ID>."),
                         "authorUserId",
                                 userIdSchema("search only: messages by this user; extract raw ID from <@USER_ID>."),
@@ -117,7 +130,7 @@ public class SlackContextTool implements EmbeddedTool {
                                         "maxLength",
                                         128,
                                         "description",
-                                        "Opaque continuation token returned by search; reuse unchanged.")));
+                                        "Opaque continuation token returned by thread or search; reuse unchanged with the same arguments.")));
     }
 
     private static Map<String, Object> userIdSchema(final String description) {
@@ -154,6 +167,12 @@ public class SlackContextTool implements EmbeddedTool {
         return switch (operation) {
             case "summary" -> args.size() == 1;
             case "resolve_user" -> args.size() == 2 && validUserId(args.get("userId"));
+            case "thread" ->
+                THREAD_FIELDS.containsAll(args.keySet())
+                        && (args.get("threadTs") == null
+                                || args.get("threadTs") instanceof String ts
+                                        && TIMESTAMP.matcher(ts).matches())
+                        && validPagination(args);
             case "search" -> validSearch(args);
             default -> false;
         };
@@ -197,6 +216,24 @@ public class SlackContextTool implements EmbeddedTool {
                     || new BigDecimal(args.get("after").toString())
                                     .compareTo(new BigDecimal(args.get("before").toString()))
                             < 0;
+        } catch (final NumberFormatException | ArithmeticException invalid) {
+            return false;
+        }
+    }
+
+    private static boolean validPagination(final Map<String, Object> args) {
+        if (args.get("pageToken") != null && !boundedText(args.get("pageToken"), 128)) {
+            return false;
+        }
+        if (args.get("limit") == null) {
+            return true;
+        }
+        if (!(args.get("limit") instanceof Number number)) {
+            return false;
+        }
+        try {
+            final var limit = new BigDecimal(number.toString()).intValueExact();
+            return limit >= 1 && limit <= 20;
         } catch (final NumberFormatException | ArithmeticException invalid) {
             return false;
         }
