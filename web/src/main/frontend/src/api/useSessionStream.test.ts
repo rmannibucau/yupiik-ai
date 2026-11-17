@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { foldLiveOutChars, foldStatus, bootstrapFromSnapshot, type WebEvent } from './useSessionStream';
+import { dedupKey, foldLiveOutChars, foldStatus, bootstrapFromSnapshot, type WebEvent } from './useSessionStream';
 
 function ev(type: string, message?: string | null): WebEvent {
   return { type, sessionId: 's1', message: message ?? null } as WebEvent;
@@ -16,6 +16,58 @@ function usageEv(data: Record<string, unknown>, message?: string | null): WebEve
 function statusEv(message: string | null, busy?: boolean): WebEvent {
   return { type: 'status', sessionId: 's1', message, data: busy === undefined ? {} : { busy } } as WebEvent;
 }
+
+describe('turn throughput', () => {
+  const metrics = (data: Record<string, unknown>): WebEvent => ({ type: 'turn-metrics', sessionId: 's1', data });
+  const complete = metrics({ requestTokensPerSecond: 12, tokensPerSecond: 99, serverTokensPerSecond: 30,
+    completedRequests: 3, reportedRequests: 1, outputEstimated: true });
+
+  it('prefers explicit request rate and folds server coverage and estimation', () => {
+    expect(foldStatus([complete])).toMatchObject({ turnThroughputTokPerSec: 12,
+      turnServerThroughputTokPerSec: 30, turnCompletedRequests: 3, turnReportedRequests: 1, turnOutputEstimated: true });
+    expect(foldStatus([metrics({ tokensPerSecond: '7.5' })]).turnThroughputTokPerSec).toBe(7.5);
+  });
+
+  it.each([null, undefined, -1, NaN, Infinity, -Infinity, '', 'invalid', true])(
+    'rejects invalid explicit rates without falling back to legacy or stale values: %s', (value) => {
+      const s = foldStatus([complete, metrics({ requestTokensPerSecond: value, tokensPerSecond: 99,
+        serverTokensPerSecond: value, completedRequests: value, reportedRequests: value })]);
+      expect(s.turnThroughputTokPerSec).toBeUndefined();
+      expect(s.turnServerThroughputTokPerSec).toBeUndefined();
+      expect(s.turnCompletedRequests).toBeUndefined();
+      expect(s.turnReportedRequests).toBeUndefined();
+      expect(s.turnOutputEstimated).toBeUndefined();
+    });
+
+  it('replaces absent fields and preserves explicit zero', () => {
+    const empty = foldStatus([complete, metrics({})]);
+    expect(empty.turnThroughputTokPerSec).toBeUndefined();
+    expect(empty.turnServerThroughputTokPerSec).toBeUndefined();
+    expect(empty.turnCompletedRequests).toBeUndefined();
+    expect(empty.turnReportedRequests).toBeUndefined();
+    expect(empty.turnOutputEstimated).toBeUndefined();
+    expect(foldStatus([complete, metrics({ requestTokensPerSecond: 0, tokensPerSecond: 99,
+      serverTokensPerSecond: 0, completedRequests: 0, reportedRequests: 0, outputEstimated: false })]))
+      .toMatchObject({ turnThroughputTokPerSec: 0, turnServerThroughputTokPerSec: 0,
+        turnCompletedRequests: 0, turnReportedRequests: 0, turnOutputEstimated: false });
+  });
+
+  it('clears throughput only on a new busy transition, not repeated activity', () => {
+    const events = [statusEv('start', true), complete, statusEv('activity', true)];
+    expect(foldStatus(events).turnThroughputTokPerSec).toBe(12);
+    const next = foldStatus([...events, statusEv('idle', false), statusEv('start', true)]);
+    expect(next.turnThroughputTokPerSec).toBeUndefined();
+    expect(next.turnServerThroughputTokPerSec).toBeUndefined();
+    expect(next.turnCompletedRequests).toBeUndefined();
+    expect(next.turnReportedRequests).toBeUndefined();
+    expect(next.turnOutputEstimated).toBeUndefined();
+    expect(foldStatus([complete, statusEv('reconnect', true)]).turnThroughputTokPerSec).toBeUndefined();
+  });
+
+  it('keeps successive metrics frames in the stream', () => {
+    expect(dedupKey(complete, 1)).not.toBe(dedupKey(complete, 2));
+  });
+});
 
 describe('foldLiveOutChars - realtime out estimate', () => {
   it('accumulates streamed text and thinking characters', () => {

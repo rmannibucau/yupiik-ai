@@ -5209,9 +5209,27 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         shellRegistry.onEvent(new AgentEvent.TurnMetrics(
-                3, 120, 400, 500, 2, 1500, new AgentEvent.Throughput(150, 3000, 0), sid(shellRegistry)));
+                3,
+                120,
+                400,
+                500,
+                2,
+                1500,
+                new AgentEvent.Throughput(150, 0, 3000, 0, 0, 3, 0, false),
+                sid(shellRegistry)));
         awaitText("3 LLM");
-        awaitText("50.0 tok/s");
+        awaitText("request 50.0 tok/s");
+
+        shellRegistry.onEvent(new AgentEvent.TurnMetrics(
+                3,
+                120,
+                400,
+                500,
+                2,
+                1500,
+                new AgentEvent.Throughput(150, 0, 3000, 0, 0, 3, 0, true),
+                sid(shellRegistry)));
+        awaitText("request ~50.0 tok/s");
 
         // a turn whose throughput cannot be measured shows no segment at all
         shellRegistry.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, sid(shellRegistry)));
@@ -5233,8 +5251,26 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         shellRegistry.onEvent(new AgentEvent.TurnMetrics(
-                3, 120, 400, 500, 2, 1500, new AgentEvent.Throughput(150, 3000, 4000), sid(shellRegistry)));
-        awaitText("50.0 tok/s (real 37.5 tok/s)");
+                3,
+                120,
+                400,
+                500,
+                2,
+                1500,
+                new AgentEvent.Throughput(150, 0, 3000, 4000, 150, 3, 3, false),
+                sid(shellRegistry)));
+        awaitText("request 50.0 tok/s · server 37.5 tok/s");
+
+        shellRegistry.onEvent(new AgentEvent.TurnMetrics(
+                3,
+                120,
+                400,
+                500,
+                2,
+                1500,
+                new AgentEvent.Throughput(150, 0, 3000, 2000, 80, 3, 1, false),
+                sid(shellRegistry)));
+        awaitText("request 50.0 tok/s · server 40.0 tok/s (partial)");
 
         quit();
     }

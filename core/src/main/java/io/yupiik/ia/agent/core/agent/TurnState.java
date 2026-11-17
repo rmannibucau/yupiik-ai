@@ -29,6 +29,9 @@ final class TurnState {
     int outputTokens;
     int reasoningTokens;
     long llmReportedMs;
+    int reportedOutputTokens;
+    int reportedRequests;
+    boolean outputEstimated;
     int unfinishedTodoContinues;
     boolean lastRequestProducedReasoning;
     boolean iterationLimitReached;
@@ -46,6 +49,9 @@ final class TurnState {
         outputTokens = 0;
         reasoningTokens = 0;
         llmReportedMs = 0L;
+        reportedOutputTokens = 0;
+        reportedRequests = 0;
+        outputEstimated = false;
         unfinishedTodoContinues = 0;
         lastRequestProducedReasoning = false;
         iterationLimitReached = false;

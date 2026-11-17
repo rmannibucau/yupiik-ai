@@ -539,14 +539,28 @@ class ConversationTranscriptTest {
     @Test
     void turnThroughputIsExposedAndResetClearsIt() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.TurnMetrics(1, 0, 0, 0, 0, 900, new AgentEvent.Throughput(150, 3000, 4000), "s1"));
+        t.onEvent(new AgentEvent.TurnMetrics(
+                1, 0, 0, 0, 0, 900, new AgentEvent.Throughput(150, 0, 3000, 4000, 150, 1, 1, false), "s1"));
         assertEquals(150, t.turnThroughput().outputTokens());
-        assertEquals(50d, t.turnOutputTokensPerSecond(), 0.001d, "150 tokens over 3s of generation");
+        assertEquals(50d, t.turnOutputTokensPerSecond(), 0.001d, "150 tokens over 3s of request time");
         assertEquals(37.5d, t.turnThroughput().reportedTokensPerSecond(), 0.001d, "the server view stays available");
 
         t.reset();
         assertEquals(0, t.turnOutputTokensPerSecond());
         assertFalse(t.turnThroughput().measurable());
+    }
+
+    @Test
+    void turnThroughputPreservesEstimatesAndMatchedPartialServerTotals() {
+        final var t = new ConversationTranscript();
+        final var throughput = new AgentEvent.Throughput(200, 20, 4_000, 2_000, 80, 3, 1, true);
+        t.onEvent(new AgentEvent.TurnMetrics(3, 0, 0, 0, 0, 5_000, throughput, "s1"));
+        assertEquals(throughput, t.turnThroughput());
+        assertEquals(50d, t.turnOutputTokensPerSecond(), 0.001d);
+        assertEquals(40d, t.turnThroughput().reportedTokensPerSecond(), 0.001d);
+        assertEquals("request ~50.0 tok/s · server 40.0 tok/s (partial)", MetricsFormat.tokPerSec(t.turnThroughput()));
+        t.reset();
+        assertEquals(AgentEvent.Throughput.EMPTY, t.turnThroughput());
     }
 
     @Test

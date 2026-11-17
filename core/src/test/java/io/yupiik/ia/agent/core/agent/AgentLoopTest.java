@@ -85,6 +85,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -133,6 +136,8 @@ class AgentLoopTest {
     private final AtomicReference<io.yupiik.ia.agent.core.llm.Usage> recordedUsage = new AtomicReference<>();
     private PermissionService permissionServiceOverride;
     private ProviderManager providerManagerOverride;
+    private FakeClock throughputClock;
+    private Consumer<AgentEvent> eventObserver;
 
     @Test
     void unknownToolDiagnosticNamesOffendingToolAndPointsToTools() throws Exception {
@@ -1182,8 +1187,7 @@ class AgentLoopTest {
         final var throughput = lastTurnMetrics().throughput();
         assertEquals(100, throughput.outputTokens(), "output tokens come from the provider usage");
         assertEquals(0, throughput.reportedMs(), "no server side generation time was reported");
-        assertTrue(
-                throughput.activeMs() >= 60, "time spent in the LLM call is active time, got " + throughput.activeMs());
+        assertEquals(60, throughput.activeMs());
         assertEquals(throughput.outputTokens() * 1000.0 / throughput.activeMs(), throughput.tokensPerSecond());
         assertEquals(0, throughput.reportedTokensPerSecond());
     }
@@ -1197,9 +1201,9 @@ class AgentLoopTest {
 
         final var throughput = lastTurnMetrics().throughput();
         assertEquals(100, throughput.outputTokens());
-        assertEquals(0, throughput.activeMs(), "the throttle must be discounted, not counted as generation time");
-        assertEquals(0, throughput.tokensPerSecond(), "an unmeasurable rate is 0 so the displays omit the segment");
-        assertFalse(throughput.measurable());
+        assertEquals(20, throughput.activeMs(), "the throttle must be discounted, not counted as request time");
+        assertEquals(5_000, throughput.tokensPerSecond());
+        assertTrue(throughput.measurable());
     }
 
     @Test
@@ -1238,12 +1242,7 @@ class AgentLoopTest {
         // 100 output tokens including 40 spent on internal reasoning
         final var reply = new ScriptedReply(
                 "done", "stop", false, new io.yupiik.llm.client.model.Usage(10L, 100L, 110L, null, null, 40L, 0L));
-        // the instant chatClient stub returns in a few ms of real wall-clock, so the client-measured
-        // activeMs is nonzero-but-garbage and reasoningTokensPerSecond() would report a huge spurious
-        // rate. Drive activeMs deterministically to 0 with a throttle that outweighs the work (same
-        // trick as turnThroughputIgnoresTheIdleTimeOfThrottlesAndRetries) so the "no generation time
-        // measured" assertion is stable.
-        loop(timedChatClient(reply, 5, 1_000), null, configuration(true)).run("do it", null, "s1", null, () -> false);
+        loop(timedChatClient(reply, 0, 1_000), null, configuration(true)).run("do it", null, "s1", null, () -> false);
 
         final var throughput = lastTurnMetrics().throughput();
         assertEquals(100, throughput.outputTokens(), "the aggregate stays the completion tokens, reasoning included");
@@ -1259,6 +1258,143 @@ class AgentLoopTest {
         return (AgentEvent.TurnMetrics) published.getLast();
     }
 
+    @Test
+    void partialServerTimingUsesOnlyMatchingTokens() {
+        final var throughput = throughputAcrossRequests(
+                new io.yupiik.llm.client.model.Usage(10L, 100L, 110L, null, null, null, 2_000L),
+                new io.yupiik.llm.client.model.Usage(10L, 100L, 110L));
+        assertEquals(200, throughput.outputTokens());
+        assertEquals(100, throughput.reportedOutputTokens());
+        assertEquals(2_000, throughput.reportedMs());
+        assertEquals(50d, throughput.reportedTokensPerSecond());
+        assertEquals(2, throughput.completedRequests());
+        assertEquals(1, throughput.reportedRequests());
+        assertEquals(200, throughput.activeMs());
+        assertFalse(throughput.outputEstimated());
+    }
+
+    @Test
+    void serverTimingIsTokenWeightedRatherThanAnAverageOfRates() {
+        final var throughput = throughputAcrossRequests(
+                new io.yupiik.llm.client.model.Usage(10L, 100L, 110L, null, null, null, 1_000L),
+                new io.yupiik.llm.client.model.Usage(10L, 300L, 310L, null, null, null, 6_000L));
+        assertEquals(400, throughput.reportedOutputTokens());
+        assertEquals(7_000, throughput.reportedMs());
+        assertEquals(400_000d / 7_000, throughput.reportedTokensPerSecond());
+        assertEquals(2, throughput.reportedRequests());
+    }
+
+    @Test
+    void mixedUsageMarksTheRequestRateAsEstimatedWithoutAddingServerCoverage() {
+        final var throughput = throughputAcrossRequests(
+                new io.yupiik.llm.client.model.Usage(10L, 100L, 110L, null, null, null, 2_000L), null);
+        assertEquals(100 + TokenEstimator.estimate("done"), throughput.outputTokens());
+        assertTrue(throughput.outputEstimated());
+        assertEquals(100, throughput.reportedOutputTokens());
+        assertEquals(1, throughput.reportedRequests());
+    }
+
+    private AgentEvent.Throughput throughputAcrossRequests(
+            final io.yupiik.llm.client.model.Usage first, final io.yupiik.llm.client.model.Usage second) {
+        throughputClock = new FakeClock();
+        final var replies = new ArrayDeque<>(List.of(
+                new ScriptedReply(null, "tool_calls", false, first) {
+                    @Override
+                    Message toMessage() {
+                        return toolCallReply("t1", "noop").toMessage();
+                    }
+                },
+                new ScriptedReply("done", "stop", false, second)));
+        final var delegate = chatClient(replies, new ArrayList<>());
+        final ChatClient client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled)
+                    throws IOException, InterruptedException {
+                throughputClock.advance(100);
+                return delegate.stream(request, pauseListener, onDelta, cancelled);
+            }
+        };
+        loop(client, null, configuration(true)).run("do it", null, "s1", null, () -> false);
+        return lastTurnMetrics().throughput();
+    }
+
+    @Test
+    void requestTimingExcludesRequestSentObserversAndPostStreamProcessing() {
+        final var client = timedChatClient(
+                new ScriptedReply("done", "stop", false, new io.yupiik.llm.client.model.Usage(10L, 100L, 110L)), 50, 0);
+        eventObserver = event -> {
+            if (event instanceof AgentEvent.Phase || event instanceof AgentEvent.UsageUpdated) {
+                throughputClock.advance(1_000);
+            }
+        };
+        loop(client, null, configuration(true)).run("do it", null, "s1", null, () -> false);
+        assertEquals(50, lastTurnMetrics().throughput().activeMs());
+        assertTrue(lastTurnMetrics().turnDurationMs() > 50);
+    }
+
+    @Test
+    void throughputResetsOnNextTurn() {
+        final var client = timedChatClient(
+                new ScriptedReply(
+                        "done",
+                        "stop",
+                        false,
+                        new io.yupiik.llm.client.model.Usage(10L, 100L, 110L, null, null, 40L, 2_000L)),
+                50,
+                0);
+        final var agent = loop(client, null, configuration(true));
+        agent.run("first", null, "s1", null, () -> false);
+        final var first = lastTurnMetrics().throughput();
+        agent.run("second", null, "s1", null, () -> false);
+        assertEquals(first, lastTurnMetrics().throughput());
+        agent.run("cancel", null, "s1", null, () -> true);
+        assertEquals(AgentEvent.Throughput.EMPTY, lastTurnMetrics().throughput());
+    }
+
+    @Test
+    void retryDiscardsUsageAndFinishReasonFromFailedAttemptWithoutSleeping() {
+        throughputClock = new FakeClock();
+        final var calls = new AtomicInteger();
+        final ChatClient client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                throughputClock.advance(50);
+                if (calls.getAndIncrement() == 0) {
+                    onDelta.accept(new End(
+                            "length", new io.yupiik.llm.client.model.Usage(10L, 900L, 910L, null, null, 400L, 1_000L)));
+                    throw new IOException("retry me");
+                }
+                return new Message("assistant", "done", null, null, null, null);
+            }
+        };
+        loop(
+                        client,
+                        null,
+                        configuration(
+                                true,
+                                Map.of("yca.llm.streamRetriesMaxAttempts", "1", "yca.llm.retriesBaseDelayMs", "0")))
+                .run("do it", null, "s1", null, () -> false);
+        final var throughput = lastTurnMetrics().throughput();
+        assertEquals(2, calls.get(), "stale length must not trigger another model round");
+        assertEquals(TokenEstimator.estimate("done"), throughput.outputTokens());
+        assertTrue(throughput.outputEstimated());
+        assertEquals(100, throughput.activeMs(), "failed attempt time belongs to the logical request");
+        assertEquals(0, throughput.reasoningTokens());
+        assertEquals(0, throughput.reportedMs());
+        assertEquals(0, throughput.reportedOutputTokens());
+        assertEquals(1, throughput.completedRequests());
+        assertEquals(0, throughput.reportedRequests());
+    }
+
     /**
      * A ChatClient stub replaying a single reply while reproducing the timing of a real generation:
      * how long the call takes and which pause the resilience layer reports before it.
@@ -1269,6 +1405,7 @@ class AgentLoopTest {
      * @return the stub client.
      */
     private ChatClient timedChatClient(final ScriptedReply reply, final long workMs, final long pauseMs) {
+        throughputClock = new FakeClock();
         return new ChatClient() {
             @Override
             public Message stream(
@@ -1282,7 +1419,7 @@ class AgentLoopTest {
                     pauseListener.accept(
                             PauseEvent.throttle("Rate limit reached, waiting ~" + pauseMs + "ms", pauseMs));
                 }
-                sleep(workMs);
+                throughputClock.advance(workMs + pauseMs);
                 if (reply.usage() != null) {
                     onDelta.accept(new End(null, reply.usage()));
                 }
@@ -1294,15 +1431,29 @@ class AgentLoopTest {
         };
     }
 
-    private static void sleep(final long ms) {
-        if (ms <= 0) {
-            return;
+    private static final class FakeClock extends Clock {
+        private long nanos;
+
+        private void advance(final long ms) {
+            nanos += ms * 1_000_000L;
         }
-        try {
-            Thread.sleep(ms);
-        } catch (final InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(e);
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(final ZoneId zone) {
+            if (!getZone().equals(zone)) {
+                throw new IllegalArgumentException("Only UTC is needed by this fixture");
+            }
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return Instant.EPOCH.plusNanos(nanos);
         }
     }
 
@@ -7386,6 +7537,9 @@ class AgentLoopTest {
                         synchronized (events) {
                             if (event instanceof AgentEvent agentEvent) {
                                 events.add(agentEvent);
+                                if (eventObserver != null) {
+                                    eventObserver.accept(agentEvent);
+                                }
                             }
                         }
                     }
@@ -7450,7 +7604,7 @@ class AgentLoopTest {
                     }
                 },
                 null,
-                Clock.systemUTC(),
+                throughputClock == null ? Clock.systemUTC() : throughputClock,
                 null,
                 todoStore,
                 executor,
@@ -7458,7 +7612,14 @@ class AgentLoopTest {
                 null,
                 null,
                 null,
-                new PrecisionDurationMarkerProvider(),
+                throughputClock == null
+                        ? new PrecisionDurationMarkerProvider()
+                        : new PrecisionDurationMarkerProvider() {
+                            @Override
+                            public long now() {
+                                return throughputClock.nanos;
+                            }
+                        },
                 null,
                 null,
                 null,

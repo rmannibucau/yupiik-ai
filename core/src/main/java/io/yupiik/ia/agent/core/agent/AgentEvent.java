@@ -582,7 +582,7 @@ public sealed interface AgentEvent {
     }
 
     /**
-     * Output throughput of a turn: the tokens it produced versus the time actually spent producing them.
+     * Request and provider-reported throughput with matched token/time coverage.
      *
      * @param outputTokens output tokens produced in the turn, as reported by the provider or estimated
      *        when the provider reports no usage
@@ -592,18 +592,27 @@ public sealed interface AgentEvent {
      *        everything outside of the LLM calls (tool executions, compaction, user typing, ...)
      * @param reportedMs generation time as reported by the provider itself, {@code 0} when the provider
      *        does not publish any
+     * @param reportedOutputTokens completion tokens from the same requests as {@code reportedMs}
+     * @param completedRequests completed logical main-model requests
+     * @param reportedRequests requests with positive completion usage and provider timing
+     * @param outputEstimated whether any positive output contribution was estimated
      */
-    record Throughput(int outputTokens, int reasoningTokens, long activeMs, long reportedMs) {
+    record Throughput(
+            int outputTokens,
+            int reasoningTokens,
+            long activeMs,
+            long reportedMs,
+            int reportedOutputTokens,
+            int completedRequests,
+            int reportedRequests,
+            boolean outputEstimated) {
         /** Zeroed throughput, used when a turn produced nothing. */
-        public static final Throughput EMPTY = new Throughput(0, 0, 0, 0);
-
-        public Throughput(final int outputTokens, final long activeMs, final long reportedMs) {
-            this(outputTokens, 0, activeMs, reportedMs);
-        }
+        public static final Throughput EMPTY = new Throughput(0, 0, 0, 0, 0, 0, 0, false);
 
         /**
-         * Our own measurement: output tokens over the time actually spent producing them. This is the
-         * number to trust to compare models and runtimes, it never includes idle time.
+         * Delivered output over logical request time, excluding tracked throttle/backoff waits.
+         * Includes prefill, queueing, transport and failed attempts in a successful retry sequence,
+         * but excludes processing after stream return. It is not a decode-only rate.
          *
          * @return the average output tokens per second, {@code 0} when it cannot be computed.
          */
@@ -622,7 +631,7 @@ public sealed interface AgentEvent {
         }
 
         /**
-         * The reasoning throughput: reasoning tokens over the time actually spent producing them.
+         * Reasoning tokens over the full request interval, not a reasoning-only generation interval.
          *
          * @return the average reasoning tokens per second, {@code 0} when it cannot be computed.
          */
@@ -631,13 +640,13 @@ public sealed interface AgentEvent {
         }
 
         /**
-         * The provider own view, when it publishes a generation time. It is displayed next to
-         * {@link #tokensPerSecond()} to expose the client overhead, and is {@code 0} when unknown.
+         * The provider's view using only tokens from requests with usable provider timing.
+         * Timing scope is provider-defined and need not be decode-only; returns {@code 0} when unknown.
          *
          * @return the average output tokens per second as seen by the server, {@code 0} when unknown.
          */
         public double reportedTokensPerSecond() {
-            return reportedMs > 0 && outputTokens > 0 ? outputTokens * 1000.0 / reportedMs : 0;
+            return reportedMs > 0 && reportedOutputTokens > 0 ? reportedOutputTokens * 1000.0 / reportedMs : 0;
         }
 
         /**

@@ -31,13 +31,14 @@ public final class MetricsFormat {
     }
 
     /**
-     * Formats the output throughput segment, the measured rate and, when the provider publishes its
+     * Formats the output throughput segment, the request rate and, when the provider publishes its
      * own generation time, the server view next to it. A turn whose throughput cannot be measured
      * (no output token, no known duration) yields an empty string so the caller can omit the segment.
      *
      * @param throughput the turn throughput, {@code null} tolerated.
-     * @return for example {@code "42.5 tok/s (real 40.1 tok/s)"}, {@code "42.5 tok/s"},
-     *         {@code "real 40.1 tok/s"} or {@code ""} when there is nothing to show.
+     * @return for example {@code "request 42.5 tok/s · server 40.0 tok/s"},
+     *         {@code "request ~42.5 tok/s"}, {@code "server 40.0 tok/s (partial)"}
+     *         or {@code ""} when there is nothing to show.
      */
     public static String tokPerSec(final AgentEvent.Throughput throughput) {
         if (throughput == null) {
@@ -45,16 +46,17 @@ public final class MetricsFormat {
         }
         final var measured = throughput.tokensPerSecond();
         final var reported = throughput.reportedTokensPerSecond();
-        if (measured > 0 && reported > 0) {
-            return String.format(Locale.ROOT, "%.1f tok/s (real %.1f tok/s)", measured, reported);
-        }
-        if (measured > 0) {
-            return String.format(Locale.ROOT, "%.1f tok/s", measured);
-        }
-        if (reported > 0) {
-            return String.format(Locale.ROOT, "real %.1f tok/s", reported);
-        }
-        return "";
+        final var request = measured > 0
+                ? String.format(Locale.ROOT, "request %s%.1f tok/s", throughput.outputEstimated() ? "~" : "", measured)
+                : "";
+        final var server = reported > 0
+                ? String.format(
+                        Locale.ROOT,
+                        "server %.1f tok/s%s",
+                        reported,
+                        throughput.reportedRequests() < throughput.completedRequests() ? " (partial)" : "")
+                : "";
+        return request.isEmpty() ? server : server.isEmpty() ? request : request + " · " + server;
     }
 
     /**
@@ -163,7 +165,7 @@ public final class MetricsFormat {
                 sb.append(" · ").append(throughputSegment);
             }
             if (full && throughput != null && throughput.reasoningTokensPerSecond() > 0) {
-                sb.append(" · reasoning ")
+                sb.append(" · reasoning/request ")
                         .append(String.format(Locale.ROOT, "%.1f tok/s", throughput.reasoningTokensPerSecond()));
             }
             final var cachedSegment = cachedTokens(transcript.cacheReadTokens(), transcript.contextInputTokens());

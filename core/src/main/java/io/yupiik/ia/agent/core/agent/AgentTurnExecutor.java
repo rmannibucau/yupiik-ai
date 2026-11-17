@@ -1183,10 +1183,11 @@ public class AgentTurnExecutor {
                 final var sentPayload = new AtomicReference<>(host.contextPayload(request));
                 final var finishReason = new String[] {null};
                 Message assistant;
+                host.emitPhase(AgentEvent.Phase.REQUEST_SENT);
                 final long llmStartNanos = host.precisionDurationMarker.now();
                 final long pausedBeforeMs = host.turnState.llmPausedMs;
+                final long requestActiveMs;
                 try {
-                    host.emitPhase(AgentEvent.Phase.REQUEST_SENT);
                     assistant = host.withContextCapture(
                             sentPayload::set,
                             () -> host.modelRoundProcessor.stream(
@@ -1205,6 +1206,8 @@ public class AgentTurnExecutor {
 
                                         @Override
                                         public void resetText() {
+                                            usage[0] = io.yupiik.ia.agent.core.llm.Usage.EMPTY;
+                                            finishReason[0] = null;
                                             // a retry is a fresh generation: rebuild the inline splitter (dropping the
                                             // failed attempt's stale, possibly half-consumed carry) and drop the stale
                                             // partial reasoning text + opaque blobs so nothing leaks into the persisted
@@ -1245,6 +1248,9 @@ public class AgentTurnExecutor {
                                             host.turnState.llmPausedMs += millis;
                                         }
                                     }));
+                    final var wallMs = (host.precisionDurationMarker.now() - llmStartNanos) / 1_000_000;
+                    final var pausedMs = Math.max(0L, host.turnState.llmPausedMs - pausedBeforeMs);
+                    requestActiveMs = Math.max(0L, wallMs - pausedMs);
                 } catch (final ContextWindowExceededException e) {
                     if (!retryOnOverflow || overflowRetried) {
                         throw e;
@@ -1363,13 +1369,9 @@ public class AgentTurnExecutor {
                                 assistant.others());
                     }
                 }
-                // throughput: time spent generating, idle time excluded. A request refused because the
-                // context window is too small contributes nothing (it is a preflight, not a generation).
-                recordThroughput(
-                        assistant,
-                        usage[0],
-                        (host.precisionDurationMarker.now() - llmStartNanos) / 1_000_000,
-                        pausedBeforeMs);
+                // Request throughput excludes tracked waits and post-stream processing. A request refused
+                // because the context window is too small contributes nothing (it is a preflight).
+                recordThroughput(assistant, usage[0], requestActiveMs);
                 // anchor the hybrid usage on the real prompt tokens of the request we just sent: the
                 // estimate at the same moment calibrates later deltas until the next observation
                 host.usageTracker.anchor(usage[0].contextInputTokens(), sentPayload.get());
@@ -1782,11 +1784,8 @@ public class AgentTurnExecutor {
     }
 
     private void recordThroughput(
-            final Message assistant,
-            final io.yupiik.ia.agent.core.llm.Usage usage,
-            final long wallMs,
-            final long pausedBeforeMs) {
-        host.turnNotificationReporter.recordThroughput(assistant, usage, wallMs, pausedBeforeMs);
+            final Message assistant, final io.yupiik.ia.agent.core.llm.Usage usage, final long activeMs) {
+        host.turnNotificationReporter.recordThroughput(assistant, usage, activeMs);
     }
 
     private void repairInterruptedToolCalls(final String sessionId, final List<Message> messages) {

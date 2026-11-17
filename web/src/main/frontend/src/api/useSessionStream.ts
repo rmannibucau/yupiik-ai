@@ -54,6 +54,10 @@ export type SessionStatus = {
   liveOutTokens?: number;
   liveReasoningTokens?: number;
   turnThroughputTokPerSec?: number;
+  turnServerThroughputTokPerSec?: number;
+  turnCompletedRequests?: number;
+  turnReportedRequests?: number;
+  turnOutputEstimated?: boolean;
   // session totals
   sessionLlmCalls?: number;
   // latest status/notice line
@@ -93,7 +97,7 @@ export function eventKey(ev: WebEvent): string {
  * occurrence must survive the O(1) key dedup: append a monotonic per-connection sequence. Structural
  * events (user, text/tool lifecycle) keep their natural identity and are NOT sequence-scoped.
  */
-export const STATE_CARRYING = new Set(['usage-updated', 'status', 'notice', 'btw', 'settings', 'web-command', 'feedback-started']);
+export const STATE_CARRYING = new Set(['usage-updated', 'turn-metrics', 'status', 'notice', 'btw', 'settings', 'web-command', 'feedback-started']);
 
 /** The dedup key of {@code ev} in a connection where it is the {@code seq}-th state-carrying occurrence. */
 export function dedupKey(ev: WebEvent, seq: number): string {
@@ -537,7 +541,13 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
       s.turnDurationMs = num(d.turnDurationMs, s.turnDurationMs);
       s.outputTokens = num(d.outputTokens, s.outputTokens);
       s.reasoningTokens = num(d.reasoningTokens, s.reasoningTokens);
-      s.turnThroughputTokPerSec = num(d.tokensPerSecond, s.turnThroughputTokPerSec);
+      // Each metrics frame replaces the rates and their coverage, never retaining another turn's data.
+      s.turnThroughputTokPerSec = nonnegative(Object.hasOwn(d, 'requestTokensPerSecond')
+        ? d.requestTokensPerSecond : d.tokensPerSecond);
+      s.turnServerThroughputTokPerSec = nonnegative(d.serverTokensPerSecond);
+      s.turnCompletedRequests = nonnegative(d.completedRequests);
+      s.turnReportedRequests = nonnegative(d.reportedRequests);
+      s.turnOutputEstimated = typeof d.outputEstimated === 'boolean' ? d.outputEstimated : undefined;
       s.sessionLlmCalls = (s.sessionLlmCalls ?? 0) + (num(d.llmCalls, 0) ?? 0);
     } else if (ev.type === 'status') {
       // a status frame may carry an explicit busy flag (emitted by the web frontend's
@@ -556,6 +566,11 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
           // live per-turn delta shows until this turn's own metrics land.
           s.outputTokens = undefined;
           s.reasoningTokens = undefined;
+          s.turnThroughputTokPerSec = undefined;
+          s.turnServerThroughputTokPerSec = undefined;
+          s.turnCompletedRequests = undefined;
+          s.turnReportedRequests = undefined;
+          s.turnOutputEstimated = undefined;
         }
         lastBusy = d.busy;
         s.busy = d.busy;
@@ -619,6 +634,14 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
   // reloaded session with no provider usage, so the token line never renders empty.
   if (liveOutChars > 0) s.liveOutChars = liveOutChars;
   return s;
+}
+
+function nonnegative(value: unknown): number | undefined {
+  if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === '')) {
+    return undefined;
+  }
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
 }
 
 function num(v: unknown, fallback?: number): number | undefined {

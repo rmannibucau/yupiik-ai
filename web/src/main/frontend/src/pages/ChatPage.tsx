@@ -1212,14 +1212,19 @@ export function TurnMetrics({ status, settings = { perTurn: true, session: true,
     if (status.turnLlmCalls != null && status.turnLlmCalls > 0) {
       const think = status.turnThinkingMs != null ? ` (${humanize(status.turnThinkingMs)})` : '';
       const tok = status.turnThroughputTokPerSec != null && status.turnThroughputTokPerSec > 0
-        ? ` · ${status.turnThroughputTokPerSec.toFixed(1)} tok/s`
+        ? ` · request ${status.turnOutputEstimated ? '~' : ''}${status.turnThroughputTokPerSec.toFixed(1)} tok/s`
+        : '';
+      const partial = status.turnReportedRequests != null && status.turnCompletedRequests != null
+        && status.turnReportedRequests < status.turnCompletedRequests;
+      const server = status.turnServerThroughputTokPerSec != null && status.turnServerThroughputTokPerSec > 0
+        ? ` · server ${status.turnServerThroughputTokPerSec.toFixed(1)} tok/s${partial ? ' (partial)' : ''}`
         : '';
       const tools = status.turnToolsRun != null ? `${status.turnToolsRun} tools` : '';
       const toolDur = status.turnToolSumMs != null || status.turnToolWallMs != null
         ? ` (${humanize(status.turnToolSumMs)}/${humanize(status.turnToolWallMs)})`
         : '';
       const dur = status.turnDurationMs != null ? ` · ${humanize(status.turnDurationMs)}` : '';
-      parts.push(`${status.turnLlmCalls} LLM${think}${tok} · ${tools}${toolDur}${dur}`);
+      parts.push(`${status.turnLlmCalls} LLM${think}${tok}${server} · ${tools}${toolDur}${dur}`);
     }
     if (
       inputTokens != null ||

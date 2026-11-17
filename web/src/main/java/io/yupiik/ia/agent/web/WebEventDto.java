@@ -188,18 +188,28 @@ public record WebEventDto(
                 }
                 yield data;
             }
-            case AgentEvent.TurnMetrics t ->
-                Map.of(
-                        "llmCalls", t.llmCalls(),
-                        "thinkingDurationMs", t.thinkingDurationMs(),
-                        "toolDurationSumMs", t.toolDurationSumMs(),
-                        "toolDurationWallMs", t.toolDurationWallMs(),
-                        "toolsRun", t.toolsRun(),
-                        "turnDurationMs", t.turnDurationMs(),
-                        "outputTokens",
-                                t.throughput() == null ? 0 : t.throughput().outputTokens(),
-                        "reasoningTokens",
-                                t.throughput() == null ? 0 : t.throughput().reasoningTokens());
+            case AgentEvent.TurnMetrics t -> {
+                final var data = new LinkedHashMap<String, Object>();
+                final var throughput = t.throughput() == null ? AgentEvent.Throughput.EMPTY : t.throughput();
+                data.put("llmCalls", t.llmCalls());
+                data.put("thinkingDurationMs", t.thinkingDurationMs());
+                data.put("toolDurationSumMs", t.toolDurationSumMs());
+                data.put("toolDurationWallMs", t.toolDurationWallMs());
+                data.put("toolsRun", t.toolsRun());
+                data.put("turnDurationMs", t.turnDurationMs());
+                data.put("outputTokens", throughput.outputTokens());
+                data.put("reasoningTokens", throughput.reasoningTokens());
+                data.put("tokensPerSecond", throughput.tokensPerSecond());
+                data.put("requestTokensPerSecond", throughput.tokensPerSecond());
+                data.put("serverTokensPerSecond", throughput.reportedTokensPerSecond());
+                data.put("activeMs", throughput.activeMs());
+                data.put("reportedMs", throughput.reportedMs());
+                data.put("reportedOutputTokens", throughput.reportedOutputTokens());
+                data.put("completedRequests", throughput.completedRequests());
+                data.put("reportedRequests", throughput.reportedRequests());
+                data.put("outputEstimated", throughput.outputEstimated());
+                yield data;
+            }
             case AgentEvent.SubagentStarted t -> {
                 final var data = new LinkedHashMap<String, Object>();
                 data.put("subagentId", t.subagentId() == null ? "" : t.subagentId());

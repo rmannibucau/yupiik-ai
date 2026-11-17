@@ -357,8 +357,10 @@ public class RunCommand implements Runnable {
                 + " llmMs=" + Math.max(0, elapsedMs - metrics.toolMs.get())
                 + " outputTokens=" + metrics.throughput.get().outputTokens()
                 + " llmActiveMs=" + metrics.throughput.get().activeMs()
+                + " llmReportedMs=" + metrics.throughput.get().reportedMs()
                 + " outTokPerSec=" + rate(metrics.throughput.get().tokensPerSecond())
                 + " realTokPerSec=" + rate(metrics.throughput.get().reportedTokensPerSecond())
+                + throughputAuditFields(metrics.throughput.get())
                 + " answerChars=" + metrics.answerChars.get()
                 + " model=" + metrics.model;
         try {
@@ -378,6 +380,15 @@ public class RunCommand implements Runnable {
      */
     private static String rate(final double value) {
         return String.format(Locale.ROOT, "%.1f", value);
+    }
+
+    private static String throughputAuditFields(final AgentEvent.Throughput throughput) {
+        return " requestTokPerSec=" + rate(throughput.tokensPerSecond())
+                + " serverTokPerSec=" + rate(throughput.reportedTokensPerSecond())
+                + " reportedOutputTokens=" + throughput.reportedOutputTokens()
+                + " completedRequests=" + throughput.completedRequests()
+                + " reportedRequests=" + throughput.reportedRequests()
+                + " outputEstimated=" + throughput.outputEstimated();
     }
 
     private static final class Metrics {
@@ -599,7 +610,8 @@ public class RunCommand implements Runnable {
                     + " llmActiveMs=" + t.activeMs()
                     + " llmReportedMs=" + t.reportedMs()
                     + " tokPerSec=" + rate(t.tokensPerSecond())
-                    + " realTokPerSec=" + rate(t.reportedTokensPerSecond()));
+                    + " realTokPerSec=" + rate(t.reportedTokensPerSecond())
+                    + throughputAuditFields(t));
         }
 
         @Override

@@ -1222,7 +1222,11 @@ public class AgentLoop {
                         turnState.outputTokens,
                         turnState.reasoningTokens,
                         turnState.llmActiveMs,
-                        turnState.llmReportedMs),
+                        turnState.llmReportedMs,
+                        turnState.reportedOutputTokens,
+                        turnState.llmCalls,
+                        turnState.reportedRequests,
+                        turnState.outputEstimated),
                 currentSessionId,
                 subagentId,
                 subagentName);

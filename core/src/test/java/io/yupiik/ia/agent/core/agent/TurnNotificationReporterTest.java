@@ -109,7 +109,7 @@ class TurnNotificationReporterTest {
     @Test
     void recordThroughputAccumulatesIntoTheTurnState() {
         final var state = new TurnState();
-        // the turn paused for 150ms while this request was in flight
+        // The caller has already removed the 150ms pause from the captured request duration.
         state.llmPausedMs = 300;
         final var reporter = new TurnNotificationReporter(
                 state,
@@ -123,11 +123,13 @@ class TurnNotificationReporterTest {
                 () -> false,
                 b -> {},
                 e -> {});
-        reporter.recordThroughput(
-                Message.assistant("hello", List.of()), new Usage(10, 120, 130, 0, 0, 30, 250), 1000, 150);
+        reporter.recordThroughput(Message.assistant("hello", List.of()), new Usage(10, 120, 130, 0, 0, 30, 250), 850);
         assertEquals(120, state.outputTokens);
         assertEquals(30, state.reasoningTokens);
         assertEquals(250, state.llmReportedMs);
+        assertEquals(120, state.reportedOutputTokens);
+        assertEquals(1, state.reportedRequests);
+        assertFalse(state.outputEstimated);
         assertEquals(850, state.llmActiveMs); // wall 1000 minus the 150 pause
     }
 
@@ -146,7 +148,8 @@ class TurnNotificationReporterTest {
                 () -> false,
                 b -> {},
                 e -> {});
-        reporter.recordThroughput(Message.assistant("hello world", List.of()), Usage.EMPTY, 100, 0);
+        reporter.recordThroughput(Message.assistant("hello world", List.of()), Usage.EMPTY, 100);
+        assertTrue(state.outputEstimated);
         assertTrue(state.outputTokens > 0, "the produced tokens must be estimated from the content");
     }
 
@@ -167,7 +170,8 @@ class TurnNotificationReporterTest {
                 e -> {});
         final var call = new ToolCall(
                 "id1", "function", new ToolCall.FunctionCall("bash", "{\"command\":\"echo hello\"}"), null);
-        reporter.recordThroughput(Message.assistant("", List.of(call)), Usage.EMPTY, 100, 0);
+        reporter.recordThroughput(Message.assistant("", List.of(call)), Usage.EMPTY, 100);
+        assertTrue(state.outputEstimated);
         assertTrue(state.outputTokens > 0, "tool arguments must contribute to the estimate");
     }
 

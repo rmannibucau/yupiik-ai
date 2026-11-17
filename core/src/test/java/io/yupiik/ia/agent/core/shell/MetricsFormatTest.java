@@ -30,26 +30,63 @@ import org.junit.jupiter.api.Test;
 class MetricsFormatTest {
     @Test
     void measuredRateOnly() {
-        assertEquals("42.5 tok/s", MetricsFormat.tokPerSec(new AgentEvent.Throughput(85, 2_000, 0)));
+        assertEquals(
+                "request 42.5 tok/s",
+                MetricsFormat.tokPerSec(new AgentEvent.Throughput(85, 0, 2_000, 0, 0, 1, 0, false)));
     }
 
     @Test
     void measuredRateNextToTheServerView() {
         assertEquals(
-                "42.5 tok/s (real 40.0 tok/s)", MetricsFormat.tokPerSec(new AgentEvent.Throughput(85, 2_000, 2_125)));
+                "request 42.5 tok/s · server 40.0 tok/s",
+                MetricsFormat.tokPerSec(new AgentEvent.Throughput(85, 0, 2_000, 2_125, 85, 1, 1, false)));
     }
 
     @Test
     void serverViewAloneWhenNothingWasMeasured() {
-        assertEquals("real 40.0 tok/s", MetricsFormat.tokPerSec(new AgentEvent.Throughput(85, 0, 2_125)));
+        assertEquals(
+                "server 40.0 tok/s",
+                MetricsFormat.tokPerSec(new AgentEvent.Throughput(85, 0, 0, 2_125, 85, 1, 1, false)));
     }
 
     @Test
     void nothingMeasurableYieldsNoSegment() {
         assertEquals("", MetricsFormat.tokPerSec(AgentEvent.Throughput.EMPTY));
-        assertEquals("", MetricsFormat.tokPerSec(new AgentEvent.Throughput(0, 1_000, 0)), "no output token");
-        assertEquals("", MetricsFormat.tokPerSec(new AgentEvent.Throughput(100, 0, 0)), "no time known");
+        assertEquals(
+                "",
+                MetricsFormat.tokPerSec(new AgentEvent.Throughput(0, 0, 1_000, 0, 0, 1, 0, false)),
+                "no output token");
+        assertEquals(
+                "", MetricsFormat.tokPerSec(new AgentEvent.Throughput(100, 0, 0, 0, 0, 1, 0, false)), "no time known");
         assertEquals("", MetricsFormat.tokPerSec(null));
+    }
+
+    @Test
+    void estimatedOutputMarksOnlyTheRequestRate() {
+        assertEquals(
+                "request ~42.5 tok/s · server 40.0 tok/s (partial)",
+                MetricsFormat.tokPerSec(new AgentEvent.Throughput(170, 0, 4_000, 2_125, 85, 2, 1, true)));
+        assertEquals(
+                "request ~42.5 tok/s",
+                MetricsFormat.tokPerSec(new AgentEvent.Throughput(85, 0, 2_000, 0, 0, 1, 0, true)));
+    }
+
+    @Test
+    void partialServerRateUsesOnlyMatchedOutput() {
+        assertEquals(
+                "request 50.0 tok/s · server 40.0 tok/s (partial)",
+                MetricsFormat.tokPerSec(new AgentEvent.Throughput(200, 0, 4_000, 2_000, 80, 3, 1, false)));
+        assertEquals(
+                "server 40.0 tok/s (partial)",
+                MetricsFormat.tokPerSec(new AgentEvent.Throughput(200, 0, 0, 2_000, 80, 3, 1, false)));
+    }
+
+    @Test
+    void aggregateRatesAreDurationWeightedRatherThanAveragesOfRates() {
+        // Requests of 100 tokens/1s and 100 tokens/3s: 50 tok/s, not 66.7 tok/s.
+        assertEquals(
+                "request 50.0 tok/s · server 80.0 tok/s",
+                MetricsFormat.tokPerSec(new AgentEvent.Throughput(200, 0, 4_000, 2_500, 200, 2, 2, false)));
     }
 
     @Test
@@ -77,7 +114,7 @@ class MetricsFormatTest {
         assertEquals(2, lines.length, "the report contract stays exactly two lines: " + report);
         assertEquals(
                 "2 LLM (1.2s think) · out 953 tok · reasoning 251 tok · 3 tools (600ms/700ms)"
-                        + " · 602.0 tok/s (real 566.6 tok/s) · reasoning 125.5 tok/s · 12.3s"
+                        + " · request 602.0 tok/s · server 566.6 tok/s · reasoning/request 125.5 tok/s · 12.3s"
                         + " · session: 1 LLM calls · reasoning 500 tok",
                 lines[1]);
     }
@@ -86,12 +123,21 @@ class MetricsFormatTest {
     void fullModeKeepsTheCompactShapeWithoutReasoning() {
         final var transcript = new ConversationTranscript();
         transcript.onEvent(new AgentEvent.TurnMetrics(
-                1, 0, 300, 400, 2, 5_000, new AgentEvent.Throughput(120, 0, 1_000, 0), "s1", null, null));
+                1,
+                0,
+                300,
+                400,
+                2,
+                5_000,
+                new AgentEvent.Throughput(120, 0, 1_000, 0, 0, 1, 0, false),
+                "s1",
+                null,
+                null));
         final var report =
                 MetricsFormat.report(new MetricsConfiguration(true, true, MetricsDisplayMode.FULL), transcript, null);
         assertEquals(
                 "metrics: showPerTurn=true showSessionTotals=true displayMode=FULL\n"
-                        + "1 LLM · 2 tools (300ms/400ms) · 120.0 tok/s · 5s",
+                        + "1 LLM · 2 tools (300ms/400ms) · request 120.0 tok/s · 5s",
                 report);
     }
 
@@ -174,7 +220,16 @@ class MetricsFormatTest {
     private static ConversationTranscript transcriptWithReasoningTurn() {
         final var transcript = new ConversationTranscript();
         transcript.onEvent(new AgentEvent.TurnMetrics(
-                2, 1_234, 600, 700, 3, 12_300, new AgentEvent.Throughput(1_204, 251, 2_000, 2_125), "s1", null, null));
+                2,
+                1_234,
+                600,
+                700,
+                3,
+                12_300,
+                new AgentEvent.Throughput(1_204, 251, 2_000, 2_125, 1_204, 2, 2, false),
+                "s1",
+                null,
+                null));
         return transcript;
     }
 

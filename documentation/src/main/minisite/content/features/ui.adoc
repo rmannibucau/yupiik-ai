@@ -70,6 +70,21 @@ Presentation truncation is separate from the xref:output.adoc[output optimizatio
 The cached percentage is the share of this full input served from cache, not the ratio of cached to uncached input.
 `context ~` estimates the active request context, while `last real` shows the full input of the last matching measured request; neither is a cumulative session total.
 
+=== Throughput
+
+Per-turn throughput uses explicit labels, for example `request 42.5 tok/s · server 40.0 tok/s`.
+The request rate divides total output tokens by total request time, including prefill, provider queueing, network overhead and retries except explicitly tracked waits such as retry backoffs and provider throttles.
+Request timing ends when the stream returns, not when the last visible text token arrives, so trailing usage and hidden reasoning processing remain included.
+Tool execution, user input and other work outside these requests are excluded.
+Rates across requests are weighted by duration (summed tokens divided by summed time), not averaged per-request rates.
+
+The server rate uses provider-defined generation timing and only the output tokens from requests with matching reported timing.
+It is not necessarily a decode-only rate or directly comparable across providers.
+When only some completed requests have matched server timing, the label becomes `server 40.0 tok/s (partial)` rather than dividing all output by a partial duration.
+If usage is missing, the request label marks estimated output with `~`, for example `request ~42.5 tok/s`.
+These estimates cover observable output and exclude hidden reasoning; they are not provider usage or billing totals.
+Full metrics label the reasoning-token rate `reasoning/request`, using the same request-time denominator.
+
 == Account usage quota
 
 The TUI and web sidebars show *Usage* below the context gauge when the provider advertises `capabilities.codex.enableUsage`.

@@ -68,6 +68,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -90,6 +91,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.Isolated;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Runs isolated from all other classes: it swaps the JVM-global {@code System.out}/{@code System.err}
@@ -1095,6 +1098,97 @@ class RunCommandTest {
         assertTrue(
                 line.contains("promptTokens=15 completionTokens=25 totalTokens=40"),
                 "per-request usage aggregated once, the display refresh must not double-count: " + line);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void throughputMetricsFilesRetainLegacyRatesAndExposeCoverage(final boolean providerTiming) throws IOException {
+        final var shellRegistry = testRegistry();
+        // Deliberately use different request/server coverage: the server rate must use 60, not 240 tokens.
+        final var throughput = new AgentEvent.Throughput(
+                240,
+                40,
+                2000,
+                providerTiming ? 400 : 0,
+                providerTiming ? 60 : 0,
+                3,
+                providerTiming ? 1 : 0,
+                !providerTiming);
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                shellRegistry.onEvent(
+                        new AgentEvent.TurnMetrics(3, 100, 200, 150, 2, 2500, throughput, sessionId, null, null));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done", sessionId));
+                return "done";
+            }
+        };
+        final var summaryFile = temp.resolve("throughput-summary.txt");
+        final var detailFile = temp.resolve("throughput-events.txt");
+        final var command = new RunCommand(
+                new RunCommand.RunConf(
+                        "say hi",
+                        "",
+                        "",
+                        false,
+                        "",
+                        "collapsed",
+                        summaryFile.toString(),
+                        detailFile.toString(),
+                        "",
+                        "",
+                        1000000,
+                        defaultCorrectionPrompt()),
+                shellRegistry,
+                runtimeFactory(agentLoop, new PermissionService(null)),
+                sessionStore(),
+                null,
+                mcpManager(),
+                mapper,
+                new FeedbackGateProducer().feedbackGate());
+
+        command.run();
+
+        final var summaryLines = Files.readAllLines(summaryFile, StandardCharsets.UTF_8);
+        assertEquals(1, summaryLines.size());
+        final var eventLines = Files.readAllLines(detailFile, StandardCharsets.UTF_8).stream()
+                .filter(line -> line.startsWith("turnMetrics "))
+                .toList();
+        assertEquals(1, eventLines.size());
+        final var summary = metricFields(summaryLines.getFirst());
+        final var event = metricFields(eventLines.getFirst());
+        assertEquals("120.0", summary.get("outTokPerSec"));
+        assertEquals("120.0", event.get("tokPerSec"));
+        for (final var fields : List.of(summary, event)) {
+            assertEquals("240", fields.get("outputTokens"));
+            assertEquals("2000", fields.get("llmActiveMs"));
+            assertEquals(providerTiming ? "400" : "0", fields.get("llmReportedMs"));
+            assertEquals(providerTiming ? "150.0" : "0.0", fields.get("realTokPerSec"));
+            assertEquals("120.0", fields.get("requestTokPerSec"));
+            assertEquals(providerTiming ? "150.0" : "0.0", fields.get("serverTokPerSec"));
+            assertEquals(providerTiming ? "60" : "0", fields.get("reportedOutputTokens"));
+            assertEquals("3", fields.get("completedRequests"));
+            assertEquals(providerTiming ? "1" : "0", fields.get("reportedRequests"));
+            assertEquals(providerTiming ? "false" : "true", fields.get("outputEstimated"));
+        }
+    }
+
+    private static Map<String, String> metricFields(final String line) {
+        final var fields = new HashMap<String, String>();
+        for (final var field : line.split("\\s+")) {
+            final var separator = field.indexOf('=');
+            if (separator > 0) {
+                assertNull(
+                        fields.put(field.substring(0, separator), field.substring(separator + 1)),
+                        "duplicate metric: " + field);
+            }
+        }
+        return fields;
     }
 
     private final AtomicBoolean mcpStarted = new AtomicBoolean();

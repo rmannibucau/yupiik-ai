@@ -28,6 +28,45 @@ import org.junit.jupiter.api.Test;
 class WebEventDtoTest {
 
     @Test
+    void turnMetricsExposeRequestAndCoveredServerThroughput() {
+        final var throughput = new AgentEvent.Throughput(300, 40, 2000, 500, 100, 3, 1, true);
+        final var dto = WebEventDto.of(new AgentEvent.TurnMetrics(3, 10, 20, 15, 2, 3000, throughput, "s1"));
+        assertEquals("turn-metrics", dto.type());
+        assertEquals(3, dto.data().get("llmCalls"));
+        assertEquals(10L, dto.data().get("thinkingDurationMs"));
+        assertEquals(20L, dto.data().get("toolDurationSumMs"));
+        assertEquals(15L, dto.data().get("toolDurationWallMs"));
+        assertEquals(2, dto.data().get("toolsRun"));
+        assertEquals(3000L, dto.data().get("turnDurationMs"));
+        assertEquals(300, dto.data().get("outputTokens"));
+        assertEquals(40, dto.data().get("reasoningTokens"));
+        assertEquals(150.0, dto.data().get("tokensPerSecond"));
+        assertEquals(150.0, dto.data().get("requestTokensPerSecond"));
+        assertEquals(200.0, dto.data().get("serverTokensPerSecond"));
+        assertEquals(2000L, dto.data().get("activeMs"));
+        assertEquals(500L, dto.data().get("reportedMs"));
+        assertEquals(100, dto.data().get("reportedOutputTokens"));
+        assertEquals(3, dto.data().get("completedRequests"));
+        assertEquals(1, dto.data().get("reportedRequests"));
+        assertEquals(true, dto.data().get("outputEstimated"));
+    }
+
+    @Test
+    void missingThroughputExposesZeroMetrics() {
+        final var data = WebEventDto.of(new AgentEvent.TurnMetrics(0, 0, 0, 0, 0, 0, null, "s1"))
+                .data();
+        assertEquals(0.0, data.get("tokensPerSecond"));
+        assertEquals(0.0, data.get("requestTokensPerSecond"));
+        assertEquals(0.0, data.get("serverTokensPerSecond"));
+        assertEquals(0L, data.get("activeMs"));
+        assertEquals(0L, data.get("reportedMs"));
+        assertEquals(0, data.get("reportedOutputTokens"));
+        assertEquals(0, data.get("completedRequests"));
+        assertEquals(0, data.get("reportedRequests"));
+        assertEquals(false, data.get("outputEstimated"));
+    }
+
+    @Test
     void toolStreamCarriesNameAndFragment() {
         final var dto = WebEventDto.of(new AgentEvent.ToolStream("bash", "line 1", "s1", null, null));
         assertEquals("tool-stream", dto.type());

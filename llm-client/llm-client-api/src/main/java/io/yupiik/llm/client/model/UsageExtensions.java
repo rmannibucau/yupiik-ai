@@ -16,6 +16,7 @@
 package io.yupiik.llm.client.model;
 
 import java.util.Map;
+import java.util.function.DoubleUnaryOperator;
 
 /**
  * Reads the non standard usage extensions emitted by some OpenAI compatible servers and gateways.
@@ -35,6 +36,9 @@ public final class UsageExtensions {
 
     /**
      * Extracts a provider side generation time.
+     * Millisecond aliases take precedence over seconds, then rates. The first candidate that
+     * converts to a finite, positive duration below {@code 0x1p63} and rounds to at least one
+     * millisecond wins; unusable candidates do not prevent trying later aliases.
      *
      * @param extensions the non standard fields of the usage payload, may be {@code null}.
      * @param completionTokens the completion token count of the same payload, used to convert a rate into a duration.
@@ -44,42 +48,58 @@ public final class UsageExtensions {
         if (extensions == null || extensions.isEmpty()) {
             return null;
         }
-        final var millis = number(extensions, "generation_time_ms", "generation_time_millis", "generation_ms");
-        if (millis != null && millis > 0) {
-            return round(millis);
+        final var millis =
+                duration(extensions, value -> value, "generation_time_ms", "generation_time_millis", "generation_ms");
+        if (millis != null) {
+            return millis;
         }
         // seconds, the most common gateway shape.
-        final var seconds = number(extensions, "generation_time", "generation_time_seconds");
-        if (seconds != null && seconds > 0) {
-            return round(seconds * 1_000d);
+        final var seconds = duration(extensions, value -> value * 1_000d, "generation_time", "generation_time_seconds");
+        if (seconds != null) {
+            return seconds;
         }
         // rate, converted back to a duration when the token count is known.
-        final var perSecond = number(extensions, "tokens_per_second", "tps", "output_tokens_per_second");
-        final var tokens = completionTokens == null ? 0d : completionTokens;
-        if (perSecond != null && perSecond > 0 && tokens > 0) {
-            return round(tokens * 1_000d / perSecond);
+        if (completionTokens != null && completionTokens > 0) {
+            return duration(
+                    extensions,
+                    value -> completionTokens * 1_000d / value,
+                    "tokens_per_second",
+                    "tps",
+                    "output_tokens_per_second");
         }
         return null;
     }
 
-    private static Double number(final Map<String, Object> extensions, final String... keys) {
+    private static Long duration(
+            final Map<String, Object> extensions, final DoubleUnaryOperator conversion, final String... keys) {
         for (final var key : keys) {
-            final var value = extensions.get(key);
-            if (value instanceof final Number n) {
-                return n.doubleValue();
+            final var value = number(extensions.get(key));
+            if (value == null || !Double.isFinite(value) || value <= 0) {
+                continue;
             }
-            if (value instanceof final String s && !s.isBlank()) {
-                try {
-                    return Double.parseDouble(s.strip());
-                } catch (final NumberFormatException e) {
-                    return null;
-                }
+            final var converted = conversion.applyAsDouble(value);
+            if (!Double.isFinite(converted) || converted <= 0 || converted >= 0x1p63) {
+                continue;
+            }
+            final var rounded = Math.round(converted);
+            if (rounded > 0) {
+                return rounded;
             }
         }
         return null;
     }
 
-    private static Long round(final double value) {
-        return Math.max(0L, Math.round(value));
+    private static Double number(final Object value) {
+        if (value instanceof final Number n) {
+            return n.doubleValue();
+        }
+        if (value instanceof final String s && !s.isBlank()) {
+            try {
+                return Double.parseDouble(s.strip());
+            } catch (final NumberFormatException e) {
+                // Try the next alias.
+            }
+        }
+        return null;
     }
 }

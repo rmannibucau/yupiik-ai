@@ -143,18 +143,14 @@ public final class TurnNotificationReporter {
     }
 
     /**
-     * Accumulates one LLM request in the turn output throughput: the time it really spent generating
-     * (wall time minus the throttles and retry backoffs it waited for) and the tokens it produced.
+     * Accumulates delivered output and logical request time. Provider timing uses matched usage only.
      *
      * @param assistant the message produced by the request.
      * @param usage the usage reported by the provider, {@link Usage#EMPTY} when none.
-     * @param wallMs wall time of the request, throttles and backoffs included.
-     * @param pausedBeforeMs the turn pause counter before the request started.
+     * @param activeMs duration captured at stream return, with tracked waits already excluded.
      */
-    public void recordThroughput(
-            final Message assistant, final Usage usage, final long wallMs, final long pausedBeforeMs) {
-        final var pausedMs = Math.max(0L, turnState.llmPausedMs - pausedBeforeMs);
-        turnState.llmActiveMs += Math.max(0L, wallMs - pausedMs);
+    public void recordThroughput(final Message assistant, final Usage usage, final long activeMs) {
+        turnState.llmActiveMs += Math.max(0L, activeMs);
         if (usage != null && usage.completionTokens() > 0) {
             turnState.outputTokens += usage.completionTokens();
             if (usage.reasoningTokens() > 0) {
@@ -162,10 +158,14 @@ public final class TurnNotificationReporter {
             }
             if (usage.generationTimeMs() > 0) {
                 turnState.llmReportedMs += usage.generationTimeMs();
+                turnState.reportedOutputTokens += usage.completionTokens();
+                turnState.reportedRequests++;
             }
         } else {
             // no usage from the provider: estimate the produced tokens from what came back
-            turnState.outputTokens += estimateOutputTokens(assistant);
+            final var estimated = estimateOutputTokens(assistant);
+            turnState.outputTokens += estimated;
+            turnState.outputEstimated |= estimated > 0;
         }
     }
 
@@ -217,7 +217,11 @@ public final class TurnNotificationReporter {
                         turnState.outputTokens,
                         turnState.reasoningTokens,
                         turnState.llmActiveMs,
-                        turnState.llmReportedMs),
+                        turnState.llmReportedMs,
+                        turnState.reportedOutputTokens,
+                        turnState.llmCalls,
+                        turnState.reportedRequests,
+                        turnState.outputEstimated),
                 currentSessionId.get(),
                 subagentId.get(),
                 subagentName.get());
