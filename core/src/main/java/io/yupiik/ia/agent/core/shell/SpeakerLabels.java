@@ -76,16 +76,31 @@ public class SpeakerLabels {
         for (final var helper : helpers) {
             functions.put(helper.name(), helper::apply);
         }
-        this.userTemplate = compile(functions, user == null || user.isBlank() ? null : user);
-        this.assistantTemplate = compile(functions, assistant == null || assistant.isBlank() ? null : assistant);
-        this.logsTemplate = compile(functions, logs == null || logs.isBlank() ? null : logs);
+        final var compiler = new HandlebarsCompiler();
+        final var logsSource = logs == null ? "" : logs;
+        // Validate the leaf first, with no partials: even a self-reference must fail
+        // before the source is registered for the speaker templates.
+        this.logsTemplate =
+                compile(compiler, new HandlebarsCompiler.Settings().helpers(functions), "logsTemplate", logsSource);
+        final var settings = new HandlebarsCompiler.Settings()
+                .helpers(functions)
+                .partials(Map.of("logsTemplate", logsSource))
+                .cachePartials(true);
+        this.userTemplate = compile(compiler, settings, "userTemplate", user);
+        this.assistantTemplate = compile(compiler, settings, "assistantTemplate", assistant);
     }
 
     private static Template compile(
-            final Map<String, Function<HelperContext, Object>> functions, final String template) {
-        return new HandlebarsCompiler()
-                .compile(new HandlebarsCompiler.CompilationContext(
-                        new HandlebarsCompiler.Settings().helpers(functions), template == null ? "\u0000" : template));
+            final HandlebarsCompiler compiler,
+            final HandlebarsCompiler.Settings settings,
+            final String name,
+            final String template) {
+        try {
+            return compiler.compile(
+                    new HandlebarsCompiler.CompilationContext(settings, template == null ? "" : template));
+        } catch (final IllegalArgumentException invalid) {
+            throw new IllegalArgumentException("Invalid yca.labels." + name + ": " + invalid.getMessage(), invalid);
+        }
     }
 
     /**

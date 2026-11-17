@@ -30,7 +30,7 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 @JsonModel
 public record LabelsConfiguration(
         @Property(
-                defaultValue = "\"[{{formatDate \\\"HH:mm:ss\\\"}}] {{systemProperty \\\"user.name\\\" \\\"You\\\"}}\"",
+                defaultValue = "\"{{> logsTemplate}} {{systemProperty \\\"user.name\\\" \\\"You\\\"}}\"",
                 documentation =
                         "Handlebars template rendering the user speaker label shown in transcript headers (CLI, TUI, run). "
                                 + "UI only: the LLM conversation keeps its hardcoded user/assistant roles and is never affected. "
@@ -40,13 +40,16 @@ public record LabelsConfiguration(
                                 + "default: {{systemProperty \"user.name\" \"You\"}}. The formatDate helper renders the current "
                                 + "date/time in the JVM default timezone (end-user local time, independent of the internal UTC "
                                 + "clock): {{formatDate}} uses HH:mm:ss and "
-                                + "{{formatDate \"yyyy-MM-dd HH:mm:ss\"}} accepts any java.time pattern. Remove the formatDate "
-                                + "segment to disable the timestamp.")
+                                + "{{formatDate \"yyyy-MM-dd HH:mm:ss\"}} accepts any java.time pattern. "
+                                + "The logsTemplate configuration is usable as a Handlebars partial with {{> logsTemplate}}, "
+                                + "sharing this label's rendering context and helpers; the default uses it for the timestamp. "
+                                + "Customize logsTemplate to change the shared prefix, set it to an empty string to omit it, "
+                                + "or remove the partial reference to disable the prefix for this label only.")
         String userTemplate,
 
         @Property(
                 defaultValue =
-                        "\"[{{formatDate \\\"HH:mm:ss\\\"}}] {{#if model.name}}{{model.provider}}::{{model.name}}{{else}}Assistant{{/if}}\"",
+                        "\"{{> logsTemplate}} {{#if model.name}}{{model.provider}}::{{model.name}}{{else}}Assistant{{/if}}\"",
                 documentation =
                         "Handlebars template rendering the assistant speaker label shown in transcript headers (CLI, TUI, run). "
                                 + "UI only: the LLM conversation keeps its hardcoded user/assistant roles and is never affected, "
@@ -56,7 +59,11 @@ public record LabelsConfiguration(
                                 + "The default renders the active provider and model, e.g. openai::gpt-5-mini; when no model is "
                                 + "resolved (no provider configured yet) it falls back to: Assistant. The formatDate helper is "
                                 + "available exactly like in the user label (JVM default timezone): {{formatDate}} (HH:mm:ss) or "
-                                + "{{formatDate \"pattern\"}} with any java.time pattern; remove it to disable the timestamp.")
+                                + "{{formatDate \"pattern\"}} with any java.time pattern. "
+                                + "The logsTemplate configuration is usable as a Handlebars partial with {{> logsTemplate}}, "
+                                + "sharing this label's rendering context and helpers; the default uses it for the timestamp. "
+                                + "Customize logsTemplate to change the shared prefix, set it to an empty string to omit it, "
+                                + "or remove the partial reference to disable the prefix for this label only.")
         String assistantTemplate,
 
         @Property(
@@ -68,7 +75,10 @@ public record LabelsConfiguration(
                                 + "sessionId and configuration (the whole yca configuration as a map). "
                                 + "The formatDate helper is available exactly like in the user/assistant labels (JVM default "
                                 + "timezone): {{formatDate}} (HH:mm:ss) or {{formatDate \"pattern\"}} with any java.time pattern; "
-                                + "remove it to disable the timestamp.")
+                                + "remove it to disable the timestamp. "
+                                + "Also available as {{> logsTemplate}} in userTemplate and assistantTemplate, including their "
+                                + "defaults. This template cannot reference any partials (including itself), preventing cycles. "
+                                + "An empty string removes the shared prefix; a standalone blank log label falls back to Logs.")
         String logsTemplate) {
 
     /** The rendered user label when a template renders blank: the OS user name, else "You". */
