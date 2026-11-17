@@ -192,7 +192,10 @@ public final class SlackWorker {
                         .orElse(null);
             }
             if (grant != null) {
-                contextStorage.validate(executor, contextConfiguration.allowSwapBackedTmpfs());
+                contextStorage.validate(
+                        executor,
+                        contextConfiguration.allowSwapBackedTmpfs(),
+                        contextConfiguration.allowContainerLogs());
             }
             final var root = Path.of(executor.attemptRoot()).toAbsolutePath().normalize();
             directory = new AttemptPreparation(json)

@@ -454,7 +454,8 @@ class SlackContextWorkerTest {
                 2,
                 retention,
                 false,
-                new SlackThreadConfiguration(true, List.of("C1"), 20, 100, 65536, 3, 24));
+                new SlackThreadConfiguration(true, List.of("C1"), 20, 100, 65536, 3, 24),
+                false);
     }
 
     private static String threadResponse() {
@@ -622,7 +623,8 @@ class SlackContextWorkerTest {
                 2,
                 600,
                 false,
-                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24),
+                false);
     }
 
     private static String memberResponse() {

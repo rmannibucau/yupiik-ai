@@ -61,6 +61,7 @@ The defaults are conservative; setting `enabled=true` alone does not enable sear
 |Property |Default |Meaning
 |`slack.context.enabled` |`false` |Host opt-in to the attempt-scoped context tool.
 |`slack.context.allowSwapBackedTmpfs` |`false` |Explicit operator acceptance of missing tmpfs `noswap` only; all other storage, privacy and logging controls remain mandatory.
+|`slack.context.allowContainerLogs` |`false` |Explicit acceptance of Docker retaining agent stdout/stderr containing Slack context; logging also requires `slack.executor.docker.disableContainerLogs=false`.
 |`slack.context.resolveMentions` |`true` |Allow minimal names for already granted raw member IDs when context is enabled.
 |`slack.context.searchEnabled` |`false` |Separate opt-in to approved public-message search.
 |`slack.context.thread.enabled` |`false` |Prefetch bounded current-thread context and enable explicit thread pagination.
@@ -166,8 +167,12 @@ Directory handles and no-follow checks must reject symlink replacement, traversa
 Both pollers use a nominal 25 ms interval; upstream calls, scheduling and filesystem overhead add latency, so this is not a wall-clock SLA.
 Only the controller calls Slack with controller-held credentials; the agent receives no Slack token or direct Slack route.
 
-Require the neutral `docker.disableContainerLogs=true` setting (`SLACK_EXECUTOR_DOCKER_DISABLECONTAINERLOGS=true`) so the actual agent launch uses `--log-driver=none`.
+By default, require the neutral `docker.disableContainerLogs=true` setting (`SLACK_EXECUTOR_DOCKER_DISABLECONTAINERLOGS=true`) so the actual agent launch uses `--log-driver=none`.
 Its shared default remains false for GitHub and context-disabled tasks.
+To explicitly accept persistent agent logs for debugging, set both `SLACK_CONTEXT_ALLOWCONTAINERLOGS=true` and `SLACK_EXECUTOR_DOCKER_DISABLECONTAINERLOGS=false` in the protected controller environment.
+This permits `docker logs` when the daemon's logging driver supports it; it does not change that driver's retention or rotation policy, expose hidden tool output, or retain containers after normal cleanup.
+Agent stdout/stderr may contain confidential Slack content and remain in host logging storage or its backups; transient attempt cleanup is not a log-erasure guarantee.
+The opt-in relaxes only log suppression; filesystem, hidden-tool-output, credential, admission and lifetime checks remain enforced, and enabling the opt-in alone does not enable Docker logging.
 Force hidden tool output and prohibit HTTP/request/body tracing; host diagnostics may contain bounded categories and runtime identity, never payloads or exception messages containing context.
 Hidden output alone does not prevent retention.
 Context attempts disable memory, skills, subagents, notifications and hooks even when the trusted agent document enables them.
@@ -194,7 +199,7 @@ Install the mount filename without `.example`; verify its escaped name with `sys
 Provisioning, activation and removal remain operator actions; never unmount to force an uncertain runtime to disappear.
 
 For a host without tmpfs `noswap` support, an operator may explicitly set `slack.context.allowSwapBackedTmpfs=true` through `SLACK_CONTEXT_ALLOWSWAPBACKEDTMPFS=true` after reviewing confidentiality and swap retention risks.
-This exception relaxes only the `noswap` requirement: tmpfs, `nodev,nosuid,noexec`, dedicated disjoint roots, private UID/GID 10002 mode-0700 ownership, restricted mounts and mandatory log suppression remain required.
+This exception relaxes only the `noswap` requirement: tmpfs, `nodev,nosuid,noexec`, dedicated disjoint roots, private UID/GID 10002 mode-0700 ownership, restricted mounts and the separately enforced logging policy remain required.
 Confidential names, retrieved messages, prompts and answers may be written to host swap and remain there after attempt deletion, unmount or runtime termination; cleanup does not establish erasure from swap, snapshots or backups.
 Neither this exception nor the strict canary guarantees zero retention, and operator acceptance does not override Slack policy or provider-retention requirements.
 The application flag does not automatically change the mount unit or launcher: the operator must separately review any removal of `noswap` from the owned mount unit and preserve all remaining controls and launcher wiring.

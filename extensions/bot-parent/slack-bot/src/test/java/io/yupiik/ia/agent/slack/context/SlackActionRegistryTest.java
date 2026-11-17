@@ -257,6 +257,7 @@ class SlackActionRegistryTest {
                 2,
                 600,
                 false,
-                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24),
+                false);
     }
 }

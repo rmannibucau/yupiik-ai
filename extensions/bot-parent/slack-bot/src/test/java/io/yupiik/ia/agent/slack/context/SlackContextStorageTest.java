@@ -41,7 +41,7 @@ class SlackContextStorageTest {
         final var root = root("custom attempts");
         final var metadata = "81 12 0:30 /some/subdirectory " + escape(root)
                 + " rw,nosuid,nodev,noexec shared:7 - tmpfs tmpfs rw,noswap,size=512m";
-        assertEquals(root, storage(List.of(disk(), metadata)).validate(configuration(root), false));
+        assertEquals(root, storage(List.of(disk(), metadata)).validate(configuration(root), false, false));
     }
 
     @Test
@@ -50,7 +50,7 @@ class SlackContextStorageTest {
         assertEquals(
                 root,
                 storage(List.of(disk(), mount(root, "tmpfs", "rw,nodev,nosuid,noexec", "rw,noswap")))
-                        .validate(configuration(root), false));
+                        .validate(configuration(root), false, false));
     }
 
     @Test
@@ -62,7 +62,7 @@ class SlackContextStorageTest {
                 throw new IOException("unavailable");
             }
         };
-        assertThrows(IOException.class, () -> helper.validate(configuration(root), false));
+        assertThrows(IOException.class, () -> helper.validate(configuration(root), false, false));
     }
 
     @Test
@@ -72,10 +72,10 @@ class SlackContextStorageTest {
         final var child = mount(root, "ext4", "rw,nodev,nosuid,noexec", "rw");
         for (final var lines : List.of(List.of(disk(), parent, child), List.of(child, parent, disk()))) {
             for (final var accepted : List.of(false, true)) {
-                assertThrows(IOException.class, () -> storage(lines).validate(configuration(root), accepted));
+                assertThrows(IOException.class, () -> storage(lines).validate(configuration(root), accepted, false));
             }
         }
-        assertEquals(root, storage(List.of(disk(), parent)).validate(configuration(root), false));
+        assertEquals(root, storage(List.of(disk(), parent)).validate(configuration(root), false, false));
     }
 
     @Test
@@ -86,7 +86,7 @@ class SlackContextStorageTest {
                 assertThrows(
                         IOException.class,
                         () -> storage(List.of(mount(root, type, "rw,nodev,nosuid,noexec", "rw,noswap")))
-                                .validate(configuration(root), accepted));
+                                .validate(configuration(root), accepted, false));
             }
         }
         for (final var flags :
@@ -96,14 +96,14 @@ class SlackContextStorageTest {
                 assertThrows(
                         IOException.class,
                         () -> storage(List.of(mount(root, "tmpfs", flags, "rw,noswap,nodev,nosuid,noexec")))
-                                .validate(configuration(root), accepted));
+                                .validate(configuration(root), accepted, false));
             }
         }
         for (final var flags : List.of("rw", "rw,swap", "rw,noswap=false")) {
             assertThrows(
                     IOException.class,
                     () -> storage(List.of(mount(root, "tmpfs", "rw,nodev,nosuid,noexec", flags)))
-                            .validate(configuration(root), false));
+                            .validate(configuration(root), false, false));
         }
     }
 
@@ -111,10 +111,10 @@ class SlackContextStorageTest {
     void explicitlyAcceptedSwapBackedTmpfsRelaxesOnlyNoswap() throws Exception {
         final var root = root("accepted attempts");
         final var helper = storage(List.of(disk(), mount(root, "tmpfs", "rw,nodev,nosuid,noexec", "rw")));
-        assertThrows(IOException.class, () -> helper.validate(configuration(root), false));
-        assertEquals(root, helper.validate(configuration(root), true));
+        assertThrows(IOException.class, () -> helper.validate(configuration(root), false, false));
+        assertEquals(root, helper.validate(configuration(root), true, false));
         Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwxr-x---"));
-        assertThrows(IOException.class, () -> helper.validate(configuration(root), true));
+        assertThrows(IOException.class, () -> helper.validate(configuration(root), true, false));
     }
 
     @Test
@@ -129,7 +129,7 @@ class SlackContextStorageTest {
                 List.of(mount(home.resolve("attempts-other"), "tmpfs", "rw,nodev,nosuid,noexec", "rw,noswap")),
                 List.of(valid.replace(escape(root), escape(root) + "\\999")))) {
             for (final var accepted : List.of(false, true)) {
-                assertThrows(IOException.class, () -> storage(lines).validate(configuration(root), accepted));
+                assertThrows(IOException.class, () -> storage(lines).validate(configuration(root), accepted, false));
             }
         }
     }
@@ -139,17 +139,19 @@ class SlackContextStorageTest {
         final var root = root("attempts");
         final var helper = storage(List.of(mount(home, "tmpfs", "rw,nodev,nosuid,noexec", "rw,noswap")));
         for (final var path : List.of(Path.of("relative"), root.resolve(".."))) {
-            assertThrows(IllegalArgumentException.class, () -> helper.validate(configuration(path), false));
+            assertThrows(IllegalArgumentException.class, () -> helper.validate(configuration(path), false, false));
         }
-        assertThrows(IllegalArgumentException.class, () -> helper.validate(configuration(Path.of("")), false));
-        assertThrows(IOException.class, () -> helper.validate(configuration(home.resolve("missing")), false));
+        assertThrows(IllegalArgumentException.class, () -> helper.validate(configuration(Path.of("")), false, false));
+        assertThrows(IOException.class, () -> helper.validate(configuration(home.resolve("missing")), false, false));
         final var link = Files.createSymbolicLink(home.resolve("link"), root);
         final var nested = Files.createDirectory(root.resolve("nested"));
-        assertThrows(IOException.class, () -> helper.validate(configuration(link), true));
-        assertThrows(IOException.class, () -> helper.validate(configuration(link.resolve(nested.getFileName())), true));
+        assertThrows(IOException.class, () -> helper.validate(configuration(link), true, false));
+        assertThrows(
+                IOException.class,
+                () -> helper.validate(configuration(link.resolve(nested.getFileName())), true, false));
         for (final var permissions : List.of("rwxr-x---", "rwx---rwx", "rw-------")) {
             Files.setPosixFilePermissions(root, PosixFilePermissions.fromString(permissions));
-            assertThrows(IOException.class, () -> helper.validate(configuration(root), false));
+            assertThrows(IOException.class, () -> helper.validate(configuration(root), false, false));
         }
     }
 
@@ -160,8 +162,10 @@ class SlackContextStorageTest {
                 List.of(ExecutorConfiguration.Backend.NONO, ExecutorConfiguration.Backend.KUBERNETES)) {
             final var config =
                     new ExecutorConfiguration(backend, root.toString(), 60, 5, "hidden", null, null, null, null);
-            assertThrows(
-                    IllegalArgumentException.class, () -> storage(List.of()).validate(config, true));
+            for (final var allowLogs : List.of(false, true)) {
+                assertThrows(
+                        IllegalArgumentException.class, () -> storage(List.of()).validate(config, true, allowLogs));
+            }
         }
         final var helper = new SlackContextStorage() {
             @Override
@@ -169,7 +173,9 @@ class SlackContextStorageTest {
                 return "Mac OS X";
             }
         };
-        assertThrows(IllegalArgumentException.class, () -> helper.validate(configuration(root), false));
+        for (final var allowLogs : List.of(false, true)) {
+            assertThrows(IllegalArgumentException.class, () -> helper.validate(configuration(root), false, allowLogs));
+        }
     }
 
     @Test
@@ -218,23 +224,12 @@ class SlackContextStorageTest {
     }
 
     @Test
-    void refusesPersistentLoggingAndMissingServicesBeforeInspectingStorage() {
+    void refusesVisibleToolOutputAndMissingServicesRegardlessOfContainerLogsOptIn() {
         final var safe = configuration(home);
         final var docker = safe.docker();
-        final var services = docker.services();
         for (final var unsafe : List.of(
                 new ExecutorConfiguration(safe.backend(), safe.attemptRoot(), 60, 5, "shown", docker, null, null, null),
                 new ExecutorConfiguration(safe.backend(), safe.attemptRoot(), 60, 5, "hidden", null, null, null, null),
-                new ExecutorConfiguration(
-                        safe.backend(),
-                        safe.attemptRoot(),
-                        60,
-                        5,
-                        "hidden",
-                        new ExecutorConfiguration.Docker("docker", "agent:test", "", null, services, false),
-                        null,
-                        null,
-                        null),
                 new ExecutorConfiguration(
                         safe.backend(),
                         safe.attemptRoot(),
@@ -246,8 +241,60 @@ class SlackContextStorageTest {
                         null,
                         null))) {
             for (final var accepted : List.of(false, true)) {
+                for (final var allowLogs : List.of(false, true)) {
+                    assertThrows(
+                            IllegalArgumentException.class,
+                            () -> storage(List.of()).validate(unsafe, accepted, allowLogs));
+                }
+            }
+        }
+    }
+
+    @Test
+    void containerLogsRequireOptInAndDoNotRelaxMountValidation() throws Exception {
+        final var root = root("logging attempts");
+        final var safe = configuration(root);
+        final var logging = new ExecutorConfiguration(
+                safe.backend(),
+                safe.attemptRoot(),
+                60,
+                5,
+                "hidden",
+                new ExecutorConfiguration.Docker(
+                        "docker", "agent:test", "", null, safe.docker().services(), false),
+                null,
+                null,
+                null);
+        final var valid = mount(root, "tmpfs", "rw,nodev,nosuid,noexec", "rw,noswap");
+        final var helper = storage(List.of(disk(), valid));
+        for (final var accepted : List.of(false, true)) {
+            assertThrows(IllegalArgumentException.class, () -> helper.validate(logging, accepted, false));
+            assertEquals(root, helper.validate(logging, accepted, true));
+            for (final var lines : List.of(
+                    List.<String>of(),
+                    List.of("invalid"),
+                    List.of(valid, valid),
+                    List.of(valid, mount(root.resolve("nested"), "ext4", "rw", "rw")),
+                    List.of(mount(root, "ext4", "rw,nodev,nosuid,noexec", "rw,noswap")),
+                    List.of(mount(root, "overlay", "rw,nodev,nosuid,noexec", "rw,noswap")),
+                    List.of(mount(root, "ramfs", "rw,nodev,nosuid,noexec", "rw,noswap")))) {
+                assertThrows(IOException.class, () -> storage(lines).validate(logging, accepted, true));
+            }
+            for (final var flags :
+                    List.of("rw,nosuid,noexec", "rw,nodev,noexec", "rw,nodev,nosuid", "ro,nodev,nosuid,noexec")) {
                 assertThrows(
-                        IllegalArgumentException.class, () -> storage(List.of()).validate(unsafe, accepted));
+                        IOException.class,
+                        () -> storage(List.of(mount(root, "tmpfs", flags, "rw,noswap,nodev,nosuid,noexec")))
+                                .validate(logging, accepted, true));
+            }
+        }
+        final var swapBacked = storage(List.of(mount(root, "tmpfs", "rw,nodev,nosuid,noexec", "rw")));
+        assertThrows(IOException.class, () -> swapBacked.validate(logging, false, true));
+        assertEquals(root, swapBacked.validate(logging, true, true));
+        for (final var permissions : List.of("rwxr-x---", "rwx---rwx", "rw-------")) {
+            Files.setPosixFilePermissions(root, PosixFilePermissions.fromString(permissions));
+            for (final var accepted : List.of(false, true)) {
+                assertThrows(IOException.class, () -> helper.validate(logging, accepted, true));
             }
         }
     }
@@ -363,7 +410,7 @@ class SlackContextStorageTest {
                     assertEquals(
                             root,
                             storage(List.of(mount(root, "tmpfs", "rw,nodev,nosuid,noexec", "rw,noswap")))
-                                    .validate(executor, accepted));
+                                    .validate(executor, accepted, false));
                     assertEquals(
                             hosts,
                             executor.docker().services().dependencyEgress().allowedHosts());

@@ -98,7 +98,8 @@ public final class SlackDomainFixture implements AutoCloseable {
             2,
             600,
             false,
-            new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
+            new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24),
+            false);
     public final SlackActionRegistry actions = new SlackActionRegistry(contextConfiguration, Clock.systemUTC());
     public final SlackContextAttempt.Dispatcher contextDispatcher =
             new SlackContextAttempt.Dispatcher(contextConfiguration);

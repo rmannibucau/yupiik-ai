@@ -88,7 +88,7 @@ class SlackThreadConfigurationTest {
     @Test
     void nullNestedPolicyNormalizesToDisabledDefaults() {
         final var config = new SlackContextConfiguration(
-                true, true, true, List.of("C1"), 30, 32, 12, 20, 131072, 20, 2, 600, false, null);
+                true, true, true, List.of("C1"), 30, 32, 12, 20, 131072, 20, 2, 600, false, null, false);
         assertEquals(new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24), config.thread());
     }
 }

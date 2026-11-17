@@ -252,7 +252,8 @@ class SlackAdmissionAuthorityRegressionTest {
                         2,
                         600,
                         false,
-                        new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
+                        new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24),
+                        false);
                 try (final var actions = new SlackActionRegistry(context, clock)) {
                     final var admission = new SlackAdmission(
                             fixture.configuration, new SlackMentionParser(), fixture.store, actions, clock);
@@ -358,7 +359,8 @@ class SlackAdmissionAuthorityRegressionTest {
                 2,
                 600,
                 false,
-                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24),
+                false);
     }
 
     private static Map<String, Object> event(

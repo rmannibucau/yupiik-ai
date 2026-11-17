@@ -158,7 +158,10 @@ public class RunCommand implements Runnable {
         final var contextStorage = new SlackContextStorage();
         if (contextConfiguration.enabled()) {
             try {
-                contextStorage.validate(executor.shared(), contextConfiguration.allowSwapBackedTmpfs());
+                contextStorage.validate(
+                        executor.shared(),
+                        contextConfiguration.allowSwapBackedTmpfs(),
+                        contextConfiguration.allowContainerLogs());
             } catch (final IOException invalid) {
                 throw new IllegalArgumentException("Slack context transient execution policy is unavailable", invalid);
             }
@@ -200,7 +203,8 @@ public class RunCommand implements Runnable {
                         json,
                         configuration.stateRoot(),
                         providerBudget,
-                        contextConfiguration.allowSwapBackedTmpfs());
+                        contextConfiguration.allowSwapBackedTmpfs(),
+                        contextConfiguration.allowContainerLogs());
                 final var workers = Executors.newFixedThreadPool(
                         options.parallelism(), Thread.ofVirtual().factory())) {
             final var api = new SlackWebApi(

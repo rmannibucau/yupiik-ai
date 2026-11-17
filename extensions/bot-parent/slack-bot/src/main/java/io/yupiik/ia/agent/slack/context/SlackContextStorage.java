@@ -37,17 +37,19 @@ public class SlackContextStorage {
      * Call only for context-enabled startup, before opening Socket Mode.
      * State/admission disjointness remains the responsibility of the existing caller checks.
      */
-    public Path validate(final ExecutorConfiguration executor, final boolean allowSwapBackedTmpfs) throws IOException {
+    public Path validate(
+            final ExecutorConfiguration executor, final boolean allowSwapBackedTmpfs, final boolean allowContainerLogs)
+            throws IOException {
         if (!"Linux".equals(operatingSystem()) || executor.backend() != ExecutorConfiguration.Backend.DOCKER) {
             throw new IllegalArgumentException("Slack context requires Linux Docker execution");
         }
         final var docker = executor.docker();
-        if (!"hidden".equals(executor.showToolOutput())
-                || docker == null
-                || !docker.disableContainerLogs()
-                || docker.services() == null) {
+        if (!"hidden".equals(executor.showToolOutput()) || docker == null || docker.services() == null) {
+            throw new IllegalArgumentException("Slack context requires hidden tool output and attempt services");
+        }
+        if (!docker.disableContainerLogs() && !allowContainerLogs) {
             throw new IllegalArgumentException(
-                    "Slack context requires hidden tool output, disabled Docker logs and attempt services");
+                    "Slack context requires disabled Docker logs unless slack.context.allowContainerLogs explicitly accepts persistent context logging");
         }
         if (executor.attemptRoot() == null || executor.attemptRoot().isBlank()) {
             throw new IllegalArgumentException("Slack context requires an explicit attempt root");
@@ -71,6 +73,11 @@ public class SlackContextStorage {
             throw new IOException("Slack context attempt root must be an existing private owned directory");
         }
         validateMount(root, mountInfo(), allowSwapBackedTmpfs);
+        if (!docker.disableContainerLogs()) {
+            Logger.getLogger(SlackContextStorage.class.getName())
+                    .warning(
+                            "Slack context Docker logging explicitly accepted: agent stdout/stderr may persist Slack context in Docker logs");
+        }
         return root;
     }
 

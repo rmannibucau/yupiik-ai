@@ -29,6 +29,7 @@ class SlackContextConfigurationTest {
         final var config = new SlackContextConfiguration$FusionConfigurationFactory(Configuration.of(Map.of())).get();
         assertFalse(config.enabled());
         assertFalse(config.allowSwapBackedTmpfs());
+        assertFalse(config.allowContainerLogs());
         assertTrue(config.resolveMentions());
         assertFalse(config.searchEnabled());
         assertEquals(List.of(), config.sourceChannels());
@@ -86,7 +87,8 @@ class SlackContextConfigurationTest {
                             2,
                             600,
                             false,
-                            new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24)));
+                            new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24),
+                            false));
         }
     }
 
@@ -107,7 +109,8 @@ class SlackContextConfigurationTest {
                 2,
                 600,
                 false,
-                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24));
+                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24),
+                false);
         sources.clear();
         assertEquals(List.of("C1"), config.sourceChannels());
         assertThrows(
@@ -129,8 +132,20 @@ class SlackContextConfigurationTest {
                                 2,
                                 600,
                                 false,
-                                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24))
+                                new SlackThreadConfiguration(false, List.of(), 20, 100, 65536, 3, 24),
+                                false)
                         .sourceChannels());
+    }
+
+    @Test
+    void containerLogsRequireExplicitOperatorConfiguration() {
+        final var config = new SlackContextConfiguration$FusionConfigurationFactory(
+                        Configuration.of(Map.of("slack.context.allowContainerLogs", "true")))
+                .get();
+        assertTrue(config.allowContainerLogs());
+        assertFalse(config.allowSwapBackedTmpfs());
+        assertFalse(config.enabled());
+        assertFalse(config.searchEnabled());
     }
 
     @Test

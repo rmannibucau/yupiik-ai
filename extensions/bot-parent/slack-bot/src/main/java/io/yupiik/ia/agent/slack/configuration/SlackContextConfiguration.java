@@ -75,7 +75,13 @@ public record SlackContextConfiguration(
         boolean allowSwapBackedTmpfs,
 
         @Property(documentation = "Deny-by-default bounded public-channel thread context.")
-        SlackThreadConfiguration thread) {
+        SlackThreadConfiguration thread,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Explicitly accept persistent Docker agent logs containing Slack context. Does not enable logging by itself; set slack.executor.docker.disableContainerLogs=false as well.")
+        boolean allowContainerLogs) {
     private static final Pattern PUBLIC_CHANNEL = Pattern.compile("C[A-Z0-9]{1,63}");
 
     public SlackContextConfiguration {

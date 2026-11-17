@@ -226,6 +226,7 @@ See xref:context.adoc#_linux_docker_transient_execution_only[transient execution
 |Required setting |Context-bearing contract
 |`slack.executor.attemptRoot=/run/yca-slack-context-attempts` |Dedicated tmpfs with `noswap,nodev,nosuid,noexec,mode=0700,uid=10002,gid=10002,size=512m`, visible at the identical host/controller path; each agent sees only its own attempt.
 |`slack.executor.docker.disableContainerLogs=true` |Neutral shared Docker flag, default false elsewhere; environment binding is `SLACK_EXECUTOR_DOCKER_DISABLECONTAINERLOGS=true`, launching the agent with `--log-driver=none`.
+|`slack.context.allowContainerLogs=false` |Default-off exception accepting persistent context-bearing agent logs; set this to `true` and `slack.executor.docker.disableContainerLogs=false` to permit `docker logs` without weakening other context checks.
 |`slack.executor.showToolOutput=hidden` |Forced hidden tool output, with request/body tracing prohibited and payload-free host diagnostics.
 |`slack.executor.docker.services.dependencyEgress` |Preserve existing explicit `enabled` and `allowedHosts` policy; no implicit enablement or new hosts. CONNECT permits data delivery to approved destinations, not download-only access.
 |===

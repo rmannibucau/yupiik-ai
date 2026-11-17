@@ -143,7 +143,8 @@ class SlackThreadAgentLoopTest {
                 2,
                 600,
                 false,
-                new SlackThreadConfiguration(true, List.of("C1"), 20, 100, 65536, 3, 24));
+                new SlackThreadConfiguration(true, List.of("C1"), 20, 100, 65536, 3, 24),
+                false);
         try (final var fixture = new SlackDomainFixture(root, 4, 2);
                 final var actions = new SlackActionRegistry(config, Clock.systemUTC());
                 final var dispatcher = new SlackContextAttempt.Dispatcher(config);
