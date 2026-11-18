@@ -92,10 +92,10 @@ class AgentBrokerGatewayTest {
     Path temporary;
 
     @ParameterizedTest
-    // Only immutable TLS and upstream Git files are shared; each invocation owns its writable
-    // directories, listeners, credentials and subprocesses. Overlap the CPU
-    // matrix instead of serializing six independent end-to-end workflows.
-    @Execution(ExecutionMode.CONCURRENT)
+    // Each case launches several JVMs and native Git operations through live TLS listeners.
+    // Keep the CPU/path matrix, but do not multiply its process load by concurrent invocations
+    // on top of the suite's class-level and Maven reactor parallelism.
+    @Execution(ExecutionMode.SAME_THREAD)
     @CsvSource({"true, 1", "false, 1", "true, 2", "false, 2", "true, 3", "false, 3"})
     void nativeGitInitializesThroughActualGatewayAndContextService(final boolean explicitPaths, final int processors)
             throws Exception {

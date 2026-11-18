@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.slack.transport;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -87,11 +88,20 @@ final class SlackTransportFixture implements AutoCloseable {
             try {
                 while (!listener.isClosed()) {
                     final var socket = listener.accept();
-                    socket.setTcpNoDelay(true);
-                    sockets.add(socket);
-                    workers.submit(() -> serve(socket));
+                    var submitted = false;
+                    try {
+                        sockets.add(socket);
+                        socket.setTcpNoDelay(true);
+                        workers.submit(() -> serve(socket));
+                        submitted = true;
+                    } finally {
+                        if (!submitted) {
+                            sockets.remove(socket);
+                            socket.close();
+                        }
+                    }
                 }
-            } catch (final IOException closed) {
+            } catch (final IOException | RejectedExecutionException closed) {
                 if (!listener.isClosed()) {
                     failures.add(closed);
                 }
@@ -175,6 +185,10 @@ final class SlackTransportFixture implements AutoCloseable {
                 sessions.add(session);
                 try {
                     session.read(input);
+                } catch (final SocketException disconnected) {
+                    // WebSocket.abort() (including protocol/size rejection) need not send a
+                    // close frame or TCP EOF. A reset while reading an established session
+                    // is also a peer disconnect, not a fixture HTTP/protocol failure.
                 } finally {
                     session.closed.complete(null);
                 }
@@ -235,18 +249,30 @@ final class SlackTransportFixture implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        listener.close();
-        for (final var socket : sockets) {
-            socket.close();
-        }
-        scheduler.shutdownNow();
-        workers.shutdownNow();
-        assertTrue(workers.awaitTermination(100, TimeUnit.MILLISECONDS), "Fixture threads did not exit");
-        extended.close();
-        http.shutdownNow();
-        assertTrue(http.awaitTermination(Duration.ofMillis(100)), "HTTP client did not exit");
-        json.close();
-        assertTrue(failures.isEmpty(), () -> "Fixture failures: " + failures);
+        final var deadline = System.nanoTime() + IO_TIMEOUT.toNanos();
+        // Each cleanup runs even if another resource fails. Stop the client before any
+        // potentially blocking delegate close, and share one budget across termination waits.
+        assertAll(
+                listener::close,
+                () -> assertAll(sockets.stream().map(socket -> socket::close)),
+                scheduler::shutdownNow,
+                workers::shutdownNow,
+                http::shutdownNow,
+                () -> assertTrue(
+                        workers.awaitTermination(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS),
+                        "Fixture threads did not exit"),
+                () -> assertTrue(
+                        http.awaitTermination(Duration.ofNanos(Math.max(0, deadline - System.nanoTime()))),
+                        "HTTP client did not exit"),
+                () -> {
+                    // ExtendedHttpClient owns this same delegate. Its blocking close is safe
+                    // only after termination; shutdownNow above already requested cleanup otherwise.
+                    if (http.isTerminated()) {
+                        extended.close();
+                    }
+                },
+                json::close,
+                () -> assertTrue(failures.isEmpty(), () -> "Fixture failures: " + failures));
     }
 
     record Request(String method, String path, Map<String, String> headers, String body) {}

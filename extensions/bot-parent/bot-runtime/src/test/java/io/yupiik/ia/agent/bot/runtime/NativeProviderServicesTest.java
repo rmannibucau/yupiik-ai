@@ -60,7 +60,7 @@ class NativeProviderServicesTest {
     @EnumSource(
             value = ApiFlavor.class,
             names = {"COMPLETIONS", "RESPONSES"})
-    void fixedRouteStreamingAuthenticationSaturationAndBudgetLifetime(final ApiFlavor api) throws Exception {
+    void fixedRouteStreamingSaturationAndBudgetLifetime(final ApiFlavor api) throws Exception {
         final var endpoint = URI.create(
                 "https://provider.invalid" + UnixProviderProtocol.endpoint(api).getPath());
         final var directory = privateDirectory();
@@ -115,26 +115,6 @@ class NativeProviderServicesTest {
                         };
                     })) {
                 assertEquals(socket, bridge.socketPath());
-                // Invalid auth and oversized request never reach the upstream or acquire a permit.
-                for (final int mode : new int[] {0, 1, 2}) {
-                    try (final var channel = SocketChannel.open(UnixDomainSocketAddress.of(socket))) {
-                        final var out = UnixProviderProtocol.output(channel);
-                        out.writeInt(UnixProviderProtocol.MAGIC);
-                        out.writeUTF(mode == 0 ? "invalid" : CAPABILITY);
-                        if (mode != 0) {
-                            out.writeUTF(
-                                    mode == 2
-                                            ? (api == ApiFlavor.RESPONSES ? "COMPLETIONS" : "RESPONSES")
-                                            : api.name());
-                        }
-                        if (mode == 1) {
-                            out.writeInt(UnixProviderProtocol.MAX_REQUEST + 1);
-                        }
-                        assertEquals(-1, UnixProviderProtocol.input(channel).read());
-                    }
-                }
-                assertEquals(0, calls.get());
-                assertEquals(0, acquired.get());
                 final var request = HttpRequest.newBuilder(UnixProviderProtocol.endpoint(api))
                         .header("Authorization", "Bearer " + CAPABILITY)
                         .header("X-Untrusted-Destination", "https://other.invalid")
@@ -161,6 +141,57 @@ class NativeProviderServicesTest {
             assertFalse(Files.exists(socket));
         } finally {
             stream.close();
+            Files.deleteIfExists(socket);
+            Files.delete(directory);
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+            value = ApiFlavor.class,
+            names = {"COMPLETIONS", "RESPONSES"})
+    void rejectsInvalidAuthenticationSizeAndApiWithoutAcquiringBudget(final ApiFlavor api) throws Exception {
+        final var directory = privateDirectory();
+        final var socket = directory.resolve("p");
+        final var acquired = new AtomicInteger();
+        try (final var upstream = new NoNetworkClient(HttpClient.Redirect.NEVER)) {
+            for (final int mode : new int[] {0, 1, 2}) {
+                // Peer EOF precedes worker cleanup and slot release. Isolate each rejection so
+                // the next connection cannot be rejected by saturation instead of validation.
+                try (final var bridge = new NativeProviderServices(
+                        socket,
+                        upstream,
+                        URI.create("https://provider.invalid"
+                                + UnixProviderProtocol.endpoint(api).getPath()),
+                        api,
+                        "Bearer upstream-only-secret",
+                        CAPABILITY,
+                        Duration.ofMillis(400),
+                        1,
+                        () -> {
+                            acquired.incrementAndGet();
+                            throw new IllegalStateException("Invalid request must not acquire budget");
+                        })) {
+                    try (final var channel = SocketChannel.open(UnixDomainSocketAddress.of(bridge.socketPath()))) {
+                        final var out = UnixProviderProtocol.output(channel);
+                        out.writeInt(UnixProviderProtocol.MAGIC);
+                        out.writeUTF(mode == 0 ? "invalid" : CAPABILITY);
+                        if (mode != 0) {
+                            out.writeUTF(
+                                    mode == 2
+                                            ? (api == ApiFlavor.RESPONSES ? "COMPLETIONS" : "RESPONSES")
+                                            : api.name());
+                        }
+                        if (mode == 1) {
+                            out.writeInt(UnixProviderProtocol.MAX_REQUEST + 1);
+                        }
+                        assertEquals(-1, UnixProviderProtocol.input(channel).read());
+                    }
+                }
+                assertEquals(0, acquired.get());
+                assertFalse(Files.exists(socket));
+            }
+        } finally {
             Files.deleteIfExists(socket);
             Files.delete(directory);
         }

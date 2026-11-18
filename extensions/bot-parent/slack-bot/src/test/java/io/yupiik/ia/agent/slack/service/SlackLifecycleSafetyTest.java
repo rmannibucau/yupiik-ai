@@ -37,6 +37,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -62,6 +63,8 @@ class SlackLifecycleSafetyTest {
             final var entered = new CountDownLatch(1);
             final var interrupted = new CountDownLatch(1);
             final var firstStop = new CountDownLatch(1);
+            final var finalStop = new CountDownLatch(1);
+            final var releaseFinalStop = new CompletableFuture<Void>();
             final var releaseLauncher = new CompletableFuture<Void>();
             final var attempt = new CompletableFuture<Path>();
             final List<String> events = new CopyOnWriteArrayList<>();
@@ -87,7 +90,12 @@ class SlackLifecycleSafetyTest {
                 @Override
                 public void stop(final String runtime) {
                     events.add("stop");
-                    firstStop.countDown();
+                    if (firstStop.getCount() != 0) {
+                        firstStop.countDown();
+                    } else {
+                        finalStop.countDown();
+                        releaseFinalStop.join();
+                    }
                 }
 
                 @Override
@@ -103,10 +111,10 @@ class SlackLifecycleSafetyTest {
                 }
             });
             try {
-                assertTrue(entered.await(150, TimeUnit.MILLISECONDS));
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
                 change(fixture, current -> current.transition(TaskStatus.cancel_requested, System.currentTimeMillis()));
-                assertTrue(interrupted.await(150, TimeUnit.MILLISECONDS), "Cancellation must interrupt the launcher");
-                assertTrue(firstStop.await(150, TimeUnit.MILLISECONDS));
+                assertTrue(interrupted.await(5, TimeUnit.SECONDS), "Cancellation must interrupt the launcher");
+                assertTrue(firstStop.await(5, TimeUnit.SECONDS));
                 assertFalse(completed.isDone(), "A successful early stop cannot settle a still-running launcher");
                 assertTrue(Files.isDirectory(attempt.join()));
                 assertEquals(
@@ -115,21 +123,33 @@ class SlackLifecycleSafetyTest {
                 assertTrue(
                         admission.tryAcquire().isEmpty(),
                         "Host slot must stay reserved while launch can still create a runtime");
+                releaseLauncher.complete(null);
+                assertTrue(finalStop.await(5, TimeUnit.SECONDS), "Final stop must follow launcher settlement");
+                assertFalse(completed.isDone(), "Final stop must finish before the worker settles");
+                assertTrue(Files.isDirectory(attempt.join()));
+                assertEquals(
+                        TaskStatus.cancel_requested,
+                        fixture.store.list().getFirst().status());
+                assertTrue(admission.tryAcquire().isEmpty(), "Host slot must stay reserved during final stop");
+                releaseFinalStop.complete(null);
+                assertTrue(completed.get(5, TimeUnit.SECONDS));
+                assertEquals(List.of("stop", "launcher-settled", "stop"), events);
+                assertEquals(
+                        TaskStatus.cancelled, fixture.store.list().getFirst().status());
+                assertFalse(Files.exists(attempt.join()));
+                assertTrue(fixture.exchanges.isEmpty());
+                try (final var lease = admission.tryAcquire().orElseThrow()) {
+                    lease.confirmTermination();
+                }
             } finally {
                 releaseLauncher.complete(null);
+                releaseFinalStop.complete(null);
                 // On the successful path the launcher already observed cancellation. Interrupting
                 // the worker here races its final store write instead of helping launcher cleanup.
                 if (interrupted.getCount() != 0) {
                     thread.interrupt();
                 }
-            }
-            assertTrue(completed.get(150, TimeUnit.MILLISECONDS));
-            assertEquals(List.of("stop", "launcher-settled", "stop"), events);
-            assertEquals(TaskStatus.cancelled, fixture.store.list().getFirst().status());
-            assertFalse(Files.exists(attempt.join()));
-            assertTrue(fixture.exchanges.isEmpty());
-            try (final var lease = admission.tryAcquire().orElseThrow()) {
-                lease.confirmTermination();
+                assertTrue(thread.join(Duration.ofSeconds(5)), "Worker must exit before fixture teardown");
             }
         }
     }

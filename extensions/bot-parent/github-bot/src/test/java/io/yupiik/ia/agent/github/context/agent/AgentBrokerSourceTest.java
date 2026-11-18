@@ -47,6 +47,8 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class AgentBrokerSourceTest {
     @TempDir
@@ -91,11 +93,15 @@ class AgentBrokerSourceTest {
         }
     }
 
-    @Test
-    void interruptionKillsAndReapsGitWhilePreservingTheInterruptFlag() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"stall", "delayed-stall"})
+    void interruptionKillsAndReapsGitWhilePreservingTheInterruptFlag(final String mode) throws Exception {
         final var workspace = Files.createDirectory(temporary.resolve("interrupted"));
         final var command = TestJava.javaCommand("-cp", classpath(), InterruptLauncher.class.getName());
-        command.addAll(fixtureFlags(workspace, "stall"));
+        final var flags = fixtureFlags(workspace, mode);
+        // Cancellation, not the operation deadline, must end this scenario, including slow startup.
+        flags.set(flags.indexOf("--timeout") + 1, "15");
+        command.addAll(flags);
         command.add("init");
         final var result = process(workspace, command, "", Map.of());
         assertEquals(0, result.exit(), result.error());
@@ -137,10 +143,15 @@ class AgentBrokerSourceTest {
         public static void main(final String... args) throws Exception {
             final var mode = args[0];
             final var workspace = Path.of(args[1]);
-            if (mode.equals("child")) {
+            if (mode.equals("child") || mode.equals("delayed-child")) {
+                if (mode.equals("delayed-child")) {
+                    // Reproduce startup exceeding the old one-second readiness assumption.
+                    Thread.sleep(1200);
+                }
                 Files.writeString(
                         workspace.resolve("child.pid"),
                         Long.toString(ProcessHandle.current().pid()));
+                Files.createFile(workspace.resolve("child.ready"));
                 Thread.sleep(30_000);
                 return;
             }
@@ -157,7 +168,11 @@ class AgentBrokerSourceTest {
                 return;
             }
             final var child = new ProcessBuilder(TestJava.javaCommand(
-                            "-cp", classpath(), GitProcessFixture.class.getName(), "child", workspace.toString()))
+                            "-cp",
+                            classpath(),
+                            GitProcessFixture.class.getName(),
+                            mode.equals("delayed-stall") ? "delayed-child" : "child",
+                            workspace.toString()))
                     .inheritIO()
                     .start();
             if (mode.equals("inherited-pipe")) {
@@ -193,14 +208,20 @@ class AgentBrokerSourceTest {
                     }
                 });
                 thread.start();
-                final long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
-                while (!Files.exists(Path.of("child.pid")) && System.nanoTime() < until) {
-                    Thread.sleep(10);
-                }
-                thread.interrupt();
-                thread.join(4000);
-                if (thread.isAlive()) {
-                    throw new IllegalStateException("Cancellation did not finish");
+                try {
+                    final long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+                    while (!Files.exists(Path.of("child.ready")) && thread.isAlive() && System.nanoTime() < until) {
+                        Thread.sleep(10);
+                    }
+                    if (!Files.exists(Path.of("child.ready"))) {
+                        throw new IllegalStateException("Child did not become ready; worker result=" + result.get());
+                    }
+                } finally {
+                    thread.interrupt();
+                    thread.join(4000);
+                    if (thread.isAlive()) {
+                        throw new IllegalStateException("Cancellation did not finish");
+                    }
                 }
                 System.out.println(result.get());
             }
