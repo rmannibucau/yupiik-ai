@@ -57,6 +57,7 @@ public class UsageTracker {
     private final AtomicLong optimizedOutputs = new AtomicLong();
     private final AtomicLong optimizedCharsBefore = new AtomicLong();
     private final AtomicLong optimizedCharsAfter = new AtomicLong();
+    private final AtomicLong optimizedTokenSavings = new AtomicLong();
     protected final Clock clock;
     /** Whether the most recent context-window resolution used a fallback rather than a configured/detected value. */
     private volatile boolean lastResolutionAuto;
@@ -191,16 +192,18 @@ public class UsageTracker {
     /**
      * Records one accepted tool-output optimization (rtk style): a meaningful character reduction
      * applied to a bash/tool result before it reaches the model. Only called for reductions that
-     * actually replaced the original output ({@code after} is smaller than {@code before}). Later
-     * the chars can be priced as estimated tokens (~4 chars/token) for the session saved-token line.
+     * actually replaced the original output. Token savings are estimated from each text separately,
+     * preserving negative differences when a shorter output is more token-dense.
      *
      * @param beforeChars the original tool output length in characters.
      * @param afterChars  the optimized output length in characters.
+     * @param tokensSaved signed difference between original and optimized token estimates.
      */
-    public void recordOptimization(final long beforeChars, final long afterChars) {
+    public void recordOptimization(final long beforeChars, final long afterChars, final long tokensSaved) {
         optimizedOutputs.incrementAndGet();
         optimizedCharsBefore.addAndGet(beforeChars);
         optimizedCharsAfter.addAndGet(afterChars);
+        optimizedTokenSavings.addAndGet(tokensSaved);
     }
 
     /** Number of tool outputs that were actually optimized (accepted reductions). */
@@ -223,6 +226,11 @@ public class UsageTracker {
         return Math.max(0, optimizedCharsBefore.get() - optimizedCharsAfter.get());
     }
 
+    /** Estimated tokens removed once from tool outputs, not cumulative billed savings. */
+    public long optimizedTokensSaved() {
+        return Math.max(0, optimizedTokenSavings.get());
+    }
+
     /**
      * Merges aggregated optimization counters as-is (used by {@code SubagentUsageTracker} to fold its
      * pre-aggregated totals into the parent without recounting each output as a single one).
@@ -230,14 +238,17 @@ public class UsageTracker {
      * @param outputs the number of optimized outputs already counted by the caller.
      * @param before  the caller's total optimized-input characters.
      * @param after   the caller's total optimized-output characters.
+     * @param tokensSaved the caller's signed estimated token savings.
      */
-    public void mergeOptimizationCounters(final long outputs, final long before, final long after) {
+    public void mergeOptimizationCounters(
+            final long outputs, final long before, final long after, final long tokensSaved) {
         if (outputs <= 0) {
             return;
         }
         optimizedOutputs.addAndGet(outputs);
         optimizedCharsBefore.addAndGet(before);
         optimizedCharsAfter.addAndGet(after);
+        optimizedTokenSavings.addAndGet(tokensSaved);
     }
 
     /** Associates normalized provider input occupancy with the immutable request captured before sending. */

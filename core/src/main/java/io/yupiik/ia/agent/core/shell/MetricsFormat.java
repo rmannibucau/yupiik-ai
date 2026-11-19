@@ -183,16 +183,10 @@ public final class MetricsFormat {
             }
         }
         if (usage != null && usage.optimizedOutputs() > 0) {
-            final var saved = usage.optimizedCharsSaved();
             sb.append(" · optimized ").append(usage.optimizedOutputs()).append(" outputs");
+            sb.append(" ~").append(tokens(usage.optimizedTokensSaved())).append(" tokens saved");
             if (full) {
-                sb.append(" ~")
-                        .append(saved)
-                        .append(" chars (")
-                        .append(Math.max(1, saved / 4))
-                        .append(" tok est)");
-            } else {
-                sb.append(" ~").append(saved).append(" chars saved");
+                sb.append(" (").append(usage.optimizedCharsSaved()).append(" chars)");
             }
         }
         return sb.toString();

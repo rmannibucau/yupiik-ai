@@ -6887,8 +6887,13 @@ public class TuiCommand implements Runnable {
         final var usage_ = state.session.runtime().usage();
         if (metrics.showSessionTotals() && usage_ != null && usage_.optimizedOutputs() > 0) {
             parts.add(Span.styled(
-                    " · optimized " + usage_.optimizedOutputs() + " (~" + usage_.optimizedCharsSaved()
-                            + " chars saved)  ",
+                    " · optimized " + usage_.optimizedOutputs() + " (~"
+                            + MetricsFormat.tokens(usage_.optimizedTokensSaved())
+                            + " tokens saved"
+                            + (metrics.displayMode() == MetricsDisplayMode.FULL
+                                    ? ", " + usage_.optimizedCharsSaved() + " chars"
+                                    : "")
+                            + ")  ",
                     muted));
         }
         // the status strip reserves a right edge for the clickable "?" shortcuts affordance

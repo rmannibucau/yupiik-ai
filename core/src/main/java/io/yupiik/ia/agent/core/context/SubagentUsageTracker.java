@@ -37,6 +37,7 @@ public class SubagentUsageTracker extends UsageTracker {
     private final AtomicLong optimizedOutputs = new AtomicLong();
     private final AtomicLong optimizedCharsBefore = new AtomicLong();
     private final AtomicLong optimizedCharsAfter = new AtomicLong();
+    private final AtomicLong optimizedTokenSavings = new AtomicLong();
 
     public SubagentUsageTracker(final UsageTracker parent, final String subagentId) {
         super(null, null, null, parent.clock);
@@ -71,10 +72,20 @@ public class SubagentUsageTracker extends UsageTracker {
     }
 
     @Override
-    public void recordOptimization(final long beforeChars, final long afterChars) {
-        optimizedOutputs.incrementAndGet();
-        optimizedCharsBefore.addAndGet(beforeChars);
-        optimizedCharsAfter.addAndGet(afterChars);
+    public void recordOptimization(final long beforeChars, final long afterChars, final long tokensSaved) {
+        mergeOptimizationCounters(1, beforeChars, afterChars, tokensSaved);
+    }
+
+    @Override
+    public void mergeOptimizationCounters(
+            final long outputs, final long before, final long after, final long tokensSaved) {
+        if (outputs <= 0) {
+            return;
+        }
+        optimizedOutputs.addAndGet(outputs);
+        optimizedCharsBefore.addAndGet(before);
+        optimizedCharsAfter.addAndGet(after);
+        optimizedTokenSavings.addAndGet(tokensSaved);
     }
 
     @Override
@@ -157,6 +168,11 @@ public class SubagentUsageTracker extends UsageTracker {
         return Math.max(0, optimizedCharsBefore.get() - optimizedCharsAfter.get());
     }
 
+    @Override
+    public long optimizedTokensSaved() {
+        return Math.max(0, optimizedTokenSavings.get());
+    }
+
     public void reset() {
         promptTokens.set(0);
         contextInputTokens.set(0);
@@ -167,6 +183,7 @@ public class SubagentUsageTracker extends UsageTracker {
         optimizedOutputs.set(0);
         optimizedCharsBefore.set(0);
         optimizedCharsAfter.set(0);
+        optimizedTokenSavings.set(0);
         clearAnchor();
     }
 
@@ -221,7 +238,10 @@ public class SubagentUsageTracker extends UsageTracker {
                     (int) contextInputTokens.get()));
             if (optimizedOutputs.get() > 0) {
                 parent.mergeOptimizationCounters(
-                        optimizedOutputs.get(), optimizedCharsBefore.get(), optimizedCharsAfter.get());
+                        optimizedOutputs.get(),
+                        optimizedCharsBefore.get(),
+                        optimizedCharsAfter.get(),
+                        optimizedTokenSavings.get());
             }
         }
     }

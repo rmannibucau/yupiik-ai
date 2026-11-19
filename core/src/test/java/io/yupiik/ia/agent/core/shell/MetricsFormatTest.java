@@ -201,6 +201,24 @@ class MetricsFormatTest {
     }
 
     @Test
+    void optimizationDefaultsToTokensAndKeepsCharactersInFullMode() {
+        final var usage = new UsageTracker(null, null, null, Clock.systemUTC());
+        usage.recordOptimization(10_000, 1_000, 3_100);
+        final var transcript = new ConversationTranscript();
+        final var compact = MetricsFormat.report(
+                new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT), transcript, usage);
+        assertTrue(compact.contains("optimized 1 outputs ~3.1k tokens saved"), compact);
+        assertFalse(compact.contains("chars"), compact);
+        final var full = MetricsFormat.report(
+                new MetricsConfiguration(true, true, MetricsDisplayMode.FULL), transcript, usage);
+        assertTrue(full.contains("~3.1k tokens saved (9000 chars)"), full);
+        usage.recordOptimization(10, 9, -3_200);
+        final var zero = MetricsFormat.report(
+                new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT), transcript, usage);
+        assertTrue(zero.contains("~0 tokens saved"), zero);
+    }
+
+    @Test
     void shrinkFormatsTheBeforeAfterReclaimSegment() {
         assertEquals("513k -> 87k (83%)", MetricsFormat.shrink(513_000, 87_000));
         assertEquals("100 -> 90 (10%)", MetricsFormat.shrink(100, 90));

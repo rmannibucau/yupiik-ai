@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.tools;
 
 import static java.util.stream.Collectors.joining;
 
+import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -169,7 +170,10 @@ public class ToolExecutionService {
                                     + " -> " + processed.length() + " chars)");
                         }
                         if (context.usage() != null) {
-                            context.usage().recordOptimization(output.length(), processed.length());
+                            context.usage().recordOptimization(
+                                    output.length(),
+                                    processed.length(),
+                                    TokenEstimator.estimate(output) - TokenEstimator.estimate(processed));
                         }
                         return processed;
                     }

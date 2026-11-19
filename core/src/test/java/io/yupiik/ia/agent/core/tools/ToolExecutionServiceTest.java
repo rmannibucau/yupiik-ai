@@ -28,6 +28,9 @@ import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.tools.builtin.EditFileTool;
 import java.nio.file.Path;
+import java.time.Clock;
+import io.yupiik.ia.agent.core.context.TokenEstimator;
+import io.yupiik.ia.agent.core.context.UsageTracker;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -126,6 +129,20 @@ class ToolExecutionServiceTest {
         assertFalse(result.output().contains("   \n"), "blank runs must be compacted");
         assertEquals(1, reports.size(), reports.toString());
         assertTrue(reports.get(0).contains("output optimized by Generic"), reports.toString());
+    }
+
+    @Test
+    void optimizationEstimatesBothTextsRatherThanDividingSavedCharacters() {
+        final var output = "value={key:[1,2,3]};\n".repeat(100);
+        final var usage = new UsageTracker(null, null, null, Clock.systemUTC());
+        final var context = new ToolContext(
+                "s1", null, null, null, null, null, null, usage, null, Cancellations.NEVER);
+        final var result = service().execute(tool("bash", output), Map.of("command", "cat big.txt"), context);
+        assertEquals(1, usage.optimizedOutputs());
+        assertEquals(output.length() - result.output().length(), usage.optimizedCharsSaved());
+        assertEquals(
+                TokenEstimator.estimate(output) - TokenEstimator.estimate(result.output()), usage.optimizedTokensSaved());
+        assertTrue(usage.optimizedTokensSaved() > usage.optimizedCharsSaved() / 4);
     }
 
     @Test

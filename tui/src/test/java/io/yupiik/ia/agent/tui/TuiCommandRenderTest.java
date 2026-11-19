@@ -2198,6 +2198,35 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void statusStripShowsEstimatedTokenSavingsByDefault() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-optimization-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        final var state = new UiState(new ThinkTagSplitter(), Clock.systemUTC());
+        state.sessionId = sid(shellRegistry);
+        state.session = shellRegistry.active(state.sessionId).session();
+        state.session.runtime().usage().recordOptimization(10_000, 1_000, 3_100);
+        final var area = new Rect(0, 0, 240, 1);
+        final var buffer = Buffer.empty(area);
+        final var render = TuiCommand.class.getDeclaredMethod(
+                "renderStatus", Rect.class, Frame.class, UiState.class, boolean.class);
+        render.setAccessible(true);
+        render.invoke(command, area, Frame.forTesting(buffer), state, true);
+        final var text = new StringBuilder();
+        for (var x = 0; x < area.width(); x++) {
+            text.append(buffer.get(x, 0).symbol());
+        }
+        assertTrue(text.toString().contains("optimized 1 (~3.1k tokens saved)"), text.toString());
+        assertFalse(text.toString().contains("chars"), text.toString());
+        quit();
+    }
+
+    @Test
     void slashHelpListsCommandsInTranscript() throws Exception {
         final var command = command(testRegistry(), stubAgentLoop());
         uiThread = new Thread(command, "tui-help-test");

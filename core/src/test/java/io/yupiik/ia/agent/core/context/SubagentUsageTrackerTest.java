@@ -146,12 +146,13 @@ class SubagentUsageTrackerTest {
         final var subagent = new SubagentUsageTracker(parent, "sub-opt");
 
         // records land on the subagent, not the parent, before the merge
-        subagent.recordOptimization(10_000, 1_000);
-        subagent.recordOptimization(20_000, 2_000);
+        subagent.recordOptimization(10_000, 1_000, 3_000);
+        subagent.recordOptimization(20_000, 2_000, -200);
         assertEquals(2, subagent.optimizedOutputs());
         assertEquals(30_000, subagent.optimizedCharsBefore());
         assertEquals(3_000, subagent.optimizedCharsAfter());
         assertEquals(27_000, subagent.optimizedCharsSaved());
+        assertEquals(2_800, subagent.optimizedTokensSaved());
         assertEquals(0, parent.optimizedOutputs(), "before the merge the parent must not be touched");
 
         subagent.mergeToParent();
@@ -160,5 +161,29 @@ class SubagentUsageTrackerTest {
         assertEquals(30_000, parent.optimizedCharsBefore());
         assertEquals(3_000, parent.optimizedCharsAfter());
         assertEquals(27_000, parent.optimizedCharsSaved());
+        assertEquals(2_800, parent.optimizedTokensSaved());
+
+        subagent.reset();
+        assertEquals(0, subagent.optimizedOutputs());
+        assertEquals(0, subagent.optimizedCharsSaved());
+        assertEquals(0, subagent.optimizedTokensSaved());
+        assertEquals(2_800, parent.optimizedTokensSaved());
+    }
+
+    @Test
+    void nestedMergePreservesNegativeSavingsUntilDisplay() {
+        final var parent = new UsageTracker(null, null, null, Clock.systemUTC());
+        final var child = new SubagentUsageTracker(parent, "child");
+        final var grandchild = new SubagentUsageTracker(child, "grandchild");
+        parent.recordOptimization(100, 10, 20);
+        grandchild.recordOptimization(100, 90, -30);
+        assertEquals(0, grandchild.optimizedTokensSaved());
+        grandchild.mergeToParent();
+        assertEquals(1, child.optimizedOutputs());
+        assertEquals(0, child.optimizedTokensSaved());
+        child.mergeToParent();
+        assertEquals(0, parent.optimizedTokensSaved());
+        parent.recordOptimization(100, 10, 15);
+        assertEquals(5, parent.optimizedTokensSaved());
     }
 }
