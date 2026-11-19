@@ -177,8 +177,19 @@ public final class SlackContextMailbox implements AutoCloseable {
     /** Publishes a response only while this exact request is still current and live. */
     public void respond(final Request request, final Map<String, Object> body) throws IOException {
         validateRequest(request);
+        // Read the response before checking the request: client cleanup removes the request
+        // first. Never replace a published response while the client may be consuming it.
+        final var published = read("response.json", RESPONSE_LIMIT);
         if (!request.equals(pending())) {
             throw new IOException("Stale Slack context request");
+        }
+        if (published != null) {
+            final var response = json.fromString(Response.class, published);
+            if (response != null
+                    && channel.equals(response.channel())
+                    && request.id().equals(response.id())) {
+                return;
+            }
         }
         write("response.json", json.toString(new Response(1, channel, request.id(), body)), RESPONSE_LIMIT);
     }

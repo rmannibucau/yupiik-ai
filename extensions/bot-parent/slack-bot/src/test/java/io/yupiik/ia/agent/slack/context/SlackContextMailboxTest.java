@@ -68,6 +68,36 @@ class SlackContextMailboxTest {
     }
 
     @Test
+    void repeatedResponsePreservesThePublishedDocumentAndCanRetryAfterRemoval() throws Exception {
+        final var root = privateDirectory("box");
+        try (final var json = json();
+                final var controller = new SlackContextMailbox(root, json, "C1")) {
+            final var request = request("C1", deadline());
+            document(root, "request.json", json.toString(request));
+            controller.respond(request, Map.of("status", "ok", "text", "first"));
+            final var original = Files.readString(root.resolve("response.json"));
+            controller.respond(request, Map.of("status", "ok", "text", "replacement"));
+            assertEquals(
+                    original,
+                    Files.readString(root.resolve("response.json")),
+                    "A controller poll must not replace a response the client may already be consuming");
+
+            Files.delete(root.resolve("response.json"));
+            controller.respond(request, Map.of("status", "ok", "text", "first"));
+            assertEquals(
+                    original,
+                    Files.readString(root.resolve("response.json")),
+                    "A still-pending request can retry a removed response");
+
+            // The client removes the request before removing its consumed response.
+            controller.clear();
+            assertThrows(IOException.class, () -> controller.respond(request, Map.of("status", "ok")));
+            assertFalse(Files.exists(root.resolve("request.json")));
+            assertFalse(Files.exists(root.resolve("response.json")));
+        }
+    }
+
+    @Test
     void rejectsUntrustedDirectoryPathsAndPermissions() throws Exception {
         final var root = privateDirectory("box");
         final var nested = Files.createDirectory(
