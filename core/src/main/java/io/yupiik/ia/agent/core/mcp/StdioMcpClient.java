@@ -44,6 +44,7 @@ class StdioMcpClient implements McpClient {
     private final String dir;
     private final JsonMapper mapper;
     private final ProcessService processes;
+    private final long timeoutNanos;
     private final AtomicLong ids = new AtomicLong();
     private final Map<Long, CompletableFuture<McpWire.Envelope>> pending = new ConcurrentHashMap<>();
     private final ReentrantLock writeLock = new ReentrantLock();
@@ -51,7 +52,6 @@ class StdioMcpClient implements McpClient {
     private volatile OutputStream writer;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean started = new AtomicBoolean();
-    private static final long TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(60);
     private static final int MAX_DISCOVERY_PAGES = 128;
 
     StdioMcpClient(
@@ -59,12 +59,14 @@ class StdioMcpClient implements McpClient {
             final List<String> command,
             final List<String> env,
             final String dir,
+            final int callTimeoutSeconds,
             final JsonMapper mapper,
             final ProcessService processes) {
         this.name = name;
         this.command = List.copyOf(command);
         this.env = List.copyOf(env);
         this.dir = dir;
+        this.timeoutNanos = TimeUnit.SECONDS.toNanos(callTimeoutSeconds > 0 ? callTimeoutSeconds : 60);
         this.mapper = mapper;
         this.processes = processes;
     }
@@ -135,7 +137,7 @@ class StdioMcpClient implements McpClient {
 
     @Override
     public List<McpServerTool> listTools() throws IOException, InterruptedException {
-        final var deadline = System.nanoTime() + TIMEOUT_NANOS;
+        final var deadline = System.nanoTime() + timeoutNanos;
         try {
             final var out = new ArrayList<McpServerTool>();
             final var cursors = new HashSet<String>();
@@ -208,7 +210,7 @@ class StdioMcpClient implements McpClient {
 
     private <T> T request(final String method, final Object params, final Class<T> type)
             throws IOException, InterruptedException {
-        return request(method, params, type, System.nanoTime() + TIMEOUT_NANOS);
+        return request(method, params, type, System.nanoTime() + timeoutNanos);
     }
 
     private <T> T request(final String method, final Object params, final Class<T> type, final long deadline)
@@ -248,7 +250,7 @@ class StdioMcpClient implements McpClient {
 
     private void send(final McpWire.Envelope message) throws IOException {
         try {
-            send(message, System.nanoTime() + TIMEOUT_NANOS);
+            send(message, System.nanoTime() + timeoutNanos);
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException("MCP write interrupted");

@@ -38,6 +38,7 @@ class StdioTest {
         try (final var mapper = CodecsTest.mapper()) {
             final var command = new ArrayList<String>();
             command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
+            command.add("-XX:TieredStopAtLevel=1");
             command.add("-Duser.home=" + tmp);
             command.add("-cp");
             command.add(System.getProperty("java.class.path"));

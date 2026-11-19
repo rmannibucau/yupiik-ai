@@ -24,6 +24,8 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -71,6 +73,7 @@ class RunShellFrontendTest {
     private ToolPresenter presenter;
     private PrintStream originalOut;
     private PrintStream originalErr;
+    private final InheritableThreadLocal<Boolean> captureOutput = new InheritableThreadLocal<>();
     private final ByteArrayOutputStream out = new ByteArrayOutputStream();
     private final ByteArrayOutputStream err = new ByteArrayOutputStream();
     private final List<String> logs = new ArrayList<>();
@@ -84,8 +87,9 @@ class RunShellFrontendTest {
         presenter = new ToolPresenter(mapper);
         originalOut = System.out;
         originalErr = System.err;
-        System.setOut(new PrintStream(out, true, StandardCharsets.UTF_8));
-        System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
+        captureOutput.set(true);
+        System.setOut(captureStream(out, originalOut));
+        System.setErr(captureStream(err, originalErr));
         handler = new Handler() {
             @Override
             public void publish(final LogRecord record) {
@@ -118,10 +122,60 @@ class RunShellFrontendTest {
     void restore() {
         System.setOut(originalOut);
         System.setErr(originalErr);
+        captureOutput.remove();
         final var logger = Logger.getLogger(RunShellFrontend.class.getName());
         logger.removeHandler(handler);
         logger.setLevel(previousLevel);
         logger.setUseParentHandlers(previousUseParentHandlers);
+    }
+
+    private PrintStream captureStream(final ByteArrayOutputStream captured, final PrintStream fallback) {
+        // Resource locks only coordinate participating tests, not unrelated JUL writers.
+        // Capture this test's execution (including its virtual child threads), never other
+        // tests' bytes. Route by ownership only; all captured content remains unmodified.
+        return new PrintStream(
+                new OutputStream() {
+                    private OutputStream target() {
+                        return Boolean.TRUE.equals(captureOutput.get()) ? captured : fallback;
+                    }
+
+                    @Override
+                    public void write(final int value) throws IOException {
+                        target().write(value);
+                    }
+
+                    @Override
+                    public void write(final byte[] bytes, final int offset, final int length) throws IOException {
+                        target().write(bytes, offset, length);
+                    }
+
+                    @Override
+                    public void flush() {
+                        fallback.flush();
+                    }
+                },
+                true,
+                StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void captureSeparatesUnrelatedWritersWithoutChangingBytes() throws InterruptedException {
+        final var captured = new ByteArrayOutputStream();
+        final var unrelated = new ByteArrayOutputStream();
+        try (final var fallback = new PrintStream(unrelated, true, StandardCharsets.UTF_8);
+                final var stream = captureStream(captured, fallback)) {
+            // Model a concurrent test worker, not a child of this test's execution.
+            final var other = Thread.ofVirtual()
+                    .inheritInheritableThreadLocals(false)
+                    .start(() -> stream.print("unrelated JUL warning\n"));
+            other.join();
+            stream.print("thinking...");
+            final var child = Thread.ofVirtual().start(() -> stream.print("\nchild\tthought"));
+            child.join();
+
+            assertEquals("thinking...\nchild\tthought", captured.toString(StandardCharsets.UTF_8));
+            assertEquals("unrelated JUL warning\n", unrelated.toString(StandardCharsets.UTF_8));
+        }
     }
 
     @Test

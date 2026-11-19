@@ -40,7 +40,9 @@ class SessionMcpTest {
     @Timeout(30)
     void paginatesRejectsCollisionsAndRollsBackStartup(@TempDir final Path tmp) throws Exception {
         try (final var mapper = CodecsTest.mapper()) {
-            final var manager = new McpManager(null, mapper, List.of(), null, null);
+            final var configuration =
+                    new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get();
+            final var manager = new McpManager(configuration, mapper, List.of(), null, null);
             final var pid = tmp.resolve("pid");
             final var descriptor = new McpManager.StdioServer(
                     "air",
@@ -56,8 +58,7 @@ class SessionMcpTest {
             try (final var owned = manager.openSession(List.of(descriptor), tmp)) {
                 child = Long.parseLong(Files.readString(pid));
                 assertEquals(2, owned.tools().size(), "second tools/list page must be imported");
-                final var permissions = new PermissionService(
-                        new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.empty()).get(), tmp);
+                final var permissions = new PermissionService(configuration, tmp);
                 permissions.setMode(AgentMode.BUILD);
                 final var context = new ToolContext(
                         "air",

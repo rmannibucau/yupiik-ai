@@ -84,10 +84,11 @@ class SpinnerTest {
         final var worker = spinner.worker();
         spinner.stop(); // must join the worker so the erase is the last write
         assertFalse(worker.isAlive(), "stop() returned before the worker exited");
-        stream.nextFrame();
-        // belt-and-braces: a stale frame written after stop() would trip this latch promptly;
-        // a clean stop stays silent, so the short bound keeps the suite fast
-        assertFalse(stream.awaitFrame(250, TimeUnit.MILLISECONDS), "a stale frame was written after stop() returned");
+        // The only frame writer is dead, so the final erase cannot be followed by a stale frame.
+        final var text = stream.text();
+        final var erase = "\r\u001b[2K\r\n";
+        assertTrue(text.contains("thinking"), "the worker must render before the erase");
+        assertTrue(text.endsWith(erase), "the erase must be the final output: " + text);
     }
 
     @Test

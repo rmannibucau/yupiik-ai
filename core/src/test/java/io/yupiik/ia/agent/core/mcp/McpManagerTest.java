@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.mcp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpExchange;
@@ -43,6 +44,7 @@ import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -52,18 +54,71 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 @ExtendWith(TestJsonMapper.class)
 class McpManagerTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @Timeout(10)
+    void configuredTimeoutBoundsBothStdioManagerPaths(final boolean session, @TempDir final Path tmp) throws Exception {
+        final var command = List.of(
+                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp",
+                System.getProperty("java.class.path"),
+                AdversarialMcpServer.class.getName(),
+                "silent-initialize",
+                tmp.toString());
+        final var config = TestConfigs.codingAgent(Map.of(
+                "yca.mcp.callTimeoutSeconds", "1",
+                "yca.tools.builtin.enabled", "false",
+                "yca.mcp.servers.length", "1",
+                "yca.mcp.servers.0.name", "silent",
+                "yca.mcp.servers.0.command", command.getFirst(),
+                "yca.mcp.servers.0.args", String.join(",", command.subList(1, command.size()))));
+        final var launched = new AtomicReference<Process>();
+        final var processes = new ProcessService() {
+            @Override
+            public Process track(final Process process) {
+                launched.set(process);
+                return super.track(process);
+            }
+        };
+        final var manager = new McpManager(config, mapper, List.of(), httpClient, processes);
+        try {
+            assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
+                if (session) {
+                    assertThrows(
+                            IOException.class,
+                            () -> manager.openSession(
+                                    List.of(new McpManager.StdioServer("silent", command, List.of())), tmp));
+                } else {
+                    manager.start();
+                    assertEquals(
+                            List.of(new McpManager.ServerStatus("silent", McpManager.ServerState.FAILED)),
+                            manager.serverStatuses());
+                    assertTrue(manager.tools().isEmpty());
+                }
+            });
+            launched.get().onExit().get(3, TimeUnit.SECONDS);
+            assertFalse(launched.get().isAlive());
+            assertEquals(0, processes.trackedCount());
+        } finally {
+            manager.close();
+        }
+    }
 
     private HttpServer server;
 

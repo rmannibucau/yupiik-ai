@@ -18,11 +18,22 @@ package io.yupiik.ia.agent.core.configuration;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class CodingAgentConfigurationTest {
 
     private static final String HOME = System.getProperty("user.home");
+
+    @Test
+    void mcpCallTimeoutDefaultsAndOverridesAreInstanceScoped() {
+        final var defaults = TestConfigs.codingAgent(Map.of());
+        final var overridden = TestConfigs.codingAgent(Map.of("yca.mcp.callTimeoutSeconds", "2"));
+        assertEquals(60, defaults.mcp().callTimeoutSeconds());
+        assertEquals(2, overridden.mcp().callTimeoutSeconds());
+        assertEquals(60, TestConfigs.codingAgent(Map.of()).mcp().callTimeoutSeconds());
+        assertEquals(60, defaults.mcp().callTimeoutSeconds());
+    }
 
     @Test
     void expandHomeExpandsLeadingTildePath() {
@@ -41,7 +52,7 @@ class CodingAgentConfigurationTest {
 
     @Test
     void resolveStorageHomeAndHomeDelegateToExpandHome() {
-        final var config = TestConfigs.codingAgent(java.util.Map.of());
+        final var config = TestConfigs.codingAgent(Map.of());
         // default storage home carries the ~/ shorthand -> expanded to an absolute home-based path
         assertEquals(HOME + "/.yupiik/coding-agent", config.resolveStorageHome());
         // default home is the JVM user home

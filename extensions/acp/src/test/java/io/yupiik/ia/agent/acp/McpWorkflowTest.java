@@ -117,12 +117,18 @@ class McpWorkflowTest {
             final var java =
                     Path.of(System.getProperty("java.home"), "bin", "java").toString();
             final var cp = System.getProperty("java.class.path");
-            final var command = new ArrayList<>(List.of(
-                    java,
-                    "-Duser.home=" + tmp,
-                    "-cp",
-                    cp,
-                    CliLauncher.class.getName(),
+            final var command = new ArrayList<String>();
+            final var executable = System.getProperty("yca.acp.executable");
+            final var jar = System.getProperty("yca.acp.jar");
+            if (executable != null) {
+                command.addAll(List.of(executable, "-Duser.home=" + tmp));
+            } else if (jar != null) {
+                command.addAll(List.of(java, "-XX:TieredStopAtLevel=1", "-Duser.home=" + tmp, "-jar", jar));
+            } else {
+                command.addAll(List.of(
+                        java, "-XX:TieredStopAtLevel=1", "-Duser.home=" + tmp, "-cp", cp, CliLauncher.class.getName()));
+            }
+            command.addAll(List.of(
                     "acp",
                     "--yca-storageHome",
                     tmp.resolve("storage").toString(),
@@ -188,15 +194,6 @@ class McpWorkflowTest {
             if (!variant.isEmpty()) {
                 command.addAll(List.of("--variant", variant));
             }
-            final var executable = System.getProperty("yca.acp.executable");
-            if (executable != null) {
-                command.subList(0, 5).clear();
-                command.addFirst("-Duser.home=" + tmp);
-                command.addFirst(executable);
-            } else if (System.getProperty("yca.acp.jar") != null) {
-                command.subList(0, 5).clear();
-                command.addAll(0, List.of(java, "-Duser.home=" + tmp, "-jar", System.getProperty("yca.acp.jar")));
-            }
             final var process = new ProcessBuilder(command).start();
             final var stderr = CompletableFuture.supplyAsync(() -> {
                 try {
@@ -226,7 +223,12 @@ class McpWorkflowTest {
                                     null,
                                     "air-server",
                                     java,
-                                    List.of("-cp", cp, FakeMcp.class.getName(), pidFile.toString()),
+                                    List.of(
+                                            "-XX:TieredStopAtLevel=1",
+                                            "-cp",
+                                            cp,
+                                            FakeMcp.class.getName(),
+                                            pidFile.toString()),
                                     List.of(
                                             new Env("ACP_TEST_VALUE", "session" + index),
                                             new Env("ACP_TEST_SECRET", "never-expose-secret")))

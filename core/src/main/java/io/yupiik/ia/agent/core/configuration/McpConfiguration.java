@@ -27,5 +27,11 @@ public record McpConfiguration(
         @Property(defaultValue = "java.util.List.of()", documentation = "MCP servers to connect to.")
         List<McpServerConfiguration> servers,
 
-        @Property(defaultValue = "60", documentation = "Timeout in seconds for a tools/call request.")
+        @Property(
+                defaultValue = "60",
+                documentation =
+                        "Timeout in seconds (yca.mcp.callTimeoutSeconds) for HTTP/SSE tools/call requests and all "
+                                + "stdio requests and notification writes, including initialization and discovery. "
+                                + "Stdio shares one deadline across discovery pages and across each request's write and response; "
+                                + "nonpositive stdio values fall back to 60 seconds (HTTP/SSE behavior is unchanged).")
         int callTimeoutSeconds) {}

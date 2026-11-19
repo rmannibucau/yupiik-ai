@@ -254,6 +254,7 @@ class ProjectWorkflowTest {
         } else if (jar != null) {
             command.addAll(List.of(
                     java,
+                    "-XX:TieredStopAtLevel=1",
                     "-Duser.home=" + home,
                     "-jar",
                     Path.of(jar).toAbsolutePath().toString()));
@@ -263,7 +264,13 @@ class ProjectWorkflowTest {
                             System.getProperty("java.class.path").split(File.pathSeparator))
                     .map(entry -> Path.of(entry).toAbsolutePath().toString())
                     .collect(joining(File.pathSeparator));
-            command.addAll(List.of(java, "-Duser.home=" + home, "-cp", classpath, CliLauncher.class.getName()));
+            command.addAll(List.of(
+                    java,
+                    "-XX:TieredStopAtLevel=1",
+                    "-Duser.home=" + home,
+                    "-cp",
+                    classpath,
+                    CliLauncher.class.getName()));
         }
         command.addAll(List.of(
                 "acp",

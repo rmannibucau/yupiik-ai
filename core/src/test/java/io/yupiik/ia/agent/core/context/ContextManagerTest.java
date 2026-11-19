@@ -1123,6 +1123,8 @@ class ContextManagerTest {
                         "yca.compaction.summarizer.chunkChars", "4000",
                         "yca.llm.retriesMaxAttempts", "2",
                         "yca.pruning.toolOutputMaxChars", "500"));
+        final var attempts = new AtomicInteger();
+        final var delays = new ArrayList<Long>();
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
@@ -1130,10 +1132,28 @@ class ContextManagerTest {
                     final Consumer<PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
+                attempts.incrementAndGet();
                 throw new IOException("upstream 500");
             }
         };
-        final var manager = manager(cfg, chat);
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                        providerManager(cfg),
+                        null,
+                        "s1",
+                        new BackoffSleeper() {
+                            @Override
+                            public boolean sleep(final long millis) {
+                                delays.add(millis);
+                                return true;
+                            }
+                        },
+                        cfg.resolveWorkingDir()));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 8; i++) {
@@ -1143,9 +1163,15 @@ class ContextManagerTest {
         messages.add(Message.user("current task"));
         // a normal forced compaction honours the non-destructive contract: transient failure -> skip
         assertEquals(CompactionResult.Mode.NONE, manager.compact(messages, true).mode());
+        assertEquals(2, attempts.get(), "normal compaction must exhaust both attempts");
+        assertEquals(1, delays.size(), "normal compaction must request retry backoff");
+        assertTrue(delays.get(0) > 0, "normal compaction must request positive jittered backoff");
         // an urgent compaction opts out: it falls back to the destructive local truncation
         final var urgent = manager.compact(messages, true, null, 0, true, () -> false, ChatSettings.EMPTY);
         assertEquals(CompactionResult.Mode.TRUNCATE, urgent.mode(), "urgent must truncate, not skip");
+        assertEquals(4, attempts.get(), "urgent compaction must also exhaust both attempts");
+        assertEquals(2, delays.size(), "urgent compaction must also request retry backoff");
+        assertTrue(delays.get(1) > 0, "urgent compaction must request positive jittered backoff");
         assertTrue(urgent.changed(), "urgent compaction must actually reclaim context");
         assertTrue(
                 urgent.error() != null && urgent.error().contains("upstream 500"),

@@ -354,6 +354,8 @@ class LlmWireTest {
     @Test
     void pumpAbortsAndCancelsSubscriptionOnNoFrameInterrupt() throws Exception {
         final var cancelled = new AtomicBoolean(false);
+        final var cancellationChecks = new AtomicInteger();
+        final var uncancelledTimeout = new CountDownLatch(1);
         final var subscriptionCancelled = new AtomicBoolean(false);
         final Flow.Publisher<LlmStreamEvent> silent = subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
             @Override
@@ -369,17 +371,27 @@ class LlmWireTest {
 
         final var result = CompletableFuture.supplyAsync(() -> {
             try {
-                return LlmWire.pump(silent, event -> {}, cancelled::get);
+                return LlmWire.pump(silent, event -> {}, () -> {
+                    final var abort = cancelled.get();
+                    // The first check is onSubscribe; the second follows the first 100ms timeout.
+                    if (cancellationChecks.incrementAndGet() == 2) {
+                        uncancelledTimeout.countDown();
+                    }
+                    return abort;
+                });
             } catch (final Exception e) {
                 throw new RuntimeException(e);
             }
         });
 
-        // let the first bounded-wait timeout elapse with cancellation still off
-        Thread.sleep(250);
-        assertFalse(result.isDone(), "with no cancel the silent stream must keep waiting");
-        // now interrupt: the no-frame abort path must cancel the subscription and end the pump
-        cancelled.set(true);
+        try {
+            assertTrue(uncancelledTimeout.await(5, TimeUnit.SECONDS), "pump must check cancellation after a timeout");
+            assertFalse(result.isDone(), "with no cancel the silent stream must keep waiting");
+        } finally {
+            // Also release the silent pump if an assertion fails.
+            cancelled.set(true);
+        }
+        // The next no-frame timeout must cancel the subscription and end the pump.
         final var message = result.get(5, TimeUnit.SECONDS);
         assertNotNull(message, "pump must return a partial message on interrupt");
         assertTrue(subscriptionCancelled.get(), "the no-frame abort must cancel the subscription");

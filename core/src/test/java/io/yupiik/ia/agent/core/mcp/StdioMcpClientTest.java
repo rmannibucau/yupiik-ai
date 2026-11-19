@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
@@ -46,14 +47,56 @@ import org.junit.jupiter.params.provider.ValueSource;
  */
 @ExtendWith(TestJsonMapper.class)
 class StdioMcpClientTest {
+    @ParameterizedTest
+    @ValueSource(ints = {4, 60, 0, -1, Integer.MIN_VALUE})
+    @Timeout(15)
+    void timeoutsAreIsolatedAndNonpositiveValuesRetainLegacyGrace(
+            final int seconds, @TempDir final Path tmp, final JsonMapper mapper) throws Exception {
+        final var longer = TestConfigs.codingAgent(Map.of("yca.mcp.callTimeoutSeconds", Integer.toString(seconds)));
+        final var shorter = TestConfigs.codingAgent(Map.of("yca.mcp.callTimeoutSeconds", "1"));
+        final var longDir = Files.createDirectory(tmp.resolve("long"));
+        final var shortDir = Files.createDirectory(tmp.resolve("short"));
+        try (final var longClient =
+                        adversary("delayed-call", longDir, mapper, longer.mcp().callTimeoutSeconds());
+                final var shortClient = adversary(
+                        "delayed-call", shortDir, mapper, shorter.mcp().callTimeoutSeconds())) {
+            longClient.initialize();
+            shortClient.initialize();
+            // Constructing a short-lived client must not change an existing client's deadline.
+            final var slowCall = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return longClient.callTool("slow", Map.of());
+                } catch (final IOException | InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+            assertTimeoutPreemptively(
+                    Duration.ofSeconds(5),
+                    () -> assertThrows(IOException.class, () -> shortClient.callTool("slow", Map.of())));
+            assertEquals("ok", slowCall.get(5, TimeUnit.SECONDS));
+            assertReaped(shortDir);
+        }
+        assertReaped(longDir);
+    }
+
     @Test
-    @Timeout(75)
+    @Timeout(10)
+    void discoveryPagesShareConfiguredDeadline(@TempDir final Path tmp, final JsonMapper mapper) throws Exception {
+        try (final var client = adversary("slow-pages", tmp, mapper, 1)) {
+            client.initialize();
+            assertTimeoutPreemptively(Duration.ofSeconds(3), () -> assertThrows(IOException.class, client::listTools));
+            assertReaped(tmp);
+        }
+    }
+
+    @Test
+    @Timeout(15)
     void deadlineIncludesBlockedPipeWrite(@TempDir final Path tmp, final JsonMapper mapper) throws Exception {
-        try (final var client = adversary("blocked", tmp, mapper)) {
+        try (final var client = adversary("blocked", tmp, mapper, 2)) {
             client.initialize();
             client.listTools();
             assertTimeoutPreemptively(
-                    Duration.ofSeconds(70),
+                    Duration.ofSeconds(6),
                     () -> assertThrows(
                             IOException.class,
                             () -> client.callTool("blocked", Map.of("payload", "x".repeat(4 * 1024 * 1024)))));
@@ -64,7 +107,7 @@ class StdioMcpClientTest {
     @Test
     @Timeout(20)
     void interruptAbortsBlockedWriterAndLockWaiters(@TempDir final Path tmp, final JsonMapper mapper) throws Exception {
-        try (final var client = adversary("blocked", tmp, mapper)) {
+        try (final var client = adversary("blocked", tmp, mapper, 60)) {
             client.initialize();
             client.listTools();
             final var entered = new CountDownLatch(1);
@@ -94,7 +137,7 @@ class StdioMcpClientTest {
     @Timeout(15)
     void readerTerminationClosesIdleConnection(final String mode, @TempDir final Path tmp, final JsonMapper mapper)
             throws Exception {
-        try (final var client = adversary(mode, tmp, mapper)) {
+        try (final var client = adversary(mode, tmp, mapper, 60)) {
             client.initialize();
             client.listTools();
             final var process = ProcessHandle.of(Long.parseLong(Files.readString(tmp.resolve("pid"))))
@@ -115,14 +158,15 @@ class StdioMcpClientTest {
     @Test
     @Timeout(15)
     void endlessFreshEmptyPagesAreBoundedAndReaped(@TempDir final Path tmp, final JsonMapper mapper) throws Exception {
-        try (final var client = adversary("pages", tmp, mapper)) {
+        try (final var client = adversary("pages", tmp, mapper, 60)) {
             client.initialize();
             assertThrows(IOException.class, client::listTools);
             assertReaped(tmp);
         }
     }
 
-    private StdioMcpClient adversary(final String mode, final Path tmp, final JsonMapper mapper) {
+    private StdioMcpClient adversary(
+            final String mode, final Path tmp, final JsonMapper mapper, final int timeoutSeconds) {
         return new StdioMcpClient(
                 "adversary",
                 List.of(
@@ -134,6 +178,7 @@ class StdioMcpClientTest {
                         tmp.toString()),
                 List.of(),
                 null,
+                timeoutSeconds,
                 mapper,
                 null);
     }
@@ -165,7 +210,7 @@ class StdioMcpClientTest {
         script.toFile().setExecutable(true);
 
         final var client =
-                new StdioMcpClient("test", List.of("/bin/sh", script.toString()), List.of(), null, mapper, service);
+                new StdioMcpClient("test", List.of("/bin/sh", script.toString()), List.of(), null, 60, mapper, service);
         client.initialize();
         assertEquals(1, service.trackedCount(), "the MCP server must be tracked");
 
@@ -196,7 +241,7 @@ class StdioMcpClientTest {
         script.toFile().setExecutable(true);
 
         final var client = new StdioMcpClient(
-                "test", List.of("/bin/sh", script.toString()), List.of(), workdir.toString(), mapper, service);
+                "test", List.of("/bin/sh", script.toString()), List.of(), workdir.toString(), 60, mapper, service);
         try {
             client.initialize();
         } finally {

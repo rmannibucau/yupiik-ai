@@ -230,6 +230,7 @@ class StdioMcpValidationTest {
                         tmp.toString()),
                 List.of(),
                 null,
+                60,
                 mapper,
                 processes);
     }

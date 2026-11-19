@@ -304,6 +304,11 @@ class SessionConfigProtocolTest {
             runtime.permissions().setPermissionMode(PermissionMode.YOLO);
             f.shells.active(id).frontend().onEvent(new AgentEvent.TextDelta("", id, eventWorkdir));
             f.untilMode(id, "build");
+            // The notification does not await the queued permission reset; a no-op model
+            // request is a session command barrier without resetting permissions itself.
+            f.config(4, id, "model", "agent-picked");
+            assertEquals(
+                    "agent-picked", f.configResult(4).configOptions().get(1).currentValue());
             assertEquals(PermissionMode.ASK, runtime.permissions().permissionMode());
         }
         assertTrue(f.sources.get("a").isCancelled());

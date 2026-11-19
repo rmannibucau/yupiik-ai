@@ -320,6 +320,7 @@ class AcpOwnedWorkIntegrationTest {
     }
 
     @Test
+    @Timeout(45)
     void spawnedLoginOnlyFailureExitsNonzeroWithoutProtocolOutput(@TempDir final Path root) throws Exception {
         final var stdout = root.resolve("stdout");
         final var stderr = root.resolve("stderr");
@@ -340,11 +341,16 @@ class AcpOwnedWorkIntegrationTest {
                 root.toString(),
                 "--yca-projectDir",
                 root.toString(),
+                "--yca-mavenRepositoryKnowledge-enabled",
+                "false",
+                "--yca-structuralCodeGraph-enabled",
+                "false",
                 "--yca-provider-api",
                 "openai",
                 "--yca-provider-apiKey",
                 "offline-private-marker");
         final var process = new ProcessBuilder(command)
+                .directory(root.toFile())
                 .redirectOutput(stdout.toFile())
                 .redirectError(stderr.toFile())
                 .start();
@@ -354,7 +360,15 @@ class AcpOwnedWorkIntegrationTest {
                             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1}}\n"
                                     .getBytes(StandardCharsets.UTF_8));
             process.getOutputStream().close();
-            assertTrue(process.waitFor(10, TimeUnit.SECONDS));
+            // Include cold container startup in the budget, as in the other spawned CLI tests.
+            assertTrue(process.waitFor(30, TimeUnit.SECONDS), () -> {
+                try {
+                    return "Login-only process did not exit; stdout:\n" + Files.readString(stdout) + "\nstderr:\n"
+                            + Files.readString(stderr);
+                } catch (final IOException failure) {
+                    return "Login-only process did not exit; could not read captured output: " + failure;
+                }
+            });
             assertNotEquals(0, process.exitValue());
             assertEquals("", Files.readString(stdout));
             final var diagnostic = Files.readString(stderr);
@@ -695,6 +709,11 @@ class AcpOwnedWorkIntegrationTest {
             block.entered.await();
             f.writer.close();
             block.interrupted.await();
+            // Executor shutdown can interrupt HTTP before State.cancel reaches the owned attempt.
+            final var result =
+                    f.attempts.getFirst().completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(CodexLoginService.LoginState.CANCELLED, result.state());
+            assertFalse(result.credentialsCommitted());
             assertEquals(0, f.disposals.get());
             assertFalse(f.attempts.getFirst().drained().toCompletableFuture().isDone());
             block.release.countDown();

@@ -69,18 +69,30 @@ public class AdversarialMcpServer {
                 }
                 final String result;
                 if (line.contains("\"initialize\"")) {
+                    if ("silent-initialize".equals(mode)) {
+                        new CountDownLatch(1).await();
+                    }
                     result =
                             "{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}";
                 } else if (line.contains("tools/list")) {
-                    result = "pages".equals(mode)
+                    if ("slow-pages".equals(mode)) {
+                        Thread.sleep(650);
+                    }
+                    result = "pages".equals(mode) || "slow-pages".equals(mode)
                             ? "{\"tools\":[],\"nextCursor\":\"page" + (++pages) + "\"}"
                             : "{\"tools\":[]}";
                 } else {
+                    if ("delayed-call".equals(mode)) {
+                        Thread.sleep(1500);
+                    }
                     result = "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}";
                 }
                 System.out.println("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + result + "}");
                 System.out.flush();
-                if (line.contains("tools/list") && !"pages".equals(mode)) {
+                if (line.contains("tools/list")
+                        && !"pages".equals(mode)
+                        && !"slow-pages".equals(mode)
+                        && !"delayed-call".equals(mode)) {
                     Files.writeString(directory.resolve("ready"), "ready");
                     if (!"blocked".equals(mode)) {
                         while (!Files.exists(directory.resolve("terminate-reader"))) {

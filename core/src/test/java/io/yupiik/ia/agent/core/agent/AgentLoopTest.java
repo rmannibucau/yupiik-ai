@@ -5898,6 +5898,7 @@ class AgentLoopTest {
                         "yca.mode", "build",
                         "yca.permissions.mode", "yolo"));
         final var started = new CountDownLatch(1);
+        final var secondStarted = new CountDownLatch(1);
         final var release = new CountDownLatch(1);
         final var chatCalls = new AtomicInteger();
         final var blockingExecutions = new AtomicInteger();
@@ -5970,6 +5971,7 @@ class AgentLoopTest {
                             @Override
                             public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
                                 secondExecutions.incrementAndGet();
+                                secondStarted.countDown();
                                 return ToolResult.ok("simple done");
                             }
                         };
@@ -6045,32 +6047,41 @@ class AgentLoopTest {
                 EXECUTOR,
                 null);
 
-        final var first = Thread.ofVirtual().start(() -> {
+        final var firstFailure = new AtomicReference<Throwable>();
+        final var secondFailure = new AtomicReference<Throwable>();
+        final var first = Thread.ofVirtual().unstarted(() -> {
             try {
                 loop.run("first", null, "s1", null, () -> false);
             } catch (final Throwable t) {
-                throw new RuntimeException(t);
+                firstFailure.set(t);
             }
         });
-        assertTrue(
-                started.await(5, TimeUnit.SECONDS),
-                "the first turn must reach its blocking tool; chatCalls=" + chatCalls);
-
-        final var second = Thread.ofVirtual().start(() -> {
+        final var second = Thread.ofVirtual().unstarted(() -> {
             try {
                 loop.run("second", null, "s1", null, () -> false);
             } catch (final Throwable t) {
-                throw new RuntimeException(t);
+                secondFailure.set(t);
             }
         });
-        // let the second turn start its own tool while the first is still blocked
-        Thread.sleep(100);
-        release.countDown();
-        first.join(10_000);
-        second.join(10_000);
+        try {
+            first.start();
+            assertTrue(
+                    started.await(5, TimeUnit.SECONDS),
+                    "the first turn must reach its blocking tool; chatCalls=" + chatCalls);
+            second.start();
+            assertTrue(
+                    secondStarted.await(5, TimeUnit.SECONDS),
+                    "the second turn must execute its own tool while the first is blocked");
+        } finally {
+            release.countDown();
+            first.join(10_000);
+            second.join(10_000);
+        }
 
         assertFalse(first.isAlive(), "the first turn must complete");
         assertFalse(second.isAlive(), "the second turn must complete");
+        assertNull(firstFailure.get(), "the first turn must not fail");
+        assertNull(secondFailure.get(), "the second turn must not fail");
         assertEquals(1, blockingExecutions.get(), "the blocking tool must run exactly once");
         assertEquals(1, secondExecutions.get(), "the second turn's tool must run exactly once");
     }

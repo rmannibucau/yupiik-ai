@@ -157,7 +157,13 @@ public class McpManager {
                         switch (server) {
                             case StdioServer stdio ->
                                 new StdioMcpClient(
-                                        stdio.name(), stdio.command(), stdio.env(), cwd.toString(), mapper, processes);
+                                        stdio.name(),
+                                        stdio.command(),
+                                        stdio.env(),
+                                        cwd.toString(),
+                                        configuration.mcp().callTimeoutSeconds(),
+                                        mapper,
+                                        processes);
                             case RemoteServer remote -> remoteClient(remote);
                         };
                 owned.add(client);
@@ -474,6 +480,7 @@ public class McpManager {
                     command,
                     server.env() == null ? List.of() : server.env(),
                     server.dir(),
+                    configuration.mcp().callTimeoutSeconds(),
                     mapper,
                     processes);
         }
