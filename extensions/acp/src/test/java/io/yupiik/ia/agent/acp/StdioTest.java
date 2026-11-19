@@ -25,7 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -59,16 +59,18 @@ class StdioTest {
                 command.addAll(List.of("--variant", variant));
             }
             final var process = new ProcessBuilder(command).start();
-            final var stderr = CompletableFuture.supplyAsync(() -> {
+            final var readers = Executors.newVirtualThreadPerTaskExecutor();
+            final var stderr = readers.submit(() -> {
                 try {
                     return new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
                 } catch (final Exception e) {
                     throw new IllegalStateException(e);
                 }
             });
-            try (final var writer = new PrintWriter(process.getOutputStream(), true);
-                    final var reader = new BufferedReader(
-                            new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            final var writer = new PrintWriter(process.getOutputStream(), true);
+            final var reader =
+                    new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+            try {
                 writer.println(
                         "{\"jsonrpc\":\"2.0\",\"id\":9007199254740993,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"clientCapabilities\":{}}}");
                 if ("not-a-variant".equals(variant)) {
@@ -80,7 +82,7 @@ class StdioTest {
                     assertNull(reader.readLine(), "Startup failure must not pollute protocol stdout");
                     return;
                 }
-                final var line = CompletableFuture.supplyAsync(() -> {
+                final var line = readers.submit(() -> {
                             try {
                                 return reader.readLine();
                             } catch (final Exception e) {
@@ -109,7 +111,7 @@ class StdioTest {
                 assertNotNull(created.result(), created.toString());
                 writer.close();
                 assertTrue(process.waitFor(20, TimeUnit.SECONDS));
-                assertEquals(0, process.exitValue(), stderr.get());
+                assertEquals(0, process.exitValue(), stderr.get(5, TimeUnit.SECONDS));
                 String rest;
                 while ((rest = reader.readLine()) != null) {
                     mapper.fromString(AcpModels.Envelope.class, rest);
@@ -121,7 +123,17 @@ class StdioTest {
                     assertTrue(logs.contains("warning-" + phase), logs);
                 }
             } finally {
-                process.destroyForcibly();
+                try {
+                    // Kill before closing a reader blocked on the process pipe.
+                    process.descendants().forEach(ProcessHandle::destroyForcibly);
+                    process.destroyForcibly();
+                    assertTrue(process.waitFor(5, TimeUnit.SECONDS), "ACP process leaked");
+                    writer.close();
+                    reader.close();
+                } finally {
+                    readers.shutdownNow();
+                    assertTrue(readers.awaitTermination(5, TimeUnit.SECONDS), "ACP readers leaked");
+                }
             }
         }
     }

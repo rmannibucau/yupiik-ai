@@ -31,8 +31,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -195,7 +195,8 @@ class McpWorkflowTest {
                 command.addAll(List.of("--variant", variant));
             }
             final var process = new ProcessBuilder(command).start();
-            final var stderr = CompletableFuture.supplyAsync(() -> {
+            final var readers = Executors.newVirtualThreadPerTaskExecutor();
+            final var stderr = readers.submit(() -> {
                 try {
                     return new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
                 } catch (final Exception e) {
@@ -203,9 +204,10 @@ class McpWorkflowTest {
                 }
             });
             final var pids = new ArrayList<Long>();
-            try (final var writer = new PrintWriter(process.getOutputStream(), true);
-                    final var reader = new BufferedReader(
-                            new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            final var writer = new PrintWriter(process.getOutputStream(), true);
+            final var reader =
+                    new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+            try {
                 send(mapper, writer, 1, "initialize", new Initialize(1, Map.of("terminal", false), null));
                 final var initialized = read(mapper, reader);
                 assertNull(initialized.error(), initialized.toString());
@@ -441,9 +443,18 @@ class McpWorkflowTest {
                 }
                 assertNull(providerFailure.get());
             } finally {
-                process.destroyForcibly();
-                pids.forEach(pid -> ProcessHandle.of(pid).ifPresent(ProcessHandle::destroyForcibly));
-                http.stop(0);
+                try {
+                    process.descendants().forEach(ProcessHandle::destroyForcibly);
+                    process.destroyForcibly();
+                    pids.forEach(pid -> ProcessHandle.of(pid).ifPresent(ProcessHandle::destroyForcibly));
+                    http.stop(0);
+                    assertTrue(process.waitFor(5, TimeUnit.SECONDS), "ACP process leaked");
+                    writer.close();
+                    reader.close();
+                } finally {
+                    readers.shutdownNow();
+                    assertTrue(readers.awaitTermination(5, TimeUnit.SECONDS), "ACP readers leaked");
+                }
             }
         }
     }

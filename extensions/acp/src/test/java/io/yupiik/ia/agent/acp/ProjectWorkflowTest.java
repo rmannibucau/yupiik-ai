@@ -101,6 +101,7 @@ class ProjectWorkflowTest {
                     final var id = mapper.fromString(Created.class, mapper.toString(created.result()))
                             .sessionId();
                     sessions.put(entry.getKey(), id);
+                    client.sessions.add(id);
                     client.request("build-" + entry.getKey(), "session/set_mode", new SetMode(id, "build"));
                 }
                 assertNotEquals(sessions.get("A"), sessions.get("B"));
@@ -341,6 +342,9 @@ class ProjectWorkflowTest {
         private final ExecutorService readers;
         private final LinkedBlockingQueue<String> lines = new LinkedBlockingQueue<>(512);
         private final Future<String> stderr;
+        private final List<String> sessions = new ArrayList<>();
+        private final List<Envelope> delayedConfigUpdates = new ArrayList<>();
+        private int backgroundUpdates;
 
         private Client(
                 final JsonMapper mapper,
@@ -378,6 +382,14 @@ class ProjectWorkflowTest {
             do {
                 message = read();
                 assertNotEquals("session/request_permission", message.method(), message.toString());
+                if ("session/update".equals(message.method())
+                        && "config_option_update"
+                                .equals(((Map<?, ?>) ((Map<?, ?>) message.params()).get("update"))
+                                        .get("sessionUpdate"))) {
+                    // Defer real configuration notifications until the first turn, deterministically
+                    // exercising the same routing as a late asynchronous catalog refresh.
+                    delayedConfigUpdates.add(message);
+                }
             } while (message.id() == null);
             assertEquals(id, message.id());
             assertNull(message.error(), messageError(message));
@@ -390,10 +402,11 @@ class ProjectWorkflowTest {
 
         private void prompt(final String turn, final String session) throws Exception {
             send(turn, "session/prompt", new Prompt(session, List.of(Content.text("PROJECT_WORKFLOW:" + turn))));
+            final var delayed = delayedConfigUpdates.iterator();
             int approvals = 0;
             boolean complete = false;
             while (true) {
-                final var message = read();
+                final var message = delayed.hasNext() ? delayed.next() : read();
                 if ("session/request_permission".equals(message.method())) {
                     final var permission = mapper.fromString(Permission.class, mapper.toString(message.params()));
                     assertEquals(session, permission.sessionId());
@@ -407,8 +420,19 @@ class ProjectWorkflowTest {
                             new PermissionResult(new Outcome("selected", "allow_once")),
                             null)));
                 } else if ("session/update".equals(message.method())) {
-                    assertEquals(session, ((Map<?, ?>) message.params()).get("sessionId"));
-                    complete |= mapper.toString(message.params()).contains("COMPLETE_" + turn);
+                    final var params = (Map<?, ?>) message.params();
+                    final var source = params.get("sessionId");
+                    assertTrue(sessions.contains(source), message.toString());
+                    if (!session.equals(source)) {
+                        // Model discovery refreshes every session, independently of the active turn.
+                        assertEquals(
+                                "config_option_update",
+                                ((Map<?, ?>) params.get("update")).get("sessionUpdate"),
+                                message.toString());
+                        backgroundUpdates++;
+                    } else {
+                        complete |= mapper.toString(message.params()).contains("COMPLETE_" + turn);
+                    }
                 } else {
                     assertEquals(turn, message.id(), message.toString());
                     assertNull(message.error(), messageError(message));
@@ -419,6 +443,8 @@ class ProjectWorkflowTest {
                     break;
                 }
             }
+            delayedConfigUpdates.clear();
+            assertTrue(backgroundUpdates > 0, "Must exercise an inactive session's configuration update");
             assertTrue(approvals > 0, "Writes must be approved through ACP, not YOLO mode");
             assertTrue(complete, "Missing assistant completion for " + turn);
         }
